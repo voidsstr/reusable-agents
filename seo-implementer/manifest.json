@@ -1,0 +1,16 @@
+{
+  "id": "seo-implementer",
+  "name": "SEO Implementer",
+  "description": "LLM-driven code editor — reads selected recommendations and applies them to the configured site repo. Only agent in the suite that needs Claude.",
+  "category": "seo",
+  "task_type": "manual",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": true,
+  "runbook": "AGENT.md",
+  "skill": "",
+  "entry_command": "bash run.sh",
+  "routine_id": "",
+  "trigger_url": "",
+  "trigger_token_env": ""
+}

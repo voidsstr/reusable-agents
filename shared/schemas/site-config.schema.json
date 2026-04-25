@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/site-config.schema.json",
+  "title": "Site Configuration",
+  "description": "Per-site configuration for the SEO agent suite. One file per site you want the agent to operate on.",
+  "type": "object",
+  "required": ["site", "data_sources"],
+  "additionalProperties": false,
+  "properties": {
+    "site": {
+      "type": "object",
+      "required": ["id", "domain", "mode"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "description": "Stable identifier (kebab-case). Used as run dir name + dashboard agent id suffix."
+        },
+        "domain": {
+          "type": "string",
+          "format": "hostname",
+          "description": "Production domain (no scheme, no path)."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["implement", "recommend"],
+          "description": "implement = data → analyze → write code → test → deploy → email (full agent loop). recommend = data → analyze → email recommendations only (no shipping). Use recommend for sites you don't own the codebase to."
+        },
+        "label": {
+          "type": "string",
+          "description": "Display name for emails / dashboard."
+        }
+      }
+    },
+    "data_sources": {
+      "type": "object",
+      "required": ["gsc", "ga4"],
+      "additionalProperties": false,
+      "properties": {
+        "gsc": {
+          "type": "object",
+          "required": ["site_url"],
+          "properties": {
+            "site_url": { "type": "string", "description": "GSC site identifier — sc-domain:example.com or https://example.com/" },
+            "default_country_filter": { "type": "string", "default": "usa", "description": "ISO-3 country code for the US-segment derived files." }
+          }
+        },
+        "ga4": {
+          "type": "object",
+          "required": ["property_id"],
+          "properties": {
+            "property_id": { "type": "string", "description": "GA4 property numeric id, as a string." }
+          }
+        },
+        "db": {
+          "type": ["object", "null"],
+          "description": "Optional: production-DB stats. Set to null/omit for sites without a backend you can query.",
+          "properties": {
+            "type": { "type": "string", "enum": ["docker-exec", "postgres", "sqlite"] },
+            "container": { "type": "string", "description": "For type=docker-exec: container name to docker exec into." },
+            "queries_file": { "type": "string", "description": "Path (relative to config) to SQL or .js script that emits stats JSON to stdout." }
+          }
+        }
+      }
+    },
+    "revenue_kpis": {
+      "type": "array",
+      "description": "Conversion events the agent should track + use for revenue-goal scoring. Empty array = pure rank/traffic focus.",
+      "items": {
+        "type": "object",
+        "required": ["id", "label"],
+        "properties": {
+          "id":        { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "label":     { "type": "string", "description": "Human label for emails (e.g., 'Instacart cart creates')." },
+          "ga4_event": { "type": "string", "description": "GA4 event name to track. Empty if DB-only." },
+          "db_table":  { "type": "string", "description": "DB table to count rows from. Optional." }
+        }
+      }
+    },
+    "analyzer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary_objective": {
+          "type": "string",
+          "enum": ["top5-rank", "revenue-conversion", "hybrid"],
+          "default": "top5-rank"
+        },
+        "max_recs_per_run": { "type": "integer", "minimum": 1, "maximum": 50, "default": 12 },
+        "us_traffic_weight": { "type": "number", "default": 1.5 },
+        "min_impressions_for_target": { "type": "integer", "default": 3 }
+      }
+    },
+    "implementer": {
+      "type": ["object", "null"],
+      "description": "Required if site.mode=implement. The implementer edits files in repo_path.",
+      "properties": {
+        "repo_path": { "type": "string", "description": "Absolute path to the site's source repo on disk." },
+        "branch":    { "type": "string", "default": "master" },
+        "commit_message_template": {
+          "type": "string",
+          "description": "Template, %s = run summary. Default: 'SEO agent run %s'."
+        }
+      }
+    },
+    "deployer": {
+      "type": ["object", "null"],
+      "description": "Required if site.mode=implement. Pluggable: any sequence of test/build/push/deploy commands.",
+      "properties": {
+        "test": {
+          "type": "object",
+          "properties": {
+            "cwd": { "type": "string" },
+            "cmd": { "type": "string", "description": "Test command. Hard gate: any non-zero exit aborts the run before deploy." }
+          }
+        },
+        "build": {
+          "type": "object",
+          "properties": {
+            "cwd": { "type": "string" },
+            "cmd": { "type": "string", "description": "{tag} placeholder substituted with a date-time tag. {image} from deploy.vars." }
+          }
+        },
+        "push": { "type": "object", "properties": { "cwd": { "type": "string" }, "cmd": { "type": "string" } } },
+        "deploy": {
+          "type": "object",
+          "properties": {
+            "cwd":  { "type": "string" },
+            "cmd":  { "type": "string" },
+            "vars": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        "smoke_check": {
+          "type": "object",
+          "properties": {
+            "base_url": { "type": "string" },
+            "paths":    { "type": "array", "items": { "type": "string" } },
+            "timeout_seconds": { "type": "integer", "default": 30 }
+          }
+        }
+      }
+    },
+    "reporter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": ["object", "null"],
+          "properties": {
+            "to":   { "type": "array", "items": { "type": "string", "format": "email" } },
+            "from": { "type": "string" },
+            "msmtp_account": { "type": "string", "description": "msmtp -a <account>." },
+            "subject_template": { "type": "string", "default": "SEO agent run — {site} — {tag}" }
+          }
+        },
+        "dashboard": {
+          "type": ["object", "null"],
+          "properties": {
+            "base_url": { "type": "string", "default": "http://localhost:8080" },
+            "agent_id": { "type": "string", "description": "Agent id in the dashboard (one or more sites can roll up to one agent id, or each site can have its own)." }
+          }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "Where Google OAuth credentials live. The collector calls refresh-token.py against this.",
+      "properties": {
+        "oauth_file": { "type": "string", "default": "~/.reusable-agents/seo/.oauth.json" }
+      }
+    },
+    "runs_root": {
+      "type": "string",
+      "description": "Where per-run output dirs are created. Each run writes to <runs_root>/<site.id>/<UTC-ts>/.",
+      "default": "~/.reusable-agents/seo/runs"
+    }
+  }
+}

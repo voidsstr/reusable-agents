@@ -216,3 +216,37 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Per-agent runtime data — same gitignore pattern as nsc-assistant/agents/
+*.db
+*.db-wal
+*.db-shm
+*.lancedb/
+logs/
+*.log
+*.log.*
+data/
+runs/
+fix_screenshots/
+journal/
+projects/
+backups/
+mail_cache/
+.gmail_cache/
+emails/
+
+# State + secrets
+.oauth.json
+.env
+*.token
+*-cache.json
+enrichment_cache.json
+seen_listings.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Bash backups
+*.bak

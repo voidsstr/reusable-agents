@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/responses.schema.json",
+  "title": "User responses to recommendations (the feedback queue)",
+  "description": "Each entry is one user decision on one recommendation. Written by the dashboard or by a human editing the file. Read by responder-agent which dispatches actions to seo-implementer.",
+  "type": "object",
+  "required": ["schema_version", "responses"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1" },
+    "responses": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Response" }
+    }
+  },
+  "definitions": {
+    "Response": {
+      "type": "object",
+      "required": ["ts", "site", "from_run", "rec_id", "action"],
+      "additionalProperties": false,
+      "properties": {
+        "ts": { "type": "string", "description": "ISO 8601 UTC timestamp the user submitted the decision." },
+        "site": { "type": "string", "description": "Matches site.id." },
+        "from_run": { "type": "string", "description": "The run-ts whose recommendations this targets." },
+        "rec_id": { "type": "string", "pattern": "^rec-\\d{3}$" },
+        "action": {
+          "type": "string",
+          "enum": ["implement", "skip", "modify", "merge"],
+          "description": "implement=ship as proposed; skip=acknowledge but don't act; modify=apply with notes; merge=combine with another rec_id."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["dashboard", "email-reply", "manual-edit", "api"],
+          "default": "dashboard"
+        },
+        "notes": { "type": "string" },
+        "merge_with": { "type": "string", "description": "Required if action=merge: the other rec_id to combine with." },
+        "consumed_at": {
+          "type": ["string", "null"],
+          "description": "Set by responder-agent when it picks this up. Null = pending."
+        },
+        "consumed_in_run_ts": {
+          "type": ["string", "null"],
+          "description": "Run-ts of the implementer run that actioned this response. Null = pending."
+        }
+      }
+    }
+  }
+}

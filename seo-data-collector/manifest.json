@@ -1,0 +1,16 @@
+{
+  "id": "seo-data-collector",
+  "name": "SEO Data Collector",
+  "description": "Pulls fresh GSC + GA4 + (optional) production-DB data for one site. Outputs the standardized run-dir layout that every other agent in this suite reads.",
+  "category": "seo",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": true,
+  "runbook": "",
+  "skill": "SKILL.md",
+  "entry_command": "SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG python3 pull-data.py",
+  "routine_id": "",
+  "trigger_url": "",
+  "trigger_token_env": ""
+}

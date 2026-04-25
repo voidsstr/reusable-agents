@@ -1,0 +1,16 @@
+{
+  "id": "seo-analyzer",
+  "name": "SEO Analyzer",
+  "description": "Reads collector data, scores opportunities, writes the canonical recommendations.json. Deterministic Python, no LLM calls.",
+  "category": "seo",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": true,
+  "runbook": "",
+  "skill": "",
+  "entry_command": "SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG python3 analyzer.py",
+  "routine_id": "",
+  "trigger_url": "",
+  "trigger_token_env": ""
+}

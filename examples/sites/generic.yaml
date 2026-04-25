@@ -1,0 +1,41 @@
+# Generic site config — copy this and edit for your own site.
+# See ../../shared/schemas/site-config.schema.json for the full reference.
+
+site:
+  id: my-site                       # kebab-case, stable
+  domain: example.com
+  label: My Awesome Site
+  mode: recommend                   # 'recommend' for safe start; flip to 'implement' once trusted
+
+data_sources:
+  gsc:
+    site_url: sc-domain:example.com
+    default_country_filter: usa     # ISO-3 country code for the US-segment derived files
+  ga4:
+    property_id: "123456789"        # GA4 property numeric id, as a STRING
+  db: null                          # set if you have a backend DB you can query for revenue events
+
+revenue_kpis: []                    # populate if you track conversions; the analyzer will surface drops as recs
+
+analyzer:
+  primary_objective: top5-rank      # top5-rank | revenue-conversion | hybrid
+  max_recs_per_run: 12
+  us_traffic_weight: 1.5
+  min_impressions_for_target: 3
+
+# Required only if site.mode = implement
+implementer: null
+deployer: null
+
+reporter:
+  email:
+    to: [you@example.com]
+    from: SEO Agent <automation@example.com>
+    msmtp_account: default
+    subject_template: "[SEO:{site}] run {tag} — {recs_count} recs"
+  dashboard: null                   # or {base_url, agent_id} to ping a dashboard
+
+auth:
+  oauth_file: ~/.reusable-agents/seo/.oauth.json
+
+runs_root: ~/.reusable-agents/seo/runs

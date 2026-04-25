@@ -1,0 +1,16 @@
+{
+  "id": "seo-reporter",
+  "name": "SEO Reporter",
+  "description": "Reads recommendations.json + comparison.json + goal-progress.json for a run, sends an HTML email summary, optionally pings the dashboard.",
+  "category": "seo",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": true,
+  "runbook": "",
+  "skill": "",
+  "entry_command": "SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG python3 send-report.py",
+  "routine_id": "",
+  "trigger_url": "",
+  "trigger_token_env": ""
+}

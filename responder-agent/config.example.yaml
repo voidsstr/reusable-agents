@@ -1,0 +1,41 @@
+# responder-agent configuration
+# Copy to ~/.reusable-agents/responder/config.yaml and edit.
+
+imap:
+  host: imap.example.com
+  port: 993
+  username: automation@example.com
+  # Name of the env var holding the IMAP password.
+  # Set the var before running:
+  #   export REUSABLE_AGENTS_IMAP_PASS='your-password-or-app-password'
+  password_env: REUSABLE_AGENTS_IMAP_PASS
+  use_tls: true
+  mailbox: INBOX
+
+# Runs roots — every reusable-agent run dir we should write responses into.
+# The responder will look for matching site dirs under each of these.
+runs_roots:
+  - ~/.reusable-agents/seo/runs
+
+# Routes — when a reply matches the criteria, run the dispatcher script.
+# The script receives RESPONDER_{ACTION,REC_IDS,SITE,RUN_TS,RUN_DIR} env vars.
+routes:
+  - match:
+      # Match by the X-Reusable-Agent header that seo-reporter sets
+      header: X-Reusable-Agent
+      equals: seo-reporter
+    dispatcher:
+      type: seo-implementer
+      script: /home/voidsstr/development/reusable-agents/seo-implementer/run.sh
+
+  # Optional: explicit agent-prefix match (user typed "[seo:my-site] implement rec-001")
+  # - match:
+  #     agent_prefix: seo
+  #   dispatcher:
+  #     type: seo-implementer
+  #     script: /home/voidsstr/development/reusable-agents/seo-implementer/run.sh
+
+# Optional: post a status line to the dashboard every tick
+# dashboard:
+#   base_url: http://localhost:8080
+#   agent_id: responder-agent

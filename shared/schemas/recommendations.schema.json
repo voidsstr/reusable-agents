@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/recommendations.schema.json",
+  "title": "Recommendations file (analyzer output, contract for everything downstream)",
+  "type": "object",
+  "required": ["schema_version", "site", "run_ts", "recommendations"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1",
+      "description": "Bump when the schema changes incompatibly."
+    },
+    "site": { "type": "string", "description": "Matches site.id from config." },
+    "run_ts": { "type": "string", "description": "ISO 8601 UTC timestamp of the analyzer run." },
+    "mode": {
+      "type": "string",
+      "enum": ["implement", "recommend"],
+      "description": "Mirrors site.mode at time of analysis."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short human-readable summary of what this run found, suitable for an email lead-in."
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Recommendation" }
+    }
+  },
+  "definitions": {
+    "Recommendation": {
+      "type": "object",
+      "required": ["id", "type", "priority", "title", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^rec-\\d{3}$",
+          "description": "rec-001, rec-002, etc. Stable for the run; referenced by responses + dashboard."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "top5-target-page",
+            "indexing-fix",
+            "ctr-fix",
+            "ssr-fix",
+            "schema-markup",
+            "internal-link",
+            "sitemap-fix",
+            "conversion-path",
+            "content-expansion",
+            "redirect-fix",
+            "other"
+          ]
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "title": { "type": "string", "description": "One-line headline. Goes in the email subject if it's the top recommendation." },
+        "rationale": { "type": "string", "description": "Why this matters. Cite the data — query, position, impressions, conversion." },
+        "expected_impact": {
+          "type": "object",
+          "properties": {
+            "metric": { "type": "string", "description": "e.g. gsc.query_position.<query>, revenue_28d.amazon_clicks_db_30d" },
+            "baseline": { "type": "number" },
+            "target": { "type": "number" },
+            "horizon_weeks": { "type": "integer" }
+          }
+        },
+        "implementation_outline": {
+          "type": "object",
+          "description": "What the implementer should change. Required if mode=implement is going to action this rec. Optional in recommend mode but very helpful for the human reading the email.",
+          "properties": {
+            "files": { "type": "array", "items": { "type": "string" } },
+            "loc_estimate": { "type": "integer" },
+            "json_ld": { "type": "string" },
+            "internal_links_from": { "type": "array", "items": { "type": "string" } },
+            "sitemap_entry": { "type": "string" },
+            "notes": { "type": "string" }
+          }
+        },
+        "data_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Paths (relative to run dir) into the raw data files this rec is based on. Lets the human verify."
+        },
+        "implemented": { "type": "boolean", "default": false },
+        "implemented_at": { "type": ["string", "null"] },
+        "implemented_run_ts": { "type": ["string", "null"], "description": "Run that shipped this rec." },
+        "user_response": {
+          "type": ["object", "null"],
+          "properties": {
+            "action": { "type": "string", "enum": ["implement", "skip", "modify", "merge"] },
+            "ts": { "type": "string" },
+            "notes": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
