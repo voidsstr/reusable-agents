@@ -262,13 +262,31 @@ def _strip_quoted_text(body: str) -> str:
 _HTML_RESIDUE_RE = re.compile(r'[<>{}=/\\]')
 
 
+_BULK_FILTERS = ("all", "auto", "review", "experimental",
+                 "critical", "high", "medium", "low")
+
+
 def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
     """Parse user reply body into a list of actions.
 
-    Each action: {action, rec_ids, notes, prefix_agent, prefix_site}.
+    Each action: {action, rec_ids, filters, notes, prefix_agent, prefix_site}.
 
-    The body must already have quoted-reply content stripped; we additionally
-    reject lines that look like HTML residue (any '<', '>', '{', '=', etc).
+    Two selection modes:
+      1. Explicit rec ids:    'implement rec-001 rec-005'
+      2. Bulk filters (NEW):  'implement all'
+                              'implement high and critical'
+                              'implement auto'
+                              'skip experimental'
+         Filter keywords: all | auto | review | experimental |
+                          critical | high | medium | low
+         Multiple filters combine as a UNION. The downstream agent
+         expands filters against its recommendations.json.
+
+    Both modes can coexist on one line:
+      'implement rec-001 and all high'  → rec_ids=[rec-001], filters=[high]
+
+    The body must already have quoted-reply content stripped; lines that
+    smell like HTML residue (`<`, `>`, `{`, `=`, etc.) are rejected.
     """
     actions: list[dict] = []
     for raw_line in body.splitlines():
@@ -296,11 +314,20 @@ def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
                 line = line[len(cmd):].strip()
                 break
         rec_ids = _REC_PATTERN.findall(line)
-        if not rec_ids:
+        # Look for bulk-filter keywords on the same line.
+        # Only meaningful for implement/skip — modify/merge need explicit ids.
+        line_lower = line.lower()
+        filters: list[str] = []
+        if verb in ("implement", "skip"):
+            for kw in _BULK_FILTERS:
+                if re.search(rf"\b{kw}\b", line_lower):
+                    filters.append(kw)
+        if not rec_ids and not filters:
             continue
         actions.append({
             "action": verb,
             "rec_ids": rec_ids,
+            "filters": filters,
             "prefix_agent": agent_prefix,
             "prefix_site": site_prefix,
             "raw_line": raw_line.strip(),
@@ -486,11 +513,43 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
             print(f"  [skip] no run dir found for site={site}", file=sys.stderr)
             continue
         run_ts = run_dir.name
-        for rec_id in action_obj["rec_ids"]:
+
+        # Expand bulk filters (e.g., 'implement all', 'implement high') against
+        # the run's recommendations.json. Filters union with explicit rec_ids.
+        rec_ids = list(action_obj.get("rec_ids") or [])
+        filters = action_obj.get("filters") or []
+        if filters:
+            recs_path = run_dir / "recommendations.json"
+            if recs_path.is_file():
+                try:
+                    doc = json.loads(recs_path.read_text())
+                    expanded: set[str] = set(rec_ids)
+                    for r in doc.get("recommendations", []):
+                        if "all" in filters:
+                            expanded.add(r["id"]); continue
+                        if r.get("tier") in filters or r.get("severity") in filters:
+                            expanded.add(r["id"])
+                    rec_ids = sorted(expanded)
+                    print(f"  [bulk] filters={filters} expanded to {len(rec_ids)} recs",
+                          file=sys.stderr)
+                except Exception as e:
+                    print(f"  [bulk] failed to expand filters: {e}", file=sys.stderr)
+            else:
+                print(f"  [bulk] no recommendations.json at {recs_path} — skip expansion",
+                      file=sys.stderr)
+
+        if not rec_ids:
+            print(f"  [skip] action {action_obj['raw_line']!r} resolved to 0 recs",
+                  file=sys.stderr)
+            continue
+
+        for rec_id in rec_ids:
             record_action(runs_roots, site, run_ts, run_dir, rec_id,
                           action_obj["action"], notes=action_obj["raw_line"])
             print(f"  [recorded] {site}/{run_ts} {rec_id} → {action_obj['action']}", file=sys.stderr)
             recorded += 1
+        # Persist the resolved set on the action so dispatch sees the expanded list
+        action_obj["rec_ids"] = rec_ids
 
         # Dispatch (one call per route per email, batching all rec_ids).
         # Match strategies, in priority order:

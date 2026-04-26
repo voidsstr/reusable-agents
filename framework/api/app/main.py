@@ -30,6 +30,7 @@ from .auth import get_expected_token
 from .routes import (
     agents as agents_routes,
     confirmations as confirmations_routes,
+    dependencies as dependencies_routes,
     directives as directives_routes,
     events as events_routes,
     messages as messages_routes,
@@ -108,6 +109,10 @@ app.add_middleware(
 
 # ---- Routes ----
 for r in (
+    # dependencies_routes must come BEFORE agents_routes — its
+    # /api/agents/dependencies path would otherwise match the
+    # /api/agents/{agent_id} catch-all in agents_routes.
+    dependencies_routes.router,
     agents_routes.router,
     runs_routes.router,
     status_routes.router,

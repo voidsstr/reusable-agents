@@ -229,12 +229,23 @@ def render_recs_email(
         header += extra_intro_html
 
     reply_help = f"""
-        <div style="padding:16px 20px;background:#f1f5f9;color:#334155;font-size:13px;line-height:1.5">
-          <b>Reply to ship recommendations.</b> Use the rec ids:<br>
+        <div style="padding:16px 20px;background:#f1f5f9;color:#334155;font-size:13px;line-height:1.6">
+          <b>Reply to ship recommendations.</b> Subject must stay <code>Re: …</code>.
+          <br><br>
+          <b>By rec id (most precise):</b><br>
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement rec-001 rec-005</code> &nbsp;
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">skip rec-002</code> &nbsp;
-          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">merge rec-003 rec-004</code><br>
-          Subject must stay <code>Re: …</code> so the responder can route the reply.
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">merge rec-003 rec-004</code>
+          <br><br>
+          <b>Bulk by tier or severity:</b><br>
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement all</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement auto</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement high</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement critical and high</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">skip experimental</code>
+          <br>
+          <span style="color:#64748b;font-size:12px">Tier filters: <code>auto</code>, <code>review</code>, <code>experimental</code>. Severity filters: <code>critical</code>, <code>high</code>, <code>medium</code>, <code>low</code>. <code>all</code> matches everything. Combine with <code>and</code> / <code>+</code> / commas.</span>
+          <br><br>
           Auto-eligible recs ship without a reply <i>only</i> if you've enabled
           <code>auto_implement: true</code> in the site config (off by default).
         </div>
@@ -264,18 +275,72 @@ def render_recs_email(
 _REC_ID_RE = re.compile(r"\brec-(\d{3})\b")
 
 
-def parse_user_action(payload: dict) -> tuple[str, list[str], str]:
+_VERBS = ("implement", "skip", "modify", "merge")
+_TIERS = ("auto", "review", "experimental")
+_SEVERITIES = ("critical", "high", "medium", "low")
+_BULK_KEYWORDS = ("all",) + _TIERS + _SEVERITIES
+
+
+def parse_user_action(payload: dict) -> tuple[str, list[str], list[str], str]:
     """From a responses-queue/<request-id>.json payload, return
-    (verb, rec_ids, notes). verb in {implement, skip, modify, merge, unknown}."""
+    (verb, rec_ids, filter_keywords, notes).
+
+    verb           ∈ {implement, skip, modify, merge, unknown}
+    rec_ids        ∈ explicit "rec-NNN" tokens in the body (precise selection)
+    filter_keywords∈ tier or severity filters (bulk selection):
+                       'all'                                  — every rec
+                       'auto', 'review', 'experimental'       — by tier
+                       'critical', 'high', 'medium', 'low'    — by severity
+                     Multiple keywords combine as a UNION
+                     ("implement high and critical" → both).
+    notes          ∈ first 500 chars of the body, lowercased
+
+    Both rec_ids and filter_keywords can be present — the agent applies the
+    union when expanding to actual rec ids.
+    """
     body = (payload.get("body") or payload.get("text") or "").lower()
     rec_ids = sorted({f"rec-{m.group(1)}" for m in _REC_ID_RE.finditer(body)})
     verb = "unknown"
-    for v in ("implement", "skip", "modify", "merge"):
+    for v in _VERBS:
         if re.search(rf"\b{v}\b", body):
             verb = v
             break
+    # Capture bulk filter keywords. Match "implement all" / "implement high and low" / etc.
+    # We scan the whole body for these tokens AFTER a verb has been seen.
+    filter_keywords: list[str] = []
+    if verb in ("implement", "skip"):
+        # Take the substring from the verb onward to avoid false positives in
+        # quoted prior-run text below the user's reply.
+        m = re.search(rf"\b{verb}\b", body)
+        scan = body[m.end():] if m else body
+        # Stop at common reply boundaries (forwarded original message, etc.)
+        for boundary in ("\n\n--", "\n\n>", "\n----", "from:", "sent:"):
+            i = scan.find(boundary)
+            if i > 0:
+                scan = scan[:i]
+        for kw in _BULK_KEYWORDS:
+            if re.search(rf"\b{kw}\b", scan):
+                filter_keywords.append(kw)
     notes = body[:500]
-    return verb, rec_ids, notes
+    return verb, rec_ids, filter_keywords, notes
+
+
+def expand_filters_to_rec_ids(
+    recs: list[dict], filter_keywords: list[str]
+) -> list[str]:
+    """Given a recs list + filter keywords (all / auto|review|experimental /
+    critical|high|medium|low), return the union of matching rec ids."""
+    if not filter_keywords:
+        return []
+    out: set[str] = set()
+    for r in recs:
+        if "all" in filter_keywords:
+            out.add(r["id"]); continue
+        if r.get("tier") in filter_keywords:
+            out.add(r["id"]); continue
+        if r.get("severity") in filter_keywords:
+            out.add(r["id"]); continue
+    return sorted(out)
 
 
 def apply_user_responses(
@@ -284,17 +349,23 @@ def apply_user_responses(
     prior_recs_path: Optional[Path],
 ) -> list[dict]:
     """Apply user-reply choices back to the previous run's recommendations.json.
-    Mutates + writes the file in-place. Returns the list of (rec_id, action) pairs applied."""
+    Mutates + writes the file in-place. Returns the list of (rec_id, action)
+    pairs applied (precise rec-id matches AND bulk-filter expansions)."""
     if prior_recs_path is None or not prior_recs_path.is_file():
         return []
     doc = json.loads(prior_recs_path.read_text())
-    by_id = {r["id"]: r for r in doc.get("recommendations", [])}
+    recs = doc.get("recommendations", [])
+    by_id = {r["id"]: r for r in recs}
     applied: list[dict] = []
     for resp in responses:
-        verb, rec_ids, notes = parse_user_action(resp)
-        if verb == "unknown" or not rec_ids:
+        verb, rec_ids, filter_keywords, notes = parse_user_action(resp)
+        if verb == "unknown":
             continue
-        for rid in rec_ids:
+        target_ids: set[str] = set(rec_ids)
+        target_ids.update(expand_filters_to_rec_ids(recs, filter_keywords))
+        if not target_ids:
+            continue
+        for rid in sorted(target_ids):
             r = by_id.get(rid)
             if not r:
                 continue
@@ -302,6 +373,8 @@ def apply_user_responses(
                 "action": verb,
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "notes": notes,
+                "matched_via": "explicit-rec-id" if rid in rec_ids else "bulk-filter",
+                "filters": filter_keywords or None,
             }
             applied.append({"id": rid, "action": verb})
     prior_recs_path.write_text(json.dumps(doc, indent=2))

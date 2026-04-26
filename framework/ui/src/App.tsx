@@ -9,9 +9,11 @@ import AgentDetail from './pages/AgentDetail'
 import Confirmations from './pages/Confirmations'
 import Events from './pages/Events'
 import Providers from './pages/Providers'
+import Graph from './pages/Graph'
 
 const NAV = [
   { to: '/',              label: 'Agents' },
+  { to: '/graph',         label: 'Graph' },
   { to: '/confirmations', label: 'Confirmations' },
   { to: '/providers',     label: 'AI Providers' },
   { to: '/events',        label: 'Events' },
@@ -22,11 +24,12 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/"               element={<AgentList />} />
-          <Route path="/agents/:id"     element={<AgentDetail />} />
-          <Route path="/confirmations"  element={<Confirmations />} />
-          <Route path="/providers"      element={<Providers />} />
-          <Route path="/events"         element={<Events />} />
+          <Route path="/"                element={<AgentList />} />
+          <Route path="/agents/:id"      element={<AgentDetail />} />
+          <Route path="/graph"           element={<Graph />} />
+          <Route path="/confirmations"   element={<Confirmations />} />
+          <Route path="/providers"       element={<Providers />} />
+          <Route path="/events"          element={<Events />} />
         </Route>
       </Routes>
     </BrowserRouter>
@@ -84,8 +87,10 @@ function Layout() {
           )}
         </div>
       </header>
-      <main className="flex-1 p-4 overflow-auto">
-        <Outlet />
+      <main className="flex-1 overflow-hidden">
+        <div className="h-full overflow-auto p-4">
+          <Outlet />
+        </div>
       </main>
     </div>
   )

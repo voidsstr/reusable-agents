@@ -50,6 +50,11 @@ class AgentManifest:
     owner: str = ""                   # email of human owner (for confirmations)
     capabilities: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    depends_on: list[dict[str, Any]] = field(default_factory=list)
+    # depends_on entries: {agent_id, kind, description?}
+    # kind ∈ triggers, feeds-run-dir, polls-replies-for, routes-replies-to,
+    # dispatches-to, sends-email-via, config-shared-with
+    # These OVERRIDE / supplement framework defaults.
     created_at: str = ""
     updated_at: str = ""
 

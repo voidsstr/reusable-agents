@@ -75,8 +75,9 @@ content is fully derivable from our existing data").
 
 ## Reply syntax
 
-Same as progressive-improvement-agent. Reply to the email keeping `Re:`,
-then any of:
+Same as progressive-improvement-agent. Two selection modes:
+
+**By rec id:**
 
 ```
 implement rec-001 rec-005
@@ -84,3 +85,17 @@ skip rec-002
 modify rec-003: build the simpler version, no admin UI
 merge rec-004 rec-006
 ```
+
+**Bulk by tier or severity:**
+
+```
+implement all
+implement auto
+implement high                # all severity=high recs
+implement critical and high   # multiple filters union
+skip experimental
+```
+
+Filters: `all` | `auto` | `review` | `experimental` | `critical` | `high` |
+`medium` | `low`. Combine with `and` / `+` / commas. Mix with explicit
+rec ids on the same line.

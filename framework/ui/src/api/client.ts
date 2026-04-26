@@ -89,6 +89,18 @@ export const api = {
   // storage
   storageList:       (prefix = '') => http<{ prefix: string; keys: string[]; count: number }>(`/api/storage/list?prefix=${encodeURIComponent(prefix)}`),
   storageRead:       (key: string, format: 'auto' | 'json' | 'jsonl' | 'text' | 'bytes' = 'auto') => http<{ key: string; format: string; content: unknown }>(`/api/storage/read?key=${encodeURIComponent(key)}&format=${format}`),
+
+  // dependencies / graph
+  dependencyGraph:   (includeBlueprints = false) => http<{
+    nodes: { id: string; name: string; category: string; enabled: boolean; is_blueprint: boolean; blueprint?: string; owner: string; cron: string }[]
+    edges: { from: string; to: string; kind: string; description: string; default: boolean }[]
+    kinds: { id: string; label: string; style: string }[]
+  }>(`/api/agents/dependencies?include_blueprints=${includeBlueprints}`),
+  patchDependencies: (id: string, depends_on: { agent_id: string; kind: string; description?: string }[]) =>
+    http<{ ok: boolean; agent_id: string; depends_on: unknown[] }>(`/api/agents/${encodeURIComponent(id)}/dependencies`, { method: 'PATCH', body: JSON.stringify({ depends_on }) }),
+  getGraphLayout:    (userId: string) => http<{ positions: Record<string, { x: number; y: number }>; viewport: Record<string, number> }>(`/api/agents/dependencies/layout/${encodeURIComponent(userId)}`),
+  putGraphLayout:    (userId: string, layout: { positions: Record<string, { x: number; y: number }>; viewport: Record<string, number> }) =>
+    http<{ ok: boolean }>(`/api/agents/dependencies/layout/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(layout) }),
 }
 
 // ---------------------------------------------------------------------------

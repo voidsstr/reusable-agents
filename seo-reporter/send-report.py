@@ -89,13 +89,23 @@ def render_html(cfg, run_dir: Path) -> tuple[str, str]:
     # Reply instructions
     reply_to = cfg.get("reporter", {}).get("email", {}).get("from", "")
     reply_help = (
-        f"<p style='color:#64748b;font-size:13px;margin-top:8px'>"
-        f"<b>To implement specific recommendations,</b> reply to this email with the "
-        f"rec ids you want implemented (one per line or space-separated): "
-        f"<code style='background:#f1f5f9;padding:2px 6px;border-radius:3px'>"
-        f"implement rec-001 rec-003</code><br>"
-        f"Subject must stay <code>Re: …</code>. Use <code>skip rec-002</code> to "
-        f"dismiss recs without implementing them.</p>"
+        "<div style='color:#475569;font-size:13px;line-height:1.6;margin-top:8px;"
+        "padding:14px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0'>"
+        "<b>Reply to ship recommendations.</b> Subject must stay <code>Re: …</code>.<br><br>"
+        "<b>By rec id (precise):</b><br>"
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement rec-001 rec-003</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>skip rec-002</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>merge rec-004 rec-005</code>"
+        "<br><br>"
+        "<b>Bulk by tier or severity:</b><br>"
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement all</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement high</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement critical and high</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>skip experimental</code>"
+        "<br><span style='color:#64748b;font-size:12px'>"
+        "Bulk filters: <code>all</code>, severity (<code>critical</code>/<code>high</code>/<code>medium</code>/<code>low</code>), "
+        "tier (<code>auto</code>/<code>review</code>/<code>experimental</code>). Combine with <code>and</code> / <code>+</code> / commas."
+        "</span></div>"
     )
 
     parts = [

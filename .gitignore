@@ -263,3 +263,7 @@ framework/ui/package-lock.json
 framework/**/__pycache__/
 framework/**/*.pyc
 framework/.pytest_cache/
+
+# Playwright
+framework/ui/test-results/
+framework/ui/playwright-report/

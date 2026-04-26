@@ -91,7 +91,9 @@ See `config.example.yaml`. Schema:
 
 ## Reply commands (parsed by responder-agent)
 
-Standard rec-id reply syntax inherited from the SEO suite:
+Two selection modes, both supported in a single reply:
+
+**By rec id (precise):**
 
 ```
 implement rec-001 rec-005   # ship these
@@ -99,3 +101,23 @@ skip rec-002                # dismiss
 modify rec-003: only the title, leave the layout
 merge rec-004 rec-006       # combine into one PR
 ```
+
+**Bulk by tier or severity:**
+
+```
+implement all                       # ship every rec in the email
+implement auto                      # only the auto-tier ones
+implement high                      # all severity=high recs
+implement critical and high         # multiple filters union
+implement high+medium               # '+' / ',' / 'and' all work
+skip experimental                   # dismiss every experimental
+```
+
+| Filter | Matches |
+|---|---|
+| `all` | every rec |
+| `auto`, `review`, `experimental` | by tier |
+| `critical`, `high`, `medium`, `low` | by severity |
+
+You can mix modes — `implement rec-001 and all high` ships rec-001 plus
+every high-severity rec.
