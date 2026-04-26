@@ -439,13 +439,21 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     env["RESPONDER_SITE"] = site
     env["RESPONDER_RUN_TS"] = run_ts
     env["RESPONDER_RUN_DIR"] = str(run_dir)
+    # Capture spawned stdout/stderr to a per-dispatch log so we can debug
+    # implementer failures (was DEVNULL — lost everything).
+    log_dir = Path(os.environ.get("RESPONDER_DISPATCH_LOG_DIR", "/tmp/reusable-agents-logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime as _dt, timezone as _tz
+    log_path = log_dir / f"dispatch-{typ}-{site}-{_dt.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
     try:
+        log_f = open(log_path, "ab")
         proc = subprocess.Popen(
             ["bash", script],
             env=env, start_new_session=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=log_f, stderr=log_f,
         )
-        print(f"  [dispatch] spawned {script} pid={proc.pid} action={action} recs={rec_ids}", file=sys.stderr)
+        print(f"  [dispatch] spawned {script} pid={proc.pid} action={action} recs={rec_ids} log={log_path}",
+              file=sys.stderr)
     except Exception as e:
         print(f"  [dispatch] failed: {e}", file=sys.stderr)
 
