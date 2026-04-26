@@ -1,0 +1,403 @@
+"""LLM-driven adaptive SEO audit pass for seo-analyzer.
+
+Centers on a specific, verifiable checklist of SEO best practices that
+evolve with search-engine behavior. The prompt enumerates each check
+explicitly so an SEO expert can validate that the agent is looking for
+the right things.
+
+Why LLM in this loop:
+  - Search-engine signals are a moving target (Core Web Vitals weights,
+    AI search citations, EEAT thresholds, schema-markup support all shift)
+  - A deterministic analyzer can ONLY flag things its code knows about;
+    the LLM pass surfaces emerging opportunities the deterministic pass
+    misses
+  - LLM still operates on REAL data (page HTML + GSC stats + GA4 events)
+    not vibes — every rec must cite evidence from the inputs
+
+The deterministic pass (analyzer.py) handles things we KNOW are right:
+top-5 keyword targets, indexing-error counts, conversion-path drops.
+This LLM pass handles things that REQUIRE judgment: "is this title
+under-optimized?" "is the schema markup complete for this content
+type?" "is this content thin for an EEAT-sensitive query?"
+
+The two passes' recs are merged + de-duplicated by analyzer.py.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# The audit checklist — explicit, expert-verifiable
+# ---------------------------------------------------------------------------
+#
+# Every category listed here MUST be a concrete, observable check the LLM
+# can verify from page HTML / structured data / GSC stats. No vibes,
+# no "improve user experience". Each check has a short label that the
+# user (or an SEO expert reviewing the agent's behavior) can audit.
+
+SEO_AUDIT_CHECKLIST = """
+You are an SEO expert auditing pages from a website. Use the data
+provided (page HTML excerpts + GSC + GA4 stats) to flag issues that
+match THIS SPECIFIC CHECKLIST. Do not invent categories outside it.
+
+═════════════════════════════════════════════════════════════════════
+TITLE + META DESCRIPTION (every page)
+─────────────────────────────────────────────────────────────────────
+[meta-title-length]            Title tag is 30-60 chars (truncated if longer)
+[meta-title-keyword]           Primary keyword appears in title (front-loaded ideal)
+[meta-title-brand]             Brand name in title (end position)
+[meta-description-length]      Description 120-160 chars
+[meta-description-cta]         Description has an action verb / value prop
+[meta-description-keyword]     Description includes the primary query keyword
+[meta-description-missing]     <meta name=\"description\"> missing entirely
+[meta-title-duplicate]         Same <title> as another page on the site
+[meta-description-duplicate]   Same description as another page
+
+HEADINGS + CONTENT STRUCTURE
+─────────────────────────────────────────────────────────────────────
+[h1-missing]                   Page has no <h1>
+[h1-multiple]                  Page has more than one <h1>
+[h1-mismatch]                  H1 doesn't reflect page intent / contradicts title
+[heading-hierarchy]            Headings skip levels (h1 → h3 with no h2)
+[content-thin]                 Body text < 300 words on a page that should rank
+[content-keyword-stuffing]     Same keyword phrase repeated suspiciously often
+
+STRUCTURED DATA / SCHEMA.ORG
+─────────────────────────────────────────────────────────────────────
+[schema-product-missing]       Product page with no Product JSON-LD
+[schema-article-missing]       Blog post with no Article JSON-LD
+[schema-faqpage-missing]       FAQ-style page with no FAQPage schema
+[schema-howto-missing]         How-to/recipe with no HowTo or Recipe schema
+[schema-breadcrumblist-missing] Page in deep nav with no BreadcrumbList
+[schema-organization-missing]  Site has no Organization schema (homepage)
+[schema-website-searchaction-missing] Site has no SearchAction schema
+[schema-incomplete]            JSON-LD present but missing required fields
+[schema-invalid]               JSON-LD has syntax errors
+[schema-deprecated]            Using a deprecated schema property
+
+E-E-A-T SIGNALS (Experience / Expertise / Authority / Trust)
+─────────────────────────────────────────────────────────────────────
+[eeat-author-missing]          Article with no visible author byline
+[eeat-author-bio]              Author byline present but no linked bio
+[eeat-publish-date-missing]    No visible publish date
+[eeat-update-date-missing]     Old content with no \"updated\" date
+[eeat-citations-missing]       Claims without sources / outbound citations
+[eeat-about-missing]           No About / Contact page reachable in 1 click
+[eeat-policy-missing]          No privacy / refund / policy pages
+
+INTERNAL LINKING
+─────────────────────────────────────────────────────────────────────
+[link-orphan]                  Page has no inbound internal links
+[link-anchor-generic]          Anchor text is \"click here\" / \"read more\" / \"learn more\"
+[link-anchor-keyword]          Internal anchor text could be keyword-optimized
+[link-broken]                  Internal link 404s (only flag if observed in crawl)
+[link-redirect-chain]          Internal link goes through 2+ redirects
+[link-nofollow-internal]       Internal link has rel=\"nofollow\" (usually wrong)
+
+MOBILE-FIRST + UX
+─────────────────────────────────────────────────────────────────────
+[mobile-viewport-missing]      No viewport meta tag
+[mobile-tap-targets]           Tap targets < 48x48px close together
+[mobile-font-small]            Body font-size < 16px (mobile readability)
+[mobile-horizontal-scroll]     Page requires horizontal scroll on phone
+
+CORE WEB VITALS / PERFORMANCE
+─────────────────────────────────────────────────────────────────────
+[cwv-render-blocking]          Synchronous JS / non-async CSS in <head>
+[cwv-image-no-dimensions]      <img> without width/height (causes CLS)
+[cwv-image-no-lazy]            Below-fold image without loading=\"lazy\"
+[cwv-image-format]             Image is JPEG/PNG when WebP/AVIF would be smaller
+[cwv-font-no-display]          @font-face without font-display:swap
+[cwv-large-dom]                DOM > ~1500 nodes (LCP penalty)
+
+CRAWLABILITY + INDEXING
+─────────────────────────────────────────────────────────────────────
+[indexing-noindex-conflict]    Page has noindex but also in sitemap
+[indexing-canonical-self]      Canonical missing or pointing wrong (self-canonical recommended)
+[indexing-canonical-non-2xx]   Canonical URL returns non-2xx
+[indexing-sitemap-404]         Sitemap entry returns 404
+[indexing-robots-blocked]      Important page blocked by robots.txt
+[indexing-pagination-rel]      Paginated series without prev/next or canonical
+[indexing-soft-404]            Real page returning 200 but with thin/error content
+
+URL STRUCTURE
+─────────────────────────────────────────────────────────────────────
+[url-non-descriptive]          URL has session ids / query strings instead of slug
+[url-deep]                     Path depth > 4 levels for important content
+[url-uppercase]                URL has uppercase chars (case-sensitivity issues)
+[url-trailing-slash]           Inconsistent trailing-slash treatment
+
+IMAGES
+─────────────────────────────────────────────────────────────────────
+[image-alt-missing]            <img> without alt attribute
+[image-alt-empty-content]      Content image with alt=\"\" (decorative-only OK; flag content imgs)
+[image-alt-keyword-stuffing]   alt text repeats target keyword unnaturally
+[image-filename-non-descriptive] File named DSC_1234.jpg / image-1.png
+
+AI SEARCH / GENERATIVE ENGINE OPTIMIZATION (GEO)
+─────────────────────────────────────────────────────────────────────
+[geo-direct-answer-missing]    No 1-paragraph direct answer near top of long-form page
+[geo-faq-missing]              Page about a topic has no FAQ section / FAQPage schema
+[geo-listicle-no-summary]      Listicle without scannable summary at top
+[geo-llms-txt-missing]         Site has no /llms.txt at root
+[geo-author-credentials]       AI-search prefers byline + credentials proof
+[geo-statistics-missing]       Authoritative content lacks data / citations
+
+CONVERSION-RELEVANT (revenue-tracking sites)
+─────────────────────────────────────────────────────────────────────
+[cta-missing]                  Page about a product/service with no CTA
+[cta-weak]                     CTA text is generic (\"submit\") not specific (\"start free trial\")
+[cta-position]                 Primary CTA below the fold on revenue page
+[trust-signals-missing]        Conversion page lacks reviews / testimonials / guarantees
+═════════════════════════════════════════════════════════════════════
+
+For EACH issue found, return a JSON object:
+{
+  "check_id": "<one of the bracketed ids above>",
+  "url": "<page URL>",
+  "severity": "critical | high | medium | low",
+  "confidence": 0.0-1.0,
+  "title": "one-line headline",
+  "rationale": "why this matters for SEO + which Google guideline",
+  "evidence": "exact snippet from the page proving the issue",
+  "fix": "concrete change — what to add/edit, with example markup if applicable"
+}
+
+Return STRICT JSON (an array). No markdown fences, no preamble.
+
+If a page is fully clean for the checks above, do not invent issues.
+Empty output is valid.
+
+Calibrate confidence carefully: 0.95+ means another SEO expert would
+look at the evidence and immediately agree. 0.5-0.7 means probable but
+worth a human verifying. <0.5 means speculation — typically only for
+GEO checks where best practices are still emerging.
+"""
+
+# Mapping check_id → SEO recommendation type (for downstream
+# tooling — implementer template selection, dashboard grouping, etc.)
+CHECK_ID_TO_REC_TYPE = {
+    # title/meta
+    "meta-title-length": "ctr-fix", "meta-title-keyword": "ctr-fix",
+    "meta-title-brand": "ctr-fix", "meta-description-length": "ctr-fix",
+    "meta-description-cta": "ctr-fix", "meta-description-keyword": "ctr-fix",
+    "meta-description-missing": "ctr-fix",
+    "meta-title-duplicate": "ctr-fix", "meta-description-duplicate": "ctr-fix",
+    # headings/content
+    "h1-missing": "ssr-fix", "h1-multiple": "ssr-fix", "h1-mismatch": "ssr-fix",
+    "heading-hierarchy": "ssr-fix",
+    "content-thin": "content-expansion", "content-keyword-stuffing": "content-expansion",
+    # schema
+    "schema-product-missing": "schema-markup", "schema-article-missing": "schema-markup",
+    "schema-faqpage-missing": "schema-markup", "schema-howto-missing": "schema-markup",
+    "schema-breadcrumblist-missing": "schema-markup",
+    "schema-organization-missing": "schema-markup",
+    "schema-website-searchaction-missing": "schema-markup",
+    "schema-incomplete": "schema-markup", "schema-invalid": "schema-markup",
+    "schema-deprecated": "schema-markup",
+    # eeat
+    "eeat-author-missing": "content-expansion", "eeat-author-bio": "content-expansion",
+    "eeat-publish-date-missing": "ssr-fix", "eeat-update-date-missing": "ssr-fix",
+    "eeat-citations-missing": "content-expansion",
+    "eeat-about-missing": "internal-link", "eeat-policy-missing": "internal-link",
+    # links
+    "link-orphan": "internal-link", "link-anchor-generic": "internal-link",
+    "link-anchor-keyword": "internal-link",
+    "link-broken": "redirect-fix", "link-redirect-chain": "redirect-fix",
+    "link-nofollow-internal": "internal-link",
+    # mobile/cwv
+    "mobile-viewport-missing": "ssr-fix", "mobile-tap-targets": "ssr-fix",
+    "mobile-font-small": "ssr-fix", "mobile-horizontal-scroll": "ssr-fix",
+    "cwv-render-blocking": "ssr-fix", "cwv-image-no-dimensions": "ssr-fix",
+    "cwv-image-no-lazy": "ssr-fix", "cwv-image-format": "ssr-fix",
+    "cwv-font-no-display": "ssr-fix", "cwv-large-dom": "ssr-fix",
+    # indexing
+    "indexing-noindex-conflict": "indexing-fix", "indexing-canonical-self": "indexing-fix",
+    "indexing-canonical-non-2xx": "indexing-fix", "indexing-sitemap-404": "sitemap-fix",
+    "indexing-robots-blocked": "indexing-fix", "indexing-pagination-rel": "indexing-fix",
+    "indexing-soft-404": "indexing-fix",
+    # url/images
+    "url-non-descriptive": "ssr-fix", "url-deep": "ssr-fix",
+    "url-uppercase": "ssr-fix", "url-trailing-slash": "redirect-fix",
+    "image-alt-missing": "ssr-fix", "image-alt-empty-content": "ssr-fix",
+    "image-alt-keyword-stuffing": "ssr-fix", "image-filename-non-descriptive": "ssr-fix",
+    # GEO / AI search
+    "geo-direct-answer-missing": "content-expansion",
+    "geo-faq-missing": "schema-markup",
+    "geo-listicle-no-summary": "content-expansion",
+    "geo-llms-txt-missing": "ssr-fix",
+    "geo-author-credentials": "content-expansion",
+    "geo-statistics-missing": "content-expansion",
+    # cta
+    "cta-missing": "conversion-path", "cta-weak": "conversion-path",
+    "cta-position": "conversion-path", "trust-signals-missing": "conversion-path",
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_llm_json(raw: str) -> list[dict]:
+    """Tolerant JSON-array parse — strip markdown fences, find brackets."""
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[1] if "\n" in s else s[3:]
+        if s.endswith("```"):
+            s = s.rsplit("```", 1)[0]
+    i = s.find("[")
+    if i < 0:
+        i = s.find("{")
+    if i < 0:
+        return []
+    j = max(s.rfind("]"), s.rfind("}"))
+    if j <= i:
+        return []
+    s = s[i:j + 1]
+    try:
+        out = json.loads(s)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(out, dict):
+        return [out]
+    if isinstance(out, list):
+        return [x for x in out if isinstance(x, dict)]
+    return []
+
+
+def format_pages_for_audit(pages: list[dict], cap_chars: int = 2000) -> str:
+    """Render a small batch of page records for the audit prompt."""
+    parts = []
+    for p in pages:
+        body = (p.get("body_text") or p.get("content") or "")[:cap_chars]
+        parts.append(
+            f"\nURL: {p.get('url','?')}\n"
+            f"TITLE: {p.get('title','')}\n"
+            f"DESCRIPTION: {p.get('description','')}\n"
+            f"H1: {p.get('h1','')}\n"
+            f"CANONICAL: {p.get('canonical','')}\n"
+            f"BODY (truncated):\n{body}\n"
+            "---"
+        )
+    return "".join(parts)
+
+
+def run_llm_audit(
+    *,
+    pages: list[dict],
+    site_label: str,
+    primary_objective: str = "top5-rank",
+    ai_chat_callable=None,
+    batch_size: int = 4,
+) -> list[dict]:
+    """Send pages through the LLM audit; return raw issue list.
+
+    `ai_chat_callable` is a function `(messages, *, temperature, max_tokens) -> str`.
+    If None, returns []. Caller wires this to `framework.core.ai_providers.ai_client_for(...)`.
+
+    Each returned issue has the schema specified in SEO_AUDIT_CHECKLIST.
+    The caller is responsible for converting these into the SEO
+    recommendation schema (see `issues_to_recommendations`).
+    """
+    if ai_chat_callable is None or not pages:
+        return []
+
+    out: list[dict] = []
+    user_preamble = (
+        f"Site: {site_label}\n"
+        f"Primary SEO objective: {primary_objective}\n\n"
+    )
+
+    for i in range(0, len(pages), batch_size):
+        batch = pages[i:i + batch_size]
+        prompt = user_preamble + "PAGES TO AUDIT:\n" + format_pages_for_audit(batch)
+        try:
+            raw = ai_chat_callable(
+                [
+                    {"role": "system", "content": SEO_AUDIT_CHECKLIST},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=3000,
+            )
+        except Exception as e:
+            # Continue with the next batch — partial output is better than none
+            out.append({
+                "check_id": "llm-audit-error",
+                "url": batch[0].get("url", ""),
+                "severity": "low",
+                "confidence": 0.0,
+                "title": "LLM audit batch failed",
+                "rationale": str(e)[:300],
+                "evidence": "",
+                "fix": "Retry next run; check ai-providers config.",
+            })
+            continue
+        parsed = _parse_llm_json(raw)
+        # Filter to only the bracketed check_ids we know about
+        for issue in parsed:
+            cid = issue.get("check_id", "")
+            if cid not in CHECK_ID_TO_REC_TYPE and cid != "llm-audit-error":
+                # Reject hallucinated check ids — we want the SEO expert
+                # to be able to audit a fixed list
+                continue
+            out.append(issue)
+
+    return out
+
+
+def issues_to_recommendations(
+    issues: list[dict], next_id_fn, *, kind_default: str = "ssr-fix"
+) -> list[dict]:
+    """Convert raw audit issues to the SEO recommendation schema."""
+    recs: list[dict] = []
+    for issue in issues:
+        check_id = issue.get("check_id", "")
+        if check_id == "llm-audit-error":
+            continue
+        rec_type = CHECK_ID_TO_REC_TYPE.get(check_id, kind_default)
+        rec = {
+            "id": next_id_fn(),
+            "type": rec_type,
+            "priority": _severity_to_priority(issue.get("severity", "low")),
+            "title": issue.get("title", check_id),
+            "rationale": issue.get("rationale", ""),
+            "implementation_outline": {
+                "notes": issue.get("fix", ""),
+            },
+            "data_refs": [issue.get("url", "")],
+            "implemented": False,
+            # LLM-specific tracking so we can audit which checks fired
+            "llm_check_id": check_id,
+            "llm_confidence": issue.get("confidence", 0),
+            "llm_evidence": issue.get("evidence", ""),
+        }
+        recs.append(rec)
+    return recs
+
+
+def _severity_to_priority(sev: str) -> str:
+    return {
+        "critical": "critical", "high": "high",
+        "medium": "medium", "low": "low",
+    }.get(sev.lower(), "medium")
+
+
+# Useful constants exposed for goals + dashboard
+ALL_CHECK_IDS = sorted(CHECK_ID_TO_REC_TYPE.keys())
+CHECK_CATEGORIES = {
+    "title-meta": [c for c in ALL_CHECK_IDS if c.startswith(("meta-",))],
+    "headings-content": [c for c in ALL_CHECK_IDS if c.startswith(("h1-", "heading-", "content-"))],
+    "schema": [c for c in ALL_CHECK_IDS if c.startswith("schema-")],
+    "eeat": [c for c in ALL_CHECK_IDS if c.startswith("eeat-")],
+    "links": [c for c in ALL_CHECK_IDS if c.startswith("link-")],
+    "mobile-cwv": [c for c in ALL_CHECK_IDS if c.startswith(("mobile-", "cwv-"))],
+    "indexing": [c for c in ALL_CHECK_IDS if c.startswith("indexing-")],
+    "url-images": [c for c in ALL_CHECK_IDS if c.startswith(("url-", "image-"))],
+    "ai-search-geo": [c for c in ALL_CHECK_IDS if c.startswith("geo-")],
+    "conversion": [c for c in ALL_CHECK_IDS if c.startswith(("cta-", "trust-"))],
+}

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -481,6 +482,33 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
 # Main
 # ---------------------------------------------------------------------------
 
+def _build_ai_chat_callable(cfg):
+    """Return a `(messages, *, temperature, max_tokens) -> str` callable that
+    routes through the framework's AI provider config, OR None if unavailable.
+
+    Resolution order:
+      1. cfg.analyzer.ai_provider / ai_model (per-site overrides)
+      2. framework default for agent_id 'seo-analyzer'
+      3. None (returns None — caller skips LLM pass)
+    """
+    try:
+        from framework.core import ai_providers
+    except ImportError:
+        return None
+    analyzer_cfg = cfg.get("analyzer", {}) or {}
+    override_provider = analyzer_cfg.get("ai_provider", "")
+    override_model = analyzer_cfg.get("ai_model", "")
+    try:
+        client = ai_providers.ai_client_for(
+            "seo-analyzer",
+            override_provider=override_provider or None,
+            override_model=override_model or None,
+        )
+    except Exception:
+        return None
+    return client.chat
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-ts", default=None,
@@ -531,12 +559,72 @@ def main() -> None:
 
     # 4. Build recommendations + declare new goals
     recs, declared_goals = build_recommendations(cfg, run_dir, snap)
+
+    # 4b. LLM-driven adaptive audit pass — flags evolving SEO opportunities
+    # the deterministic pass can't see (CWV, schema, EEAT, AI search,
+    # mobile-first specifics). Disabled with SEO_DISABLE_LLM_AUDIT=1.
+    if os.environ.get("SEO_DISABLE_LLM_AUDIT") != "1":
+        try:
+            from llm_audit import (
+                run_llm_audit,
+                issues_to_recommendations,
+            )
+            ai_chat = _build_ai_chat_callable(cfg)
+            if ai_chat is not None:
+                # Pull the page records the collector scraped (if any).
+                # The collector currently writes data/pages.jsonl when
+                # available; the LLM audit is best-effort otherwise.
+                pages_path = run_dir / "data" / "pages.jsonl"
+                pages: list[dict] = []
+                if pages_path.is_file():
+                    for line in pages_path.read_text().splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            pages.append(json.loads(line))
+                        except Exception:
+                            pass
+                # Cap at 20 pages to keep token usage sane
+                pages = pages[:20]
+                if pages:
+                    print(f"  → LLM audit: {len(pages)} pages", file=sys.stderr)
+                    issues = run_llm_audit(
+                        pages=pages,
+                        site_label=cfg.site_id,
+                        primary_objective=cfg.get("analyzer", {}).get(
+                            "primary_objective", "top5-rank"),
+                        ai_chat_callable=ai_chat,
+                        batch_size=4,
+                    )
+                    print(f"  → LLM audit found {len(issues)} issues", file=sys.stderr)
+                    next_id_count = {"i": len(recs)}
+                    def _next_id():
+                        next_id_count["i"] += 1
+                        return f"rec-{next_id_count['i']:03d}"
+                    llm_recs = issues_to_recommendations(issues, _next_id)
+                    # De-dupe by (url, llm_check_id) to avoid stomping
+                    seen = {(r.get("data_refs",[None])[0], r.get("llm_check_id"))
+                            for r in recs if r.get("llm_check_id")}
+                    for r in llm_recs:
+                        key = (r.get("data_refs",[None])[0], r.get("llm_check_id"))
+                        if key in seen:
+                            continue
+                        recs.append(r)
+                        seen.add(key)
+                else:
+                    print(f"  → LLM audit skipped (no pages.jsonl)", file=sys.stderr)
+            else:
+                print("  → LLM audit skipped (no AI client available)", file=sys.stderr)
+        except Exception as e:
+            print(f"  → LLM audit failed: {e}", file=sys.stderr)
+
     summary = (
         f"{len(recs)} recommendations: "
         f"{sum(1 for r in recs if r['type'] == 'top5-target-page')} top-5 pages, "
         f"{sum(1 for r in recs if r['type'] == 'ctr-fix')} CTR fixes, "
         f"{sum(1 for r in recs if r['type'] == 'indexing-fix')} indexing fixes, "
-        f"{sum(1 for r in recs if r['type'] == 'conversion-path')} conversion-path."
+        f"{sum(1 for r in recs if r['type'] == 'conversion-path')} conversion-path, "
+        f"{sum(1 for r in recs if r.get('llm_check_id'))} from adaptive LLM audit."
     )
     run_files.write_recommendations(
         run_dir,

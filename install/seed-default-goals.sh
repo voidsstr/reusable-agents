@@ -86,11 +86,31 @@ SEO_GOALS='{"goals":[
   {"id":"goal-zero-indexing-issues","title":"Zero indexing issues in GSC",
    "description":"Every URL we want indexed IS indexed. No soft-404s, no canonical conflicts.",
    "metric":{"name":"indexing_issues","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":4},
-   "directives":["surface noindex/canonical conflicts as critical","fix sitemap entries that 404"]},
+   "directives":["surface noindex/canonical conflicts as critical","fix sitemap entries that 404","check the indexing-* checklist (canonical-self, sitemap-404, robots-blocked, soft-404, pagination-rel)"]},
   {"id":"goal-ctr-baseline","title":"Average CTR >=3% across high-impression queries",
    "description":"For queries with 100+ impressions, CTR should be at-or-above industry baseline.",
    "metric":{"name":"avg_ctr_pct","current":0,"target":3,"direction":"increase","unit":"%","horizon_weeks":12},
-   "directives":["rewrite titles + descriptions for low-CTR / high-impression queries","use power words + numbers"]}
+   "directives":["rewrite titles + descriptions for low-CTR / high-impression queries","use power words + numbers","run the meta-* checks (title length, keyword, brand, description length/CTA)"]},
+  {"id":"goal-schema-coverage","title":"Schema.org coverage on every page",
+   "description":"Every product page has Product schema, every article has Article, every FAQ has FAQPage, etc. Track count of schema-* findings dropping over time.",
+   "metric":{"name":"schema_violations","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":12},
+   "directives":["run the schema-* checks (product, article, faqpage, howto, breadcrumblist, organization, searchaction, incomplete, invalid, deprecated)","prioritize high-traffic pages first"]},
+  {"id":"goal-eeat-baseline","title":"E-E-A-T signals on all editorial content",
+   "description":"Articles have author byline + bio + publish/update dates + citations. Critical for Google'\''s helpful-content + AI-search ranking.",
+   "metric":{"name":"eeat_violations","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":16},
+   "directives":["run eeat-* checks (author-missing, author-bio, publish-date-missing, update-date-missing, citations-missing, about-missing, policy-missing)","cite specific guidelines from Google'\''s Search Quality Rater guidelines"]},
+  {"id":"goal-cwv-pass","title":"Core Web Vitals pass on every page",
+   "description":"LCP < 2.5s, INP < 200ms, CLS < 0.1. Confirmed CWV ranking factor since 2021; weight has grown.",
+   "metric":{"name":"cwv_violations","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":8},
+   "directives":["run cwv-* + mobile-* checks (render-blocking, image dimensions, lazy loading, modern formats, font-display, large DOM, viewport, tap targets, font size)"]},
+  {"id":"goal-ai-search-readiness","title":"AI search citation readiness (GEO)",
+   "description":"Generative search engines (Perplexity, ChatGPT search, Google AI Overviews) cite authoritative content with clear direct answers + citations + author credentials. AI-search citations are the new top-of-funnel.",
+   "metric":{"name":"geo_violations","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":24},
+   "directives":["run geo-* checks (direct-answer-missing, faq-missing, listicle-no-summary, llms-txt-missing, author-credentials, statistics-missing)","add an llms.txt at site root"]},
+  {"id":"goal-internal-linking","title":"Internal-link health",
+   "description":"No orphan pages, no generic anchor text, no broken/redirect-chained internal links. Compounds topic authority.",
+   "metric":{"name":"link_violations","current":0,"target":0,"direction":"decrease","unit":"issues","horizon_weeks":12},
+   "directives":["run link-* checks (orphan, anchor-generic, anchor-keyword, broken, redirect-chain, nofollow-internal)"]}
 ]}'
 for a in aisleprompt-seo-opportunity-agent specpicks-seo-opportunity-agent; do
     put_goals "$a" "$SEO_GOALS"
