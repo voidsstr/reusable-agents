@@ -1,0 +1,30 @@
+{
+  "id": "reusable-agents-competitor-research-agent",
+  "name": "Reusable-Agents Competitor Research",
+  "description": "Self-improvement: scans this framework's own codebase + compares against competitor agent platforms (n8n, Temporal, Airflow, Prefect, Inngest, etc.). Recommends parity-gap features and competitive-advantage ideas to keep reusable-agents on its toes. Codebase-mode (no public website yet).",
+  "category": "research",
+  "task_type": "desktop-task",
+  "cron_expr": "0 7 * * 1",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "README.md",
+  "entry_command": "COMPETITOR_RESEARCH_CONFIG=/home/voidsstr/development/reusable-agents/agents/reusable-agents-competitor-research-agent/site.yaml python3 /home/voidsstr/development/reusable-agents/competitor-research-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "site-quality-recommender",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/reusable-agents-competitor-research-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "competitor-research-agent",
+    "site": "reusable-agents",
+    "scan_mode": "codebase"
+  },
+  "runnable_modes": ["cron", "manual"],
+  "confirmation_flow": {
+    "enabled": true,
+    "kind": "email-recommendations",
+    "owner_email": "mperry@northernsoftwareconsulting.com",
+    "description": "Weekly self-improvement report — scans the reusable-agents framework's own codebase + features, compares against competitor agent platforms, emails ranked recommendations. User replies to mark which to ship."
+  }
+}

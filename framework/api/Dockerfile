@@ -20,9 +20,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed site-packages from deps stage
 COPY --from=deps /install /usr/local
 
-# Copy framework source
+# Copy framework source + shared/ (schemas + helpers used by framework.core)
 WORKDIR /app
 COPY framework /app/framework
+COPY shared /app/shared
 RUN chown -R agent:agent /app
 
 USER agent

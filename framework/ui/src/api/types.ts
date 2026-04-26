@@ -40,6 +40,7 @@ export interface AgentDetail extends AgentSummary {
   depends_on: { agent_id: string; kind: string; description?: string }[]
   runbook_body: string | null
   skill_body: string | null
+  readme_body: string | null
   current_status: AgentLiveStatus | null
   recent_runs: RunSummary[]
 }
@@ -122,6 +123,33 @@ export interface ConfirmationRecord {
   resolved_at: string
   approved_by: string
   notes: string
+}
+
+export interface GoalMetric {
+  name?: string
+  current?: number
+  target?: number
+  direction?: 'increase' | 'decrease'
+  unit?: string
+  horizon_weeks?: number
+}
+export interface GoalProgressEntry {
+  ts: string
+  value: number
+  run_ts?: string
+  note?: string
+}
+export interface Goal {
+  id: string
+  title: string
+  description?: string
+  metric?: GoalMetric
+  status?: 'active' | 'accomplished' | 'abandoned' | 'blocked'
+  created_at?: string
+  accomplished_at?: string | null
+  progress_history?: GoalProgressEntry[]
+  directives?: string[]
+  owner_email?: string
 }
 
 export interface FrameworkEvent {

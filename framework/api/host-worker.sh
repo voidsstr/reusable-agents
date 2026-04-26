@@ -40,9 +40,16 @@ process_one() {
     log "claim agent=$agent_id run_id=$run_id"
     local job_log="$LOG_DIR/${agent_id}-${run_id}.log"
 
+    # Pass through framework storage config so agents write to the SAME
+    # store the API container reads from (otherwise the dashboard sees
+    # an empty Runs / Storage / current_status). Defaults match the
+    # docker-compose bind-mount target on this dev box.
     AGENT_RUN_ID="$run_id" \
     AGENT_ID="$agent_id" \
     AGENT_TRIGGERED_BY="$triggered_by" \
+    STORAGE_BACKEND="${STORAGE_BACKEND:-local}" \
+    AGENT_STORAGE_LOCAL_PATH="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}" \
+    FRAMEWORK_API_URL="${FRAMEWORK_API_URL:-http://localhost:8093}" \
         bash -c "$cmd" > "$job_log" 2>&1
     local rc=$?
     log "done agent=$agent_id run_id=$run_id rc=$rc log=$job_log"

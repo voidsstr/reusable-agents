@@ -137,6 +137,56 @@ def validate_recs_doc(doc: dict) -> None:
 # Email rendering
 # ---------------------------------------------------------------------------
 
+def send_via_msmtp(
+    *,
+    subject: str,
+    body_html: str,
+    to: list[str],
+    sender: str,
+    msmtp_account: str = "automation",
+    extra_headers: Optional[dict[str, str]] = None,
+) -> tuple[bool, str]:
+    """Send an HTML email via local msmtp. Mirrors seo-reporter/send-report.py.
+    Returns (ok, detail). Caller is responsible for setting up ~/.msmtprc with
+    the named account."""
+    import subprocess
+    from email.utils import formatdate, make_msgid
+
+    if not to:
+        return False, "no recipients"
+    msg_lines = [
+        f"From: {sender}",
+        f"To: {', '.join(to)}",
+        f"Subject: {subject}",
+        f"Date: {formatdate(localtime=True)}",
+        f"Message-ID: {make_msgid()}",
+        "MIME-Version: 1.0",
+        "Content-Type: text/html; charset=utf-8",
+    ]
+    for k, v in (extra_headers or {}).items():
+        msg_lines.append(f"{k}: {v}")
+    msg_lines.append("")  # blank line
+    msg_lines.append(body_html)
+    msg_bytes = "\r\n".join(msg_lines).encode("utf-8")
+
+    try:
+        proc = subprocess.run(
+            ["msmtp", "-a", msmtp_account, *to],
+            input=msg_bytes,
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            return False, f"msmtp rc={proc.returncode}: {proc.stderr.decode('utf-8','replace')[:300]}"
+        return True, f"sent to {len(to)} recipient(s)"
+    except FileNotFoundError:
+        return False, "msmtp not found on PATH"
+    except subprocess.TimeoutExpired:
+        return False, "msmtp timed out"
+    except Exception as e:
+        return False, f"msmtp error: {e}"
+
+
 _TIER_BADGE = {
     "auto": ("🟢", "#16a34a", "auto-eligible"),
     "review": ("🟡", "#ca8a04", "needs review"),

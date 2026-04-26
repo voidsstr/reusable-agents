@@ -69,6 +69,37 @@
         }
       }
     },
+    "scan_mode": {
+      "type": "string",
+      "enum": ["website", "codebase"],
+      "default": "website",
+      "description": "How to discover what we offer: 'website' (crawl public pages, default) or 'codebase' (scan a local repo for features). codebase mode is for frameworks, libraries, or apps without a public website."
+    },
+    "codebase": {
+      "type": "object",
+      "description": "Required if scan_mode=codebase. Tells the agent which repo + how to extract features.",
+      "additionalProperties": false,
+      "properties": {
+        "repo_path": { "type": "string", "description": "Absolute path to the repo to scan." },
+        "include_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "File patterns to include (e.g. ['**/*.py', '**/*.md', 'README.md']). Falls back to README.md + top-level docs if unset."
+        },
+        "exclude_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/node_modules/**", "**/.git/**", "**/__pycache__/**", "**/dist/**", "**/build/**", "**/.venv/**"]
+        },
+        "max_files":     { "type": "integer", "default": 30 },
+        "max_chars_per_file": { "type": "integer", "default": 5000 },
+        "feature_summary_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Files that summarize features (README, ARCHITECTURE.md, etc.). These get full attention from the LLM."
+        }
+      }
+    },
     "competitors": {
       "type": "object",
       "description": "Used by competitor-research-agent only. Optional for progressive-improvement.",
@@ -77,7 +108,7 @@
         "seed_domains": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Known competitor domains. Agent fetches each one's homepage + key pages. If empty, agent uses LLM to brainstorm competitors from site.what_we_do."
+          "description": "Known competitor domains/projects. For website mode: domains to crawl. For codebase mode: domain or GitHub project name (e.g. 'n8n.io', 'temporal.io'). If empty, agent uses LLM to brainstorm."
         },
         "max_competitors": { "type": "integer", "default": 6 },
         "max_pages_per_competitor": { "type": "integer", "default": 4 }

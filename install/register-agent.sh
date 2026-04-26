@@ -63,16 +63,37 @@ payload = {
     "runnable_modes": m.get("runnable_modes", ["cron", "manual"]),
     "confirmation_flow": m.get("confirmation_flow", {}),
 }
-runbook = m.get("runbook", "")
-if runbook and os.path.isfile(os.path.join(agent_dir, runbook)):
-    payload["runbook_path"] = os.path.join(agent_dir, runbook)
-elif os.path.isfile(os.path.join(agent_dir, "AGENT.md")):
-    payload["runbook_path"] = os.path.join(agent_dir, "AGENT.md")
-skill = m.get("skill", "")
-if skill and os.path.isfile(os.path.join(agent_dir, skill)):
-    payload["skill_path"] = os.path.join(agent_dir, skill)
-elif os.path.isfile(os.path.join(agent_dir, "SKILL.md")):
-    payload["skill_path"] = os.path.join(agent_dir, "SKILL.md")
+def _resolve(d, name, fallbacks):
+    p = m.get(name, "")
+    if p and os.path.isfile(os.path.join(d, p)):
+        return os.path.join(d, p)
+    for f in fallbacks:
+        fp = os.path.join(d, f)
+        if os.path.isfile(fp):
+            return fp
+    return ""
+
+runbook_path = _resolve(agent_dir, "runbook", ["AGENT.md", "README.md"])
+skill_path   = _resolve(agent_dir, "skill", ["SKILL.md"])
+if runbook_path:
+    payload["runbook_path"] = runbook_path
+    try:
+        payload["runbook_body"] = open(runbook_path).read()
+    except Exception:
+        pass
+if skill_path:
+    payload["skill_path"] = skill_path
+    try:
+        payload["skill_body"] = open(skill_path).read()
+    except Exception:
+        pass
+# Also embed README.md if it differs from runbook
+readme_path = os.path.join(agent_dir, "README.md")
+if os.path.isfile(readme_path) and readme_path != runbook_path:
+    try:
+        payload["readme_body"] = open(readme_path).read()
+    except Exception:
+        pass
 print(json.dumps(payload))
 PY
 )

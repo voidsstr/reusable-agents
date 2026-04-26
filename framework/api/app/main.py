@@ -32,6 +32,7 @@ from .routes import (
     confirmations as confirmations_routes,
     dependencies as dependencies_routes,
     directives as directives_routes,
+    goals as goals_routes,
     events as events_routes,
     messages as messages_routes,
     providers as providers_routes,
@@ -113,6 +114,7 @@ for r in (
     # /api/agents/dependencies path would otherwise match the
     # /api/agents/{agent_id} catch-all in agents_routes.
     dependencies_routes.router,
+    goals_routes.router,
     agents_routes.router,
     runs_routes.router,
     status_routes.router,

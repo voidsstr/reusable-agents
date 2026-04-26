@@ -34,6 +34,7 @@ from shared.site_quality import (  # noqa: E402
     load_quality_config,
     render_recs_email,
     score_tier,
+    send_via_msmtp,
     validate_recs_doc,
 )
 
@@ -124,6 +125,84 @@ def _parse_llm_json(raw: str):
         return None
 
 
+def _scan_codebase(codebase_cfg: dict) -> str:
+    """Read a repo's representative files (READMEs, top-level docs, key
+    source files) and return a concatenated text blob the LLM can analyze.
+
+    Heuristic:
+      1. Always include README.md / ARCHITECTURE.md / CHANGELOG.md if present
+      2. Include feature_summary_files explicitly listed in config
+      3. Include up to max_files matching include_globs (default: top-level
+         .md + a sampling of source modules)
+      4. Cap each file at max_chars_per_file
+    """
+    import fnmatch
+    import os
+
+    repo = codebase_cfg.get("repo_path", "")
+    if not repo or not os.path.isdir(repo):
+        return f"(no codebase at {repo!r})"
+
+    max_files       = int(codebase_cfg.get("max_files", 30))
+    max_chars       = int(codebase_cfg.get("max_chars_per_file", 5000))
+    include_globs   = codebase_cfg.get("include_globs") or [
+        "README.md", "*.md", "**/README.md",
+        "framework/**/*.py", "src/**/*.py", "src/**/*.ts",
+        "package.json", "pyproject.toml", "manifest.json",
+    ]
+    exclude_globs   = codebase_cfg.get("exclude_globs") or [
+        "**/node_modules/**", "**/.git/**", "**/__pycache__/**",
+        "**/dist/**", "**/build/**", "**/.venv/**", "**/test*/**",
+    ]
+    feature_summary = codebase_cfg.get("feature_summary_files") or [
+        "README.md", "ARCHITECTURE.md", "CHANGELOG.md", "FEATURES.md",
+    ]
+
+    chunks: list[str] = []
+    seen: set[str] = set()
+
+    def _read(rel_path: str, prefix: str = "") -> None:
+        full = os.path.join(repo, rel_path)
+        if rel_path in seen or not os.path.isfile(full):
+            return
+        seen.add(rel_path)
+        try:
+            text = open(full, encoding="utf-8", errors="replace").read()[:max_chars]
+        except Exception:
+            return
+        chunks.append(f"\n{'=' * 60}\n{prefix}{rel_path}\n{'=' * 60}\n{text}")
+
+    # 1. Feature-summary files first — they're highest-signal
+    for f in feature_summary:
+        _read(f, prefix="[FEATURE SUMMARY] ")
+
+    # 2. Then walk include_globs
+    count = len(seen)
+    for root, dirs, files in os.walk(repo):
+        rel_root = os.path.relpath(root, repo)
+        # Apply directory-level excludes
+        if any(fnmatch.fnmatch(os.path.join(rel_root, d), e) or fnmatch.fnmatch(d, e)
+               for d in dirs for e in exclude_globs):
+            dirs[:] = [d for d in dirs
+                       if not any(fnmatch.fnmatch(d, e.split("/")[0])
+                                  for e in exclude_globs if e.endswith("/**"))]
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), repo)
+            if any(fnmatch.fnmatch(rel, e) for e in exclude_globs):
+                continue
+            if not any(fnmatch.fnmatch(rel, p) or fnmatch.fnmatch(f, p)
+                       for p in include_globs):
+                continue
+            if count >= max_files:
+                break
+            _read(rel)
+            count += 1
+        if count >= max_files:
+            break
+
+    return "".join(chunks) or "(no files matched the configured globs)"
+
+
 def _format_pages(pages: list[Page], cap_chars: int = 1500) -> str:
     parts = []
     for p in pages:
@@ -165,6 +244,12 @@ class CompetitorResearchAgent(AgentBase):
                 affects=["downstream-agent"]),
     ]
 
+    def __init__(self, *args, **kwargs):
+        env_id = os.environ.get("AGENT_ID")
+        if env_id and env_id != AGENT_ID:
+            kwargs.setdefault("agent_id", env_id)
+        super().__init__(*args, **kwargs)
+
     def setup(self) -> None:
         path = os.environ.get("COMPETITOR_RESEARCH_CONFIG")
         if not path:
@@ -172,8 +257,8 @@ class CompetitorResearchAgent(AgentBase):
         self.cfg = load_quality_config(path)
         self.run_dir = self.cfg.run_dir_for_now(self.agent_id)
         self.decide("setup",
-                    f"site={self.cfg.site_id} run_dir={self.run_dir}",
-                    evidence={"site": self.cfg.site_id})
+                    f"site={self.cfg.site_id} run_dir={self.run_dir} agent_id={self.agent_id}",
+                    evidence={"site": self.cfg.site_id, "agent_id": self.agent_id})
 
     def run(self) -> RunResult:
         cfg = self.cfg
@@ -229,29 +314,40 @@ class CompetitorResearchAgent(AgentBase):
             "source": "config" if comp_cfg.get("seed_domains") else "llm-brainstorm",
         })
 
-        # ── 2. Fetch our site (small crawl) ─────────────────────────────────
-        self.status("crawling our site", progress=0.20)
-        ours_pages: list[Page] = []
-        for page in crawl(
-            base_url=cfg.base_url,
-            seed_urls=crawler_cfg.get("seed_urls") or ["/"],
-            use_sitemap=crawler_cfg.get("use_sitemap", True),
-            max_depth=int(crawler_cfg.get("max_depth", 1)),
-            max_pages=int(crawler_cfg.get("max_pages", 12)),
-            path_excludes=crawler_cfg.get("path_excludes") or [],
-            request_timeout_s=int(crawler_cfg.get("request_timeout_s", 15)),
-            user_agent=crawler_cfg.get("user_agent",
-                                        "reusable-agents-competitor-research/1.0"),
-            throttle_ms=int(crawler_cfg.get("throttle_ms", 500)),
-        ):
-            if 200 <= page.status_code < 300 and page.body_text:
-                ours_pages.append(page)
-        self.decide("observation",
-                    f"crawled {len(ours_pages)} pages from {cfg.domain}")
-
-        # Extract our features
-        self.status("extracting our features", progress=0.30)
-        ours_features = self._extract_features(client, cfg.domain, ours_pages)
+        # ── 2. Discover what WE offer — website crawl OR codebase scan ──────
+        scan_mode = cfg.get("scan_mode", "website")
+        if scan_mode == "codebase":
+            self.status("scanning our codebase", progress=0.20)
+            codebase_cfg = cfg.get("codebase", {}) or {}
+            ours_text = _scan_codebase(codebase_cfg)
+            self.decide("observation",
+                        f"scanned codebase at {codebase_cfg.get('repo_path','?')} "
+                        f"({len(ours_text)} chars)")
+            ours_features = self._extract_features_from_text(
+                client, cfg.domain or "ours", ours_text,
+            )
+            self._save_artifact("codebase-scan.txt", ours_text[:50_000])
+        else:
+            self.status("crawling our site", progress=0.20)
+            ours_pages: list[Page] = []
+            for page in crawl(
+                base_url=cfg.base_url,
+                seed_urls=crawler_cfg.get("seed_urls") or ["/"],
+                use_sitemap=crawler_cfg.get("use_sitemap", True),
+                max_depth=int(crawler_cfg.get("max_depth", 1)),
+                max_pages=int(crawler_cfg.get("max_pages", 12)),
+                path_excludes=crawler_cfg.get("path_excludes") or [],
+                request_timeout_s=int(crawler_cfg.get("request_timeout_s", 15)),
+                user_agent=crawler_cfg.get("user_agent",
+                                            "reusable-agents-competitor-research/1.0"),
+                throttle_ms=int(crawler_cfg.get("throttle_ms", 500)),
+            ):
+                if 200 <= page.status_code < 300 and page.body_text:
+                    ours_pages.append(page)
+            self.decide("observation",
+                        f"crawled {len(ours_pages)} pages from {cfg.domain}")
+            self.status("extracting our features", progress=0.30)
+            ours_features = self._extract_features(client, cfg.domain, ours_pages)
         self._save_artifact("features-ours.json", ours_features)
 
         # ── 3. Fetch + extract competitor features ──────────────────────────
@@ -379,19 +475,41 @@ class CompetitorResearchAgent(AgentBase):
         )
         self._save_artifact("email-rendered.html", html)
 
-        if self.mailer:
-            try:
-                to = (cfg.get("reporter", {}).get("email") or {}).get("to") or []
-                self.mailer.send(
-                    agent_id=AGENT_ID, request_id=request_id,
-                    subject=subject, body_html=html,
-                    to=to, expects_response=True,
+        email_cfg = (cfg.get("reporter", {}) or {}).get("email") or {}
+        to = email_cfg.get("to") or []
+        sender = email_cfg.get("from", "")
+        msmtp_account = email_cfg.get("msmtp_account", "automation")
+        if to and sender:
+            ok, detail = send_via_msmtp(
+                subject=subject, body_html=html, to=to,
+                sender=sender, msmtp_account=msmtp_account,
+                extra_headers={
+                    "X-Reusable-Agent": self.agent_id,
+                    "Reply-To": sender,
+                },
+            )
+            if ok:
+                self.decide("action", f"emailed {len(to)} recipient(s) via msmtp/{msmtp_account}")
+                from datetime import datetime as _dt, timezone as _tz
+                self.storage.write_json(
+                    f"agents/{self.agent_id}/outbound-emails/{request_id}.json",
+                    {
+                        "schema_version": "1",
+                        "request_id": request_id,
+                        "agent_id": self.agent_id,
+                        "subject": subject,
+                        "to": list(to),
+                        "expects_response": True,
+                        "sent_at": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                        "transport": f"msmtp:{msmtp_account}",
+                        "ok": True,
+                    },
                 )
-                self.decide("action", f"sent email to {len(to)} recipient(s)")
-            except Exception as e:
-                self.decide("error", f"mail send failed: {e}")
+            else:
+                self.decide("error", f"email send failed: {detail}")
         else:
-            self.decide("observation", "no mailer — email-rendered.html written only")
+            self.decide("observation",
+                        "no recipient/sender configured — email-rendered.html written only")
 
         dispatched = dispatch_auto_recs(
             cfg=cfg, agent_id=AGENT_ID, recs=recs, storage=self.storage,
@@ -421,6 +539,26 @@ class CompetitorResearchAgent(AgentBase):
                 "competitors_used": seeds,
             },
         )
+
+    def _extract_features_from_text(self, client, label: str, text: str) -> dict:
+        """LLM-extract feature list from a codebase-scan text blob (no URLs)."""
+        try:
+            raw = client.chat([
+                {"role": "system", "content": EXTRACT_FEATURES_SYS},
+                {"role": "user", "content":
+                    f"Project: {label}\n\nCODEBASE SCAN (truncated):\n{text[:60_000]}"},
+            ], temperature=0.1, max_tokens=2500)
+        except Exception as e:
+            self.decide("error", f"feature extraction (codebase) failed: {e}")
+            return {"competitor": label, "summary": "(extraction failed)",
+                     "features": [], "error": str(e)}
+        parsed = _parse_llm_json(raw)
+        if not isinstance(parsed, dict):
+            return {"competitor": label, "summary": "(parse failed)",
+                     "features": [], "raw": (raw or "")[:500]}
+        parsed.setdefault("competitor", label)
+        parsed.setdefault("features", [])
+        return parsed
 
     def _extract_features(self, client, domain: str, pages: list[Page]) -> dict:
         """One LLM call per site: extract feature list."""

@@ -5,14 +5,15 @@ import { Link, useParams } from 'react-router-dom'
 import { api, openStatusWS } from '../api/client'
 import type {
   AgentDetail as TAgentDetail, AgentLiveStatus, ChangelogEntry,
-  ConfirmationRecord, Message, RunDetail,
+  ConfirmationRecord, Message, RunDetail, Goal,
 } from '../api/types'
 import StatusBadge from '../components/StatusBadge'
 
-type TabId = 'overview' | 'directives' | 'runs' | 'messages' | 'storage' | 'confirmations' | 'changelog'
+type TabId = 'overview' | 'goals' | 'directives' | 'runs' | 'messages' | 'storage' | 'confirmations' | 'changelog'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview',      label: 'Overview' },
+  { id: 'goals',         label: 'Goals' },
   { id: 'directives',    label: 'Directives' },
   { id: 'runs',          label: 'Runs' },
   { id: 'messages',      label: 'Messages' },
@@ -127,6 +128,7 @@ export default function AgentDetail() {
       </div>
 
       {tab === 'overview' && <OverviewTab detail={detail} liveStatus={liveStatus} />}
+      {tab === 'goals' && <GoalsTab agentId={id} />}
       {tab === 'directives' && <DirectivesTab detail={detail} onUpdated={refresh} />}
       {tab === 'runs' && <RunsTab agentId={id} />}
       {tab === 'messages' && <MessagesTab agentId={id} />}
@@ -174,7 +176,11 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
       <div className="bg-ink-800 p-4 rounded md:col-span-2">
         <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Capabilities</h2>
         {detail.capabilities_detail.length === 0 ? (
-          <div className="text-ink-500 italic text-sm">No capabilities declared.</div>
+          <div className="text-ink-500 italic text-sm">
+            No capabilities declared. Code-declared capabilities (via
+            <code className="text-ink-300 mx-1">framework.core.guardrails.declare()</code>)
+            are surfaced here at run-time once the agent has executed at least once.
+          </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
             {detail.capabilities_detail.map(c => (
@@ -203,6 +209,46 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
           </div>
         )}
       </div>
+
+      {/* Dependencies */}
+      <div className="bg-ink-800 p-4 rounded md:col-span-2">
+        <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">
+          Dependencies <span className="text-ink-600">— see <Link to="/graph" className="underline">Graph</Link> for full picture</span>
+        </h2>
+        {detail.depends_on.length === 0 ? (
+          <div className="text-ink-500 italic text-sm">No explicit manifest dependencies. Default framework edges may still connect this agent (visible in the Graph).</div>
+        ) : (
+          <div className="space-y-1 text-sm">
+            {detail.depends_on.map((d, i) => (
+              <div key={i} className="border border-ink-700 rounded p-2 flex items-start gap-2">
+                <span className="font-mono text-ink-200">→ <Link to={`/agents/${d.agent_id}`} className="underline">{d.agent_id}</Link></span>
+                <span className="text-[10px] px-1.5 py-0.5 bg-ink-700 rounded text-ink-300">{d.kind}</span>
+                {d.description && <span className="text-xs text-ink-400">{d.description}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* README — repo-level docs */}
+      {detail.readme_body && (
+        <div className="bg-ink-800 p-4 rounded md:col-span-2">
+          <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">README</h2>
+          <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-3 rounded max-h-96 overflow-auto">
+            {detail.readme_body}
+          </pre>
+        </div>
+      )}
+
+      {/* Metadata */}
+      {detail.metadata && Object.keys(detail.metadata).length > 0 && (
+        <div className="bg-ink-800 p-4 rounded md:col-span-2">
+          <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Metadata</h2>
+          <pre className="whitespace-pre-wrap text-xs font-mono text-ink-300 bg-ink-950 p-3 rounded max-h-72 overflow-auto">
+            {JSON.stringify(detail.metadata, null, 2)}
+          </pre>
+        </div>
+      )}
     </div>
   )
 }
@@ -740,6 +786,144 @@ const KIND_META: Record<string, { emoji: string; label: string; bg: string; fg: 
     bg: 'rgba(56,189,248,0.10)', fg: '#bae6fd', border: 'rgba(56,189,248,0.45)',
   },
 }
+
+// ---------------------------------------------------------------------------
+// Goals
+// ---------------------------------------------------------------------------
+
+function GoalsTab({ agentId }: { agentId: string }) {
+  const [goals, setGoals] = useState<Goal[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.agentGoals(agentId)
+      .then(d => setGoals(d.goals || []))
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [agentId])
+
+  if (loading) return <div className="text-ink-500 italic py-8 text-center">Loading goals…</div>
+
+  if (goals.length === 0) {
+    return (
+      <div className="bg-ink-800 p-4 rounded text-sm text-ink-400">
+        <div className="font-semibold text-ink-200 mb-1">No goals declared yet.</div>
+        <div className="text-ink-500">
+          Every agent in the framework should declare 3-7 long-running goals
+          that periodic runs incrementally advance. Seed defaults via:
+          <pre className="text-xs bg-ink-950 mt-2 p-2 rounded">
+{`bash /home/voidsstr/development/reusable-agents/install/seed-default-goals.sh`}
+          </pre>
+          or PUT directly to <code>/api/agents/{agentId}/goals</code> with the
+          schema at <code>shared/schemas/agent-goals.schema.json</code>.
+        </div>
+      </div>
+    )
+  }
+
+  const active = goals.filter(g => g.status !== 'accomplished')
+  const accomplished = goals.filter(g => g.status === 'accomplished')
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 text-xs text-ink-400">
+        <span>{active.length} active</span>
+        <span>·</span>
+        <span className="text-glow-success">{accomplished.length} accomplished</span>
+      </div>
+
+      {active.length > 0 && (
+        <div>
+          <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Active goals</h2>
+          <div className="space-y-3">
+            {active.map(g => <GoalCard key={g.id} goal={g} />)}
+          </div>
+        </div>
+      )}
+
+      {accomplished.length > 0 && (
+        <div>
+          <h2 className="text-xs uppercase text-glow-success font-semibold tracking-wide mb-2">
+            ✓ Accomplished
+          </h2>
+          <div className="space-y-2">
+            {accomplished.map(g => <GoalCard key={g.id} goal={g} compact />)}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function GoalCard({ goal, compact }: { goal: Goal; compact?: boolean }) {
+  const m = goal.metric || {}
+  const cur = m.current ?? 0
+  const tgt = m.target ?? 0
+  const direction = m.direction || 'increase'
+  const unit = m.unit || ''
+  const pct = (() => {
+    if (tgt === 0 && direction === 'decrease') return cur === 0 ? 100 : 0
+    if (tgt === 0) return 0
+    if (direction === 'increase') return Math.min(100, Math.max(0, (cur / tgt) * 100))
+    // decrease: starting from initial value (we don't track it; use cur/tgt inverse heuristic)
+    if (cur <= tgt) return 100
+    return Math.max(0, 100 - ((cur - tgt) / Math.max(cur, 1)) * 100)
+  })()
+  const accomplished = goal.status === 'accomplished'
+  const sparkline = goal.progress_history?.slice(-30) || []
+  const sparkMax = Math.max(...sparkline.map(p => p.value), tgt, 1)
+
+  return (
+    <div className={`bg-ink-800 rounded p-3 ${accomplished ? 'border-l-4 border-glow-success' : ''}`}>
+      <div className="flex items-baseline justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2 min-w-0">
+          {accomplished && <span className="text-glow-success text-base">✓</span>}
+          <span className="text-sm font-semibold text-ink-100">{goal.title}</span>
+        </div>
+        <span className="font-mono text-[10px] text-ink-500 flex-shrink-0">{goal.id}</span>
+      </div>
+      {!compact && goal.description && (
+        <div className="text-xs text-ink-400 mb-2">{goal.description}</div>
+      )}
+      {m.name && (
+        <div className="grid grid-cols-[1fr_auto] gap-3 items-center">
+          <div className="h-1.5 bg-ink-950 rounded-full overflow-hidden">
+            <div
+              className={`h-full ${accomplished ? 'bg-glow-success' : 'bg-glow-running'} transition-all`}
+              style={{ width: `${pct.toFixed(0)}%` }}
+            />
+          </div>
+          <div className="text-[11px] font-mono text-ink-300 whitespace-nowrap">
+            {cur}{unit} {direction === 'increase' ? '↗' : '↘'} {tgt}{unit}
+          </div>
+        </div>
+      )}
+      {!compact && sparkline.length > 1 && (
+        <svg width="100%" height="24" viewBox={`0 0 ${sparkline.length * 4} 24`} className="mt-2 opacity-70">
+          <polyline
+            points={sparkline.map((p, i) => `${i * 4},${24 - (p.value / sparkMax) * 22}`).join(' ')}
+            fill="none" stroke="#38bdf8" strokeWidth="1.5"
+          />
+        </svg>
+      )}
+      {!compact && goal.directives && goal.directives.length > 0 && (
+        <div className="mt-2 text-[11px] text-ink-500">
+          {goal.directives.map((d, i) => <div key={i}>↳ {d}</div>)}
+        </div>
+      )}
+      {accomplished && goal.accomplished_at && (
+        <div className="text-[10px] text-ink-500 font-mono mt-1">
+          accomplished {goal.accomplished_at}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Confirmation flow banner
+// ---------------------------------------------------------------------------
 
 function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: string; description: string; ownerEmail: string }) {
   const meta = KIND_META[kind] || {

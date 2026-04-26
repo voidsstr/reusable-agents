@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/agent-goals.schema.json",
+  "title": "Agent goals — persistent objectives the agent works toward each run",
+  "description": "Every agent in the framework declares a set of long-running goals (typically 3-7) that its periodic runs incrementally advance. Goals stick around forever; the dashboard renders a per-agent goals tab showing which are accomplished and current progress on the rest. Each run computes new metric values + appends to progress_history.",
+  "type": "object",
+  "required": ["schema_version", "agent_id", "goals"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1" },
+    "agent_id": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "goals": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Goal" }
+    }
+  },
+  "definitions": {
+    "Goal": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^goal-[a-z0-9-]+$",
+          "description": "Stable kebab-case id (e.g. goal-cap-broken-pages-zero). Never reused."
+        },
+        "title": { "type": "string", "description": "One-line objective." },
+        "description": {
+          "type": "string",
+          "description": "Why this goal matters + how reaching it would manifest."
+        },
+        "metric": {
+          "type": "object",
+          "description": "How progress is measured. Optional but strongly encouraged.",
+          "properties": {
+            "name":         { "type": "string", "description": "e.g. 'broken_pages_count', 'top5_keywords', 'mom_revenue'." },
+            "current":      { "type": "number" },
+            "target":       { "type": "number" },
+            "direction":    { "type": "string", "enum": ["increase", "decrease"] },
+            "unit":         { "type": "string", "description": "Display unit, e.g. 'pages', '$', '%'." },
+            "horizon_weeks":{ "type": "integer" }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "accomplished", "abandoned", "blocked"],
+          "default": "active"
+        },
+        "created_at":      { "type": "string" },
+        "accomplished_at": { "type": ["string", "null"] },
+        "progress_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ts", "value"],
+            "properties": {
+              "ts":    { "type": "string" },
+              "value": { "type": "number" },
+              "run_ts":{ "type": "string", "description": "The run that produced this measurement." },
+              "note":  { "type": "string" }
+            }
+          },
+          "description": "Append-only — every run pushes a new entry. Drives the goals chart."
+        },
+        "directives": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "What the agent should do each run to advance this goal. Plain-text — read by the agent's LLM at run start to bias its analysis."
+        },
+        "owner_email": { "type": "string" }
+      }
+    }
+  }
+}

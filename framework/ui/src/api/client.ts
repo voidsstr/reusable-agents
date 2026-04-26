@@ -5,7 +5,7 @@
 
 import type {
   AgentDetail, AgentLiveStatus, AgentSummary, ChangelogEntry,
-  ConfirmationRecord, FrameworkEvent, Message, RunDetail, RunSummary,
+  ConfirmationRecord, FrameworkEvent, Goal, Message, RunDetail, RunSummary,
 } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -89,6 +89,12 @@ export const api = {
   // storage
   storageList:       (prefix = '') => http<{ prefix: string; keys: string[]; count: number }>(`/api/storage/list?prefix=${encodeURIComponent(prefix)}`),
   storageRead:       (key: string, format: 'auto' | 'json' | 'jsonl' | 'text' | 'bytes' = 'auto') => http<{ key: string; format: string; content: unknown }>(`/api/storage/read?key=${encodeURIComponent(key)}&format=${format}`),
+
+  // goals
+  agentGoals:        (id: string) => http<{ schema_version: string; agent_id: string; updated_at?: string; goals: Goal[] }>(`/api/agents/${encodeURIComponent(id)}/goals`),
+  putAgentGoals:     (id: string, goals: Goal[]) => http<{ schema_version: string; goals: Goal[] }>(`/api/agents/${encodeURIComponent(id)}/goals`, { method: 'PUT', body: JSON.stringify({ goals }) }),
+  postGoalProgress:  (id: string, goalId: string, body: { value: number; run_ts?: string; note?: string; accomplished?: boolean }) => http<unknown>(`/api/agents/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/progress`, { method: 'POST', body: JSON.stringify(body) }),
+  goalsAccomplished: (id: string) => http<{ entries: { ts: string; goal_id: string; title: string; value: number }[] }>(`/api/agents/${encodeURIComponent(id)}/goals/accomplished`),
 
   // dependencies / graph
   dependencyGraph:   (includeBlueprints = false) => http<{

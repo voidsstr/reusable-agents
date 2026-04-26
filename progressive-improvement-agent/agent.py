@@ -42,6 +42,7 @@ from shared.site_quality import (  # noqa: E402
     load_quality_config_from_env,
     render_recs_email,
     score_tier,
+    send_via_msmtp,
     validate_recs_doc,
 )
 
@@ -151,12 +152,21 @@ class ProgressiveImprovementAgent(AgentBase):
                 affects=["downstream-agent"]),
     ]
 
+    def __init__(self, *args, **kwargs):
+        # Per-site instances pass AGENT_ID via the host-worker so this code
+        # can be driven by aisleprompt-progressive-improvement-agent or
+        # specpicks-progressive-improvement-agent without colliding storage.
+        env_id = os.environ.get("AGENT_ID")
+        if env_id and env_id != AGENT_ID:
+            kwargs.setdefault("agent_id", env_id)
+        super().__init__(*args, **kwargs)
+
     def setup(self) -> None:
         self.cfg = load_quality_config_from_env("PROGRESSIVE_IMPROVEMENT_CONFIG")
         self.run_dir = self.cfg.run_dir_for_now(self.agent_id)
         self.decide("setup",
-                    f"site={self.cfg.site_id} run_dir={self.run_dir}",
-                    evidence={"site": self.cfg.site_id})
+                    f"site={self.cfg.site_id} run_dir={self.run_dir} agent_id={self.agent_id}",
+                    evidence={"site": self.cfg.site_id, "agent_id": self.agent_id})
 
     def run(self) -> RunResult:
         cfg = self.cfg
@@ -333,19 +343,41 @@ class ProgressiveImprovementAgent(AgentBase):
         )
         self._save_artifact("email-rendered.html", html)
 
-        if self.mailer:
-            try:
-                to = (cfg.get("reporter", {}).get("email") or {}).get("to") or []
-                self.mailer.send(
-                    agent_id=AGENT_ID, request_id=request_id,
-                    subject=subject, body_html=html,
-                    to=to, expects_response=True,
+        email_cfg = (cfg.get("reporter", {}) or {}).get("email") or {}
+        to = email_cfg.get("to") or []
+        sender = email_cfg.get("from", "")
+        msmtp_account = email_cfg.get("msmtp_account", "automation")
+        if to and sender:
+            ok, detail = send_via_msmtp(
+                subject=subject, body_html=html, to=to,
+                sender=sender, msmtp_account=msmtp_account,
+                extra_headers={
+                    "X-Reusable-Agent": self.agent_id,
+                    "Reply-To": sender,
+                },
+            )
+            if ok:
+                self.decide("action", f"emailed {len(to)} recipient(s) via msmtp/{msmtp_account}")
+                # Persist outbound-email metadata so the responder can route replies
+                self.storage.write_json(
+                    f"agents/{self.agent_id}/outbound-emails/{request_id}.json",
+                    {
+                        "schema_version": "1",
+                        "request_id": request_id,
+                        "agent_id": self.agent_id,
+                        "subject": subject,
+                        "to": list(to),
+                        "expects_response": True,
+                        "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "transport": f"msmtp:{msmtp_account}",
+                        "ok": True,
+                    },
                 )
-                self.decide("action", f"sent email to {len(to)} recipient(s)")
-            except Exception as e:
-                self.decide("error", f"mail send failed: {e}")
+            else:
+                self.decide("error", f"email send failed: {detail}")
         else:
-            self.decide("observation", "no mailer configured — email-rendered.html written only")
+            self.decide("observation",
+                        "no recipient/sender configured — email-rendered.html written only")
 
         # ── 6. Auto-dispatch tier=auto recs (if opted in) ───────────────────
         dispatched = dispatch_auto_recs(

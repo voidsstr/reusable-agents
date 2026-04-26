@@ -1,0 +1,95 @@
+# Self-improvement competitor research for the reusable-agents framework
+# itself. Schema: shared/schemas/site-quality-config.schema.json
+
+site:
+  id: reusable-agents
+  domain: reusable-agents
+  label: Reusable-Agents Framework
+  base_url: https://github.com/voidsstr/reusable-agents
+  what_we_do: |
+    A self-hostable Python framework for running scheduled / triggered LLM
+    agents. Agents subclass AgentBase, register from their own home repos
+    (manifest.json), and inherit lifecycle, scheduling (systemd timers),
+    status reporting, inter-agent messaging, email-confirmation gates
+    (responder-agent + tagged subjects), AI provider configuration
+    (Anthropic / Azure OpenAI / Ollama / Copilot), Azure Blob OR local-FS
+    storage, a React/Tailwind dashboard with run drill-down + n8n-style
+    dependency graph, JSON-schema-validated recommendations, and a goals
+    system. Currently in active development — no public website, no
+    package on PyPI, distribution is git clone + docker compose up.
+
+# Codebase mode: scan our own repo instead of crawling a website
+scan_mode: codebase
+
+codebase:
+  repo_path: /home/voidsstr/development/reusable-agents
+  feature_summary_files:
+    - README.md
+    - CLAUDE.md
+    - blueprints/README.md
+    - blueprints/site-quality-recommender/BLUEPRINT.md
+    - blueprints/pipeline-stage/BLUEPRINT.md
+    - blueprints/inbox-poller/BLUEPRINT.md
+    - blueprints/llm-code-editor/BLUEPRINT.md
+    - blueprints/scheduled-task/BLUEPRINT.md
+    - framework/core/agent_base.py
+    - framework/core/storage.py
+    - framework/core/dependencies.py
+    - framework/core/goals.py
+    - framework/core/email_codes.py
+    - framework/core/ai_providers.py
+  include_globs:
+    - "README.md"
+    - "*.md"
+    - "framework/core/*.py"
+    - "framework/api/app/main.py"
+    - "framework/api/app/routes/*.py"
+    - "framework/ui/src/pages/*.tsx"
+    - "blueprints/**/*.md"
+  exclude_globs:
+    - "**/node_modules/**"
+    - "**/.git/**"
+    - "**/__pycache__/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/.venv/**"
+    - "**/test_*.py"
+    - "**/*.test.ts"
+  max_files: 40
+  max_chars_per_file: 6000
+
+competitors:
+  # Other agent / workflow platforms we should be aware of. Mix of FOSS,
+  # commercial, and AI-native systems.
+  seed_domains:
+    - n8n.io
+    - temporal.io
+    - airflow.apache.org
+    - prefect.io
+    - inngest.com
+    - dagster.io
+    - argoproj.github.io
+    - windmill.dev
+    - trigger.dev
+    - langchain.com
+  max_competitors: 10
+  max_pages_per_competitor: 4
+
+crawler:
+  request_timeout_s: 20
+  throttle_ms: 500
+
+analyzer:
+  max_recs_per_run: 12
+  auto_implement_threshold: 0.95
+
+auto_implement: false
+
+reporter:
+  email:
+    to: [mperry@northernsoftwareconsulting.com]
+    from: automation@northernsoftwareconsulting.com
+    msmtp_account: automation
+    subject_template: "Reusable-Agents Self-Improvement — {tag}"
+
+runs_root: ~/.reusable-agents/competitor-research-agent/runs

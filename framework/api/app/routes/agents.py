@@ -47,6 +47,7 @@ class AgentDetail(AgentSummary):
     depends_on: list[dict] = Field(default_factory=list)
     runbook_body: Optional[str] = None
     skill_body: Optional[str] = None
+    readme_body: Optional[str] = None
     current_status: Optional[dict] = None
     recent_runs: list[dict] = Field(default_factory=list)
 
@@ -70,6 +71,12 @@ class RegisterRequest(BaseModel):
     depends_on: list[dict] = Field(default_factory=list)
     runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
     confirmation_flow: dict = Field(default_factory=dict)
+    # Optional: file contents embedded by register-agent.sh (so the API,
+    # which lives in a Docker container, can render them without bind-
+    # mounting the host's filesystem).
+    runbook_body: Optional[str] = None
+    skill_body: Optional[str] = None
+    readme_body: Optional[str] = None
 
 
 class PatchRequest(BaseModel):
@@ -133,6 +140,14 @@ def register(req: RegisterRequest):
         confirmation_flow=dict(req.confirmation_flow or {}),
     )
     registry.register_agent(manifest, storage=s)
+    # Persist embedded markdown content so the dashboard can render it
+    # without needing to bind-mount the host's filesystem.
+    if req.runbook_body:
+        s.write_text(f"agents/{req.id}/runbook.md", req.runbook_body)
+    if req.skill_body:
+        s.write_text(f"agents/{req.id}/skill.md", req.skill_body)
+    if req.readme_body:
+        s.write_text(f"agents/{req.id}/readme.md", req.readme_body)
     if req.autowire_cron and req.cron_expr and req.entry_command:
         try:
             scheduler.write_systemd_units(
@@ -176,14 +191,19 @@ def get_one(agent_id: str):
         if rd:
             runs.append(rd)
 
-    runbook_body = None
-    if m.runbook_path and Path(m.runbook_path).is_file():
-        try: runbook_body = Path(m.runbook_path).read_text()
-        except Exception: pass
-    skill_body = None
-    if m.skill_path and Path(m.skill_path).is_file():
-        try: skill_body = Path(m.skill_path).read_text()
-        except Exception: pass
+    # Markdown content: prefer storage (embedded at register-time) over
+    # host filesystem (only works when API isn't containerized).
+    def _load_md(storage_key: str, host_path: str) -> Optional[str]:
+        v = s.read_text(storage_key)
+        if v: return v
+        if host_path and Path(host_path).is_file():
+            try: return Path(host_path).read_text()
+            except Exception: return None
+        return None
+
+    runbook_body = _load_md(f"agents/{m.id}/runbook.md", m.runbook_path)
+    skill_body   = _load_md(f"agents/{m.id}/skill.md", m.skill_path)
+    readme_body  = _load_md(f"agents/{m.id}/readme.md", "")
 
     base = _summary(m).dict()
     return AgentDetail(
@@ -198,6 +218,7 @@ def get_one(agent_id: str):
         depends_on=list(m.depends_on or []),
         runbook_body=runbook_body,
         skill_body=skill_body,
+        readme_body=readme_body,
         current_status=status,
         recent_runs=runs,
     )
