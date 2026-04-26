@@ -128,6 +128,25 @@ def _parse_llm_json(raw: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
+# Goal mapping — maps the LLM's chosen rec.category onto one or more of the
+# long-running goals seeded for this agent. Drives goal_changes logging when
+# a user implements the rec.
+_CATEGORY_GOAL_MAP: dict[str, list[str]] = {
+    "broken-page":              ["goal-zero-broken-pages"],
+    "incorrect-categorization": ["goal-zero-miscategorized-products"],
+    "duplicate-content":        ["goal-zero-duplicate-content"],
+    "outdated-content":         ["goal-content-freshness"],
+    "missing-content":          ["goal-content-freshness"],
+    "accessibility":            ["goal-accessibility-baseline"],
+    # No mapping for: layout-issue, performance, content-error, other → []
+}
+
+
+def _category_to_goal_ids(category: str) -> list[str]:
+    return _CATEGORY_GOAL_MAP.get(category, [])
+
+
+# ---------------------------------------------------------------------------
 
 class ProgressiveImprovementAgent(AgentBase):
     agent_id = AGENT_ID
@@ -234,6 +253,21 @@ class ProgressiveImprovementAgent(AgentBase):
                               summary=f"AI provider not configured: {e}",
                               metrics={"pages_crawled": len(pages)})
 
+        # Adaptive context — pull recent goal-changes for this site so the
+        # LLM can de-prioritize patterns that haven't been moving the metric
+        # and double down on what worked. Empty string when there's no
+        # history yet (first run).
+        try:
+            from framework.core import goal_changes as _gc
+            adaptive_block = _gc.adaptive_context_block(
+                self.agent_id, site=cfg.site_id, horizon=30, storage=self.storage,
+            )
+        except Exception:
+            adaptive_block = ""
+        if adaptive_block:
+            self.decide("observation",
+                        f"injected adaptive context ({len(adaptive_block)} chars) into LLM prompt")
+
         raw_issues: list[dict] = []
         valid_pages = [p for p in pages if 200 <= p.status_code < 300 and p.body_text]
         # Also surface fetch errors as broken-page issues directly (no LLM needed)
@@ -253,9 +287,16 @@ class ProgressiveImprovementAgent(AgentBase):
             batch = valid_pages[i:i + batch_size]
             user_prompt = _format_pages_for_prompt(batch, cfg.what_we_do)
             try:
+                system_prompt = ANALYSIS_SYSTEM
+                if adaptive_block:
+                    system_prompt = (
+                        ANALYSIS_SYSTEM
+                        + "\n\n--- ADAPTIVE CONTEXT (recent work + outcomes) ---\n"
+                        + adaptive_block
+                    )
                 raw = client.chat(
                     [
-                        {"role": "system", "content": ANALYSIS_SYSTEM},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
@@ -288,8 +329,9 @@ class ProgressiveImprovementAgent(AgentBase):
                     "url": issue["url"],
                     "snippet": (issue.get("evidence_snippet") or "")[:300],
                 })
+            cat = issue.get("category", "other")
             recs.append({
-                "category": issue.get("category", "other"),
+                "category": cat,
                 "severity": sev,
                 "confidence": round(conf, 3),
                 "tier": tier,
@@ -300,6 +342,10 @@ class ProgressiveImprovementAgent(AgentBase):
                     "approach": issue.get("fix_suggestion", ""),
                 },
                 "implemented": False,
+                # goal_ids: which long-running goals this rec advances. Used by
+                # the responder to log goal-changes when the user implements,
+                # which feeds adaptive_context_block on the next analyzer pass.
+                "goal_ids": _category_to_goal_ids(cat),
             })
 
         # Sort: severity (critical→low), then confidence desc, then tier (auto first)
@@ -380,6 +426,16 @@ class ProgressiveImprovementAgent(AgentBase):
             self.decide("observation",
                         "no recipient/sender configured — email-rendered.html written only")
 
+        # ── 5b. Update goal metrics + close out prior goal-changes ──────────
+        # Each recs.category translates back to a goal metric — broken-page
+        # count, miscategorized count, etc. Compute now-current values from
+        # the issues we found, update the goal's current metric, and walk the
+        # change log to fill metric_after on past dispatches.
+        try:
+            self._measure_and_update_goals(pages=pages, recs=recs)
+        except Exception as e:
+            self.decide("error", f"goal-metric update failed: {e}")
+
         # ── 6. Auto-dispatch tier=auto recs (if opted in) ───────────────────
         dispatched = dispatch_auto_recs(
             cfg=cfg, agent_id=AGENT_ID, recs=recs, storage=self.storage,
@@ -408,6 +464,57 @@ class ProgressiveImprovementAgent(AgentBase):
                 "site_id": cfg.site_id,
             },
         )
+
+    def _measure_and_update_goals(self, *, pages: list, recs: list[dict]) -> None:
+        """Compute current metric values from this run's findings, persist
+        them on the goals doc, and fill metric_after on past goal-changes.
+
+        Mapping: each goal-id has a `metric.name` that we know how to count
+        from our run state.
+        """
+        from framework.core import goals as _goals_mod, goal_changes as _gc
+
+        # Counts derived from this run
+        broken_count = sum(1 for p in pages
+                           if (p.error or (p.status_code and not (200 <= p.status_code < 400))))
+        miscat_count = sum(1 for r in recs if r.get("category") == "incorrect-categorization")
+        dup_count    = sum(1 for r in recs if r.get("category") == "duplicate-content")
+        stale_count  = sum(1 for r in recs if r.get("category") in ("outdated-content", "missing-content"))
+        a11y_count   = sum(1 for r in recs if r.get("category") == "accessibility")
+        metric_now: dict[str, float] = {
+            "broken_pages": broken_count,
+            "miscategorized_count": miscat_count,
+            "duplicate_count": dup_count,
+            "stale_count": stale_count,
+            "accessibility_violations": a11y_count,
+        }
+
+        active = _goals_mod.read_active_goals(self.agent_id, storage=self.storage)
+        if not active:
+            return
+        changed = False
+        for g in active:
+            metric = g.get("metric") or {}
+            name = metric.get("name")
+            if name in metric_now:
+                value = float(metric_now[name])
+                if metric.get("current") != value:
+                    metric["current"] = value
+                    changed = True
+                # Fill metric_after on prior goal-changes for this goal
+                try:
+                    _gc.update_post_change_metrics(
+                        self.agent_id, goal_id=g["id"],
+                        current_value=value,
+                        measurement_run_ts=self.run_ts,
+                        storage=self.storage,
+                    )
+                except Exception:
+                    pass
+        if changed:
+            _goals_mod.write_goals_doc(self.agent_id, active, storage=self.storage)
+            self.decide("observation",
+                        f"goal metrics updated: {metric_now}")
 
     def _save_artifact(self, name: str, content) -> None:
         """Write an artifact to BOTH local disk (for human inspection) AND

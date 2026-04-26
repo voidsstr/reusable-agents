@@ -406,6 +406,51 @@ def extract_run_ts_from_subject(subject: str) -> tuple[Optional[str], Optional[s
 # Dispatching
 # ---------------------------------------------------------------------------
 
+def _record_goal_change_for_rec(*, source_agent_id: str, rec: dict,
+                                 site: str, run_ts: str) -> None:
+    """Record a goal-change log entry capturing metric_before from the
+    source agent's current goals. Best-effort — we never block dispatch on
+    goal-change failures.
+
+    Why: each rec the user implements is a hypothesis ("this rec moves goal-X").
+    Logging the dispatch with metric_before lets a future analyzer run measure
+    metric_after and compute a delta — feeding adaptive_context_block on the
+    NEXT analysis pass.
+    """
+    # Lazy import — framework path appended to sys.path at module load
+    from framework.core import goal_changes as _gc, goals as _goals_mod
+    metric_before: dict = {}
+    try:
+        active = _goals_mod.read_active_goals(source_agent_id)
+        rec_goal_ids = set(rec.get("goal_ids") or [])
+        for g in active or []:
+            if g.get("id") in rec_goal_ids:
+                metric = g.get("metric") or {}
+                metric_before = {
+                    "goal_id": g.get("id"),
+                    "value": metric.get("current"),
+                    "name": metric.get("name", ""),
+                    "unit": metric.get("unit", ""),
+                }
+                break
+    except Exception:
+        pass
+    _gc.record_goal_change(
+        agent_id=source_agent_id,
+        rec_id=rec.get("id", ""),
+        goal_ids=rec.get("goal_ids") or [],
+        site=site,
+        rec_title=rec.get("title") or "",
+        rec_category=rec.get("category") or "",
+        rec_check_id=rec.get("check_id") or "",
+        rec_severity=rec.get("severity") or "",
+        rec_tier=rec.get("tier") or "",
+        implementer_agent="seo-implementer",
+        implementer_run_ts=run_ts,
+        metric_before=metric_before or None,
+    )
+
+
 def record_action(runs_roots: list[Path], site: str, run_ts: str, run_dir: Path,
                   rec_id: str, action: str, notes: str = "") -> None:
     """Append to the run's responses.json + the global queue."""
@@ -547,32 +592,38 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
             continue
         run_ts = run_dir.name
 
+        # Load recommendations.json once — used for bulk filter expansion AND
+        # for goal-change tracking (we need each rec's goal_ids + metadata).
+        recs_doc: dict = {}
+        recs_path = run_dir / "recommendations.json"
+        if recs_path.is_file():
+            try:
+                recs_doc = json.loads(recs_path.read_text())
+            except Exception as e:
+                print(f"  [warn] could not parse {recs_path}: {e}", file=sys.stderr)
+        rec_by_id = {r.get("id"): r for r in recs_doc.get("recommendations", [])}
+
         # Expand bulk filters (e.g., 'implement all', 'implement high') against
         # the run's recommendations.json. Filters union with explicit rec_ids.
         rec_ids = list(action_obj.get("rec_ids") or [])
         filters = action_obj.get("filters") or []
         if filters:
-            recs_path = run_dir / "recommendations.json"
-            if recs_path.is_file():
-                try:
-                    doc = json.loads(recs_path.read_text())
-                    expanded: set[str] = set(rec_ids)
-                    for r in doc.get("recommendations", []):
-                        if "all" in filters:
-                            expanded.add(r["id"]); continue
-                        # Match against tier (PI/CR schema), severity
-                        # (PI/CR schema), AND priority (legacy SEO schema).
-                        # SEO recs only carry `priority`; PI/CR carry both
-                        # `severity` + `tier`.
-                        if (r.get("tier") in filters
-                                or r.get("severity") in filters
-                                or r.get("priority") in filters):
-                            expanded.add(r["id"])
-                    rec_ids = sorted(expanded)
-                    print(f"  [bulk] filters={filters} expanded to {len(rec_ids)} recs",
-                          file=sys.stderr)
-                except Exception as e:
-                    print(f"  [bulk] failed to expand filters: {e}", file=sys.stderr)
+            if rec_by_id:
+                expanded: set[str] = set(rec_ids)
+                for r in recs_doc.get("recommendations", []):
+                    if "all" in filters:
+                        expanded.add(r["id"]); continue
+                    # Match against tier (PI/CR schema), severity
+                    # (PI/CR schema), AND priority (legacy SEO schema).
+                    # SEO recs only carry `priority`; PI/CR carry both
+                    # `severity` + `tier`.
+                    if (r.get("tier") in filters
+                            or r.get("severity") in filters
+                            or r.get("priority") in filters):
+                        expanded.add(r["id"])
+                rec_ids = sorted(expanded)
+                print(f"  [bulk] filters={filters} expanded to {len(rec_ids)} recs",
+                      file=sys.stderr)
             else:
                 print(f"  [bulk] no recommendations.json at {recs_path} — skip expansion",
                       file=sys.stderr)
@@ -582,11 +633,40 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
                   file=sys.stderr)
             continue
 
+        # Derive source agent id from run_dir (only when run_dir is under the
+        # framework's storage root: agents/<agent-id>/runs/<run-ts>/...). Used
+        # for goal-change logging, which needs to attribute the change to the
+        # agent that owns the goals.
+        source_agent_id = ""
+        try:
+            parts = run_dir.resolve().parts
+            if "agents" in parts:
+                idx = parts.index("agents")
+                if "runs" in parts[idx:]:
+                    source_agent_id = parts[idx + 1]
+        except Exception:
+            pass
+
         for rec_id in rec_ids:
             record_action(runs_roots, site, run_ts, run_dir, rec_id,
                           action_obj["action"], notes=action_obj["raw_line"])
             print(f"  [recorded] {site}/{run_ts} {rec_id} → {action_obj['action']}", file=sys.stderr)
             recorded += 1
+            # Goal-change tracking: only when (a) rec carries goal_ids, AND
+            # (b) we know which source agent owns the goals. Legacy SEO recs
+            # have neither — they get the existing record_action call only.
+            if action_obj["action"] == "implement" and source_agent_id:
+                rec = rec_by_id.get(rec_id) or {}
+                goal_ids = rec.get("goal_ids") or []
+                if goal_ids:
+                    try:
+                        _record_goal_change_for_rec(
+                            source_agent_id=source_agent_id,
+                            rec=rec, site=site, run_ts=run_ts,
+                        )
+                    except Exception as e:
+                        print(f"  [warn] goal-change record failed for {rec_id}: {e}",
+                              file=sys.stderr)
         # Persist the resolved set on the action so dispatch sees the expanded list
         action_obj["rec_ids"] = rec_ids
 
