@@ -129,4 +129,68 @@ if [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
         }
 fi
 
+
+# ── Send completion-confirmation email to the user ───────────────────────────
+# The user originally got a recs email; now that we've shipped the recs they
+# selected, email them back so they know it's done.
+COMPLETION_TO="${IMPLEMENTER_NOTIFY_EMAIL:-}"
+COMPLETION_FROM="${IMPLEMENTER_FROM:-automation@northernsoftwareconsulting.com}"
+COMPLETION_ACCOUNT="${IMPLEMENTER_MSMTP_ACCOUNT:-automation}"
+# Default recipient: pull `to` from the SEO config if available
+if [ -z "$COMPLETION_TO" ] && [ -n "${SEO_AGENT_CONFIG:-}" ] && [ -f "$SEO_AGENT_CONFIG" ]; then
+    COMPLETION_TO=$(python3 - "$SEO_AGENT_CONFIG" 2>/dev/null <<'PY' || true
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open(sys.argv[1]))
+    rcp = (((cfg.get("reporter") or {}).get("email") or {}).get("to") or [])
+    print(",".join(rcp))
+except Exception:
+    pass
+PY
+)
+fi
+
+if [ -n "$COMPLETION_TO" ] && command -v msmtp > /dev/null 2>&1; then
+    SUBJECT="[seo-implementer:done] Shipped recs ${RESPONDER_REC_IDS} — site=${RESPONDER_SITE:-unknown}"
+    GIT_SHA=""
+    if [ -n "${RESPONDER_RUN_DIR:-}" ]; then
+        # Try to find a recent commit reflecting this rec's changes
+        IMPL_REPO="${IMPLEMENTER_REPO_PATH:-}"
+        [ -d "$IMPL_REPO/.git" ] && GIT_SHA=$(git -C "$IMPL_REPO" log -1 --format='%H' 2>/dev/null || echo "")
+    fi
+    BODY=$(cat <<EOF
+<!doctype html>
+<html><body style="font-family:sans-serif;color:#0f172a;line-height:1.5">
+<div style="max-width:680px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:6px">
+<h2 style="margin:0 0 12px 0">✓ Shipped: ${RESPONDER_REC_IDS}</h2>
+<div style="color:#475569;font-size:14px">
+The recommendations you selected have been applied. Details:
+</div>
+<table style="margin-top:12px;font-size:13px;border-collapse:collapse">
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Site</td><td>${RESPONDER_SITE:-—}</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Run dir</td><td><code>${RESPONDER_RUN_DIR:-—}</code></td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Commit</td><td><code>${GIT_SHA:-pending}</code></td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Mode</td><td>${IMPLEMENTER_LLM:-claude}</td></tr>
+</table>
+<div style="color:#64748b;font-size:12px;margin-top:14px">
+Sent automatically by seo-implementer after rec dispatch. View the full run
+in the dashboard at http://localhost:8080/agents/seo-implementer.
+</div>
+</div></body></html>
+EOF
+)
+    {
+        echo "From: $COMPLETION_FROM"
+        echo "To: $COMPLETION_TO"
+        echo "Subject: $SUBJECT"
+        echo "MIME-Version: 1.0"
+        echo "Content-Type: text/html; charset=utf-8"
+        echo "X-Reusable-Agent: seo-implementer"
+        echo ""
+        echo "$BODY"
+    } | msmtp -a "$COMPLETION_ACCOUNT" "$COMPLETION_TO" \
+        || echo "[implementer] completion email failed (non-fatal)" >&2
+    echo "[implementer] sent completion email to $COMPLETION_TO"
+fi
+
 echo "[implementer] done"

@@ -71,22 +71,48 @@ Read it before scaffolding.
    - `manifest.json` — only edit if user wants different cron / category
      than what was passed to the scaffold.
 
-5. **Register with the framework**:
+5. **Declare goals** (REQUIRED). Every agent in the framework MUST
+   declare 3-7 long-running goals it incrementally advances each run.
+   Goals stick around forever; the dashboard shows them in the Goals
+   tab with progress bars and a separate Accomplished section. Each
+   goal has:
+   - `id` (kebab-case, stable, never reused)
+   - `title` + `description`
+   - `metric: {name, current, target, direction, unit}` (optional but
+     strongly encouraged — drives the progress bars)
+   - `directives: list[str]` (what the agent should DO each run to
+     advance this goal — read by the agent's LLM at run start to bias
+     analysis)
+
+   Add the seed call to `install/seed-default-goals.sh` (one section per
+   agent) so re-runs don't wipe progress, OR PUT directly to
+   `/api/agents/<id>/goals` after registration. Schema:
+   `shared/schemas/agent-goals.schema.json`. The `run()` should call
+   `record_goal_progress(agent_id, goal_id, value, run_ts=...)` at the
+   end to update metrics + push progress_history.
+
+   Without goals the agent's purpose isn't legible to the human reviewing
+   the dashboard. Don't ship without them.
+
+6. **Register with the framework**:
    ```bash
-   # If the repo has its own register-with-framework.sh:
-   bash <repo>/agents/register-with-framework.sh
+   FRAMEWORK_API_URL=http://localhost:8093 \
+       bash <repo>/agents/register-with-framework.sh
    # Or use the framework's universal walker:
-   bash /home/voidsstr/development/reusable-agents/install/register-all-from-dir.sh <repo>/agents
+   FRAMEWORK_API_URL=http://localhost:8093 \
+       bash /home/voidsstr/development/reusable-agents/install/register-all-from-dir.sh <repo>/agents
    ```
    Idempotent — registration upserts an existing record + re-applies
-   the systemd timer.
+   the systemd timer. (Use port 8093 because 8090 is held by
+   application-research on this dev box.)
 
-6. **Verify**:
+7. **Verify**:
    - UI: http://localhost:8091/agents/<agent-id>
    - API: `curl http://localhost:8090/api/agents/<agent-id>`
    - systemd: `systemctl --user list-timers | grep agent-<agent-id>`
+   - Goals tab shows the declared objectives with progress bars
 
-7. **Commit** the new agent dir to its home repo.
+8. **Commit** the new agent dir to its home repo.
 
 ### Repos in this ecosystem
 

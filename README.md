@@ -280,6 +280,42 @@ For `--kind bash`, you get `run.sh` only (no `agent.py`).
 
 ### Standards every new agent follows
 
+**Every agent MUST declare goals.** Goals are persistent objectives
+that the agent's runs incrementally advance. The framework tracks
+progress over time (with a sparkline + progress bar in the dashboard)
+and graduates goals to "accomplished" once their metric target is hit.
+
+```json
+{
+  "id": "goal-zero-broken-pages",
+  "title": "Drive broken-page count to 0",
+  "description": "Every URL on the site returns 2xx with valid HTML.",
+  "metric": {
+    "name": "broken_pages",
+    "current": 12,
+    "target": 0,
+    "direction": "decrease",
+    "unit": "pages",
+    "horizon_weeks": 4
+  },
+  "directives": [
+    "flag every non-2xx response as critical",
+    "auto-tier any rec with confidence >= 0.95 + severity in {critical,high}"
+  ]
+}
+```
+
+Goal directives are pasted into the agent's LLM system prompt at run
+start to bias analysis. The `run()` should end with a call to
+`framework.core.goals.record_goal_progress(...)` for each goal, pushing
+the new measurement.
+
+Schema: `shared/schemas/agent-goals.schema.json`. Seed via
+`install/seed-default-goals.sh` (idempotent — preserves history) or PUT
+to `/api/agents/<id>/goals`.
+
+
+
 1. **Kebab-case ID** — `my-new-agent`, not `MyNewAgent` or `my_new_agent`.
 2. **Manifest schema** — see [Manifest format](#manifest-format) below. The
    scaffold pre-fills it from the CLI args you pass.
