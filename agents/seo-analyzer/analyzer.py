@@ -491,7 +491,7 @@ def _crawl_for_audit(cfg, run_dir):
     """
     try:
         # Reuse the BFS crawler from progressive-improvement-agent
-        sys.path.insert(0, str(_REPO_ROOT / "progressive-improvement-agent"))
+        sys.path.insert(0, str(_REPO_ROOT / "agents" / "progressive-improvement-agent"))
         from crawler import crawl as _crawl
     except ImportError as e:
         print(f"  [llm-audit] crawler import failed: {e}", file=sys.stderr)
