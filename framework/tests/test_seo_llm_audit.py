@@ -14,7 +14,7 @@ from pathlib import Path
 # Load the llm_audit module from the seo-analyzer dir
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _SPEC = iu.spec_from_file_location(
-    "llm_audit", _ROOT / "seo-analyzer" / "llm_audit.py"
+    "llm_audit", _ROOT / "agents" / "seo-analyzer" / "llm_audit.py"
 )
 llm_audit = iu.module_from_spec(_SPEC)
 sys.modules.setdefault("llm_audit", llm_audit)

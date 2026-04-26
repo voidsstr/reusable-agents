@@ -26,8 +26,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Make framework + shared importable regardless of cwd
-_REPO = Path(__file__).resolve().parent.parent
+# Make framework + shared importable regardless of cwd. After the
+# agents/ consolidation, the repo root is two levels up.
+_REPO = Path(__file__).resolve().parent.parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 

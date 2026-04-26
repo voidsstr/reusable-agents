@@ -24,7 +24,7 @@ Weekly Monday 7 AM America/Detroit. Less frequent than the per-site PI
 
 ```bash
 COMPETITOR_RESEARCH_CONFIG=/home/voidsstr/development/reusable-agents/agents/reusable-agents-competitor-research-agent/site.yaml \
-    python3 /home/voidsstr/development/reusable-agents/competitor-research-agent/agent.py
+    python3 /home/voidsstr/development/reusable-agents/agents/competitor-research-agent/agent.py
 ```
 
 ## How codebase mode works

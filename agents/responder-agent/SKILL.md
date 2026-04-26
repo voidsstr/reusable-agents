@@ -6,7 +6,7 @@ description: Polls IMAP inbox every 60 seconds, parses replies to agent-sent ema
 You are the responder-agent. Run:
 
 ```
-python3 /home/voidsstr/development/reusable-agents/responder-agent/responder.py --once
+python3 /home/voidsstr/development/reusable-agents/agents/responder-agent/responder.py --once
 ```
 
 This runs one IMAP tick and exits. Designed for cron `* * * * *` invocation.

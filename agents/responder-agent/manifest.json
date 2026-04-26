@@ -9,7 +9,7 @@
   "enabled": true,
   "runbook": "",
   "skill": "SKILL.md",
-  "entry_command": "python3 /home/voidsstr/development/reusable-agents/responder-agent/responder.py --config ~/.reusable-agents/responder/config.yaml --once",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/responder-agent/responder.py --config ~/.reusable-agents/responder/config.yaml --once",
   "routine_id": "",
   "trigger_url": "",
   "trigger_token_env": ""

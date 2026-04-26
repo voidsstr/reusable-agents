@@ -93,10 +93,12 @@ reusable-agents/
 │  ├─ inbox-poller/               IMAP loop, parses tagged subjects, dispatches replies
 │  ├─ llm-code-editor/            Reads recs, drives LLM to apply edits, commits + deploys
 │  └─ scheduled-task/             Default cron-driven script blueprint
-├─ progressive-improvement-agent/  Reference impl of site-quality-recommender (audits)
-├─ competitor-research-agent/      Reference impl of site-quality-recommender (competitor)
-├─ seo-{data-collector,analyzer,reporter,implementer,deployer}/  Reference SEO pipeline
-├─ responder-agent/                Reference impl of inbox-poller
+├─ agents/                       All in-repo reference agents (consolidated layout)
+│  ├─ progressive-improvement-agent/  Reference impl of site-quality-recommender (audits)
+│  ├─ competitor-research-agent/      Reference impl of site-quality-recommender (competitor)
+│  ├─ seo-{data-collector,analyzer,reporter,implementer,deployer}/  Reference SEO pipeline
+│  ├─ responder-agent/                Reference impl of inbox-poller
+│  └─ reusable-agents-competitor-research-agent/  Self-improvement instance (codebase mode)
 ├─ shared/
 │  ├─ schemas/                  JSON schemas (recommendations + site config)
 │  ├─ site_config.py            SEO site-config loader

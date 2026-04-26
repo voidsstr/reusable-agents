@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 # Load responder-agent module directly (it's a script, not on sys.path)
-_RESPONDER = Path(os.path.dirname(__file__)).resolve().parent.parent / "responder-agent" / "responder.py"
+_RESPONDER = Path(os.path.dirname(__file__)).resolve().parent.parent / "agents" / "responder-agent" / "responder.py"
 spec = iu.spec_from_file_location("responder_test_module", _RESPONDER)
 mod = iu.module_from_spec(spec)
 sys.modules.setdefault("responder_test_module", mod)

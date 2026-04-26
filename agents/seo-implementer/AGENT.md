@@ -48,7 +48,7 @@ to the configured site repo.
 5. **Hand off** to `seo-deployer` if the site has a deployer config:
    ```bash
    SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG \
-     bash /home/voidsstr/development/reusable-agents/seo-deployer/run.sh \
+     bash /home/voidsstr/development/reusable-agents/agents/seo-deployer/run.sh \
        --run-dir $RESPONDER_RUN_DIR
    ```
    Or skip deployer and let the orchestrator commit+push manually.

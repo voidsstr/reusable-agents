@@ -62,7 +62,7 @@ routes:
       equals: seo-reporter
     dispatcher:
       type: seo-implementer
-      script: /home/voidsstr/development/reusable-agents/seo-implementer/run.sh
+      script: /home/voidsstr/development/reusable-agents/agents/seo-implementer/run.sh
 
 # Where to find each site's runs (so we can append to <run>/responses.json)
 runs_roots:
