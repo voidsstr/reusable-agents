@@ -385,7 +385,7 @@ class ProgressiveImprovementAgent(AgentBase):
         self._save_artifact("recommendations.json", recs_doc)
 
         subject, html = render_recs_email(
-            cfg=cfg, agent_id=AGENT_ID, request_id=request_id,
+            cfg=cfg, agent_id=self.agent_id, request_id=request_id,
             recs=recs, summary=recs_doc["summary"],
         )
         self._save_artifact("email-rendered.html", html)

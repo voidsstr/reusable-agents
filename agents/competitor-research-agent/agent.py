@@ -19,7 +19,9 @@ import json
 import sys
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parent.parent
+# After agents/ consolidation: agent.py is at agents/competitor-research-agent/,
+# so the repo root is THREE levels up.
+_REPO = Path(__file__).resolve().parent.parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
@@ -39,8 +41,9 @@ from shared.site_quality import (  # noqa: E402
 )
 
 # Reuse the crawler from progressive-improvement-agent — same shape,
-# same dependencies, no need to duplicate.
-sys.path.insert(0, str(_REPO / "progressive-improvement-agent"))
+# same dependencies, no need to duplicate. After agents/ consolidation
+# it lives under agents/progressive-improvement-agent/.
+sys.path.insert(0, str(_REPO / "agents" / "progressive-improvement-agent"))
 from crawler import Page, crawl  # noqa: E402
 
 import os  # noqa: E402
@@ -470,7 +473,7 @@ class CompetitorResearchAgent(AgentBase):
         self._save_artifact("recommendations.json", recs_doc)
 
         subject, html = render_recs_email(
-            cfg=cfg, agent_id=AGENT_ID, request_id=request_id,
+            cfg=cfg, agent_id=self.agent_id, request_id=request_id,
             recs=recs, summary=recs_doc["summary"],
         )
         self._save_artifact("email-rendered.html", html)
