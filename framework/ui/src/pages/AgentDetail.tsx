@@ -96,7 +96,7 @@ export default function AgentDetail() {
 
       {tab === 'overview' && <OverviewTab detail={detail} liveStatus={liveStatus} />}
       {tab === 'directives' && <DirectivesTab detail={detail} onUpdated={refresh} />}
-      {tab === 'runs' && <RunsTab agentId={id} runs={detail.recent_runs} />}
+      {tab === 'runs' && <RunsTab agentId={id} />}
       {tab === 'messages' && <MessagesTab agentId={id} />}
       {tab === 'storage' && <StorageTab agentId={id} />}
       {tab === 'confirmations' && <ConfirmationsTab agentId={id} onChange={refresh} />}
@@ -281,70 +281,202 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
 // Runs
 // ---------------------------------------------------------------------------
 
-function RunsTab({ agentId, runs }: { agentId: string; runs: { run_ts: string; status: string; started_at: string; ended_at?: string | null; summary: string; iteration_count: number; progress: number }[] }) {
+type RunListItem = { run_ts: string; status: string; started_at: string; ended_at?: string | null; summary: string; iteration_count: number; progress: number }
+type Artifact = { key: string; name: string; ext: string; kind: 'json' | 'jsonl' | 'html' | 'markdown' | 'text' }
+
+function RunsTab({ agentId }: { agentId: string }) {
+  const [runs, setRuns] = useState<RunListItem[]>([])
   const [openRunTs, setOpenRunTs] = useState<string | null>(null)
-  const [runDetail, setRunDetail] = useState<RunDetail | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  const openRun = async (runTs: string) => {
-    if (openRunTs === runTs) {
-      setOpenRunTs(null); setRunDetail(null); return
-    }
-    setOpenRunTs(runTs)
-    try { setRunDetail(await api.getRun(agentId, runTs)) }
-    catch (e) { console.error(e); setRunDetail(null) }
+  const refresh = async () => {
+    setLoading(true)
+    try { setRuns(await api.listRuns(agentId, 200)) }
+    catch (e) { console.error(e) }
+    finally { setLoading(false) }
   }
+  useEffect(() => { void refresh() /* eslint-disable-next-line */ }, [agentId])
 
-  if (runs.length === 0) {
-    return <div className="text-ink-500 italic text-center py-8">No runs yet.</div>
+  if (loading && runs.length === 0) {
+    return <div className="text-ink-500 italic text-center py-8">Loading runs…</div>
+  }
+  if (!loading && runs.length === 0) {
+    return <div className="text-ink-500 italic text-center py-8">No runs yet. Hit "Run now" to trigger one.</div>
   }
 
   return (
     <div className="space-y-2">
+      <div className="flex items-center justify-between text-xs text-ink-400">
+        <span>{runs.length} run{runs.length === 1 ? '' : 's'}</span>
+        <button onClick={refresh} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">↻ refresh</button>
+      </div>
       {runs.map(r => (
         <div key={r.run_ts} className="bg-ink-800 rounded">
           <button
-            onClick={() => openRun(r.run_ts)}
+            onClick={() => setOpenRunTs(openRunTs === r.run_ts ? null : r.run_ts)}
             className="w-full p-3 flex items-center gap-3 text-left hover:bg-ink-700/50"
           >
             <StatusBadge state={r.status as any} />
             <span className="font-mono text-xs text-ink-300 flex-shrink-0">{r.run_ts}</span>
             <span className="text-xs text-ink-400 flex-1 truncate">{r.summary || '(no summary)'}</span>
             <span className="text-[10px] text-ink-500">#{r.iteration_count}</span>
+            <span className="text-[10px] text-ink-500">{openRunTs === r.run_ts ? '▾' : '▸'}</span>
           </button>
-          {openRunTs === r.run_ts && runDetail && (
-            <div className="p-3 border-t border-ink-700 space-y-3">
-              {runDetail.context_summary_md && (
-                <div>
-                  <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Context summary</h3>
-                  <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-2 rounded max-h-72 overflow-auto">{runDetail.context_summary_md}</pre>
-                </div>
-              )}
-              {runDetail.decisions.length > 0 && (
-                <div>
-                  <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Decisions ({runDetail.decisions.length})</h3>
-                  <div className="space-y-1 text-xs">
-                    {runDetail.decisions.map((d, i) => (
-                      <div key={i} className="grid grid-cols-[auto_auto_1fr] gap-2 items-start">
-                        <span className="font-mono text-ink-500 text-[10px]">{d.ts.slice(11, 19)}</span>
-                        <span className="px-1.5 py-0.5 bg-ink-700 rounded text-[10px] text-ink-300">{d.category}</span>
-                        <span className="text-ink-200">{d.message}</span>
+          {openRunTs === r.run_ts && (
+            <RunDetailPanel agentId={agentId} runTs={r.run_ts} />
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) {
+  const [detail, setDetail] = useState<RunDetail | null>(null)
+  const [artifacts, setArtifacts] = useState<Artifact[]>([])
+  const [openArtifact, setOpenArtifact] = useState<Artifact | null>(null)
+  const [artifactContent, setArtifactContent] = useState<string>('')
+
+  useEffect(() => {
+    api.getRun(agentId, runTs).then(setDetail).catch(console.error)
+    api.runArtifacts(agentId, runTs).then(r => setArtifacts(r.artifacts)).catch(console.error)
+  }, [agentId, runTs])
+
+  const openFile = async (a: Artifact) => {
+    if (openArtifact?.key === a.key) {
+      setOpenArtifact(null); setArtifactContent(''); return
+    }
+    setOpenArtifact(a); setArtifactContent('Loading…')
+    try {
+      if (a.kind === 'json') {
+        const res = await api.storageRead(a.key, 'json')
+        setArtifactContent(JSON.stringify(res.content, null, 2))
+      } else if (a.kind === 'jsonl') {
+        const res = await api.storageRead(a.key, 'jsonl')
+        const lines = (res.content as unknown[]).map(x => JSON.stringify(x))
+        setArtifactContent(lines.join('\n'))
+      } else {
+        const apiBase = import.meta.env.VITE_API_BASE_URL ?? ''
+        const token = localStorage.getItem('framework_api_token')
+        const res = await fetch(`${apiBase}/api/storage/read?key=${encodeURIComponent(a.key)}&format=text`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        })
+        setArtifactContent(await res.text())
+      }
+    } catch (e) {
+      setArtifactContent(String(e))
+    }
+  }
+
+  // Group artifacts by category — inputs vs outputs vs reports vs other
+  const groups: Record<string, Artifact[]> = {
+    'Reports': [],
+    'Outputs': [],
+    'Inputs': [],
+    'Logs / Trace': [],
+    'Other': [],
+  }
+  for (const a of artifacts) {
+    if (a.name === 'recommendations.json') groups['Reports'].push(a)
+    else if (a.name === 'email-rendered.html') groups['Reports'].push(a)
+    else if (a.name === 'progress.json' || a.name === 'errors.json') groups['Logs / Trace'].push(a)
+    else if (a.name === 'decisions.jsonl') groups['Logs / Trace'].push(a)
+    else if (a.name === 'context-summary.md') groups['Logs / Trace'].push(a)
+    else if (a.name === 'pages.jsonl') groups['Inputs'].push(a)
+    else if (a.name === 'competitors.json') groups['Inputs'].push(a)
+    else if (a.name.startsWith('features-')) groups['Outputs'].push(a)
+    else if (a.name === 'responses.json') groups['Inputs'].push(a)
+    else if (a.name === 'deploy.json') groups['Outputs'].push(a)
+    else groups['Other'].push(a)
+  }
+
+  return (
+    <div className="p-3 border-t border-ink-700 space-y-4">
+      {/* Summary header */}
+      {detail && (
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          <div>
+            <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide">Status</div>
+            <div className="text-ink-200 mt-1"><StatusBadge state={(detail.progress as any)?.status} /></div>
+          </div>
+          <div>
+            <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide">Started</div>
+            <div className="text-ink-200 font-mono text-[11px] mt-1">{(detail.progress as any)?.started_at || '—'}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Artifacts grouped */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide">Run artifacts</h3>
+          <span className="text-[10px] text-ink-500">{artifacts.length} files</span>
+        </div>
+        {artifacts.length === 0 ? (
+          <div className="text-ink-500 italic text-xs py-2">No artifacts persisted to storage for this run yet.</div>
+        ) : (
+          <div className="space-y-2">
+            {Object.entries(groups).map(([groupName, items]) =>
+              items.length === 0 ? null : (
+                <div key={groupName}>
+                  <div className="text-[10px] text-ink-400 mb-1 font-semibold">{groupName}</div>
+                  <div className="space-y-1">
+                    {items.map(a => (
+                      <div key={a.key} className="bg-ink-900/60 rounded">
+                        <button
+                          onClick={() => openFile(a)}
+                          className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-ink-700/30"
+                        >
+                          <span className="text-[9px] uppercase text-ink-500 font-mono w-12 flex-shrink-0">{a.kind}</span>
+                          <span className="font-mono text-ink-200 flex-1 truncate">{a.name}</span>
+                          <span className="text-[10px] text-ink-500">{openArtifact?.key === a.key ? '▾' : '▸'}</span>
+                        </button>
+                        {openArtifact?.key === a.key && (
+                          a.kind === 'html' ? (
+                            <iframe
+                              srcDoc={artifactContent}
+                              className="w-full h-96 bg-white border-t border-ink-700"
+                              title={a.name}
+                            />
+                          ) : (
+                            <pre className="whitespace-pre-wrap text-[11px] text-ink-300 font-mono bg-ink-950 p-3 border-t border-ink-700 max-h-96 overflow-auto">
+                              {artifactContent}
+                            </pre>
+                          )
+                        )}
                       </div>
                     ))}
                   </div>
                 </div>
-              )}
-              {runDetail.progress && (
-                <div>
-                  <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Progress</h3>
-                  <pre className="whitespace-pre-wrap text-xs font-mono text-ink-400 bg-ink-950 p-2 rounded">
-                    {JSON.stringify(runDetail.progress, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
-          )}
+              )
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Decisions inline (from API, not from storage list) */}
+      {detail && detail.decisions && detail.decisions.length > 0 && (
+        <div>
+          <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Decisions ({detail.decisions.length})</h3>
+          <div className="space-y-1 text-xs bg-ink-900/60 rounded p-2 max-h-64 overflow-auto">
+            {detail.decisions.map((d, i) => (
+              <div key={i} className="grid grid-cols-[auto_auto_1fr] gap-2 items-start">
+                <span className="font-mono text-ink-500 text-[10px]">{d.ts.slice(11, 19)}</span>
+                <span className="px-1.5 py-0.5 bg-ink-700 rounded text-[10px] text-ink-300">{d.category}</span>
+                <span className="text-ink-200">{d.message}</span>
+              </div>
+            ))}
+          </div>
         </div>
-      ))}
+      )}
+
+      {/* Context summary */}
+      {detail?.context_summary_md && (
+        <div>
+          <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Context summary</h3>
+          <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-2 rounded max-h-72 overflow-auto">{detail.context_summary_md}</pre>
+        </div>
+      )}
     </div>
   )
 }

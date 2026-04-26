@@ -55,6 +55,7 @@ export const api = {
   // runs
   listRuns:          (id: string, limit = 20) => http<RunSummary[]>(`/api/agents/${encodeURIComponent(id)}/runs?limit=${limit}`),
   getRun:            (id: string, runTs: string) => http<RunDetail>(`/api/agents/${encodeURIComponent(id)}/runs/${runTs}`),
+  runArtifacts:      (id: string, runTs: string) => http<{ agent_id: string; run_ts: string; artifacts: { key: string; name: string; ext: string; kind: 'json' | 'jsonl' | 'html' | 'markdown' | 'text' }[] }>(`/api/agents/${encodeURIComponent(id)}/runs/${runTs}/artifacts`),
   changelog:         (id: string, limit = 50) => http<ChangelogEntry[]>(`/api/agents/${encodeURIComponent(id)}/changelog?limit=${limit}`),
 
   // status

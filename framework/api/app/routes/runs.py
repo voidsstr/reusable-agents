@@ -79,3 +79,28 @@ def get_run(agent_id: str, run_ts: str):
 @router.get("/{agent_id}/changelog")
 def changelog(agent_id: str, limit: int = Query(50, le=500)):
     return read_changelog(agent_id, limit=limit)
+
+
+@router.get("/{agent_id}/runs/{run_ts}/artifacts")
+def list_run_artifacts(agent_id: str, run_ts: str):
+    """List every blob under agents/<id>/runs/<run-ts>/ with kind hints so
+    the UI can pick the right viewer (json / jsonl / html / markdown / text)."""
+    s = get_storage()
+    prefix = f"agents/{agent_id}/runs/{run_ts}/"
+    keys = s.list_prefix(prefix)
+    out = []
+    for k in keys:
+        rel = k[len(prefix):]
+        if not rel:
+            continue
+        ext = rel.rsplit(".", 1)[-1].lower() if "." in rel else ""
+        kind = (
+            "json" if ext == "json"
+            else "jsonl" if ext == "jsonl"
+            else "html" if ext == "html"
+            else "markdown" if ext in ("md", "markdown")
+            else "text"
+        )
+        out.append({"key": k, "name": rel, "ext": ext, "kind": kind})
+    out.sort(key=lambda x: x["name"])
+    return {"agent_id": agent_id, "run_ts": run_ts, "artifacts": out}

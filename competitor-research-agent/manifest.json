@@ -14,6 +14,7 @@
   "metadata": {
     "framework": "reusable-agents",
     "blueprint": "site-quality-recommender",
+    "is_blueprint": true,
     "ai": {
       "provider": "",
       "model": ""

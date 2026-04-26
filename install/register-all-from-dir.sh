@@ -34,6 +34,14 @@ for d in "$PARENT_DIR"/*/; do
         n_skip=$((n_skip+1))
         continue
     fi
+    # Skip blueprints (code-only entries with no per-site config) — they're
+    # documentation, not runnable agents. Site-specific instances in customer
+    # repos register the actual scheduled agent.
+    if python3 -c "import json,sys; d=json.load(open('$d/manifest.json')); sys.exit(0 if d.get('metadata',{}).get('is_blueprint') else 1)" 2>/dev/null; then
+        echo "  ⊘ $name (blueprint — skipped)"
+        n_skip=$((n_skip+1))
+        continue
+    fi
     if bash "$REGISTER" "$d"; then
         n_ok=$((n_ok+1))
     else

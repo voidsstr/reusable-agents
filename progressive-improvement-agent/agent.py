@@ -183,7 +183,8 @@ class ProgressiveImprovementAgent(AgentBase):
         pages: list[Page] = []
         pages_jsonl = self.run_dir / "pages.jsonl"
         with pages_jsonl.open("w") as f:
-            for page in crawl(
+            for page in crawl(  # noqa: B020 — using both `f` and outer `page`
+
                 base_url=cfg.base_url,
                 seed_urls=crawler_cfg.get("seed_urls") or ["/"],
                 use_sitemap=crawler_cfg.get("use_sitemap", True),
@@ -200,6 +201,12 @@ class ProgressiveImprovementAgent(AgentBase):
                 if len(pages) % 5 == 0:
                     self.status(f"crawled {len(pages)} pages",
                                 progress=0.15 + min(0.35, len(pages) * 0.01))
+        # Also write the full pages.jsonl to framework storage so the dashboard
+        # can surface it in the per-run drill-down.
+        self.storage.write_text(
+            f"agents/{self.agent_id}/runs/{self.run_ts}/pages.jsonl",
+            "\n".join(json.dumps(p.to_dict()) for p in pages),
+        )
         self.decide("observation",
                     f"crawled {len(pages)} pages "
                     f"({sum(1 for p in pages if 200 <= p.status_code < 300)} ok)",
@@ -318,13 +325,13 @@ class ProgressiveImprovementAgent(AgentBase):
             "recommendations": recs,
         }
         validate_recs_doc(recs_doc)
-        (self.run_dir / "recommendations.json").write_text(json.dumps(recs_doc, indent=2))
+        self._save_artifact("recommendations.json", recs_doc)
 
         subject, html = render_recs_email(
             cfg=cfg, agent_id=AGENT_ID, request_id=request_id,
             recs=recs, summary=recs_doc["summary"],
         )
-        (self.run_dir / "email-rendered.html").write_text(html)
+        self._save_artifact("email-rendered.html", html)
 
         if self.mailer:
             try:
@@ -368,6 +375,20 @@ class ProgressiveImprovementAgent(AgentBase):
                 "site_id": cfg.site_id,
             },
         )
+
+    def _save_artifact(self, name: str, content) -> None:
+        """Write an artifact to BOTH local disk (for human inspection) AND
+        framework storage (so the dashboard's per-run drill-down can list +
+        render it)."""
+        storage_key = f"agents/{self.agent_id}/runs/{self.run_ts}/{name}"
+        disk = self.run_dir / name
+        if isinstance(content, (dict, list)):
+            disk.write_text(json.dumps(content, indent=2))
+            self.storage.write_json(storage_key, content)
+        else:
+            text = str(content)
+            disk.write_text(text)
+            self.storage.write_text(storage_key, text)
 
     def _most_recent_recs_path(self) -> Path | None:
         """Find the most recent prior run's recommendations.json for this site."""

@@ -224,10 +224,10 @@ class CompetitorResearchAgent(AgentBase):
                     f"comparing against {len(seeds)} competitor(s): {', '.join(seeds[:6])}",
                     evidence={"competitors": seeds})
 
-        (self.run_dir / "competitors.json").write_text(json.dumps({
+        self._save_artifact("competitors.json", {
             "ours": cfg.domain, "competitors": seeds,
             "source": "config" if comp_cfg.get("seed_domains") else "llm-brainstorm",
-        }, indent=2))
+        })
 
         # ── 2. Fetch our site (small crawl) ─────────────────────────────────
         self.status("crawling our site", progress=0.20)
@@ -252,7 +252,7 @@ class CompetitorResearchAgent(AgentBase):
         # Extract our features
         self.status("extracting our features", progress=0.30)
         ours_features = self._extract_features(client, cfg.domain, ours_pages)
-        (self.run_dir / "features-ours.json").write_text(json.dumps(ours_features, indent=2))
+        self._save_artifact("features-ours.json", ours_features)
 
         # ── 3. Fetch + extract competitor features ──────────────────────────
         per_comp_pages = int(comp_cfg.get("max_pages_per_competitor", 4))
@@ -281,9 +281,7 @@ class CompetitorResearchAgent(AgentBase):
                 continue
             extracted = self._extract_features(client, comp, comp_pages)
             theirs_features.append(extracted)
-        (self.run_dir / "features-theirs.json").write_text(
-            json.dumps(theirs_features, indent=2)
-        )
+        self._save_artifact("features-theirs.json", theirs_features)
 
         # ── 4. Compare → recommendations ────────────────────────────────────
         self.status("comparing + writing recommendations", progress=0.65)
@@ -373,13 +371,13 @@ class CompetitorResearchAgent(AgentBase):
             "recommendations": recs,
         }
         validate_recs_doc(recs_doc)
-        (self.run_dir / "recommendations.json").write_text(json.dumps(recs_doc, indent=2))
+        self._save_artifact("recommendations.json", recs_doc)
 
         subject, html = render_recs_email(
             cfg=cfg, agent_id=AGENT_ID, request_id=request_id,
             recs=recs, summary=recs_doc["summary"],
         )
-        (self.run_dir / "email-rendered.html").write_text(html)
+        self._save_artifact("email-rendered.html", html)
 
         if self.mailer:
             try:
@@ -443,6 +441,20 @@ class CompetitorResearchAgent(AgentBase):
         parsed.setdefault("competitor", domain)
         parsed.setdefault("features", [])
         return parsed
+
+    def _save_artifact(self, name: str, content) -> None:
+        """Write an artifact to BOTH local disk (for human inspection) AND
+        framework storage (so the dashboard's per-run drill-down can list +
+        render it)."""
+        storage_key = f"agents/{self.agent_id}/runs/{self.run_ts}/{name}"
+        disk = self.run_dir / name
+        if isinstance(content, (dict, list)):
+            disk.write_text(json.dumps(content, indent=2))
+            self.storage.write_json(storage_key, content)
+        else:
+            text = str(content)
+            disk.write_text(text)
+            self.storage.write_text(storage_key, text)
 
     def _most_recent_recs_path(self) -> Path | None:
         site_runs = self.run_dir.parent
