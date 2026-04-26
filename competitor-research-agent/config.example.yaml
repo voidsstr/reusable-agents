@@ -1,0 +1,53 @@
+# competitor-research-agent — site config example
+#
+# Same schema as progressive-improvement-agent (shared/schemas/site-quality-config.schema.json).
+# Use the `competitors` block to control which sites this agent compares against.
+
+site:
+  id: example-site
+  domain: example.com
+  label: Example Site
+  what_we_do: |
+    AI-driven grocery shopping assistant. We let users plan meals, build
+    shopping lists, and import recipes from URLs/videos. Mobile-first,
+    consumer-focused, free.
+
+competitors:
+  # Curated competitor list. If empty, the agent will brainstorm via the LLM.
+  seed_domains:
+    - mealime.com
+    - paprika.app
+    - plantoeat.com
+    - anylist.com
+  max_competitors: 6
+  max_pages_per_competitor: 4
+
+# Crawler settings used to fetch *our* site for the comparison.
+crawler:
+  seed_urls: ["/", "/about", "/features"]
+  use_sitemap: true
+  max_depth: 1
+  max_pages: 12
+  throttle_ms: 500
+
+analyzer:
+  max_recs_per_run: 15
+  auto_implement_threshold: 0.95
+
+# Off until track record is established. Even when on, parity-feature recs
+# rarely qualify for tier=auto (most need real product design work).
+auto_implement: false
+
+implementer:
+  agent_id: seo-implementer
+  repo_path: /path/to/your/site/repo
+  branch: master
+
+reporter:
+  email:
+    to: [you@example.com]
+    from: automation@example.com
+    msmtp_account: automation
+    subject_template: "Competitor Research — {site} — {tag}"
+
+runs_root: ~/.reusable-agents/competitor-research-agent/runs

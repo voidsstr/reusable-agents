@@ -1,0 +1,127 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/site-quality-config.schema.json",
+  "title": "Site Quality Config",
+  "description": "Per-site config for progressive-improvement-agent and competitor-research-agent. One YAML file per site.",
+  "type": "object",
+  "required": ["site"],
+  "additionalProperties": true,
+  "properties": {
+    "site": {
+      "type": "object",
+      "required": ["id", "domain"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "domain": { "type": "string" },
+        "label": { "type": "string" },
+        "base_url": { "type": "string", "description": "Full URL with scheme. Defaults to https://<domain>." },
+        "what_we_do": {
+          "type": "string",
+          "description": "One-paragraph description used in LLM prompts to ground the analysis."
+        }
+      }
+    },
+    "crawler": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seed_urls": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Starting URLs (relative to base_url or absolute). Defaults to ['/']. Sitemap entries auto-included if discoverable."
+        },
+        "use_sitemap": { "type": "boolean", "default": true },
+        "max_depth": { "type": "integer", "default": 2 },
+        "max_pages": { "type": "integer", "default": 30 },
+        "path_excludes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns of paths to skip (e.g., ['/admin/*', '/api/*'])."
+        },
+        "request_timeout_s": { "type": "integer", "default": 15 },
+        "user_agent": { "type": "string", "default": "reusable-agents-quality-crawler/1.0" },
+        "throttle_ms": { "type": "integer", "default": 500, "description": "Delay between requests to be polite." },
+        "render_js": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, use a headless browser. Required for SPAs. Adds Playwright dependency."
+        }
+      }
+    },
+    "analyzer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "batch_size": { "type": "integer", "default": 5, "description": "Pages per LLM call." },
+        "max_recs_per_run": { "type": "integer", "default": 15 },
+        "auto_implement_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.95,
+          "description": "Recs at confidence >= this and severity in {medium, high, critical} are tier=auto."
+        },
+        "issue_categories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Override the default category list. Use to focus the agent on specific concerns (e.g., only 'incorrect-categorization' for a catalog site)."
+        }
+      }
+    },
+    "competitors": {
+      "type": "object",
+      "description": "Used by competitor-research-agent only. Optional for progressive-improvement.",
+      "additionalProperties": false,
+      "properties": {
+        "seed_domains": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Known competitor domains. Agent fetches each one's homepage + key pages. If empty, agent uses LLM to brainstorm competitors from site.what_we_do."
+        },
+        "max_competitors": { "type": "integer", "default": 6 },
+        "max_pages_per_competitor": { "type": "integer", "default": 4 }
+      }
+    },
+    "auto_implement": {
+      "type": "boolean",
+      "default": false,
+      "description": "Master toggle. When false, ALL recs require user reply. When true, tier=auto recs ship without confirmation. Until you've established a track record DO NOT enable this."
+    },
+    "implementer": {
+      "type": ["object", "null"],
+      "description": "Optional: where to dispatch auto-tier recs. Required if auto_implement=true.",
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "default": "seo-implementer",
+          "description": "Downstream agent to receive auto-tier recs."
+        },
+        "repo_path": { "type": "string" },
+        "branch": { "type": "string", "default": "master" }
+      }
+    },
+    "reporter": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "email": {
+          "type": ["object", "null"],
+          "properties": {
+            "to": { "type": "array", "items": { "type": "string" } },
+            "from": { "type": "string" },
+            "msmtp_account": { "type": "string" },
+            "subject_template": {
+              "type": "string",
+              "description": "Defaults to '<agent-id> — {site} — {tag}'. Subject is auto-prefixed with [<agent-id>:<request-id>] for routing."
+            }
+          }
+        }
+      }
+    },
+    "runs_root": {
+      "type": "string",
+      "description": "Where per-run output dirs are created. Default: ~/.reusable-agents/<agent-id>/runs"
+    }
+  }
+}

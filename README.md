@@ -54,13 +54,31 @@ reusable-agents/
 │  │   ├─ nginx.conf          Reverse-proxies /api + /ws to agent-api
 │  │   └─ src/                AgentList, AgentDetail, Confirmations, Events
 │  └─ tests/                 pytest suite — 20 tests cover core primitives
+├─ blueprints/                Reusable agent-pattern templates (see blueprints/README.md)
+│  ├─ site-quality-recommender/  Crawl + LLM analysis + email recs (auto-pilot capable)
+│  ├─ pipeline-stage/             One step in a multi-stage pipeline (run-dir based)
+│  ├─ inbox-poller/               IMAP loop, parses tagged subjects, dispatches replies
+│  ├─ llm-code-editor/            Reads recs, drives LLM to apply edits, commits + deploys
+│  └─ scheduled-task/             Default cron-driven script blueprint
+├─ progressive-improvement-agent/  Reference impl of site-quality-recommender (audits)
+├─ competitor-research-agent/      Reference impl of site-quality-recommender (competitor)
+├─ seo-{data-collector,analyzer,reporter,implementer,deployer}/  Reference SEO pipeline
+├─ responder-agent/                Reference impl of inbox-poller
+├─ shared/
+│  ├─ schemas/                  JSON schemas (recommendations + site config)
+│  ├─ site_config.py            SEO site-config loader
+│  └─ site_quality.py           Site-quality config loader + tier scoring + email render
 ├─ install/
-│  ├─ register-agent.sh        POSTs one manifest.json to the framework
-│  ├─ register-all-from-dir.sh Walks a dir and registers every manifest.json
-│  └─ install-host-worker.sh   Sets up the host-worker systemd unit
-├─ docker-compose.yml          API + UI services
-├─ .env.example                Operator config template
-└─ examples/sites/*.yaml       Per-site SEO config templates (legacy use)
+│  ├─ register-agent.sh         POSTs one manifest.json to the framework
+│  ├─ register-all-from-dir.sh  Walks a dir and registers every manifest.json
+│  ├─ install-host-worker.sh    Sets up the host-worker systemd unit
+│  ├─ install.sh                One-shot installer (validates env, brings up stack, seeds providers)
+│  ├─ bootstrap-azure.sh        Creates Azure resource group + storage account + container
+│  ├─ seed-providers.sh         Seeds AI provider skeletons (Azure / Anthropic / Ollama / Copilot / OpenAI)
+│  └─ seed-providers-local.sh   Host-tailored seeder for the dev box
+├─ docker-compose.yml           API + UI services
+├─ .env.example                 Operator config template
+└─ examples/sites/*.yaml        Per-site SEO config templates (legacy use)
 ```
 
 ## Quick start
@@ -207,6 +225,20 @@ The framework ships an `install/create-agent.sh` scaffold script that sets up
 a new agent dir conforming to all framework standards (manifest format,
 runbook conventions, entry-script shape, registration glue). Use this when
 adding a new agent to ANY repo — your repo, my repo, doesn't matter.
+
+**Pick a [blueprint](blueprints/README.md) first** — it determines the shape
+of what you're building:
+
+| You want to... | Blueprint |
+|---|---|
+| Crawl a site, identify issues, email ranked recs, gate ship-time on user replies | `site-quality-recommender` |
+| Build one stage of a multi-step pipeline (reads upstream run-dir, writes downstream) | `pipeline-stage` |
+| Poll an IMAP inbox, parse subject tags, route replies to other agents | `inbox-poller` |
+| Read approved recs, drive an LLM to apply edits, commit + tag + deploy | `llm-code-editor` |
+| Run a script on a cron schedule (the default) | `scheduled-task` |
+
+See `blueprints/<name>/BLUEPRINT.md` for when each fits, what files come
+out, and which existing agents are reference implementations.
 
 ```bash
 # Python agent (subclasses AgentBase, gets full lifecycle for free)

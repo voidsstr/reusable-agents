@@ -1,0 +1,22 @@
+{
+  "id": "competitor-research-agent",
+  "name": "Competitor Research Agent",
+  "description": "BASE CODE for the competitor-research-agent blueprint. Per-site instances live in customer repos (e.g. nsc-assistant/agents/aisleprompt-competitor-research-agent, specpicks/agents/competitor-research-agent) and reference this code via entry_command. This base entry exists only so the framework can show the code's existence + run-history; it is never scheduled.",
+  "category": "research",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": false,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "COMPETITOR_RESEARCH_CONFIG=$COMPETITOR_RESEARCH_CONFIG python3 agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "site-quality-recommender",
+    "ai": {
+      "provider": "",
+      "model": ""
+    }
+  }
+}

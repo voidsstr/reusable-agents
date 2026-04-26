@@ -13,10 +13,25 @@ Read it before designing an agent.
 
 ## When the user asks you to create a new agent (in ANY repo)
 
-**Always use the scaffold script.** Don't hand-roll agent files — the
-scaffold enforces the framework's conventions (kebab-case ids, manifest
-schema, AGENT.md section structure, AgentBase lifecycle, capabilities
-declared, status/decision protocol, confirmation gates).
+**Always start from a blueprint.** Pick the closest one and use the
+scaffold script — don't hand-roll agent files. The blueprint + scaffold
+enforce conventions (kebab-case ids, manifest schema, AGENT.md section
+structure, AgentBase lifecycle, capabilities declared, status/decision
+protocol, confirmation gates).
+
+### Pick a blueprint
+
+| User's intent | Blueprint | Reference impl |
+|---|---|---|
+| "audit my site for issues / send me recommendations / put fixes on auto-pilot" | `site-quality-recommender` | `progressive-improvement-agent` |
+| "compare my site to competitors / find feature gaps" | `site-quality-recommender` | `competitor-research-agent` |
+| "one step in a pipeline (collect / analyze / report / ship)" | `pipeline-stage` | `seo-data-collector`, `seo-analyzer` |
+| "poll an inbox / route replies" | `inbox-poller` | `responder-agent` |
+| "apply approved recs as code edits" | `llm-code-editor` | `seo-implementer` |
+| "just run a script on a cron" | `scheduled-task` | most agents in `nsc-assistant/agents/` |
+
+Each blueprint's `BLUEPRINT.md` has anti-patterns + integration points.
+Read it before scaffolding.
 
 ### Step-by-step
 

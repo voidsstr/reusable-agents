@@ -1,0 +1,46 @@
+# progressive-improvement-agent — site config example
+#
+# Validate: python3 -c "import yaml,json,jsonschema; \
+#   yaml=yaml.safe_load(open('config.example.yaml')); \
+#   schema=json.load(open('../shared/schemas/site-quality-config.schema.json')); \
+#   jsonschema.validate(yaml, schema); print('ok')"
+
+site:
+  id: example-site
+  domain: example.com
+  label: Example Site
+  what_we_do: |
+    One paragraph of context. The agent uses this to ground its analysis —
+    "is this content consistent with what the site claims to do?".
+
+crawler:
+  seed_urls: ["/", "/about", "/products"]
+  use_sitemap: true
+  max_depth: 2
+  max_pages: 30
+  path_excludes: ["/admin/*", "/api/*", "/login*"]
+  request_timeout_s: 15
+  throttle_ms: 500
+
+analyzer:
+  batch_size: 5
+  max_recs_per_run: 15
+  auto_implement_threshold: 0.95
+
+# Until you've validated 20+ prior recs ship cleanly, leave this false.
+auto_implement: false
+
+# Required if auto_implement: true.
+implementer:
+  agent_id: seo-implementer
+  repo_path: /path/to/your/site/repo
+  branch: master
+
+reporter:
+  email:
+    to: [you@example.com]
+    from: automation@example.com
+    msmtp_account: automation
+    subject_template: "Progressive Improvement — {site} — {tag}"
+
+runs_root: ~/.reusable-agents/progressive-improvement-agent/runs

@@ -243,6 +243,9 @@ emails/
 enrichment_cache.json
 seen_listings.json
 
+# Local docker-compose overrides (host-specific port bindings, bind mounts)
+docker-compose.override.yml
+
 # Editor / OS
 .DS_Store
 .idea/

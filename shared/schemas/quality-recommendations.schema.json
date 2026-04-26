@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/quality-recommendations.schema.json",
+  "title": "Quality / Competitive recommendations (progressive-improvement + competitor-research)",
+  "description": "Output schema for the progressive-improvement-agent and competitor-research-agent. Mirrors recommendations.schema.json but adds a confidence score and a tier band that gates auto-implement vs request-confirmation.",
+  "type": "object",
+  "required": ["schema_version", "site", "agent", "run_ts", "recommendations"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "type": "string", "const": "1" },
+    "site": { "type": "string", "description": "Matches site.id from config." },
+    "agent": {
+      "type": "string",
+      "enum": ["progressive-improvement-agent", "competitor-research-agent"],
+      "description": "Which agent produced this set."
+    },
+    "run_ts": { "type": "string" },
+    "summary": { "type": "string" },
+    "pages_analyzed": { "type": "integer", "description": "For progressive-improvement: count of pages crawled." },
+    "competitors_analyzed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "For competitor-research: list of competitor domains analyzed."
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/Recommendation" }
+    }
+  },
+  "definitions": {
+    "Recommendation": {
+      "type": "object",
+      "required": ["id", "category", "severity", "confidence", "tier", "title", "rationale"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^rec-\\d{3}$",
+          "description": "rec-001, rec-002, etc. Stable for the run; referenced by responses + dashboard."
+        },
+        "category": {
+          "type": "string",
+          "description": "Issue / opportunity category. Progressive-improvement: incorrect-categorization, broken-page, outdated-content, duplicate-content, missing-content, layout-issue, accessibility, performance, content-error, other. Competitor-research: parity-feature, competitive-advantage, ux-improvement, content-gap, marketing-positioning, monetization, integrations, other."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "How confident the agent is that this rec is correct + safe to ship. 0.95+ = high enough for auto-pilot once the agent has a track record."
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["auto", "review", "experimental"],
+          "description": "auto = high-confidence + low-risk → eligible for auto-implementation when site config opts in. review = needs explicit human approval. experimental = speculative, longer odds."
+        },
+        "title": { "type": "string" },
+        "rationale": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url": { "type": "string" },
+              "snippet": { "type": "string" },
+              "screenshot_path": { "type": "string" }
+            }
+          },
+          "description": "Where on the site (or which competitor URL) the recommendation came from. Lets the human verify quickly."
+        },
+        "competitor": {
+          "type": "string",
+          "description": "Competitor-research only: which competitor inspired this rec (if any)."
+        },
+        "expected_impact": {
+          "type": "string",
+          "description": "Plain-text expected impact (e.g., 'reduces bounce rate on /pantry by ~15%')."
+        },
+        "implementation_outline": {
+          "type": "object",
+          "properties": {
+            "files": { "type": "array", "items": { "type": "string" } },
+            "loc_estimate": { "type": "integer" },
+            "approach": { "type": "string" },
+            "risk_notes": { "type": "string" }
+          }
+        },
+        "implemented": { "type": "boolean", "default": false },
+        "implemented_at": { "type": ["string", "null"] },
+        "implemented_run_ts": { "type": ["string", "null"] },
+        "user_response": {
+          "type": ["object", "null"],
+          "properties": {
+            "action": { "type": "string", "enum": ["implement", "skip", "modify", "merge"] },
+            "ts": { "type": "string" },
+            "notes": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

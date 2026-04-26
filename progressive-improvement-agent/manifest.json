@@ -1,0 +1,22 @@
+{
+  "id": "progressive-improvement-agent",
+  "name": "Progressive Improvement Agent",
+  "description": "BASE CODE for the progressive-improvement-agent blueprint. Per-site instances live in customer repos (e.g. nsc-assistant/agents/aisleprompt-progressive-improvement-agent, specpicks/agents/progressive-improvement-agent) and reference this code via entry_command. This base entry exists only so the framework can show the code's existence + run-history; it is never scheduled.",
+  "category": "seo",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": false,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "PROGRESSIVE_IMPROVEMENT_CONFIG=$PROGRESSIVE_IMPROVEMENT_CONFIG python3 agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "site-quality-recommender",
+    "ai": {
+      "provider": "",
+      "model": ""
+    }
+  }
+}
