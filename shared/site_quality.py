@@ -390,6 +390,9 @@ def expand_filters_to_rec_ids(
             out.add(r["id"]); continue
         if r.get("severity") in filter_keywords:
             out.add(r["id"]); continue
+        # Legacy SEO recs use `priority` instead of `severity`/`tier`
+        if r.get("priority") in filter_keywords:
+            out.add(r["id"]); continue
     return sorted(out)
 
 

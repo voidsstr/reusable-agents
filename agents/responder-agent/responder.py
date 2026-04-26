@@ -527,7 +527,13 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
                     for r in doc.get("recommendations", []):
                         if "all" in filters:
                             expanded.add(r["id"]); continue
-                        if r.get("tier") in filters or r.get("severity") in filters:
+                        # Match against tier (PI/CR schema), severity
+                        # (PI/CR schema), AND priority (legacy SEO schema).
+                        # SEO recs only carry `priority`; PI/CR carry both
+                        # `severity` + `tier`.
+                        if (r.get("tier") in filters
+                                or r.get("severity") in filters
+                                or r.get("priority") in filters):
                             expanded.add(r["id"])
                     rec_ids = sorted(expanded)
                     print(f"  [bulk] filters={filters} expanded to {len(rec_ids)} recs",
