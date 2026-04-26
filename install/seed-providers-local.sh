@@ -59,6 +59,14 @@ put_provider "anthropic" '{
     "default_model": "claude-opus-4-7"
 }'
 
+put_provider "claude-cli" '{
+    "name": "claude-cli",
+    "kind": "claude-cli",
+    "description": "Claude CLI (uses Max session token, no API key). Shells out to `claude --print --model <model>`. Best for one-shot text generation when you want billing on the Max plan.",
+    "available_models": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "opus", "sonnet", "haiku"],
+    "default_model": "claude-opus-4-7"
+}'
+
 put_provider "ollama-local" '{
     "name": "ollama-local",
     "kind": "ollama",
@@ -95,10 +103,10 @@ set_default "anthropic" "claude-opus-4-7"
 
 echo ""
 echo "Per-agent overrides:"
-# SEO sub-agents — Claude best at code editing
-set_override "seo-implementer"          "anthropic"     "claude-opus-4-7"
-set_override "seo-analyzer"             "anthropic"     "claude-sonnet-4-6"
-set_override "seo-reporter"             "anthropic"     "claude-haiku-4-5"
+# SEO sub-agents — use Claude via the CLI (Max session, not API key)
+set_override "seo-implementer"          "claude-cli"    "claude-opus-4-7"
+set_override "seo-analyzer"             "claude-cli"    "claude-opus-4-7"
+set_override "seo-reporter"             "claude-cli"    "claude-haiku-4-5"
 # Existing pipelines that already use specific backends
 set_override "market-research-pipeline" "copilot"       "claude-opus-4.6"
 set_override "email-monitor"            "ollama-local"  "qwen3:8b"

@@ -120,7 +120,7 @@ def upsert_provider(provider: Provider, storage: Optional[StorageBackend] = None
     s = storage or get_storage()
     if not provider.name:
         raise ValueError("provider.name is required")
-    if provider.kind not in {"azure_openai", "anthropic", "ollama", "copilot", "openai"}:
+    if provider.kind not in {"azure_openai", "anthropic", "ollama", "copilot", "openai", "claude-cli"}:
         raise ValueError(f"unsupported provider kind: {provider.kind!r}")
     with s.lock(PROVIDERS_KEY):
         providers = _read_providers(s)
@@ -341,12 +341,76 @@ class _OpenAIClient(AIClient):
         return resp.choices[0].message.content or ""
 
 
+class _ClaudeCliClient(AIClient):
+    """Shells out to the `claude` CLI in --print mode. Uses the user's
+    Claude Max session token (no API key) — the same auth `claude setup-token`
+    establishes for interactive sessions.
+
+    Why this exists: Claude Max is billed per-subscription, not per-API-call,
+    so for one-shot text generation (analysis, audit prompts) we want this
+    path instead of the Anthropic API.
+
+    Caller is responsible for ensuring `claude` is on PATH and authenticated
+    on the host that runs the agent.
+    """
+    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+        import subprocess
+        # Build a single prompt from messages — claude -p takes one string.
+        # Concatenate system + user/assistant turns with role headers; the
+        # model handles them fine for one-shot prompts.
+        parts: list[str] = []
+        for m in messages:
+            role = m.get("role", "user").upper()
+            content = m.get("content", "")
+            if role == "SYSTEM":
+                parts.append(f"# SYSTEM\n{content}")
+            elif role == "USER":
+                parts.append(f"# USER\n{content}")
+            elif role == "ASSISTANT":
+                parts.append(f"# ASSISTANT\n{content}")
+            else:
+                parts.append(content)
+        prompt = "\n\n".join(parts)
+
+        chosen = model or self.model or "claude-opus-4-7"
+        # The CLI accepts both aliases ("opus", "sonnet") + full ids.
+        # We pass the configured value through verbatim.
+        cmd = [
+            "claude",
+            "--print",
+            "--output-format", "text",
+            "--no-session-persistence",
+            "--model", chosen,
+            "--max-turns", "1",
+            "--dangerously-skip-permissions",
+            prompt,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=kwargs.get("timeout", 600),
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError("claude CLI not on PATH — install Claude Code first") from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"claude CLI timed out after {kwargs.get('timeout', 600)}s") from e
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"claude CLI exited rc={proc.returncode}: "
+                f"{(proc.stderr or '')[:500]}"
+            )
+        return (proc.stdout or "").strip()
+
+
 _CLIENT_CLASSES = {
     "azure_openai": _AzureOpenAIClient,
     "anthropic":    _AnthropicClient,
     "ollama":       _OllamaClient,
     "copilot":      _CopilotClient,
     "openai":       _OpenAIClient,
+    "claude-cli":   _ClaudeCliClient,
 }
 
 

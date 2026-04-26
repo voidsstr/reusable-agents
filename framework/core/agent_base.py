@@ -336,23 +336,48 @@ class AgentBase:
         )
 
     def ai_client(self, *, provider: Optional[str] = None,
-                  model: Optional[str] = None):
+                  model: Optional[str] = None,
+                  call: Optional[str] = None):
         """Return an AIClient configured for this agent.
 
         Resolution order:
           1. `provider` / `model` arguments (run-time override)
-          2. agent's manifest metadata.ai.{provider,model}
-          3. defaults.json agent_overrides[<this-agent-id>]
-          4. defaults.json default_provider / default_model
+          2. agent's manifest metadata.ai_calls[call] (NAMED CALL OVERRIDE)
+             — lets a single agent route different operations to different
+             providers, e.g. metadata.ai_calls = {
+               "audit":   {"provider": "claude-cli", "model": "claude-opus-4-7"},
+               "summary": {"provider": "ollama-local", "model": "qwen3:8b"}
+             }
+             then `self.ai_client(call="audit")` uses Claude Opus while
+             `self.ai_client(call="summary")` uses qwen3:8b.
+          3. agent's manifest metadata.ai.{provider,model}
+          4. defaults.json agent_overrides[<this-agent-id>]
+          5. defaults.json default_provider / default_model
         Raises if no provider can be resolved.
 
         Usage:
+            # Default agent-level provider:
             client = self.ai_client()
+            # Named-call override (uses metadata.ai_calls["audit"]):
+            client = self.ai_client(call="audit")
+            # Run-time override:
+            client = self.ai_client(provider="claude-cli", model="opus")
             response = client.chat([
                 {"role": "system", "content": "You summarize SEO data."},
                 {"role": "user",   "content": "Here are 200 GSC rows: ..."},
             ])
         """
+        # Look up the named-call override from this agent's manifest if any
+        if call and not provider:
+            from . import registry as _registry
+            m = _registry.get_agent(self.agent_id, storage=self.storage)
+            if m is not None:
+                ai_calls = (m.metadata or {}).get("ai_calls") or {}
+                spec = ai_calls.get(call)
+                if isinstance(spec, dict):
+                    provider = provider or spec.get("provider") or None
+                    model = model or spec.get("model") or None
+
         from . import ai_providers
         return ai_providers.ai_client_for(
             self.agent_id,
