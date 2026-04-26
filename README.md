@@ -1,189 +1,318 @@
 # reusable-agents
 
-> Composable, configuration-driven Claude Code agents you can clone for your own
-> site. Each agent has one job and reads/writes standardized files so you can
-> mix-and-match.
+> A self-hostable framework for running LLM-driven agents with shared
+> memory, scheduled execution, human-in-the-loop confirmations, and a
+> control dashboard. Agents register with a local instance from their
+> own repos, get auto-scheduled via systemd, and write all state to
+> Azure Blob Storage so they get smarter over time.
 
-The headline workflow today is **SEO + top-5 rank work** for any site you
-have GSC + GA4 access to. The pieces are independent: pull data, analyze,
-report, optionally implement, optionally deploy, plus a feedback loop that
-lets a human pick which recommendations to ship.
+## Why
+
+Most agent systems are monoliths. You install one product and your agents
+have to live inside it. This framework inverts the relationship:
+
+- **Your agent code lives in your own repo** (or wherever it makes sense
+  for its problem domain).
+- The framework runs **next to** your agents and provides the cross-cutting
+  infrastructure: registration, scheduling, status, decision logs, message
+  bus, confirmations for dangerous actions, an HTTP API + UI.
+- Each repo POSTs its `manifest.json` files to the local framework
+  instance and immediately gains: scheduled execution (systemd timers
+  auto-wired), live status visibility (UI glows when working), a durable
+  decision log, and inter-agent communication.
+
+You can run one framework instance for personal projects, share it across
+several of your repos (this codebase already does — `nsc-assistant`,
+`specpicks`, etc. all register with the same instance), or fork it for
+production deployments.
+
+## What's in the box
 
 ```
-seo-data-collector ──► /run/data/*.json
-                            │
-                  seo-analyzer ──► /run/recommendations.json ◄──┐
-                                          │                      │
-                                ┌─────────┴───────┐              │
-                                │                 │              │
-                       (mode=recommend)   (mode=implement)       │
-                                │                 │              │
-                          seo-reporter   seo-implementer         │
-                          emails recs    LLM writes code         │
-                                │                 │              │
-                          ▼ user reads ▼   seo-deployer          │
-                          ▼ replies   ▼   tests + ships          │
-                                │                                │
-                                └─► responder-agent ◄ polls IMAP ┘
-                                    parses replies,
-                                    dispatches actions
+reusable-agents/
+├─ framework/
+│  ├─ core/                  Importable Python package — the foundation
+│  │   ├─ agent_base.py       AgentBase lifecycle (setup/pre_run/run/post_run/teardown)
+│  │   ├─ storage.py          StorageBackend abstraction (Azure Blob + LocalFS)
+│  │   ├─ registry.py         Master agent list (registry/agents.json in storage)
+│  │   ├─ status.py           Live status writer + global event log
+│  │   ├─ messaging.py        Inter-agent async messages (shared/messages/)
+│  │   ├─ confirmations.py    @requires_confirmation decorator + approve/reject
+│  │   ├─ decision_log.py     Per-run jsonl log + per-agent changelog
+│  │   ├─ context_index.py    Date-indexed run summaries with daily rollups
+│  │   ├─ scheduler.py        systemd --user timer/service writer (cron→OnCalendar)
+│  │   ├─ release_tagger.py   git commit + tag agent/<id>/release/<run-ts> + push
+│  │   ├─ email_codes.py      Subject-tag encode/decode, request-id generator
+│  │   ├─ guardrails.py       Capability dataclass for declared dangerous methods
+│  │   └─ mailer.py           Outbound mailer abstraction (LogMailer + Graph + SMTP)
+│  ├─ api/                   FastAPI service (35 routes + 2 WebSockets)
+│  │   ├─ Dockerfile          python:3.12-slim, non-root, healthcheck
+│  │   ├─ host-worker.sh      Systemd-user service — exec triggers on host
+│  │   └─ app/                Routes for agents/runs/status/messages/etc.
+│  ├─ ui/                    React + Vite + Tailwind dashboard
+│  │   ├─ Dockerfile          node:20 build → nginx:1.27-alpine, iframe-friendly
+│  │   ├─ nginx.conf          Reverse-proxies /api + /ws to agent-api
+│  │   └─ src/                AgentList, AgentDetail, Confirmations, Events
+│  └─ tests/                 pytest suite — 20 tests cover core primitives
+├─ install/
+│  ├─ register-agent.sh        POSTs one manifest.json to the framework
+│  ├─ register-all-from-dir.sh Walks a dir and registers every manifest.json
+│  └─ install-host-worker.sh   Sets up the host-worker systemd unit
+├─ docker-compose.yml          API + UI services
+├─ .env.example                Operator config template
+└─ examples/sites/*.yaml       Per-site SEO config templates (legacy use)
 ```
 
-## Why this exists
+## Quick start
 
-Most "SEO agents" are monoliths — they pull data, analyze, write code, deploy,
-all in one black-box session. Hard to reuse. Hard to inspect. Hard to fork
-just one piece.
-
-This repo splits the work into 6 small agents that talk through standardized
-JSON files. You can:
-
-- Run only the **collector + analyzer + reporter** to get daily SEO recommendations
-  emailed to you, without ever auto-shipping anything.
-- Add the **implementer + deployer** when you're ready to let the agent ship
-  changes itself.
-- Use the **responder-agent** to close the loop — read replies to the agent's
-  emails, dispatch the marked recommendations.
-
-Every agent is configuration-driven. No hardcoded site names, repo paths, or
-deploy commands. One YAML file per site = full pipeline.
-
-## Quick start: get daily SEO recommendations emailed to you
+### 1. Bring up the framework
 
 ```bash
 git clone https://github.com/voidsstr/reusable-agents
 cd reusable-agents
 
-# 1. Install deps (one-time)
-pip install -r seo-data-collector/requirements.txt
-pip install -r seo-analyzer/requirements.txt
-pip install -r responder-agent/requirements.txt
+cp .env.example .env
+$EDITOR .env                # set FRAMEWORK_API_TOKEN, AZURE_STORAGE_CONNECTION_STRING
 
-# 2. Bootstrap Google OAuth (one-time, opens browser)
-SEO_AGENT_CLIENT_ID="..." SEO_AGENT_CLIENT_SECRET="..." \
-  python3 seo-data-collector/refresh-token.py --bootstrap
-
-# 3. Make a config for your site
-cp examples/sites/generic.yaml ~/.reusable-agents/seo/my-site.yaml
-$EDITOR ~/.reusable-agents/seo/my-site.yaml
-# (set GSC site_url, GA4 property_id, your email address)
-
-# 4. Run a one-off
-export SEO_AGENT_CONFIG=~/.reusable-agents/seo/my-site.yaml
-python3 seo-data-collector/pull-data.py
-python3 seo-analyzer/analyzer.py
-python3 seo-reporter/send-report.py
-
-# 5. Schedule it — the orchestrator script chains the 3 above.
+docker compose up -d --build
 ```
 
-You'll get an HTML email with ranked recommendations. Reply with `implement
-rec-001 rec-005` (or `skip rec-002`) to mark which ones to ship — the
-**responder-agent** picks up the reply and triggers the implementer.
+The API runs on port 8090, the UI on 8091. If 8090 conflicts with another
+service, override via `.env`:
 
-## What each agent does
-
-| Agent | Reads | Writes | LLM? |
-|---|---|---|---|
-| [`seo-data-collector`](seo-data-collector) | GSC + GA4 + (optional) DB | `data/*.json` | no |
-| [`seo-analyzer`](seo-analyzer) | `data/*` | `recommendations.json`, `goals.json`, `snapshot.json`, `comparison.json` | no |
-| [`seo-reporter`](seo-reporter) | `recommendations.json` + comparison + goal-progress | sends email, pings dashboard | no |
-| [`seo-implementer`](seo-implementer) | `recommendations.json` + selected `rec_ids` | `changes/*.diff`, code commits | **yes** (Claude Code) |
-| [`seo-deployer`](seo-deployer) | site config `deployer:` block | `deploy.json` (test+build+push+deploy+smoke) | no |
-| [`responder-agent`](responder-agent) | IMAP inbox | `responses.json`, dispatches to seo-implementer | no |
-
-Only `seo-implementer` needs Claude. The other five run as plain Python /
-shell scripts. Useful if you want recommendations without auto-coding, or
-if you want to run the deterministic pieces on cheap infra and only spin
-up Claude when there's something to ship.
-
-## Standardized run dir
-
-Every run writes to `<runs_root>/<site>/<UTC-ts>/`:
-
-```
-data/                       # raw collector output
-  gsc-queries-90d.json      gsc-pages-90d.json
-  ga4-organic-landing-90d.json   db-stats.json
-  gsc-top5-targets.json     gsc-zero-click.json
-  ...
-snapshot.json               # analyzer's metric record
-comparison.json             # snapshot vs prior
-recommendations.json        # the contract — what reporter/implementer/dashboard read
-goals.json                  # this run's declared goals
-goal-progress.json          # prior run's goals scored
-changes/                    # implementer output (only if implement mode)
-  rec-001.diff
-  rec-001.summary.md
-deploy.json                 # deployer output (only if implement mode)
-responses.json              # user feedback (input to responder)
-run.json                    # status + timing
+```dotenv
+# Anywhere in .env — the docker-compose ports are also configurable
+FRAMEWORK_API_PORT=8093
 ```
 
-Schemas live in [`shared/schemas/`](shared/schemas/) — see
-[`site-config.schema.json`](shared/schemas/site-config.schema.json),
-[`recommendations.schema.json`](shared/schemas/recommendations.schema.json), and
-[`responses.schema.json`](shared/schemas/responses.schema.json).
+### 2. Install the host-worker
 
-## Modes: recommend vs implement
+The host-worker exec's "Run now" triggers on the host (not in the API
+container) so agents get full access to docker, git, az, ssh, etc.
 
-Every site config has `site.mode`:
+```bash
+bash install/install-host-worker.sh
+```
 
-- **`recommend`** (safe default): collector → analyzer → reporter. The agent
-  emails recommendations; you decide what to ship and when. No code is
-  written and no deploys happen.
-- **`implement`**: full loop — collector → analyzer → implementer → deployer
-  → reporter. The agent ships up to N changes per run, runs tests as a
-  hard gate, and emails a summary.
+This writes `~/.config/systemd/user/reusable-agents-host-worker.service`
+and starts it. Linger is enabled so it survives logout.
 
-Switching from recommend → implement is a one-line edit. The implementer +
-deployer blocks in your config are inert in recommend mode but ready to go.
+### 3. Register agents from your repos
 
-## The feedback loop (recommend mode)
+In any repo that has agent definitions, run:
 
-1. Agent runs collector + analyzer + reporter on a schedule.
-2. You get an email with recommendations:
-   ```
-   Recommendations
-   rec-001  HIGH    🎯 Build /best/best-tacos for query "tacos"
-   rec-002  MEDIUM  ✏️ Rewrite snippet for "easy weeknight dinners"
-   rec-003  HIGH    💰 Zero Amazon click-throughs in 30d
-   ```
-3. You reply: `implement rec-001 rec-003` (or `skip rec-002`).
-4. **responder-agent** (cron, every minute) polls the inbox, parses the reply,
-   appends to `responses.json`, and triggers `seo-implementer` with rec-001
-   and rec-003.
-5. Implementer applies, deployer ships, reporter emails the result.
+```bash
+bash /path/to/reusable-agents/install/register-all-from-dir.sh ./agents
+```
 
-## Composability
+Or build a thin wrapper in the consuming repo (see
+[`nsc-assistant/scripts/register-agents.sh`](https://github.com/voidsstr/nsc-assistant/blob/master/scripts/register-agents.sh)
+for an example).
 
-Each agent's input/output schemas are stable contracts. You can:
+### 4. Open the UI
 
-- Replace the `seo-analyzer` with your own scoring logic — anything that
-  writes a valid `recommendations.json`.
-- Plug in a different deployer for different cloud / framework.
-- Use `responder-agent` for non-SEO use cases — it routes any
-  `[<agent>:<site>] implement <id>` reply to a configured dispatcher.
+http://localhost:8091/
 
-## Repo structure
+The card grid auto-glows when an agent is running. Click into an agent for
+runbook, runs, decisions, messages, storage browser, confirmations, and
+release changelog.
+
+## Manifest format
+
+Every agent dir has a `manifest.json` describing it:
+
+```json
+{
+  "id": "specpicks-scraper-watchdog",
+  "name": "SpecPicks Scraper Watchdog",
+  "description": "Restarts the scraper container if it dies.",
+  "category": "research",
+  "task_type": "desktop-task",
+  "cron_expr": "*/5 * * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "you@example.com",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "bash /absolute/path/to/agent/run.sh",
+  "metadata": {
+    "framework": "reusable-agents",
+    "source_repo": "specpicks"
+  }
+}
+```
+
+Field reference:
+
+| Field | Required | What |
+|---|---|---|
+| `id` | yes | Stable kebab-case id; primary key for the framework |
+| `name` | yes | Display name for the UI |
+| `description` | no | One-line summary |
+| `category` | no | One of `seo / research / fleet / personal / ops / misc` (or your own) |
+| `task_type` | no | `desktop-task` (host) / `cloud-routine` (Anthropic Routines) / `manual` |
+| `cron_expr` | no | 5-field cron — auto-wires a systemd timer if set |
+| `timezone` | no | IANA tz, default `UTC` |
+| `enabled` | no | If false, schedule is registered but disabled |
+| `owner` | no | Email — gets confirmation requests for dangerous actions |
+| `runbook` | no | Path (relative to manifest dir) to AGENT.md, or use the convention |
+| `skill` | no | Path to SKILL.md (Claude Desktop task definition) |
+| `entry_command` | no | Shell command for the host-worker to exec on "Run now" |
+| `metadata` | no | Free-form JSON — flow through to the registry |
+
+## Storage layout
+
+The framework writes everything to a single Azure Blob container (default
+name `agents`). Hierarchical via key prefixes:
 
 ```
-reusable-agents/
-  shared/
-    schemas/                # JSON Schemas — the contracts
-    site_config.py          # YAML loader + validator
-    run_files.py            # read/write helpers for the run dir
-    agent_recorder.py       # optional dashboard-recording lib
-  seo-data-collector/
-  seo-analyzer/
-  seo-reporter/
-  seo-implementer/
-  seo-deployer/
-  responder-agent/
-  examples/
-    sites/                  # generic + per-site configs
-  docs/
+registry/
+  agents.json                          # master agent list
+  events.jsonl                         # framework event log
+
+agents/<agent-id>/
+  manifest.json                        # canonical manifest
+  status.json                          # live status (UI reads)
+  state/latest.json                    # carried-forward state
+  state/history/<run-ts>.json
+  goals/current.json
+  goals/history/<run-ts>.json
+  runs/<run-ts>/
+    progress.json                      # success criteria, metrics
+    errors.json                        # exceptions + tracebacks
+    decisions.jsonl                    # streaming decision log
+    context-summary.md                 # narrative for next run
+    recommendations.json               # SEO-style recs (where applicable)
+    responses.json                     # parsed user replies
+    deploy.json                        # deployer artifacts
+  context-summaries/<YYYY-MM-DD>.md    # daily rollups (smart cap on next-run context)
+  changelog.jsonl                      # release tags + commits
+  outbound-emails/<request-id>.json    # routing for replies
+  responses-queue/<request-id>.json    # parsed user replies awaiting pickup
+  confirmations/<request-id>.json      # pending dangerous-action approvals
+
+shared/
+  messages/<message-id>.json           # inter-agent async messages
+  inboxes/<agent-id>/<message-id>      # zero-byte markers for fast inbox listing
 ```
+
+Why blob keys instead of e.g. Storage Queues for messages:
+- Indexable by date — agents pull a bounded window each run
+- Auditable — humans can read everything in the portal
+- No queue retention limits (Azure Queues cap at 7d)
+
+## Authoring an agent
+
+### Subclass `AgentBase` (recommended for new agents)
+
+```python
+from framework.core.agent_base import AgentBase, RunResult
+from framework.core.guardrails import declare
+
+class SeoDeployer(AgentBase):
+    agent_id = "seo-deployer"
+    name = "SEO Deployer"
+    category = "seo"
+    capabilities = [
+        declare("read_metrics", "Pull GSC + GA4 data"),
+        declare("ship_to_prod", "Deploy a new container revision",
+                confirmation_required=True, risk_level="high",
+                affects=["production", "git", "billing"]),
+    ]
+
+    def run(self) -> RunResult:
+        self.status("checking metrics", progress=0.2)
+        self.decide("plan", "if delta < threshold, skip deploy")
+        # … work …
+        self.status("ready to ship", progress=0.9)
+        return RunResult(status="success", summary="ok",
+                         metrics={"changes_shipped": 0})
+
+    @requires_confirmation(reason="deploys a new tag to production Azure")
+    def ship_to_prod(self, tag: str): ...
+
+if __name__ == "__main__":
+    SeoDeployer().run_once()
+```
+
+Then add a `manifest.json` next to it and register:
+
+```bash
+bash /path/to/reusable-agents/install/register-agent.sh /path/to/your/agent
+```
+
+### Bash agents (lightweight option)
+
+You don't have to subclass anything. Bash agents work fine — they just need
+a `manifest.json` declaring `entry_command`. They won't get the AgentBase
+lifecycle features (status, decisions, etc.) for free, but they're easy
+to drop in.
+
+## Email confirmation flow
+
+For dangerous actions:
+
+```
+1. Agent calls @requires_confirmation method
+2. Framework writes a pending confirmation to storage
+3. Framework emails the agent's owner with subject [<agent-id>:<request-id>]
+4. Owner replies "yes" / "no" — the responder agent picks it up via IMAP XOAUTH2
+5. Responder writes the reply to <agent>/responses-queue/<request-id>.json
+6. Next agent run's pre_run() drains the queue, resolves the confirmation
+7. The originally-deferred call now succeeds (or raises ConfirmationRejected)
+```
+
+The same flow can be UI-driven: the dashboard's `Confirmations` page has
+approve/reject buttons that write directly to storage, bypassing email.
+
+## Inter-agent messaging
+
+```python
+# Agent A
+self.message(to=["agent-b"], kind="request", subject="please refresh",
+             body={"site": "aisleprompt"})
+
+# Agent B (next run)
+for msg in self.inbox():
+    if msg["kind"] == "request":
+        # … handle …
+        self.mark_message_read(msg["message_id"])
+```
+
+Messages persist in `shared/messages/` indefinitely — useful for analytics
+("what did agent X tell agent Y last month?"). Threading via `in_reply_to`.
+
+## Composability with other systems
+
+- **Existing scripts**: register a manifest pointing at your existing
+  bash/python script. Zero refactor.
+- **Microsoft Graph email**: the framework's mailer ships a Graph sendMail
+  implementation with Send-As → Send-on-Behalf fallback.
+- **OAuth2 IMAP**: the responder-agent dir has a complete XOAUTH2 setup
+  for Office 365 + Google Workspace (one-time browser bootstrap, refresh
+  tokens auto-rotate).
+- **Anthropic Routines / Desktop Scheduled Tasks**: declare `task_type:
+  cloud-routine` in the manifest and provide `routine_id` + `trigger_url`
+  + `trigger_token_env`; the framework's trigger endpoint POSTs to
+  Anthropic's `/fire` API instead of the host-worker queue.
+
+## Operational rules
+
+- Never `--no-verify` on git commit — release-tagger fails the run if hooks fail.
+- Hard cap on agent decisions per run is configurable; default 50 to keep
+  the decision log scannable.
+- Status writes are throttled to ≤1/s per agent to avoid blob churn —
+  terminal states (success/failure/blocked/cancelled) are always flushed.
+- Cron expressions auto-translate to systemd OnCalendar; complex Quartz
+  extensions (`L`, `W`, `?`, `#`) aren't supported — write the timer by hand
+  if you need them.
+
+## Contributing
+
+This codebase is shared across several of my own repos but designed to be
+fork-friendly. Open issues / PRs at https://github.com/voidsstr/reusable-agents.
+
+If you build an interesting agent on top of it, I'd love to see it.
 
 ## License
 
