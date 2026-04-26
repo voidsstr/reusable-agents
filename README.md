@@ -6,6 +6,39 @@
 > own repos, get auto-scheduled via systemd, and write all state to
 > Azure Blob Storage so they get smarter over time.
 
+## Dashboard at a glance
+
+**Agent grid** — color-coded by category, glowing while running, with
+filter pills for application (🛒 aisleprompt / 🎮 specpicks /
+🔧 reusable-agents / etc.) and confirmation/queue-driven badges per
+card:
+
+![Agent grid](docs/screenshots/agent-grid.png)
+
+**n8n-style dependency graph** — every agent is a node; edges show
+pipeline triggers, email-confirmation flows, queue dispatches, and
+shared-config ties. Drag-to-reposition with localStorage persistence,
+auto-layout via elkjs, custom edge styles per relationship kind:
+
+![Dependency graph](docs/screenshots/dependency-graph.png)
+
+Click any node to see what it depends on + what it triggers:
+
+![Graph side panel](docs/screenshots/dependency-graph-side-panel.png)
+
+**Per-agent detail** — overview with confirmation-flow banner,
+dependencies, runs drill-down with per-run artifacts (recommendations,
+emails, decision logs), and a Goals tab showing persistent objectives
+with progress bars and 30-point sparklines:
+
+![Agent detail with goals](docs/screenshots/agent-detail-goals.png)
+
+Filtering the grid to a single application:
+
+![Application filter](docs/screenshots/agent-grid-filtered.png)
+
+
+
 ## Why
 
 Most agent systems are monoliths. You install one product and your agents
