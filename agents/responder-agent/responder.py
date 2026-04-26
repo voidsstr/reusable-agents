@@ -485,6 +485,20 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     env["RESPONDER_SITE"] = site
     env["RESPONDER_RUN_TS"] = run_ts
     env["RESPONDER_RUN_DIR"] = str(run_dir)
+    # Derive source agent from run_dir path (agents/<id>/runs/<ts>/...) so
+    # the dispatched implementer can look up the original outbound-email
+    # metadata + send a confirmation email back to that recipient.
+    try:
+        parts = Path(run_dir).resolve().parts
+        if "agents" in parts and "runs" in parts:
+            idx = parts.index("agents")
+            env["RESPONDER_SOURCE_AGENT"] = parts[idx + 1]
+        elif "seo" in parts and "runs" in parts:
+            # Legacy SEO layout: seo/runs/<site>/<run-ts>/
+            env["RESPONDER_SOURCE_AGENT"] = f"{site}-seo-opportunity-agent"
+    except Exception:
+        pass
+    env["RESPONDER_REQUEST_ID"] = run_ts  # best-effort thread id
     # Capture spawned stdout/stderr to a per-dispatch log so we can debug
     # implementer failures (was DEVNULL — lost everything).
     log_dir = Path(os.environ.get("RESPONDER_DISPATCH_LOG_DIR", "/tmp/reusable-agents-logs"))

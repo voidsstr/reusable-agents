@@ -129,3 +129,77 @@ def resolve(agent_id: str):
         "provider": _to_model(provider).dict() if provider else None,
         "model": model,
     }
+
+
+# ── Per-call AI config (named calls per agent) ─────────────────────────────
+
+class AgentCallConfig(BaseModel):
+    """One named call routing — a subset of the agent's AI traffic that goes
+    to a specific provider + model. e.g., name="audit" → claude-cli/opus,
+    name="summary" → ollama-local/qwen3:8b.
+    """
+    name: str                        # call name, e.g. "audit", "summary"
+    provider: str                    # one of the registered providers
+    model: str = ""                  # optional — defaults to provider default
+    description: str = ""
+
+
+class AgentCallsModel(BaseModel):
+    agent_id: str
+    calls: dict[str, AgentCallConfig] = Field(default_factory=dict)
+
+
+@router.get("/agent-calls/{agent_id}", response_model=AgentCallsModel)
+def get_agent_calls(agent_id: str):
+    """Read the per-call AI routing for an agent."""
+    from framework.core import registry as _reg
+    m = _reg.get_agent(agent_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    raw = ((m.metadata or {}).get("ai_calls") or {})
+    calls = {
+        k: AgentCallConfig(name=k, provider=v.get("provider", ""),
+                           model=v.get("model", ""),
+                           description=v.get("description", ""))
+        for k, v in raw.items() if isinstance(v, dict)
+    }
+    return AgentCallsModel(agent_id=agent_id, calls=calls)
+
+
+@router.put("/agent-calls/{agent_id}/{call_name}", response_model=AgentCallsModel)
+def upsert_agent_call(agent_id: str, call_name: str, req: AgentCallConfig):
+    """Add or update a named call routing. Mutates manifest.metadata.ai_calls."""
+    if call_name != req.name:
+        raise HTTPException(status_code=400, detail="path call_name must match body name")
+    if not ai_providers.get_provider(req.provider):
+        raise HTTPException(status_code=404, detail=f"provider {req.provider!r} not found")
+    from framework.core import registry as _reg
+    m = _reg.get_agent(agent_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    md = dict(m.metadata or {})
+    calls = dict(md.get("ai_calls") or {})
+    calls[call_name] = {
+        "provider": req.provider, "model": req.model,
+        "description": req.description,
+    }
+    md["ai_calls"] = calls
+    _reg.update_agent(agent_id, {"metadata": md})
+    return get_agent_calls(agent_id)
+
+
+@router.delete("/agent-calls/{agent_id}/{call_name}", response_model=AgentCallsModel)
+def delete_agent_call(agent_id: str, call_name: str):
+    """Remove a named call routing — falls back to agent default after this."""
+    from framework.core import registry as _reg
+    m = _reg.get_agent(agent_id)
+    if m is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    md = dict(m.metadata or {})
+    calls = dict(md.get("ai_calls") or {})
+    if call_name not in calls:
+        raise HTTPException(status_code=404, detail="call not configured")
+    del calls[call_name]
+    md["ai_calls"] = calls
+    _reg.update_agent(agent_id, {"metadata": md})
+    return get_agent_calls(agent_id)
