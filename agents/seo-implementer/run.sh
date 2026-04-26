@@ -12,6 +12,13 @@ set -euo pipefail
 # interactive shell PATH.
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
+# Trace mode (debugging silent failures from systemd spawn).
+# Disable with IMPLEMENTER_TRACE=0 in env.
+if [ "${IMPLEMENTER_TRACE:-1}" != "0" ]; then
+    set -x
+    export PS4='+[$(date +%H:%M:%S)] '
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
