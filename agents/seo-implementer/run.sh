@@ -7,6 +7,11 @@
 
 set -euo pipefail
 
+# Ensure user-local bins (where claude / claude-cli live) are reachable
+# even when invoked from systemd-user services that don't inherit
+# interactive shell PATH.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 

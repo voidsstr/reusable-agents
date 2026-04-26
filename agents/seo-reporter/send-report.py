@@ -538,9 +538,59 @@ def main() -> None:
         return
 
     if not args.no_email:
-        send_email(cfg, subject, html)
+        sent = send_email(cfg, subject, html)
+        # Record the outbound email in framework storage so the dashboard's
+        # Confirmations page can surface it as a pending recommendation.
+        if sent:
+            _record_outbound_email(cfg, run_dir, subject, html)
     if not args.no_dashboard:
         post_to_dashboard(cfg, run_dir, subject)
+
+
+def _record_outbound_email(cfg, run_dir: Path, subject: str, body_html: str) -> None:
+    """Write an entry to agents/<seo-opportunity-agent-id>/outbound-emails/
+    in framework storage so the Confirmations page can render it as a
+    pending email-recommendation awaiting reply."""
+    try:
+        agent_id = cfg.get("reporter", {}).get("dashboard", {}).get("agent_id") \
+            or f"{cfg.site_id}-seo-opportunity-agent"
+        run_ts = run_dir.name
+        recs_doc = _load(run_dir / "recommendations.json")
+        recs = recs_doc.get("recommendations", [])
+        # Build a synthetic request_id from agent + run_ts
+        request_id = f"r-{run_ts}-seo-{cfg.site_id}"
+        # Use the framework's storage backend
+        import os
+        os.environ.setdefault("STORAGE_BACKEND", "local")
+        os.environ.setdefault(
+            "AGENT_STORAGE_LOCAL_PATH",
+            os.path.expanduser("~/.reusable-agents/data"),
+        )
+        from framework.core.storage import get_storage
+        s = get_storage()
+        email_to = (cfg.get("reporter", {}).get("email") or {}).get("to") or []
+        record = {
+            "schema_version": "1",
+            "request_id": request_id,
+            "agent_id": agent_id,
+            "site": cfg.site_id,
+            "run_ts": run_ts,
+            "subject": subject,
+            "to": list(email_to),
+            "expects_response": True,
+            "rec_count": len(recs),
+            "rec_ids": [r["id"] for r in recs],
+            "sent_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "transport": "msmtp+graph",
+            "ok": True,
+            "kind": "email-recommendations",
+        }
+        s.write_json(f"agents/{agent_id}/outbound-emails/{request_id}.json", record)
+        print(f"[reporter] recorded outbound email at agents/{agent_id}/outbound-emails/{request_id}.json",
+              file=sys.stderr)
+    except Exception as e:
+        # Non-fatal: if framework storage isn't reachable, just log
+        print(f"[reporter] could not record outbound email: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
