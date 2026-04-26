@@ -17,6 +17,7 @@ import imaplib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -445,15 +446,39 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     log_dir.mkdir(parents=True, exist_ok=True)
     from datetime import datetime as _dt, timezone as _tz
     log_path = log_dir / f"dispatch-{typ}-{site}-{_dt.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
+    # Detach the dispatcher into its own systemd transient scope so it
+    # survives the responder's exit. Otherwise the responder.service
+    # (Type=oneshot) cgroup teardown kills our spawned implementer +
+    # any descendant claude --print as soon as the responder finishes
+    # its tick, which is way before the implementer can finish 77 recs.
+    use_systemd_run = bool(shutil.which("systemd-run"))
     try:
         log_f = open(log_path, "ab")
-        proc = subprocess.Popen(
-            ["bash", script],
-            env=env, start_new_session=True,
-            stdout=log_f, stderr=log_f,
-        )
-        print(f"  [dispatch] spawned {script} pid={proc.pid} action={action} recs={rec_ids} log={log_path}",
-              file=sys.stderr)
+        if use_systemd_run:
+            unit_name = f"agent-dispatch-{typ}-{site}-{_dt.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            sd_cmd = [
+                "systemd-run", "--user", "--scope", "--collect",
+                f"--unit={unit_name}",
+                "--property=KillMode=process",
+                "--property=TimeoutStopSec=0",
+                "bash", script,
+            ]
+            proc = subprocess.Popen(
+                sd_cmd, env=env, start_new_session=True,
+                stdout=log_f, stderr=log_f,
+            )
+            print(f"  [dispatch] spawned-via-systemd-run unit={unit_name} pid={proc.pid} "
+                  f"action={action} recs={rec_ids} log={log_path}",
+                  file=sys.stderr)
+        else:
+            proc = subprocess.Popen(
+                ["bash", script],
+                env=env, start_new_session=True,
+                stdout=log_f, stderr=log_f,
+            )
+            print(f"  [dispatch] spawned {script} pid={proc.pid} action={action} "
+                  f"recs={rec_ids} log={log_path} (no systemd-run — descendant may be cgroup-killed)",
+                  file=sys.stderr)
     except Exception as e:
         print(f"  [dispatch] failed: {e}", file=sys.stderr)
 

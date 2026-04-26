@@ -51,9 +51,62 @@ export default function AgentDetail() {
     return <div className="text-ink-500">Loading…</div>
   }
   const liveState = liveStatus?.state ?? detail.last_run_status ?? ''
+  const isActive = liveState === 'running' || liveState === 'starting'
 
   return (
-    <div className="space-y-4">
+    <div className={`space-y-4 ${isActive ? 'agent-detail-active' : ''}`}>
+      {/* Prominent "what the agent is doing right now" banner.
+          Only when state is running/starting — quietly disappears otherwise. */}
+      {isActive && liveStatus && (
+        <div
+          data-testid="live-action-banner"
+          className="rounded-lg p-4 flex items-center gap-3 agent-active-banner"
+          style={{
+            background: liveState === 'starting'
+              ? 'linear-gradient(90deg, rgba(168,85,247,0.18) 0%, rgba(168,85,247,0.05) 100%)'
+              : 'linear-gradient(90deg, rgba(56,189,248,0.18) 0%, rgba(56,189,248,0.05) 100%)',
+            border: liveState === 'starting'
+              ? '1px solid rgba(168,85,247,0.6)'
+              : '1px solid rgba(56,189,248,0.6)',
+            boxShadow: liveState === 'starting'
+              ? '0 0 24px rgba(168,85,247,0.3)'
+              : '0 0 24px rgba(56,189,248,0.3)',
+          }}
+        >
+          <div className="text-3xl animate-spin" style={{ animationDuration: '2s' }}>⚙️</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs uppercase font-bold tracking-wide" style={{
+              color: liveState === 'starting' ? '#d8b4fe' : '#7dd3fc',
+            }}>
+              ● {liveState === 'starting' ? 'Starting up' : 'Working now'}
+            </div>
+            <div className="text-base font-semibold text-ink-100 truncate">
+              {liveStatus.current_action || liveStatus.message || 'Running…'}
+            </div>
+            {liveStatus.message && liveStatus.current_action && liveStatus.message !== liveStatus.current_action && (
+              <div className="text-xs text-ink-300 mt-0.5 truncate">{liveStatus.message}</div>
+            )}
+          </div>
+          {liveStatus.progress > 0 && liveStatus.progress < 1 && (
+            <div className="flex flex-col items-end gap-1 min-w-[120px]">
+              <div className="text-xs font-mono text-ink-200">
+                {(liveStatus.progress * 100).toFixed(0)}%
+              </div>
+              <div className="w-32 h-2 bg-ink-900/60 rounded-full overflow-hidden">
+                <div
+                  className="h-full transition-all"
+                  style={{
+                    width: `${(liveStatus.progress * 100).toFixed(0)}%`,
+                    background: liveState === 'starting' ? '#a78bfa' : '#38bdf8',
+                  }}
+                />
+              </div>
+              <div className="text-[10px] text-ink-500 font-mono">iter #{liveStatus.iteration_count}</div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex items-start justify-between gap-4">
         <div>
           <Link to="/" className="text-xs text-ink-500 hover:text-ink-300">← agents</Link>

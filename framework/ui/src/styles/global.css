@@ -46,3 +46,15 @@
   0%, 100% { filter: brightness(1); }
   50%      { filter: brightness(1.15); }
 }
+
+/* Agent detail "Working now" banner — subtle pulse so the user notices */
+.agent-active-banner {
+  animation: banner-glow 2.6s ease-in-out infinite;
+}
+@keyframes banner-glow {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.005); }
+}
+.agent-detail-active h1 {
+  text-shadow: 0 0 18px rgba(56, 189, 248, 0.45);
+}

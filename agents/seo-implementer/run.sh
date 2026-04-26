@@ -84,9 +84,18 @@ Your runbook is below — follow it exactly.
 
 EOF
         cat "$SCRIPT_DIR/AGENT.md" >> "$PROMPT_FILE"
-        # Run claude in non-interactive mode (one prompt, allow tool use)
-        # Inherit env so AGENT_RUN_ID / etc reach the recorder if used
-        claude --dangerously-skip-permissions --print < "$PROMPT_FILE" || {
+        # Run claude in non-interactive mode (one prompt, allow tool use).
+        # --output-format text     deterministic stdout
+        # --max-turns N            bound the agentic loop (without it, claude
+        #                          can spin indefinitely on multi-rec runs)
+        # Inherit env so AGENT_RUN_ID / etc reach the recorder if used.
+        # NOTE: removed --no-session-persistence — older claude builds reject
+        # this flag. Session files are written to ~/.claude regardless.
+        IMPLEMENTER_MAX_TURNS="${IMPLEMENTER_MAX_TURNS:-200}"
+        claude --dangerously-skip-permissions \
+               --print --output-format text \
+               --max-turns "$IMPLEMENTER_MAX_TURNS" \
+               < "$PROMPT_FILE" || {
             rc=$?
             echo "[implementer] claude exited rc=$rc" >&2
             rm -f "$PROMPT_FILE"
