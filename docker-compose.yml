@@ -1,0 +1,74 @@
+# reusable-agents framework — API + UI
+#
+# Bring up:
+#   cp .env.example .env       # then edit (set AZURE_STORAGE_CONNECTION_STRING + FRAMEWORK_API_TOKEN)
+#   docker compose up -d --build
+#
+# Endpoints:
+#   API:  http://localhost:8090/api/health
+#   UI:   http://localhost:8091/
+#
+# The host-worker (framework/api/host-worker.sh) is NOT a Docker service —
+# it runs on the host so it can exec agents with full host access (docker,
+# az, git, ssh, ~/.openclaw, etc). Install it as a systemd --user service:
+#   bash install/install-host-worker.sh
+#
+# Storage backend selection via env (.env):
+#   STORAGE_BACKEND=azure                              (default if conn string set)
+#   AZURE_STORAGE_CONNECTION_STRING=DefaultEndpoints…  (required for azure)
+#   AZURE_STORAGE_CONTAINER=agents                     (default)
+#   STORAGE_BACKEND=local                              (dev/tests)
+#   AGENT_STORAGE_LOCAL_PATH=/data/agents              (when local)
+
+version: "3.9"
+
+services:
+  agent-api:
+    build:
+      context: .
+      dockerfile: framework/api/Dockerfile
+    image: reusable-agents-api:latest
+    container_name: reusable-agents-api
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FRAMEWORK_API_TOKEN: ${FRAMEWORK_API_TOKEN:-}
+      FRAMEWORK_API_CORS: ${FRAMEWORK_API_CORS:-*}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-azure}
+      AZURE_STORAGE_CONNECTION_STRING: ${AZURE_STORAGE_CONNECTION_STRING:-}
+      AZURE_STORAGE_CONTAINER: ${AZURE_STORAGE_CONTAINER:-agents}
+      AGENT_STORAGE_LOCAL_PATH: /data/agents
+      AGENT_TRIGGER_QUEUE_DIR: /tmp/agent-trigger-queue
+      WS_POLL_INTERVAL_S: ${WS_POLL_INTERVAL_S:-2.0}
+    volumes:
+      # Trigger queue: shared with the host-worker on the host
+      - /tmp/agent-trigger-queue:/tmp/agent-trigger-queue
+      # Local-storage fallback (only used when STORAGE_BACKEND=local)
+      - agent-data:/data/agents
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  agent-ui:
+    build:
+      context: .
+      dockerfile: framework/ui/Dockerfile
+      args:
+        # Embedded into the build so the UI's API client knows where to talk.
+        # If you put the UI behind the same origin as the API, leave blank.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8090}
+    image: reusable-agents-ui:latest
+    container_name: reusable-agents-ui
+    restart: unless-stopped
+    ports:
+      - "8091:80"
+    depends_on:
+      agent-api:
+        condition: service_healthy
+
+volumes:
+  agent-data:
