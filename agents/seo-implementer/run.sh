@@ -8,7 +8,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# If the responder dispatched us, it sets RESPONDER_SITE — derive
+# SEO_AGENT_CONFIG from the well-known site-config dir.
+if [ -z "${SEO_AGENT_CONFIG:-}" ] && [ -n "${RESPONDER_SITE:-}" ]; then
+    CANDIDATE="$REPO_ROOT/examples/sites/$RESPONDER_SITE.yaml"
+    if [ -f "$CANDIDATE" ]; then
+        export SEO_AGENT_CONFIG="$CANDIDATE"
+        echo "[implementer] derived SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG from RESPONDER_SITE=$RESPONDER_SITE"
+    fi
+fi
 
 # Required env
 : "${SEO_AGENT_CONFIG:?SEO_AGENT_CONFIG must be set}"
