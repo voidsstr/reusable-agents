@@ -78,6 +78,11 @@ export const api = {
   pendingConfirmations:    (id?: string) => id
                              ? http<ConfirmationRecord[]>(`/api/agents/${encodeURIComponent(id)}/confirmations`)
                              : http<ConfirmationRecord[]>('/api/confirmations'),
+  pendingEmailRecs:        () => http<{
+    agent_id: string; agent_name: string; request_id: string;
+    subject: string; to: string[]; rec_count: number; rec_ids: string[];
+    site: string; run_ts: string; sent_at: string; kind: string;
+  }[]>('/api/confirmations/pending-emails'),
   approveConfirmation:     (agentId: string, confirmationId: string, body: { approver?: string; notes?: string } = {}) =>
                              http<ConfirmationRecord>(`/api/confirmations/${encodeURIComponent(agentId)}/${encodeURIComponent(confirmationId)}/approve`, { method: 'POST', body: JSON.stringify(body) }),
   rejectConfirmation:      (agentId: string, confirmationId: string, body: { approver?: string; notes?: string } = {}) =>
