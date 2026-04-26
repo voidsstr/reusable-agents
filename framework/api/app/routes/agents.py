@@ -34,6 +34,7 @@ class AgentSummary(BaseModel):
     next_run_at: Optional[str] = None
     runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
     confirmation_flow: dict = Field(default_factory=dict)
+    application: str = "shared"  # derived: which app/site this agent serves
 
 
 class AgentDetail(AgentSummary):
@@ -102,6 +103,48 @@ class DiscoverRequest(BaseModel):
     agents_dir: str
 
 
+def _derive_application(m: registry.AgentManifest) -> str:
+    """Group an agent under an 'application' for the dashboard filter.
+
+    Resolution order:
+      1. manifest.metadata.site         (explicit, the new PI/CR agents set this)
+      2. manifest.metadata.application  (explicit override)
+      3. id prefix mapping              (legacy agents)
+      4. category-based fallback
+      5. 'shared'                       (framework-level / cross-cutting)
+    """
+    md = m.metadata or {}
+    if md.get("site"):
+        return str(md["site"])
+    if md.get("application"):
+        return str(md["application"])
+    # id-prefix mapping for the well-known apps
+    aid = m.id.lower()
+    for prefix, app in [
+        ("aisleprompt-", "aisleprompt"),
+        ("specpicks-",   "specpicks"),
+        ("reusable-agents-", "reusable-agents"),
+    ]:
+        if aid.startswith(prefix):
+            return app
+    # Whole-id matches for orchestrators that span multiple sites
+    if aid == "seo-opportunity-agent":
+        return "seo-pipeline"
+    if aid in ("seo-data-collector", "seo-analyzer", "seo-reporter",
+                "seo-implementer", "seo-deployer"):
+        return "seo-pipeline"
+    if aid == "responder-agent":
+        return "shared"
+    # Category-based
+    if m.category == "fleet":
+        return "retro-fleet"
+    if aid.startswith("retro-"):
+        return "retro-fleet"
+    if aid.startswith("travel-"):
+        return "personal"
+    return m.category or "shared"
+
+
 def _summary(m: registry.AgentManifest) -> AgentSummary:
     s = get_storage()
     status = s.read_json(f"agents/{m.id}/status.json") or {}
@@ -113,6 +156,7 @@ def _summary(m: registry.AgentManifest) -> AgentSummary:
         last_run_at=status.get("updated_at"),
         runnable_modes=list(m.runnable_modes or ["cron", "manual"]),
         confirmation_flow=dict(m.confirmation_flow or {}),
+        application=_derive_application(m),
     )
 
 

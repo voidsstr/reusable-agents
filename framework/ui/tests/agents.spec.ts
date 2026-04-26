@@ -115,6 +115,44 @@ test.describe('Events page', () => {
   })
 })
 
+test.describe('Application filter', () => {
+  test('filter pills appear with each application + count', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.getByText(/Application/i).first()).toBeVisible()
+    // Known applications from default registrations
+    await expect(page.getByTestId('app-filter-all')).toBeVisible()
+    await expect(page.getByTestId('app-filter-aisleprompt')).toBeVisible()
+    await expect(page.getByTestId('app-filter-specpicks')).toBeVisible()
+    await expect(page.getByTestId('app-filter-reusable-agents')).toBeVisible()
+  })
+
+  test('clicking aisleprompt filter narrows the grid', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('app-filter-aisleprompt').click()
+    // No specpicks card should be visible
+    await expect(page.locator('a[href="/agents/specpicks-progressive-improvement-agent"]')).toHaveCount(0)
+    // AislePrompt cards ARE visible
+    await expect(page.locator('a[href="/agents/aisleprompt-progressive-improvement-agent"]')).toHaveCount(1)
+  })
+
+  test('clicking specpicks filter narrows the grid', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('app-filter-specpicks').click()
+    await expect(page.locator('a[href="/agents/aisleprompt-progressive-improvement-agent"]')).toHaveCount(0)
+    await expect(page.locator('a[href="/agents/specpicks-progressive-improvement-agent"]')).toHaveCount(1)
+  })
+
+  test('selection persists across reloads', async ({ page }) => {
+    await page.goto('/')
+    await page.getByTestId('app-filter-reusable-agents').click()
+    await page.reload()
+    await page.waitForLoadState('networkidle')
+    // After reload, the reusable-agents pill should still be active
+    const stored = await page.evaluate(() => localStorage.getItem('agent-list-app-filter'))
+    expect(stored).toBe('reusable-agents')
+  })
+})
+
 test.describe('Runnable modes + confirmation flow', () => {
   test('queue-driven agent has disabled Run-now and shows tooltip', async ({ page }) => {
     // seo-implementer is registered with runnable_modes=['chained'].

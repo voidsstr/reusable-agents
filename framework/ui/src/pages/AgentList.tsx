@@ -9,11 +9,33 @@ const REFRESH_INTERVALS_MS: Record<string, number> = {
   '5s': 5_000, '10s': 10_000, '30s': 30_000, '60s': 60_000, 'manual': 0,
 }
 
+const APPLICATION_EMOJI: Record<string, string> = {
+  'all': '🗂',
+  'aisleprompt': '🛒',
+  'specpicks': '🎮',
+  'reusable-agents': '🔧',
+  'seo-pipeline': '🎯',
+  'retro-fleet': '🖥',
+  'personal': '📅',
+  'shared': '🔌',
+  'research': '🔬',
+  'ops': '⚙️',
+}
+
 export default function AgentList() {
   const [agents, setAgents] = useState<AgentSummary[]>([])
   const [statuses, setStatuses] = useState<Record<string, AgentLiveStatus>>({})
-  const [filter, setFilter] = useState<string>('all')
+  const [filter, setFilter] = useState<string>(
+    () => localStorage.getItem('agent-list-filter') || 'all'
+  )
+  const [appFilter, setAppFilter] = useState<string>(
+    () => localStorage.getItem('agent-list-app-filter') || 'all'
+  )
   const [search, setSearch] = useState('')
+
+  // Persist filter selections per browser
+  useEffect(() => { localStorage.setItem('agent-list-filter', filter) }, [filter])
+  useEffect(() => { localStorage.setItem('agent-list-app-filter', appFilter) }, [appFilter])
   const [refreshKey, setRefreshKey] = useState<keyof typeof REFRESH_INTERVALS_MS>('10s')
   const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState(true)
@@ -73,16 +95,22 @@ export default function AgentList() {
     return ['all', ...Array.from(set).sort()]
   }, [agents])
 
+  const applications = useMemo(() => {
+    const set = new Set(agents.map(a => a.application || 'shared'))
+    return ['all', ...Array.from(set).sort()]
+  }, [agents])
+
   const filtered = useMemo(() => {
     return agents.filter(a => {
       if (filter !== 'all' && a.category !== filter) return false
+      if (appFilter !== 'all' && (a.application || 'shared') !== appFilter) return false
       if (search) {
         const q = search.toLowerCase()
         if (!`${a.name} ${a.id} ${a.description}`.toLowerCase().includes(q)) return false
       }
       return true
     })
-  }, [agents, filter, search])
+  }, [agents, filter, appFilter, search])
 
   const triggerOne = async (id: string) => {
     try {
@@ -143,23 +171,56 @@ export default function AgentList() {
         </div>
       )}
 
-      <div className="flex gap-1.5 flex-wrap">
-        {categories.map(cat => (
-          <button
-            key={cat}
-            onClick={() => setFilter(cat)}
-            className={`text-xs px-3 py-1 rounded-full transition-colors ${
-              filter === cat
-                ? 'bg-ink-700 text-ink-50 border border-ink-600'
-                : 'bg-ink-800/50 text-ink-400 border border-ink-700 hover:bg-ink-800'
-            }`}
-          >
-            {cat}
-            {cat !== 'all' && (
-              <span className="ml-1.5 text-ink-500">{agents.filter(a => a.category === cat).length}</span>
-            )}
-          </button>
-        ))}
+      {/* Application filter row */}
+      <div>
+        <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1.5">Application</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {applications.map(app => {
+            const count = app === 'all'
+              ? agents.length
+              : agents.filter(a => (a.application || 'shared') === app).length
+            const emoji = APPLICATION_EMOJI[app] || ''
+            return (
+              <button
+                key={app}
+                data-testid={`app-filter-${app}`}
+                onClick={() => setAppFilter(app)}
+                className={`text-xs px-3 py-1 rounded-full transition-colors ${
+                  appFilter === app
+                    ? 'bg-glow-running/20 text-glow-running border border-glow-running/40'
+                    : 'bg-ink-800/50 text-ink-300 border border-ink-700 hover:bg-ink-800'
+                }`}
+              >
+                {emoji && <span className="mr-1">{emoji}</span>}
+                {app}
+                <span className="ml-1.5 text-ink-500">{count}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Category filter row */}
+      <div>
+        <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1.5">Category</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {categories.map(cat => (
+            <button
+              key={cat}
+              onClick={() => setFilter(cat)}
+              className={`text-xs px-3 py-1 rounded-full transition-colors ${
+                filter === cat
+                  ? 'bg-ink-700 text-ink-50 border border-ink-600'
+                  : 'bg-ink-800/50 text-ink-400 border border-ink-700 hover:bg-ink-800'
+              }`}
+            >
+              {cat}
+              {cat !== 'all' && (
+                <span className="ml-1.5 text-ink-500">{agents.filter(a => a.category === cat).length}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading ? (

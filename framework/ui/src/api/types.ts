@@ -27,6 +27,7 @@ export interface AgentSummary {
   next_run_at: string | null
   runnable_modes: RunnableMode[]
   confirmation_flow: ConfirmationFlow
+  application: string
 }
 
 export interface AgentDetail extends AgentSummary {

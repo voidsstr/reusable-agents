@@ -92,7 +92,9 @@ SEO_GOALS='{"goals":[
    "metric":{"name":"avg_ctr_pct","current":0,"target":3,"direction":"increase","unit":"%","horizon_weeks":12},
    "directives":["rewrite titles + descriptions for low-CTR / high-impression queries","use power words + numbers"]}
 ]}'
-put_goals "seo-opportunity-agent" "$SEO_GOALS"
+for a in aisleprompt-seo-opportunity-agent specpicks-seo-opportunity-agent; do
+    put_goals "$a" "$SEO_GOALS"
+done
 
 # ── responder-agent ─────────────────────────────────────────────────────────
 RESP_GOALS='{"goals":[
