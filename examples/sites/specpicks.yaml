@@ -1,55 +1,44 @@
-# SpecPicks site config (recommend mode — agent emails recs, doesn't auto-ship).
 site:
   id: specpicks
   domain: specpicks.com
   label: SpecPicks
   mode: recommend
-
 data_sources:
   gsc:
     site_url: sc-domain:specpicks.com
     default_country_filter: usa
   ga4:
-    property_id: "531274480"
-  db: null                         # SpecPicks scraper writes to a different DB; not wired yet
-
+    property_id: '531274480'
+  db: null
 revenue_kpis:
-  - id: amazon-clicks
-    label: Amazon affiliate click-throughs
-    ga4_event: ""
-    db_table: ""                    # to wire when the specpicks DB query script lands
-
+- id: amazon-clicks
+  label: Amazon affiliate click-throughs
+  ga4_event: ''
+  db_table: ''
 analyzer:
   primary_objective: top5-rank
   max_recs_per_run: 12
   us_traffic_weight: 1.5
-  min_impressions_for_target: 2     # specpicks is thin-volume — lower bar
-
+  min_impressions_for_target: 2
 implementer:
   repo_path: /home/voidsstr/development/specpicks
   branch: master
-  commit_message_template: "SEO agent: %s"
-
-# Inert deployer block — flip site.mode to 'implement' to activate.
-# SpecPicks has its own deploy infra; copy/adapt the AislePrompt deployer
-# block when ready.
+  commit_message_template: 'SEO agent: %s'
 deployer: null
-
 reporter:
   email:
-    to: [mperry@northernsoftwareconsulting.com]
+    to:
+    - mperry@northernsoftwareconsulting.com
     from: SEO Agent <automation@northernsoftwareconsulting.com>
-    subject_template: "[SEO:{site}] run {tag} — {recs_count} recs"
+    subject_template: "[SEO:{site}] run {tag} \u2014 {recs_count} recs"
     graph:
       oauth_file: ~/.reusable-agents/responder/.oauth.json
-      scope: "offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared"
+      scope: offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared
       use_shared_mailbox: true
       from_address: automation@northernsoftwareconsulting.com
   dashboard:
     base_url: http://localhost:8080
-    agent_id: seo-opportunity-agent
-
+    agent_id: specpicks-seo-opportunity-agent
 auth:
   oauth_file: ~/.openclaw/workspace/tools/seo/.oauth.json
-
 runs_root: ~/.openclaw/workspace/tools/seo/runs

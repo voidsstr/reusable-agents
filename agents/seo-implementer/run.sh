@@ -22,6 +22,13 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Storage env — when dispatched via systemd-run by the responder, these
+# don't get inherited from the host-worker. Default to local FS so the
+# completion-email module can write its tracking file alongside other
+# framework storage.
+export STORAGE_BACKEND="${STORAGE_BACKEND:-local}"
+export AGENT_STORAGE_LOCAL_PATH="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}"
+
 # If the responder dispatched us, it sets RESPONDER_SITE — derive
 # SEO_AGENT_CONFIG from the well-known site-config dir.
 if [ -z "${SEO_AGENT_CONFIG:-}" ] && [ -n "${RESPONDER_SITE:-}" ]; then
@@ -190,8 +197,14 @@ fi
 # framework-aware responder when it dispatches; legacy paths derive from site.
 SOURCE_AGENT="${RESPONDER_SOURCE_AGENT:-${RESPONDER_SITE:-}-seo-opportunity-agent}"
 
+# Hard-code our own agent id — AGENT_ID env may have been inherited from the
+# responder service ("responder-agent") since we run inside its dispatched
+# scope. Use a different, locally-set variable so tracking lands at
+# agents/seo-implementer/outbound-emails/.
+IMPL_AGENT_ID="${SEO_IMPLEMENTER_AGENT_ID:-seo-implementer}"
+
 PYTHONPATH="$REPO_ROOT" python3 -m framework.core.completion_email \
-    --agent-id "${AGENT_ID:-seo-implementer}" \
+    --agent-id "$IMPL_AGENT_ID" \
     --rec-ids "$RESPONDER_REC_IDS" \
     --site "${RESPONDER_SITE:-}" \
     --source-agent "$SOURCE_AGENT" \

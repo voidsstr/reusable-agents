@@ -375,13 +375,17 @@ class _ClaudeCliClient(AIClient):
         chosen = model or self.model or "claude-opus-4-7"
         # The CLI accepts both aliases ("opus", "sonnet") + full ids.
         # We pass the configured value through verbatim.
+        # Default --max-turns 1 is fine for one-shot text generation. Bump
+        # it for callers that need tool use (web_search etc.) — the CLI
+        # counts each tool invocation as a turn.
+        max_turns = int(kwargs.get("max_turns", 1))
         cmd = [
             "claude",
             "--print",
             "--output-format", "text",
             "--no-session-persistence",
             "--model", chosen,
-            "--max-turns", "1",
+            "--max-turns", str(max_turns),
             "--dangerously-skip-permissions",
             prompt,
         ]
@@ -397,9 +401,11 @@ class _ClaudeCliClient(AIClient):
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(f"claude CLI timed out after {kwargs.get('timeout', 600)}s") from e
         if proc.returncode != 0:
+            # Surface stdout when stderr is empty — Claude CLI writes
+            # "Error: Reached max turns (1)" and similar messages there.
+            err = (proc.stderr or proc.stdout or "")[:500]
             raise RuntimeError(
-                f"claude CLI exited rc={proc.returncode}: "
-                f"{(proc.stderr or '')[:500]}"
+                f"claude CLI exited rc={proc.returncode}: {err}"
             )
         return (proc.stdout or "").strip()
 

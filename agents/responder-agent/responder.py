@@ -697,14 +697,38 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
             matched_route = None
             for route in cfg.get("routes", []):
                 match = route.get("match", {})
-                if match.get("header") == "X-Reusable-Agent" and x_agent \
-                        and match.get("equals") == x_agent:
-                    matched_route = route; break
-                if match.get("agent_prefix") and action_obj.get("prefix_agent") \
-                        and action_obj["prefix_agent"].lower() == match["agent_prefix"].lower():
-                    matched_route = route; break
-                if match.get("agent_subject_tag") and agent_hint \
-                        and agent_hint.lower() == match["agent_subject_tag"].lower():
+                # X-Reusable-Agent header — value is str OR list[str].
+                hdr_eq = match.get("equals")
+                if match.get("header") == "X-Reusable-Agent" and x_agent and hdr_eq:
+                    if isinstance(hdr_eq, list):
+                        if x_agent in hdr_eq:
+                            matched_route = route; break
+                    elif hdr_eq == x_agent:
+                        matched_route = route; break
+                # body-prefix match — usually str; treat list as alternation
+                ap = match.get("agent_prefix")
+                if ap and action_obj.get("prefix_agent"):
+                    pa = action_obj["prefix_agent"].lower()
+                    if isinstance(ap, list):
+                        if pa in [x.lower() for x in ap]:
+                            matched_route = route; break
+                    elif pa == ap.lower():
+                        matched_route = route; break
+                # subject [<tag>:<site>] match — str OR list[str] OR regex via _re
+                sub_tag = match.get("agent_subject_tag")
+                if sub_tag and agent_hint:
+                    ah = agent_hint.lower()
+                    if isinstance(sub_tag, list):
+                        if ah in [x.lower() for x in sub_tag]:
+                            matched_route = route; break
+                    elif ah == sub_tag.lower():
+                        matched_route = route; break
+                sub_re = match.get("agent_subject_tag_re")
+                if sub_re and agent_hint:
+                    if re.search(sub_re, agent_hint, re.I):
+                        matched_route = route; break
+                # Catchall — any subject with [<tag>:<site>] form when match.fallback=true
+                if match.get("fallback") and agent_hint:
                     matched_route = route; break
             if matched_route:
                 trigger_dispatcher(matched_route, action_obj["action"],

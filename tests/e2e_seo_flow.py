@@ -159,9 +159,19 @@ def find_latest_run(site: str) -> Path | None:
 
 
 def find_outbound_email(site: str, run_ts: str) -> dict | None:
+    """Look for the outbound email metadata. The seo-reporter writes to
+    agents/<dashboard.agent_id>/outbound-emails/<request_id>.json — the
+    per-site config used to point at the legacy 'seo-opportunity-agent',
+    so we check both paths for resilience."""
     request_id = f"r-{run_ts}-seo-{site}"
-    p = DATA / "agents" / f"{site}-seo-opportunity-agent" / "outbound-emails" / f"{request_id}.json"
-    return json.loads(p.read_text()) if p.is_file() else None
+    candidates = [
+        DATA / "agents" / f"{site}-seo-opportunity-agent" / "outbound-emails" / f"{request_id}.json",
+        DATA / "agents" / "seo-opportunity-agent" / "outbound-emails" / f"{request_id}.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return json.loads(p.read_text())
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -389,23 +399,41 @@ def main() -> int:
         banner("Phase 0: cleanup")
         cleanup()
 
-    # Phases A–D, sequential per site (running both at once would overload)
+    # Phases A–D, sequential per site (running both at once would overload).
+    # One site failing must NOT abort the others — log and continue.
     site_results: list[dict] = []
     for site in sites:
-        if args.skip_trigger:
-            log(f"--skip-trigger: using existing latest run for {site}")
+        try:
+            if args.skip_trigger:
+                log(f"--skip-trigger: using existing latest run for {site}")
+                run_dir = find_latest_run(site)
+                if not run_dir:
+                    log(f"  no existing run for {site} — skipping")
+                    continue
+                recs_doc = json.loads((run_dir / "recommendations.json").read_text())
+                site_results.append({
+                    "site": site, "run_ts": run_dir.name,
+                    "rec_count": len(recs_doc.get("recommendations", [])),
+                    "outbound": find_outbound_email(site, run_dir.name),
+                })
+            else:
+                site_results.append(phase_trigger_and_wait(site))
+        except Exception as e:
+            log(f"  ERROR for {site}: {e}")
+            # Even on agent failure, recs may exist on disk — try to pick them up
             run_dir = find_latest_run(site)
-            if not run_dir:
-                log(f"  no existing run for {site} — skipping")
-                continue
-            recs_doc = json.loads((run_dir / "recommendations.json").read_text())
-            site_results.append({
-                "site": site, "run_ts": run_dir.name,
-                "rec_count": len(recs_doc.get("recommendations", [])),
-                "outbound": find_outbound_email(site, run_dir.name),
-            })
-        else:
-            site_results.append(phase_trigger_and_wait(site))
+            if run_dir and (run_dir / "recommendations.json").is_file():
+                recs_doc = json.loads((run_dir / "recommendations.json").read_text())
+                if recs_doc.get("recommendations"):
+                    log(f"  ↳ recovered: {site} has {len(recs_doc['recommendations'])} recs at {run_dir.name}")
+                    site_results.append({
+                        "site": site, "run_ts": run_dir.name,
+                        "rec_count": len(recs_doc["recommendations"]),
+                        "outbound": find_outbound_email(site, run_dir.name),
+                        "recovered": True,
+                    })
+                    continue
+            log(f"  ↳ {site}: skipping for downstream phases")
 
     if not site_results:
         log("no site_results — aborting")

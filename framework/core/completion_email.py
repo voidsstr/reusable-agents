@@ -110,6 +110,71 @@ The recommendations you approved by reply have been implemented by
 </div></body></html>"""
 
 
+def _send_via_graph(*, to_list: list[str], from_address: str,
+                    subject: str, html_body: str,
+                    extra_headers: list[tuple[str, str]],
+                    oauth_file: Path) -> tuple[bool, str]:
+    """Send via Microsoft Graph /users/<from>/sendMail (Send-As) or /me/sendMail.
+
+    Uses the responder's OAuth refresh token. Required because the host's
+    msmtp is sandboxed by AppArmor and can't exec the python3 passwordeval.
+    """
+    import urllib.error
+    import urllib.request as _ur
+    # Lazy-import the mint helpers from responder-agent
+    here = Path(__file__).resolve().parent
+    repo_root = here.parent.parent
+    mint_path = repo_root / "agents" / "responder-agent"
+    sys.path.insert(0, str(mint_path))
+    try:
+        from importlib import import_module
+        mint = import_module("mint-token")
+        token, oauth_user, _ = mint.mint_access_token(
+            oauth_file,
+            scope_override="offline_access https://graph.microsoft.com/Mail.Send",
+        )
+    finally:
+        try: sys.path.remove(str(mint_path))
+        except ValueError: pass
+
+    msg: dict = {
+        "subject": subject,
+        "body": {"contentType": "HTML", "content": html_body},
+        "toRecipients": [
+            {"emailAddress": {"address": addr.strip()}}
+            for addr in to_list if addr.strip()
+        ],
+        "internetMessageHeaders": [
+            {"name": k, "value": v} for k, v in extra_headers
+        ],
+    }
+    # Try send_as first (shared mailbox), then send_on_behalf, then self
+    attempts = [
+        ("send_as", f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail",
+         {"message": msg, "saveToSentItems": True}),
+        ("send_on_behalf", "https://graph.microsoft.com/v1.0/me/sendMail",
+         {"message": dict(msg, **{"from": {"emailAddress": {"address": from_address}}}),
+          "saveToSentItems": True}),
+        ("self", "https://graph.microsoft.com/v1.0/me/sendMail",
+         {"message": msg, "saveToSentItems": True}),
+    ]
+    last_err = ""
+    for method, url, payload in attempts:
+        body = json.dumps(payload).encode()
+        req = _ur.Request(url, data=body, method="POST",
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"})
+        try:
+            with _ur.urlopen(req, timeout=30) as resp:
+                if resp.status == 202:
+                    return True, f"graph:{method}"
+        except urllib.error.HTTPError as e:
+            last_err = f"graph:{method} HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
+        except Exception as e:
+            last_err = f"graph:{method} {type(e).__name__}: {e}"
+    return False, last_err
+
+
 def send_completion_email(
     *,
     agent_id: str,
@@ -126,13 +191,20 @@ def send_completion_email(
     msmtp_account: str = "automation",
     site_config_path: str = "",
     dashboard_base: str = "",
+    oauth_file: str = "",
     storage: Optional[StorageBackend] = None,
 ) -> tuple[bool, str]:
     """Send a per-rec confirmation email after an implementer ships changes.
 
+    Send-path priority:
+      1. Microsoft Graph /sendMail — if oauth_file exists. This is the
+         standard path because the host's msmtp is sandboxed by AppArmor
+         and can't exec the python3 passwordeval.
+      2. msmtp — fallback for hosts where Graph isn't configured.
+
     Returns (ok, detail). Best-effort — failure is non-fatal; we record the
-    attempt to outbound-emails/<request-id>-completion.json regardless so
-    the dashboard can show the send attempt.
+    attempt to outbound-emails/<request-id>.completion.json regardless so
+    the dashboard's Confirmations view can show the send trail.
     """
     s = storage or get_storage()
     sender = sender or os.environ.get("IMPLEMENTER_FROM",
@@ -149,6 +221,11 @@ def send_completion_email(
         logger.info(f"completion email skipped: no recipient resolved for {agent_id}/{request_id}")
         return False, "no recipient"
 
+    # Strip 'Display Name <addr@x>' down to just addr@x for from_address
+    sender_addr = sender
+    if "<" in sender and ">" in sender:
+        sender_addr = sender.split("<", 1)[1].split(">", 1)[0]
+
     rec_titles = rec_titles or {}
     subject = (
         f"[{agent_id}:{request_id or 'done'}] Shipped {len(rec_ids)} rec(s)"
@@ -160,53 +237,70 @@ def send_completion_email(
         run_dir=run_dir, commit_sha=commit_sha, mode=mode,
         dashboard_base=dashboard_base,
     )
-    headers = [
-        f"From: {sender}",
-        f"To: {to}",
-        f"Subject: {subject}",
-        "MIME-Version: 1.0",
-        "Content-Type: text/html; charset=utf-8",
-        f"X-Reusable-Agent: {agent_id}",
-    ]
-    msg = "\r\n".join(headers) + "\r\n\r\n" + body_html
 
-    # Track the attempt — even if msmtp fails, we want a paper trail
-    track_key = f"agents/{agent_id}/outbound-emails/{request_id or 'completion-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.completion.json"
+    track_key = (
+        f"agents/{agent_id}/outbound-emails/"
+        f"{request_id or 'completion-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.completion.json"
+    )
     sent_at = _now_iso()
 
+    def _track(ok: bool, transport: str, error: str = "") -> None:
+        try:
+            s.write_json(track_key, {
+                "kind": "completion-email", "ok": ok,
+                "transport": transport, "error": error,
+                "to": to, "subject": subject, "sent_at": sent_at,
+                "rec_ids": rec_ids, "agent_id": agent_id,
+                "request_id": request_id, "site": site,
+                "commit_sha": commit_sha,
+            })
+        except Exception as e:
+            logger.warning(f"completion-email track write failed: {e}")
+
+    to_list = [a.strip() for a in to.split(",") if a.strip()]
+    extra_headers = [("X-Reusable-Agent", agent_id)]
+
+    # Try Graph first
+    oauth_path = Path(os.path.expanduser(
+        oauth_file or os.environ.get("RESPONDER_OAUTH_FILE",
+                                       "~/.reusable-agents/responder/.oauth.json")
+    ))
+    if oauth_path.is_file():
+        ok, detail = _send_via_graph(
+            to_list=to_list, from_address=sender_addr,
+            subject=subject, html_body=body_html,
+            extra_headers=extra_headers, oauth_file=oauth_path,
+        )
+        if ok:
+            _track(True, detail)
+            return True, detail
+        logger.info(f"completion email graph send failed: {detail} — trying msmtp")
+
+    # Fallback to msmtp
+    headers = [
+        f"From: {sender}", f"To: {to}", f"Subject: {subject}",
+        "MIME-Version: 1.0", "Content-Type: text/html; charset=utf-8",
+        f"X-Reusable-Agent: {agent_id}",
+    ]
+    msg_text = "\r\n".join(headers) + "\r\n\r\n" + body_html
     try:
         proc = subprocess.run(
-            ["msmtp", "-a", msmtp_account] + [a.strip() for a in to.split(",") if a.strip()],
-            input=msg.encode(), capture_output=True, timeout=60,
+            ["msmtp", "-a", msmtp_account] + to_list,
+            input=msg_text.encode(), capture_output=True, timeout=60,
         )
         if proc.returncode != 0:
             err = (proc.stderr or b"").decode(errors="replace")[:300]
-            try:
-                s.write_json(track_key, {
-                    "kind": "completion-email", "ok": False,
-                    "to": to, "subject": subject, "sent_at": sent_at,
-                    "rec_ids": rec_ids, "agent_id": agent_id,
-                    "error": err,
-                })
-            except Exception:
-                pass
+            _track(False, "msmtp", err)
             return False, f"msmtp rc={proc.returncode}: {err}"
     except FileNotFoundError:
+        _track(False, "msmtp", "msmtp not installed")
         return False, "msmtp not installed"
     except subprocess.TimeoutExpired:
+        _track(False, "msmtp", "msmtp timed out")
         return False, "msmtp timed out after 60s"
 
-    try:
-        s.write_json(track_key, {
-            "kind": "completion-email", "ok": True,
-            "to": to, "subject": subject, "sent_at": sent_at,
-            "rec_ids": rec_ids, "agent_id": agent_id,
-            "request_id": request_id, "site": site,
-            "commit_sha": commit_sha,
-        })
-    except Exception as e:
-        logger.warning(f"completion-email track write failed: {e}")
-    return True, "ok"
+    _track(True, "msmtp")
+    return True, "msmtp ok"
 
 
 # ---------------------------------------------------------------------------
