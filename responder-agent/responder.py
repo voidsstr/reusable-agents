@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from email.header import decode_header, make_header
 from email.message import Message
 from pathlib import Path
 from typing import Optional
@@ -158,36 +159,96 @@ _REC_PATTERN = re.compile(r"\brec-\d{3}\b")
 _PREFIX_PATTERN = re.compile(r"^\s*\[(?P<agent>[a-z0-9-]+)(?::(?P<site>[a-z0-9-]+))?\]\s*", re.I)
 
 
+_HTML_QUOTE_BOUNDARIES = [
+    # Outlook for Web / Office 365: appended at the start of the quoted block
+    re.compile(r'<div id=["\']?(appendonsend|divRplyFwdMsg|_originalContent|OutlookMessageHeader)["\']?', re.I),
+    re.compile(r'<hr[^>]*\bid=["\']?stopSpelling["\']?', re.I),
+    # Gmail
+    re.compile(r'<div class=["\']?gmail_quote["\']?', re.I),
+    re.compile(r'<div class=["\']?gmail_attr["\']?', re.I),
+    # Apple Mail / generic blockquotes (most replies)
+    re.compile(r'<blockquote\b', re.I),
+    # Microsoft Outlook desktop "________________________________" separator block
+    re.compile(r'<div[^>]*>\s*<font[^>]*><span[^>]*>_{30,}', re.I),
+]
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML to plain text. Also collapses runs of whitespace and decodes
+    common entities. Goal: turn an Outlook HTML reply body into the same text
+    the user actually typed, without leaking tag-internals like <b>rec-001</b>."""
+    import html as html_mod
+    # Drop <style> and <script> blocks entirely
+    s = re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", html, flags=re.I | re.S)
+    # Replace block-level closers with newlines so structure survives
+    s = re.sub(r"</(p|div|li|tr|h[1-6]|br)\s*[^>]*>", "\n", s, flags=re.I)
+    s = re.sub(r"<br\s*/?\s*>", "\n", s, flags=re.I)
+    # Strip remaining tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Decode entities
+    s = html_mod.unescape(s)
+    # Collapse whitespace per line, drop empties
+    lines = [ln.strip() for ln in s.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
 def get_body_text(msg: Message) -> str:
-    """Return the plain-text body of an email, falling back to HTML stripped."""
+    """Return the user-typed body of a reply.
+
+    Strategy:
+      1. Prefer text/plain (most mail clients include it alongside HTML).
+         For text/plain, strip the quoted reply via plain-text markers.
+      2. Fall back to text/html. Cut at the first HTML reply-boundary marker
+         BEFORE stripping tags (so `<b>rec-001</b>` in the quoted body never
+         gets a chance to look like a command).
+    """
+    plain_part = None
+    html_part = None
     if msg.is_multipart():
         for part in msg.walk():
             ctype = part.get_content_type()
-            disp = part.get("Content-Disposition", "")
-            if ctype == "text/plain" and "attachment" not in disp:
-                payload = part.get_payload(decode=True) or b""
-                return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-        # No text/plain — strip HTML
-        for part in msg.walk():
-            if part.get_content_type() == "text/html":
-                payload = part.get_payload(decode=True) or b""
-                html = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-                return re.sub(r"<[^>]+>", " ", html)
+            disp = part.get("Content-Disposition", "") or ""
+            if "attachment" in disp:
+                continue
+            if ctype == "text/plain" and plain_part is None:
+                plain_part = part
+            elif ctype == "text/html" and html_part is None:
+                html_part = part
     else:
-        payload = msg.get_payload(decode=True) or b""
-        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+        if msg.get_content_type() == "text/plain":
+            plain_part = msg
+        elif msg.get_content_type() == "text/html":
+            html_part = msg
+
+    if plain_part is not None:
+        payload = plain_part.get_payload(decode=True) or b""
+        text = payload.decode(plain_part.get_content_charset() or "utf-8", errors="replace")
+        return _strip_quoted_text(text)
+
+    if html_part is not None:
+        payload = html_part.get_payload(decode=True) or b""
+        html = payload.decode(html_part.get_content_charset() or "utf-8", errors="replace")
+        # Cut HTML at the earliest reply-boundary marker
+        cut = len(html)
+        for pat in _HTML_QUOTE_BOUNDARIES:
+            m = pat.search(html)
+            if m and m.start() < cut:
+                cut = m.start()
+        return _strip_quoted_text(_html_to_text(html[:cut]))
+
     return ""
 
 
-def strip_quoted_reply(body: str) -> str:
-    """Return only the new content above the first quoted-reply marker.
-    Email clients quote the original message — we don't want to parse those rec ids."""
-    # Common reply markers, in priority order
+def _strip_quoted_text(body: str) -> str:
+    """Strip plain-text quoted-reply markers ('On <date> ... wrote:', leading >)
+    and return only the new content."""
     markers = [
-        re.compile(r"^On .+ wrote:\s*$", re.M),
+        re.compile(r"^On .+wrote:\s*$", re.M),
         re.compile(r"^From: .+@", re.M),
-        re.compile(r"^>.+", re.M),
+        re.compile(r"^Sent from .+", re.M),
+        re.compile(r"^>", re.M),
         re.compile(r"^-{3,}\s*Original Message\s*-{3,}", re.M | re.I),
+        re.compile(r"^_{20,}\s*$", re.M),  # Outlook desktop separator line
     ]
     cut = len(body)
     for pat in markers:
@@ -197,17 +258,25 @@ def strip_quoted_reply(body: str) -> str:
     return body[:cut].strip()
 
 
+# Lines that are >50% non-alphanumeric / suspicious are HTML residue, not user text
+_HTML_RESIDUE_RE = re.compile(r'[<>{}=/\\]')
+
+
 def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
     """Parse user reply body into a list of actions.
 
-    Each action: {action: 'implement'|'skip'|'merge', rec_ids: [...], notes: str,
-                  prefix_agent: str, prefix_site: str}
+    Each action: {action, rec_ids, notes, prefix_agent, prefix_site}.
+
+    The body must already have quoted-reply content stripped; we additionally
+    reject lines that look like HTML residue (any '<', '>', '{', '=', etc).
     """
-    body = strip_quoted_reply(body)
-    actions = []
+    actions: list[dict] = []
     for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line:
+            continue
+        # Reject lines that smell like HTML residue
+        if _HTML_RESIDUE_RE.search(line):
             continue
         agent_prefix = None
         site_prefix = None
@@ -218,12 +287,14 @@ def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
             line = line[m.end():].strip()
         # Determine action verb
         verb = default_action
+        line_lower = line.lower()
         for cmd in ("implement", "skip", "merge", "modify"):
-            if line.lower().startswith(cmd):
+            if line_lower.startswith(cmd) and (
+                len(line) == len(cmd) or not line[len(cmd)].isalnum()
+            ):
                 verb = cmd
                 line = line[len(cmd):].strip()
                 break
-        # Find rec ids
         rec_ids = _REC_PATTERN.findall(line)
         if not rec_ids:
             continue
@@ -264,15 +335,42 @@ def find_run_dir_for_site(runs_roots: list[Path], site: str, hint_run_ts: Option
     return None
 
 
+_RUN_TS_RE = re.compile(r"\b(\d{8}T\d{6}Z)\b")
+_SITE_TAG_RE = re.compile(r"\[(?:(?P<agent>[a-z0-9-]+):)?(?P<site>[a-z0-9-]+)\]", re.I)
+
+
+def extract_agent_from_subject(subject: str) -> Optional[str]:
+    """Pull the agent id from a '[<agent>:<site>]' subject tag (lower-case)."""
+    if not subject:
+        return None
+    m = _SITE_TAG_RE.search(subject)
+    if m and m.group("agent"):
+        return m.group("agent").lower()
+    return None
+
+
 def extract_run_ts_from_subject(subject: str) -> tuple[Optional[str], Optional[str]]:
-    """Parse 'Re: SEO agent run — <site> — <run-ts>' style subjects."""
-    if not subject: return None, None
-    s = re.sub(r"^(Re:|Fwd:|Fw:)\s*", "", subject, flags=re.I).strip()
-    parts = re.split(r"\s+[—–-]\s+", s)
-    site = parts[1].strip() if len(parts) > 1 else None
-    run_ts = parts[-1].strip() if len(parts) > 2 else None
-    if run_ts and not re.match(r"^\d{8}T\d{6}Z$", run_ts):
-        run_ts = None
+    """Pull the (site, run_ts) pair from any subject containing them.
+
+    Handles all of:
+      Re: [SEO:aisleprompt] run 20260426T031318Z — 12 recs
+      Re: SEO agent run — aisleprompt — 20260426T031318Z
+      Fwd: [SEO:my-site] run 20260101T000000Z any extra
+    Falls back to (None, None) if either signal is missing.
+    """
+    if not subject:
+        return None, None
+    run_ts_m = _RUN_TS_RE.search(subject)
+    run_ts = run_ts_m.group(1) if run_ts_m else None
+    # Prefer [agent:site] / [site] bracket-tag form
+    tag_m = _SITE_TAG_RE.search(subject)
+    site = tag_m.group("site") if tag_m else None
+    # Fallback: legacy 'Re: ... — <site> — <run-ts>' layout
+    if site is None:
+        s = re.sub(r"^(Re:|Fwd:|Fw:)\s*", "", subject, flags=re.I).strip()
+        parts = re.split(r"\s+[—–-]\s+", s)
+        if len(parts) >= 3:
+            site = parts[1].strip() or None
     return site, run_ts
 
 
@@ -329,23 +427,46 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
 # Main loop
 # ---------------------------------------------------------------------------
 
+def _decode_header(value: str) -> str:
+    """RFC 2047 decode an email header. Returns the original string if decoding fails."""
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
+
+
 def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
     """Process a single email. Returns # of recorded actions."""
-    subject = msg.get("Subject", "")
-    sender = msg.get("From", "")
+    # All headers may be RFC-2047 encoded — decode before any text parsing.
+    subject = _decode_header(msg.get("Subject", ""))
+    sender = _decode_header(msg.get("From", ""))
     msg_id = msg.get("Message-ID", "")
     in_reply_to = msg.get("In-Reply-To", "")
+    references = msg.get("References", "")
 
-    # Identify which agent ecosystem this reply is for via X-* headers OR subject
-    site_hint, run_ts_hint = extract_run_ts_from_subject(subject)
+    # Identify which agent ecosystem this reply is for. Multiple signals:
+    #   1. X-Reusable-Agent header (most reliable, but mail clients sometimes
+    #      strip custom X-headers from replies).
+    #   2. In-Reply-To / References pointing at a Message-ID we sent (durable;
+    #      survives any subject mangling — but only matches if we tracked the
+    #      original Message-ID, which the reporter doesn't persist yet).
+    #   3. Subject pattern: 'Re: ... — <site> ... <run-ts>' (most fragile but
+    #      survives almost all reply round-trips).
     x_agent = msg.get("X-Reusable-Agent", "") or ""
+    site_hint, run_ts_hint = extract_run_ts_from_subject(subject)
+    agent_hint = extract_agent_from_subject(subject)  # e.g. 'seo' from '[SEO:aisleprompt]'
 
-    print(f"[responder] msg from={sender} subject={subject!r} x-agent={x_agent!r} site={site_hint} run_ts={run_ts_hint}", file=sys.stderr)
+    print(f"[responder] msg from={sender} subject={subject[:120]!r} "
+          f"x-agent={x_agent!r} site={site_hint} run_ts={run_ts_hint}",
+          file=sys.stderr)
 
     # If the message is not from a recognized X- header AND the subject doesn't look
     # like one of our reports, skip it (avoid acting on unrelated mail).
     if not (x_agent or run_ts_hint):
-        print("  [skip] not a recognized agent reply (no X-header, no run-ts in subject)", file=sys.stderr)
+        print("  [skip] not a recognized agent reply (no X-header, no run-ts in subject)",
+              file=sys.stderr)
         return 0
 
     body = get_body_text(msg)
@@ -371,20 +492,35 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
             print(f"  [recorded] {site}/{run_ts} {rec_id} → {action_obj['action']}", file=sys.stderr)
             recorded += 1
 
-        # Dispatch (one call per route per email, batching all rec_ids)
+        # Dispatch (one call per route per email, batching all rec_ids).
+        # Match strategies, in priority order:
+        #   1. X-Reusable-Agent header (only present when the original
+        #      outbound message-id chain is preserved AND the mail client
+        #      didn't strip our X-* header — Outlook usually does strip).
+        #   2. [<agent>:<site>] subject tag (durable; survives reply round-trip
+        #      because mail clients prepend 'Re: ' but keep the rest).
+        #   3. action_obj's own '[<agent>:<site>]' line prefix (user typed
+        #      it explicitly).
         if action_obj["action"] in ("implement", "merge"):
+            matched_route = None
             for route in cfg.get("routes", []):
                 match = route.get("match", {})
-                # Match by X-Reusable-Agent header (most precise)
-                if match.get("header") == "X-Reusable-Agent" and x_agent and match.get("equals") == x_agent:
-                    trigger_dispatcher(route, action_obj["action"], action_obj["rec_ids"],
-                                        site, run_ts, run_dir)
-                    break
-                # Or match by agent prefix the user wrote in the email
-                if match.get("agent_prefix") and action_obj.get("prefix_agent") == match["agent_prefix"]:
-                    trigger_dispatcher(route, action_obj["action"], action_obj["rec_ids"],
-                                        site, run_ts, run_dir)
-                    break
+                if match.get("header") == "X-Reusable-Agent" and x_agent \
+                        and match.get("equals") == x_agent:
+                    matched_route = route; break
+                if match.get("agent_prefix") and action_obj.get("prefix_agent") \
+                        and action_obj["prefix_agent"].lower() == match["agent_prefix"].lower():
+                    matched_route = route; break
+                if match.get("agent_subject_tag") and agent_hint \
+                        and agent_hint.lower() == match["agent_subject_tag"].lower():
+                    matched_route = route; break
+            if matched_route:
+                trigger_dispatcher(matched_route, action_obj["action"],
+                                   action_obj["rec_ids"], site, run_ts, run_dir)
+            else:
+                print(f"  [no-route] no dispatcher matched (x_agent={x_agent!r}, "
+                      f"subject_agent={agent_hint!r}, prefix_agent={action_obj.get('prefix_agent')!r})",
+                      file=sys.stderr)
 
     return recorded
 
