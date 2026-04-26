@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/goal-changes.schema.json",
+  "title": "Goal change log entry — one event per implemented recommendation",
+  "description": "Append-only record of each implementation an agent has shipped, the goal(s) it was meant to advance, and the metric movement that resulted. Stored at agents/<agent-id>/goals/changes.jsonl. Each new run reads this back as context so the agent can shift its recommendations based on what's actually working.",
+  "type": "object",
+  "required": ["ts", "rec_id", "goal_ids"],
+  "additionalProperties": true,
+  "properties": {
+    "ts": { "type": "string", "description": "When this change was recorded (ISO 8601 UTC)." },
+    "rec_id": { "type": "string", "pattern": "^rec-\\d{3}$" },
+    "goal_ids": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^goal-[a-z0-9-]+$" },
+      "description": "Which agent goals this change was meant to advance. A single rec can advance multiple goals."
+    },
+    "site": { "type": "string", "description": "Site this change applies to (when the agent is per-site)." },
+    "rec_title": { "type": "string" },
+    "rec_category": { "type": "string" },
+    "rec_check_id": {
+      "type": "string",
+      "description": "For LLM-audit recs: the SEO_AUDIT_CHECKLIST check_id (e.g. meta-title-length, schema-product-missing). Lets the agent pattern-match across runs."
+    },
+    "rec_severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+    "rec_tier": { "type": "string", "enum": ["auto", "review", "experimental"] },
+    "implementer_agent": { "type": "string", "description": "Agent that actually applied the change (e.g. seo-implementer)." },
+    "implemented_at": { "type": "string" },
+    "implementer_run_ts": { "type": "string" },
+    "commit_sha": { "type": "string" },
+    "deploy_tag": { "type": "string" },
+    "metric_before": {
+      "type": "object",
+      "description": "Snapshot of the affected goal's metric value at change-time.",
+      "required": ["goal_id", "value"],
+      "properties": {
+        "goal_id": { "type": "string" },
+        "metric_name": { "type": "string" },
+        "value": { "type": "number" },
+        "measured_at": { "type": "string" }
+      }
+    },
+    "metric_after": {
+      "type": "object",
+      "description": "Filled in after follow-up runs measure the goal again. May be missing on a fresh entry.",
+      "properties": {
+        "value": { "type": "number" },
+        "delta": { "type": "number", "description": "value - metric_before.value" },
+        "direction": { "type": "string", "enum": ["improving", "flat", "regressing"] },
+        "measured_at": { "type": "string" },
+        "measurement_run_ts": { "type": "string" },
+        "horizon_runs": { "type": "integer", "description": "How many runs after the change this measurement is from." }
+      }
+    },
+    "outcome_summary": {
+      "type": "string",
+      "description": "Human-readable single-sentence summary of what shipped + what happened. Filled by the agent's next-run analysis."
+    },
+    "user_feedback": {
+      "type": ["string", "null"],
+      "description": "Optional free-text the user attached when accepting the rec via email reply."
+    }
+  }
+}

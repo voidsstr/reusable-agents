@@ -33,3 +33,16 @@
     animation: glow-pulse 1.5s ease-in-out infinite;
   }
 }
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--glow-color) / 0.65),
+                         0 0 12px 2px rgb(var(--glow-color) / 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgb(var(--glow-color) / 0.20),
+                         0 0 24px 6px rgb(var(--glow-color) / 0.55); }
+}
+
+/* Graph node pulse — used by AgentNode in Graph.tsx when state=running. */
+@keyframes agent-node-pulse {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.15); }
+}

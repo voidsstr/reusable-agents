@@ -36,7 +36,8 @@ import ReactFlow, {
 import 'reactflow/dist/style.css'
 import ELK from 'elkjs/lib/elk.bundled.js'
 
-import { api } from '../api/client'
+import { api, openStatusWS } from '../api/client'
+import type { AgentLiveStatus } from '../api/types'
 
 const STORAGE_KEY = 'framework-graph-layout:v1'
 
@@ -62,11 +63,30 @@ const KIND_STYLES: Record<string, { stroke: string; strokeDasharray?: string; an
 
 // ---------- Custom node ----------
 
-function AgentNode({ data }: { data: { name: string; id: string; category: string; enabled: boolean; cron: string; selected: boolean } }) {
+type NodeData = {
+  name: string; id: string; category: string; enabled: boolean
+  cron: string; selected: boolean; live?: AgentLiveStatus | null
+}
+
+const STATE_GLOW_RGB: Record<string, string> = {
+  running:  '56 189 248',
+  starting: '168 85 247',
+  failure:  '239 68 68',
+  blocked:  '245 158 11',
+  success:  '16 185 129',
+}
+
+function AgentNode({ data }: { data: NodeData }) {
   const colors = CATEGORY_COLORS[data.category] || CATEGORY_COLORS.misc
   const dim = !data.enabled
+  const liveState = data.live?.state
+  const isActive = liveState === 'running' || liveState === 'starting'
+  const glowRgb = STATE_GLOW_RGB[liveState || ''] || ''
+
   return (
     <div
+      data-agent-id={data.id}
+      data-state={liveState || 'idle'}
       style={{
         background: colors.bg,
         color: colors.text,
@@ -77,18 +97,44 @@ function AgentNode({ data }: { data: { name: string; id: string; category: strin
         opacity: dim ? 0.55 : 1,
         boxShadow: data.selected
           ? '0 0 0 3px rgba(250, 204, 21, 0.3)'
+          : isActive && glowRgb
+          ? `0 0 0 3px rgba(${glowRgb}, 0.7), 0 0 24px 4px rgba(${glowRgb}, 0.55), 0 4px 12px rgba(0,0,0,0.4)`
           : '0 4px 12px rgba(0,0,0,0.4)',
+        animation: isActive ? 'agent-node-pulse 1.4s ease-in-out infinite' : undefined,
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       }}
     >
       <Handle type="target" position={Position.Left} style={{ background: colors.ring, width: 8, height: 8 }} />
       <div style={{ fontSize: 12, fontWeight: 600 }}>{data.name}</div>
       <div style={{ fontSize: 10, opacity: 0.7, fontFamily: 'monospace', marginTop: 2 }}>{data.id}</div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 6, fontSize: 9 }}>
+      <div style={{ display: 'flex', gap: 8, marginTop: 6, fontSize: 9, flexWrap: 'wrap' }}>
         <span style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 3 }}>{data.category}</span>
         {data.cron && <span style={{ background: 'rgba(0,0,0,0.3)', padding: '1px 6px', borderRadius: 3, fontFamily: 'monospace' }}>{data.cron}</span>}
         {!data.enabled && <span style={{ background: 'rgba(220,38,38,0.4)', padding: '1px 6px', borderRadius: 3 }}>disabled</span>}
+        {isActive && (
+          <span style={{ background: `rgba(${glowRgb}, 0.4)`, color: '#fff', padding: '1px 6px', borderRadius: 3, fontWeight: 600 }}>
+            ● {liveState}
+          </span>
+        )}
       </div>
+      {data.live?.current_action && isActive && (
+        <div style={{ marginTop: 6, fontSize: 10, color: '#cbd5e1', fontStyle: 'italic',
+                       maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis',
+                       whiteSpace: 'nowrap' }}>
+          ▸ {data.live.current_action}
+        </div>
+      )}
+      {data.live && data.live.progress > 0 && data.live.progress < 1 && isActive && (
+        <div style={{ marginTop: 4, height: 2, background: 'rgba(0,0,0,0.4)', borderRadius: 2 }}>
+          <div style={{
+            height: '100%',
+            width: `${(data.live.progress * 100).toFixed(0)}%`,
+            background: `rgb(${glowRgb})`,
+            borderRadius: 2,
+            transition: 'width 0.3s',
+          }} />
+        </div>
+      )}
       <Handle type="source" position={Position.Right} style={{ background: colors.ring, width: 8, height: 8 }} />
     </div>
   )
@@ -138,8 +184,47 @@ function GraphInner() {
   const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [savedAt, setSavedAt] = useState<string>('')
+  const [statuses, setStatuses] = useState<Record<string, AgentLiveStatus>>({})
+  const wsRefs = useRef<Map<string, WebSocket>>(new Map())
   const rfInstance = useRef<ReactFlowInstance | null>(null)
   const { setViewport } = useReactFlow()
+
+  // Live-status WebSocket subscriptions — one per visible enabled agent.
+  // When status arrives we splice it into the matching node's `data.live`
+  // so the AgentNode component can glow + show current_action.
+  useEffect(() => {
+    const wantedIds = new Set(nodes.filter(n => (n.data as any).enabled).map(n => n.id))
+    for (const [id, ws] of wsRefs.current) {
+      if (!wantedIds.has(id)) {
+        ws.close()
+        wsRefs.current.delete(id)
+      }
+    }
+    for (const id of wantedIds) {
+      if (wsRefs.current.has(id)) continue
+      const ws = openStatusWS(id, (status) => {
+        setStatuses(s => ({ ...s, [id]: status }))
+      })
+      if (ws) wsRefs.current.set(id, ws)
+    }
+    return () => {
+      for (const ws of wsRefs.current.values()) ws.close()
+      wsRefs.current.clear()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes.length, nodes.map(n => n.id).join(',')])
+
+  // Splice the latest statuses into the nodes' data.live so the custom
+  // AgentNode renderer picks up the glow + current_action without
+  // re-running the layout (just data update).
+  useEffect(() => {
+    setNodes(ns => ns.map(n => {
+      const s = statuses[n.id]
+      if (s === (n.data as any).live) return n
+      return { ...n, data: { ...n.data, live: s } }
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statuses])
 
   // Pull persisted layout
   const loadLayout = (): { positions: Record<string, { x: number; y: number }>; viewport?: Viewport } => {

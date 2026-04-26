@@ -62,6 +62,23 @@ test.describe('Dependency Graph page', () => {
     await expect(page.getByText('Outgoing')).toBeVisible()
   })
 
+  test('graph subscribes to live status WebSockets', async ({ page }) => {
+    // Track WS connections opened from the page
+    const wsUrls: string[] = []
+    page.on('websocket', ws => { wsUrls.push(ws.url()) })
+
+    await page.goto('/graph')
+    await page.waitForFunction(
+      () => !document.body.innerText.includes('Loading dependency graph'),
+      { timeout: 15_000 }
+    )
+    // Give the page a beat to open status sockets per enabled agent
+    await page.waitForTimeout(2_000)
+    // Should have opened at least one /ws/agents/<id>/status connection
+    const statusWs = wsUrls.filter(u => u.includes('/ws/agents/') && u.endsWith('/status'))
+    expect(statusWs.length).toBeGreaterThan(0)
+  })
+
   test('layout persists across reloads', async ({ page }) => {
     await page.goto('/graph')
     await page.waitForFunction(

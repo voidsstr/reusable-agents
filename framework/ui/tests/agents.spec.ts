@@ -184,12 +184,26 @@ test.describe('Runnable modes + confirmation flow', () => {
     await expect(banner).toContainText(/Upstream-gated/i)
   })
 
-  test('agent card lists show "queue-driven" badge for chained agents', async ({ page }) => {
-    await page.goto('/')
-    // The seo-implementer card should carry a queue-driven badge
-    const card = page.locator('a[href="/agents/seo-implementer"]')
-    await expect(card).toBeVisible({ timeout: 5_000 })
-    await expect(card).toContainText(/queue-driven/i)
+  test('agent card lists show "queue-driven" badge for chained agents', async ({ page, request }) => {
+    // The seo-pipeline framework agents are blueprints (hidden) on this
+    // host, so register a temporary chained-only agent for the assertion,
+    // then delete it.
+    await request.post('http://localhost:8093/api/agents/register', {
+      data: {
+        id: 'test-chained-agent',
+        name: 'Test Chained Agent', category: 'ops',
+        runnable_modes: ['chained'], entry_command: 'echo ok',
+        autowire_cron: false,
+      },
+    })
+    try {
+      await page.goto('/')
+      const card = page.locator('a[href="/agents/test-chained-agent"]')
+      await expect(card).toBeVisible({ timeout: 5_000 })
+      await expect(card).toContainText(/queue-driven/i)
+    } finally {
+      await request.delete('http://localhost:8093/api/agents/test-chained-agent')
+    }
   })
 
   test('agent card lists show confirms-via-email badge for PI agents', async ({ page }) => {
