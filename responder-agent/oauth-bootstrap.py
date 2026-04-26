@@ -24,14 +24,19 @@ Microsoft setup (one-time):
   3. Supported account types: 'Accounts in this organizational directory only'
   4. Redirect URI: Public client/native → http://localhost
   5. Authentication → Allow public client flows: yes
-  6. API permissions → Add a permission → Microsoft Graph → Delegated:
-       - IMAP.AccessAsUser.All
-       - SMTP.Send
-       - offline_access
-       - User.Read (auto-added)
-     (You may also need: Office 365 Exchange Online → IMAP.AccessAsUser.All
-     and SMTP.Send if your tenant is configured for legacy resource access.)
-  7. Grant admin consent (or have an admin do it).
+  6. API permissions → Add a permission. Add ALL of these (delegated):
+       Microsoft Graph:
+         - Mail.Send                  (reporter sends via Graph)
+         - Mail.Send.Shared           (reporter sends from a shared mailbox)
+         - offline_access
+         - User.Read (auto-added)
+       Microsoft Graph (legacy outlook.office.com resource — for IMAP/SMTP):
+         - IMAP.AccessAsUser.All      (responder reads inbox)
+         - SMTP.Send                  (optional fallback if Graph is blocked)
+     If you don't see the outlook.office.com options, switch to "APIs my
+     organization uses" tab and search for "Office 365 Exchange Online" —
+     they're listed there.
+  7. Grant admin consent for [tenant] (button on the API permissions page).
   8. Copy the Application (client) ID — that's what you pass to --client-id.
   9. The Directory (tenant) ID is also on the Overview page — pass to --tenant
      (or use 'organizations' for multi-tenant).
@@ -102,10 +107,17 @@ def _start_callback_server(port: int = 0) -> tuple[HTTPServer, int]:
 
 MS_AUTH = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
 MS_TOKEN = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+# Default scopes: IMAP for the responder, Graph Mail.Send for the reporter.
+# SMTP.Send is included as a fallback for environments where Graph isn't viable.
+# Mail.Send.Shared lets the reporter use /users/{shared}/sendMail with delegation.
+# All four of these must be pre-granted (delegated) on the Azure AD app +
+# admin-consented before bootstrap will work.
 MS_SCOPES = " ".join([
     "offline_access",
     "https://outlook.office.com/IMAP.AccessAsUser.All",
     "https://outlook.office.com/SMTP.Send",
+    "https://graph.microsoft.com/Mail.Send",
+    "https://graph.microsoft.com/Mail.Send.Shared",
 ])
 
 

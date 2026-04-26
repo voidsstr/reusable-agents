@@ -33,12 +33,17 @@ def load_oauth(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def mint_microsoft(cfg: dict) -> str:
+def mint_microsoft(cfg: dict, scope_override: str = None) -> str:
+    # Microsoft v2 token endpoint mints tokens for one resource per request.
+    # IMAP uses outlook.office.com; Graph uses graph.microsoft.com.
+    # Pass scope_override='offline_access https://graph.microsoft.com/Mail.Send'
+    # to get a Graph-audience token from the same refresh token (cross-resource
+    # refresh; works as long as the refresh_token includes offline_access).
     body = urllib.parse.urlencode({
         "client_id": cfg["client_id"],
         "refresh_token": cfg["refresh_token"],
         "grant_type": "refresh_token",
-        "scope": cfg.get("scopes", " ".join([
+        "scope": scope_override or cfg.get("scopes", " ".join([
             "offline_access",
             "https://outlook.office.com/IMAP.AccessAsUser.All",
             "https://outlook.office.com/SMTP.Send",
@@ -60,7 +65,8 @@ def mint_microsoft(cfg: dict) -> str:
     return tokens["access_token"]
 
 
-def mint_google(cfg: dict) -> str:
+def mint_google(cfg: dict, scope_override: str = None) -> str:  # noqa: ARG001
+    # Google ignores scope on refresh and returns the original scopes.
     body = urllib.parse.urlencode({
         "client_id": cfg["client_id"],
         "client_secret": cfg["client_secret"],
@@ -78,13 +84,23 @@ def mint_google(cfg: dict) -> str:
     return tokens["access_token"]
 
 
-def mint_access_token(oauth_path: Path = DEFAULT_OAUTH_PATH) -> tuple[str, str, str]:
-    """Returns (access_token, username, provider)."""
+def mint_access_token(
+    oauth_path: Path = DEFAULT_OAUTH_PATH,
+    scope_override: str = None,
+) -> tuple[str, str, str]:
+    """Returns (access_token, username, provider).
+
+    scope_override lets callers ask for a token with different scopes than
+    were originally granted — useful for getting a Graph-audience token from
+    a refresh_token originally minted for Outlook IMAP/SMTP scopes. Microsoft's
+    refresh-token-grant supports cross-resource scope substitution as long as
+    the original consent included offline_access.
+    """
     cfg = load_oauth(oauth_path)
     if cfg["provider"] == "microsoft":
-        token = mint_microsoft(cfg)
+        token = mint_microsoft(cfg, scope_override=scope_override)
     elif cfg["provider"] == "google":
-        token = mint_google(cfg)
+        token = mint_google(cfg, scope_override=scope_override)
     else:
         raise SystemExit(f"Unknown provider: {cfg.get('provider')!r}")
     return token, cfg.get("username_hint", ""), cfg["provider"]

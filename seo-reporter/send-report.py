@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import urllib.request
 from datetime import datetime, timezone
 from email.utils import formatdate, make_msgid
 from pathlib import Path
+from typing import Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -70,11 +72,19 @@ def render_html(cfg, run_dir: Path) -> tuple[str, str]:
     recs = recs_data.get("recommendations", [])
     summary = recs_data.get("summary", "")
 
-    # Subject
+    # Subject — defensively handle any extra placeholders the user adds
     subject_template = cfg.get("reporter", {}).get("email", {}).get(
         "subject_template", "SEO agent run — {site} — {tag}"
     )
-    subject = subject_template.format(site=site, tag=run_ts, mode=mode)
+    subject_vars = {
+        "site": site, "domain": domain, "label": label, "mode": mode,
+        "tag": run_ts, "run_ts": run_ts, "recs_count": len(recs),
+    }
+    try:
+        subject = subject_template.format_map(subject_vars)
+    except KeyError as e:
+        print(f"[reporter] subject_template references {e} — falling back to default", file=sys.stderr)
+        subject = f"SEO agent run — {site} — {run_ts}"
 
     # Reply instructions
     reply_to = cfg.get("reporter", {}).get("email", {}).get("from", "")
@@ -226,7 +236,6 @@ def send_email(cfg, subject: str, html_body: str) -> bool:
         print("[reporter] no recipients configured", file=sys.stderr)
         return False
     from_addr = email_cfg.get("from", "")
-    account = email_cfg.get("msmtp_account", "default")
 
     msg_id = make_msgid(domain="reusable-agents")
     headers = [
@@ -241,6 +250,26 @@ def send_email(cfg, subject: str, html_body: str) -> bool:
         f"X-Reusable-Agent-Site: {cfg.site_id}",
     ]
     raw = "\n".join(headers) + "\n\n" + html_body
+
+    # Three send paths in priority order:
+    #   1. graph.* (Microsoft Graph sendMail) — recommended, no SMTP needed
+    #   2. smtp.auth_method=oauth2 → smtplib + XOAUTH2
+    #   3. msmtp_account=...        → shell out to msmtp (legacy / password auth)
+    graph_cfg = email_cfg.get("graph")
+    if graph_cfg:
+        return _send_via_graph(
+            graph_cfg, cfg.site_id,
+            from_addr=from_addr, to_list=to_list,
+            subject=subject, html_body=html_body,
+            extra_headers=[
+                ("X-Reusable-Agent", "seo-reporter"),
+                ("X-Reusable-Agent-Site", cfg.site_id),
+            ],
+        )
+    smtp_cfg = email_cfg.get("smtp")
+    if smtp_cfg and smtp_cfg.get("auth_method") == "oauth2":
+        return _send_via_smtplib_oauth2(smtp_cfg, from_addr, to_list, raw)
+    account = email_cfg.get("msmtp_account", "default")
     try:
         proc = subprocess.run(
             ["msmtp", "-a", account] + to_list,
@@ -252,8 +281,160 @@ def send_email(cfg, subject: str, html_body: str) -> bool:
         print(f"[reporter] sent to {', '.join(to_list)} via msmtp[{account}]", file=sys.stderr)
         return True
     except FileNotFoundError:
-        print("[reporter] msmtp not installed — install + configure first", file=sys.stderr)
+        print("[reporter] no send method available — configure reporter.email.graph "
+              "(recommended for M365), reporter.email.smtp (XOAUTH2), or install msmtp.",
+              file=sys.stderr)
         return False
+
+
+def _send_via_graph(graph_cfg: dict, site_id: str, *,
+                    from_addr: str, to_list: list[str],
+                    subject: str, html_body: str,
+                    extra_headers: list[tuple[str, str]]) -> bool:
+    """Send via Microsoft Graph /me/sendMail (or /users/<id>/sendMail).
+
+    No SMTP needed. Uses the same OAuth refresh token the responder uses for
+    IMAP. Requires the Azure AD app to have Mail.Send (delegated) permission
+    granted with admin consent.
+
+    graph_cfg fields:
+      oauth_file:     path to .oauth.json (default ~/.reusable-agents/responder/.oauth.json)
+      from_address:   bare email; required if differs from oauth user (shared mailbox)
+                      For shared mailbox sending, use /users/<from_address>/sendMail.
+      use_shared_mailbox: bool — if true, send via /users/<from_address>/sendMail
+                      (requires Mail.Send permission scoped to that mailbox in EXO,
+                      typically via "Send As" delegation set on the shared mailbox).
+    """
+    import urllib.error  # noqa
+    oauth_file = Path(os.path.expanduser(graph_cfg.get(
+        "oauth_file", "~/.reusable-agents/responder/.oauth.json"
+    )))
+    here = Path(__file__).resolve().parent
+    mint_path = here.parent / "responder-agent"
+    sys.path.insert(0, str(mint_path))
+    try:
+        from importlib import import_module
+        mint = import_module("mint-token")
+        token, oauth_user, _ = mint.mint_access_token(
+            oauth_file,
+            scope_override=graph_cfg.get("scope",
+                "offline_access https://graph.microsoft.com/Mail.Send"),
+        )
+    finally:
+        try: sys.path.remove(str(mint_path))
+        except ValueError: pass
+
+    from_address = _extract_address(from_addr) or oauth_user
+    use_shared = graph_cfg.get("use_shared_mailbox", False)
+    if use_shared and from_address:
+        url = f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail"
+    else:
+        url = "https://graph.microsoft.com/v1.0/me/sendMail"
+
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "HTML", "content": html_body},
+            "toRecipients": [
+                {"emailAddress": {"address": _extract_address(addr) or addr}}
+                for addr in to_list
+            ],
+            "from": {"emailAddress": {"address": from_address}} if use_shared else None,
+            # SingleValueExtendedProperties + InternetMessageHeaders for our
+            # X-* headers so the responder can match replies. Graph requires
+            # the X- prefix for custom internet message headers.
+            "internetMessageHeaders": [
+                {"name": k, "value": v} for k, v in extra_headers
+            ],
+        },
+        "saveToSentItems": True,
+    }
+    # Drop None values that Graph would reject
+    msg = payload["message"]
+    payload["message"] = {k: v for k, v in msg.items() if v is not None}
+
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            # 202 Accepted is the success code for sendMail
+            if resp.status == 202:
+                print(f"[reporter] sent to {', '.join(to_list)} via Graph "
+                      f"({'shared' if use_shared else 'me'}/{from_address})",
+                      file=sys.stderr)
+                return True
+            print(f"[reporter] Graph sendMail unexpected status {resp.status}", file=sys.stderr)
+            return False
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:1500]
+        print(f"[reporter] Graph sendMail HTTP {e.code}: {body}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"[reporter] Graph sendMail error: {e}", file=sys.stderr)
+        return False
+
+
+def _send_via_smtplib_oauth2(smtp_cfg: dict, from_addr: str, to_list: list[str], raw: str) -> bool:
+    """Send via smtplib using XOAUTH2 — no msmtp dependency."""
+    import smtplib, base64
+    # Lazy-import so the module loads cleanly even without the responder dir on path
+    oauth_file = Path(os.path.expanduser(smtp_cfg.get(
+        "oauth_file", "~/.reusable-agents/responder/.oauth.json"
+    )))
+    # Find mint-token.py (it lives in responder-agent/)
+    here = Path(__file__).resolve().parent
+    mint_path = here.parent / "responder-agent"
+    sys.path.insert(0, str(mint_path))
+    try:
+        from importlib import import_module
+        mint = import_module("mint-token")
+        token, oauth_user, _ = mint.mint_access_token(oauth_file)
+    finally:
+        try: sys.path.remove(str(mint_path))
+        except ValueError: pass
+
+    # SMTP "username" — for shared mailbox sending, use the from-address local
+    # part (the bearer is for whoever signed in during oauth bootstrap).
+    smtp_user = smtp_cfg.get("username") or _extract_address(from_addr) or oauth_user
+    sasl = f"user={smtp_user}\x01auth=Bearer {token}\x01\x01".encode()
+    sasl_b64 = base64.b64encode(sasl).decode()
+
+    host = smtp_cfg.get("host", "smtp.office365.com")
+    port = int(smtp_cfg.get("port", 587))
+
+    try:
+        srv = smtplib.SMTP(host, port, timeout=30)
+        srv.ehlo()
+        srv.starttls()
+        srv.ehlo()
+        # Send the AUTH XOAUTH2 command directly
+        code, resp = srv.docmd("AUTH XOAUTH2 " + sasl_b64)
+        if code != 235:
+            print(f"[reporter] SMTP XOAUTH2 auth failed: {code} {resp!r}", file=sys.stderr)
+            srv.quit()
+            return False
+        srv.sendmail(_extract_address(from_addr) or smtp_user, to_list, raw)
+        srv.quit()
+        print(f"[reporter] sent to {', '.join(to_list)} via SMTP XOAUTH2 ({host}:{port})", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"[reporter] SMTP XOAUTH2 send failed: {e}", file=sys.stderr)
+        return False
+
+
+def _extract_address(s: str) -> Optional[str]:
+    """Extract bare email address from a 'Name <addr@host>' or 'addr@host' string."""
+    if not s:
+        return None
+    if "<" in s and ">" in s:
+        return s.split("<", 1)[1].rsplit(">", 1)[0].strip()
+    return s.strip()
 
 
 def post_to_dashboard(cfg, run_dir: Path, subject: str) -> None:

@@ -77,8 +77,24 @@ reporter:
   email:
     to: [mperry@northernsoftwareconsulting.com]
     from: SEO Agent <automation@northernsoftwareconsulting.com>
-    msmtp_account: automation
     subject_template: "[SEO:{site}] run {tag} — {recs_count} recs"
+    # Microsoft Graph sendMail — recommended path for M365.
+    # Doesn't need SMTP AUTH enabled at the tenant. Same refresh token the
+    # responder uses for IMAP; mint-token.py asks Microsoft for a Graph-scoped
+    # token via cross-resource refresh.
+    graph:
+      oauth_file: ~/.reusable-agents/responder/.oauth.json
+      scope: "offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared"
+      use_shared_mailbox: true
+      from_address: automation@northernsoftwareconsulting.com
+    # SMTP fallback (only used if 'graph' block above is removed). Not active
+    # by default because M365 disables tenant-wide SMTP AUTH out of the box.
+    # smtp:
+    #   host: smtp.office365.com
+    #   port: 587
+    #   auth_method: oauth2
+    #   username: automation@northernsoftwareconsulting.com
+    #   oauth_file: ~/.reusable-agents/responder/.oauth.json
   dashboard:
     base_url: http://localhost:8080
     agent_id: seo-opportunity-agent

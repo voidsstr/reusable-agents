@@ -88,26 +88,48 @@ short-lived access tokens automatically.
    - Supported accounts: *Accounts in this organizational directory only*
    - Redirect URI: **Public client/native** → `http://localhost`
    - After creation: **Authentication → Allow public client flows: Yes**
-   - **API permissions → Add a permission → Microsoft Graph (delegated):**
-     - `IMAP.AccessAsUser.All`
-     - `SMTP.Send`
-     - `offline_access`
-     - `User.Read` (auto-added)
-   - Grant admin consent (or have an admin do it).
-   - Copy the **Application (client) ID** and **Directory (tenant) ID**
-     from the Overview tab.
 
-2. **Run the bootstrap** (browser opens, log in as `automation@yourdomain`):
+2. **Grant API permissions** (delegated, all five):
+
+   **Microsoft Graph** (used by the reporter for `sendMail`, recommended path):
+   - `Mail.Send`
+   - `Mail.Send.Shared` (lets the reporter send via `/users/{shared}/sendMail`
+     when the from-address is a shared mailbox)
+   - `offline_access`
+   - `User.Read` (usually auto-added)
+
+   **Office 365 Exchange Online** (used by the responder for IMAP):
+   - `IMAP.AccessAsUser.All`
+   - `SMTP.Send` (optional — only used if you want SMTP fallback in addition
+     to Graph sendMail)
+
+   *If you don't see the Exchange Online options under Microsoft Graph,
+   they're under the "APIs my organization uses" tab — search for
+   "Office 365 Exchange Online".*
+
+   Then click **Grant admin consent for [tenant]**.
+
+3. **Copy the Application (client) ID** and **Directory (tenant) ID**
+   from the Overview tab.
+
+4. **Run the bootstrap** (browser opens, log in with whichever account has
+   FullAccess to the automation/shared mailbox):
    ```bash
    python3 oauth-bootstrap.py \
        --provider microsoft \
        --client-id   <client-id-from-azure> \
        --tenant      <tenant-id-from-azure> \
-       --username    automation@northernsoftwareconsulting.com
+       --username    automation@yourdomain.com
    ```
+   `--username` is what gets written into `username_hint` in the oauth file
+   — that's the mailbox the responder talks to and the reporter sends from.
+
+   The browser flow logs in YOU (the human with FullAccess delegated to the
+   shared mailbox), grants the app permission, and returns a refresh token.
+
    This saves `~/.reusable-agents/responder/.oauth.json` (mode 0600).
 
-3. **Smoke-test**:
+5. **Smoke-test**:
    ```bash
    python3 mint-token.py --check
    # → OK provider=microsoft user=automation@... token_chars=2347
@@ -129,26 +151,44 @@ short-lived access tokens automatically.
        --username      automation@yourdomain.com
    ```
 
-### After bootstrap, use OAuth in:
+### After bootstrap, the OAuth token is used by:
 
-**responder.py (IMAP)** — already wired. Just set `auth_method: oauth2` in
-the responder config (the example shows both forms).
+**responder.py (IMAP)** — already wired. Set `auth_method: oauth2` in the
+responder config (the example shows both forms).
 
-**msmtp (SMTP)** — for the SEO reporter to send via XOAUTH2:
-```msmtprc
-account automation
-host smtp.office365.com                # or smtp.gmail.com
-port 587
-auth xoauth2
-tls on
-tls_starttls on
-from automation@northernsoftwareconsulting.com
-user automation@northernsoftwareconsulting.com
-passwordeval "python3 /home/voidsstr/development/reusable-agents/responder-agent/mint-token.py"
-```
+**seo-reporter (sending email)** — three send paths, in priority order:
 
-The `passwordeval` runs `mint-token.py` once per send; it prints a fresh
-access token which msmtp uses as the XOAUTH2 password.
+1. **Graph `sendMail`** (recommended for M365). No SMTP needed; uses Mail.Send
+   delegated permission. The reporter's site config uses a `graph:` block:
+   ```yaml
+   reporter:
+     email:
+       to: [you@example.com]
+       from: SEO Agent <automation@example.com>
+       graph:
+         oauth_file: ~/.reusable-agents/responder/.oauth.json
+         scope: "offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared"
+         use_shared_mailbox: true
+         from_address: automation@example.com
+   ```
+
+2. **smtplib XOAUTH2** (fallback for non-M365 providers, or M365 tenants
+   where SMTP AUTH is enabled and Graph is blocked):
+   ```yaml
+   reporter:
+     email:
+       smtp:
+         host: smtp.office365.com         # or smtp.gmail.com
+         port: 587
+         auth_method: oauth2
+         username: automation@example.com
+         oauth_file: ~/.reusable-agents/responder/.oauth.json
+   ```
+
+3. **msmtp** (legacy / password auth). Note: under Ubuntu's AppArmor profile
+   `usr.bin.msmtp`, msmtp can't exec `python3`, so XOAUTH2 via `passwordeval`
+   doesn't work out of the box. Use the smtplib path above instead — same
+   token, same outcome, no AppArmor friction.
 
 ## Why poll IMAP instead of a webhook?
 

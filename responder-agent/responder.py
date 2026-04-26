@@ -53,9 +53,21 @@ def load_config(path: Path) -> dict:
     # Validate minimum required fields
     if not cfg.get("imap"):
         raise SystemExit("config.imap is required")
-    for k in ("host", "port", "username", "password_env"):
+    for k in ("host", "port"):
         if not cfg["imap"].get(k):
             raise SystemExit(f"config.imap.{k} is required")
+    auth_method = cfg["imap"].get("auth_method", "password")
+    if auth_method == "oauth2":
+        # username can be inherited from the oauth file's username_hint
+        if not cfg["imap"].get("oauth_file"):
+            raise SystemExit("config.imap.oauth_file is required when auth_method=oauth2")
+    elif auth_method == "password":
+        if not cfg["imap"].get("username"):
+            raise SystemExit("config.imap.username is required when auth_method=password")
+        if not cfg["imap"].get("password_env"):
+            raise SystemExit("config.imap.password_env is required when auth_method=password")
+    else:
+        raise SystemExit(f"unknown imap.auth_method: {auth_method!r} (expected 'oauth2' or 'password')")
     return cfg
 
 

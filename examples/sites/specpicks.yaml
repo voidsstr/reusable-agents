@@ -39,8 +39,12 @@ reporter:
   email:
     to: [mperry@northernsoftwareconsulting.com]
     from: SEO Agent <automation@northernsoftwareconsulting.com>
-    msmtp_account: automation
     subject_template: "[SEO:{site}] run {tag} — {recs_count} recs"
+    graph:
+      oauth_file: ~/.reusable-agents/responder/.oauth.json
+      scope: "offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared"
+      use_shared_mailbox: true
+      from_address: automation@northernsoftwareconsulting.com
   dashboard:
     base_url: http://localhost:8080
     agent_id: seo-opportunity-agent
