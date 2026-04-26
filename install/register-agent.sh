@@ -59,6 +59,9 @@ payload = {
     "entry_command": m.get("entry_command", ""),
     "autowire_cron": True,
     "metadata": m.get("metadata", {}),
+    "depends_on": m.get("depends_on", []),
+    "runnable_modes": m.get("runnable_modes", ["cron", "manual"]),
+    "confirmation_flow": m.get("confirmation_flow", {}),
 }
 runbook = m.get("runbook", "")
 if runbook and os.path.isfile(os.path.join(agent_dir, runbook)):

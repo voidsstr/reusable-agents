@@ -32,6 +32,8 @@ class AgentSummary(BaseModel):
     last_run_status: str = ""
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
+    runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
+    confirmation_flow: dict = Field(default_factory=dict)
 
 
 class AgentDetail(AgentSummary):
@@ -42,6 +44,7 @@ class AgentDetail(AgentSummary):
     capabilities: list[str] = Field(default_factory=list)
     capabilities_detail: list[dict] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
+    depends_on: list[dict] = Field(default_factory=list)
     runbook_body: Optional[str] = None
     skill_body: Optional[str] = None
     current_status: Optional[dict] = None
@@ -64,6 +67,9 @@ class RegisterRequest(BaseModel):
     owner: str = ""
     autowire_cron: bool = True
     metadata: dict = Field(default_factory=dict)
+    depends_on: list[dict] = Field(default_factory=list)
+    runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
+    confirmation_flow: dict = Field(default_factory=dict)
 
 
 class PatchRequest(BaseModel):
@@ -98,6 +104,8 @@ def _summary(m: registry.AgentManifest) -> AgentSummary:
         enabled=m.enabled, owner=m.owner,
         last_run_status=status.get("state", ""),
         last_run_at=status.get("updated_at"),
+        runnable_modes=list(m.runnable_modes or ["cron", "manual"]),
+        confirmation_flow=dict(m.confirmation_flow or {}),
     )
 
 
@@ -120,6 +128,9 @@ def register(req: RegisterRequest):
         runbook_path=req.runbook_path, skill_path=req.skill_path,
         entry_command=req.entry_command, owner=req.owner,
         metadata=req.metadata,
+        depends_on=list(req.depends_on or []),
+        runnable_modes=list(req.runnable_modes or ["cron", "manual"]),
+        confirmation_flow=dict(req.confirmation_flow or {}),
     )
     registry.register_agent(manifest, storage=s)
     if req.autowire_cron and req.cron_expr and req.entry_command:
@@ -184,6 +195,7 @@ def get_one(agent_id: str):
         capabilities=m.capabilities,
         capabilities_detail=(m.metadata or {}).get("capabilities", []),
         metadata=m.metadata,
+        depends_on=list(m.depends_on or []),
         runbook_body=runbook_body,
         skill_body=skill_body,
         current_status=status,
@@ -254,6 +266,17 @@ def trigger(agent_id: str):
     if m is None: raise HTTPException(status_code=404, detail="unknown agent")
     if not m.entry_command:
         raise HTTPException(status_code=400, detail="agent has no entry_command")
+    # Gate: agent must allow manual triggering.
+    if m.runnable_modes and "manual" not in m.runnable_modes:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"agent {agent_id} is not manually runnable "
+                f"(runnable_modes={m.runnable_modes}). It is queue-driven — "
+                "an upstream agent dispatches work to it. See the dependency "
+                "graph for incoming edges."
+            ),
+        )
 
     queue_dir = Path(os.getenv("AGENT_TRIGGER_QUEUE_DIR", "/tmp/agent-trigger-queue"))
     queue_dir.mkdir(parents=True, exist_ok=True)

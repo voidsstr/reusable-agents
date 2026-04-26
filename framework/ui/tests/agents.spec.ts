@@ -114,3 +114,50 @@ test.describe('Events page', () => {
     await expect(errorBoundary).toHaveCount(0)
   })
 })
+
+test.describe('Runnable modes + confirmation flow', () => {
+  test('queue-driven agent has disabled Run-now and shows tooltip', async ({ page }) => {
+    // seo-implementer is registered with runnable_modes=['chained'].
+    await page.goto('/agents/seo-implementer')
+    // Disabled "queue-driven" button instead of Run now
+    const lockBtn = page.getByText(/queue-driven/i)
+    await expect(lockBtn).toBeVisible()
+    // No active "Run now" button
+    await expect(page.getByTestId('run-now')).toHaveCount(0)
+  })
+
+  test('manually runnable agent shows the Run-now button', async ({ page }) => {
+    await page.goto('/agents/aisleprompt-progressive-improvement-agent')
+    await expect(page.getByTestId('run-now')).toBeVisible()
+    await expect(page.getByTestId('run-now')).toBeEnabled()
+  })
+
+  test('confirmation flow banner is shown for email-recommendations agents', async ({ page }) => {
+    await page.goto('/agents/aisleprompt-progressive-improvement-agent')
+    const banner = page.getByTestId('confirmation-flow-banner')
+    await expect(banner).toBeVisible()
+    await expect(banner).toContainText(/Email confirmation gate/i)
+  })
+
+  test('upstream-gated banner is shown on seo-implementer', async ({ page }) => {
+    await page.goto('/agents/seo-implementer')
+    const banner = page.getByTestId('confirmation-flow-banner')
+    await expect(banner).toBeVisible()
+    await expect(banner).toContainText(/Upstream-gated/i)
+  })
+
+  test('agent card lists show "queue-driven" badge for chained agents', async ({ page }) => {
+    await page.goto('/')
+    // The seo-implementer card should carry a queue-driven badge
+    const card = page.locator('a[href="/agents/seo-implementer"]')
+    await expect(card).toBeVisible({ timeout: 5_000 })
+    await expect(card).toContainText(/queue-driven/i)
+  })
+
+  test('agent card lists show confirms-via-email badge for PI agents', async ({ page }) => {
+    await page.goto('/')
+    const card = page.locator('a[href="/agents/aisleprompt-progressive-improvement-agent"]')
+    await expect(card).toBeVisible({ timeout: 5_000 })
+    await expect(card).toContainText(/confirms via email/i)
+  })
+})

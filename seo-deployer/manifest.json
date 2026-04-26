@@ -1,7 +1,7 @@
 {
   "id": "seo-deployer",
   "name": "SEO Deployer",
-  "description": "Pluggable deploy pipeline — runs configured test, build, push, deploy, smoke-check commands. Hard gates on test failure + smoke-check failure.",
+  "description": "Pluggable deploy pipeline \u2014 runs configured test, build, push, deploy, smoke-check commands. Hard gates on test failure + smoke-check failure.",
   "category": "seo",
   "task_type": "manual",
   "cron_expr": "",
@@ -12,5 +12,13 @@
   "entry_command": "bash run.sh --run-dir $RESPONDER_RUN_DIR",
   "routine_id": "",
   "trigger_url": "",
-  "trigger_token_env": ""
+  "trigger_token_env": "",
+  "runnable_modes": [
+    "chained"
+  ],
+  "confirmation_flow": {
+    "enabled": true,
+    "kind": "upstream-gated",
+    "description": "This agent only acts on items dispatched to its response queue by upstream agents (responder-agent \u2192 user replies, or progressive-improvement-agent \u2192 tier=auto recs when site opts in). The confirmation gate is upstream: seo-reporter emails recs; the user replies; responder-agent dispatches matched recs here. Direct manual triggering is disabled (runnable_modes=['chained'])."
+  }
 }

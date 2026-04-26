@@ -63,11 +63,34 @@ export default function AgentDetail() {
         <div className="flex flex-col items-end gap-2">
           <StatusBadge state={liveState} pulsing={liveState === 'running' || liveState === 'starting'} />
           <div className="flex gap-1.5">
-            <button
-              onClick={async () => { await api.triggerAgent(id); setTimeout(refresh, 1500) }}
-              className="text-xs px-3 py-1.5 bg-glow-running/20 hover:bg-glow-running/30 text-glow-running rounded font-semibold"
-              disabled={liveState === 'running'}
-            >▶ Run now</button>
+            {(() => {
+              const modes = detail.runnable_modes || ['cron', 'manual']
+              const manualOk = modes.includes('manual')
+              if (!manualOk) {
+                return (
+                  <button
+                    disabled
+                    className="text-xs px-3 py-1.5 bg-ink-900 text-ink-600 rounded cursor-not-allowed font-semibold"
+                    title={`runnable_modes=${JSON.stringify(modes)} — queue-driven, dispatched by upstream agent. See Graph tab for incoming edges.`}
+                  >🔒 queue-driven (no manual)</button>
+                )
+              }
+              return (
+                <button
+                  data-testid="run-now"
+                  onClick={async () => {
+                    try {
+                      await api.triggerAgent(id)
+                      setTimeout(refresh, 1500)
+                    } catch (e: any) {
+                      alert(`Trigger failed: ${e?.message || e}`)
+                    }
+                  }}
+                  className="text-xs px-3 py-1.5 bg-glow-running/20 hover:bg-glow-running/30 text-glow-running rounded font-semibold"
+                  disabled={liveState === 'running'}
+                >▶ Run now</button>
+              )
+            })()}
             <button
               onClick={async () => {
                 if (detail.enabled) await api.disableAgent(id)
@@ -79,6 +102,15 @@ export default function AgentDetail() {
           </div>
         </div>
       </div>
+
+      {/* Confirmation-flow banner */}
+      {detail.confirmation_flow?.enabled && (
+        <ConfirmationFlowBanner
+          kind={detail.confirmation_flow.kind || ''}
+          description={detail.confirmation_flow.description || ''}
+          ownerEmail={detail.confirmation_flow.owner_email || detail.owner}
+        />
+      )}
 
       <div className="border-b border-ink-800 flex gap-1">
         {TABS.map(t => (
@@ -677,6 +709,59 @@ function ChangelogTab({ agentId }: { agentId: string }) {
           )}
         </div>
       ))}
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Confirmation-flow banner
+// ---------------------------------------------------------------------------
+
+const KIND_META: Record<string, { emoji: string; label: string; bg: string; fg: string; border: string }> = {
+  'email-recommendations': {
+    emoji: '✉',
+    label: 'Email confirmation gate',
+    bg: 'rgba(34,197,94,0.10)', fg: '#bbf7d0', border: 'rgba(34,197,94,0.45)',
+  },
+  'upstream-gated': {
+    emoji: '⤴',
+    label: 'Upstream-gated',
+    bg: 'rgba(168,85,247,0.10)', fg: '#e9d5ff', border: 'rgba(168,85,247,0.45)',
+  },
+  'per-action': {
+    emoji: '🛡',
+    label: 'Per-action confirmation',
+    bg: 'rgba(245,158,11,0.10)', fg: '#fde68a', border: 'rgba(245,158,11,0.45)',
+  },
+  'preview-mode': {
+    emoji: '👁',
+    label: 'Preview mode',
+    bg: 'rgba(56,189,248,0.10)', fg: '#bae6fd', border: 'rgba(56,189,248,0.45)',
+  },
+}
+
+function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: string; description: string; ownerEmail: string }) {
+  const meta = KIND_META[kind] || {
+    emoji: '🛡', label: kind || 'Confirmation gate',
+    bg: 'rgba(34,197,94,0.10)', fg: '#bbf7d0', border: 'rgba(34,197,94,0.45)',
+  }
+  return (
+    <div
+      data-testid="confirmation-flow-banner"
+      className="rounded p-3 text-sm flex items-start gap-3"
+      style={{ background: meta.bg, color: meta.fg, border: `1px solid ${meta.border}` }}
+    >
+      <div className="text-2xl leading-none">{meta.emoji}</div>
+      <div className="flex-1 min-w-0">
+        <div className="font-semibold">{meta.label}</div>
+        {description && <div className="text-xs mt-1 opacity-90">{description}</div>}
+        {ownerEmail && (
+          <div className="text-[11px] mt-1 opacity-70 font-mono">
+            owner: {ownerEmail}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

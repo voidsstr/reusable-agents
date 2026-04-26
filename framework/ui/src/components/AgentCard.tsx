@@ -58,6 +58,9 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
         <div className="text-xs text-ink-300 line-clamp-2 mb-2">{agent.description}</div>
       )}
 
+      <AgentBadges agent={agent} />
+
+
       <div className="text-[11px] text-ink-400 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 font-mono">
         <span className="text-ink-500">cron:</span>
         <span className="truncate">{agent.cron_expr || '(manual)'} <span className="text-ink-600">{agent.timezone}</span></span>
@@ -90,14 +93,30 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
         className="flex gap-1 mt-3 pt-2 border-t border-ink-700/50"
         onClick={(e) => e.preventDefault()}
       >
-        <button
-          onClick={(e) => { e.stopPropagation(); onTrigger?.(agent.id) }}
-          className="text-[11px] px-2 py-1 bg-ink-700 hover:bg-glow-running/20 hover:text-glow-running rounded transition-colors"
-          disabled={isActive}
-          title={isActive ? 'A run is already in progress' : 'Trigger a run now'}
-        >
-          ▶ run
-        </button>
+        {(() => {
+          const manualOk = !agent.runnable_modes || agent.runnable_modes.includes('manual')
+          if (!manualOk) {
+            return (
+              <button
+                disabled
+                className="text-[11px] px-2 py-1 bg-ink-900 text-ink-600 rounded cursor-not-allowed"
+                title={`Queue-driven agent (runnable_modes=${JSON.stringify(agent.runnable_modes)}). Triggered by upstream agent — see the dependency graph.`}
+              >
+                🔒 queue-driven
+              </button>
+            )
+          }
+          return (
+            <button
+              onClick={(e) => { e.stopPropagation(); onTrigger?.(agent.id) }}
+              className="text-[11px] px-2 py-1 bg-ink-700 hover:bg-glow-running/20 hover:text-glow-running rounded transition-colors"
+              disabled={isActive}
+              title={isActive ? 'A run is already in progress' : 'Trigger a run now'}
+            >
+              ▶ run
+            </button>
+          )
+        })()}
         <button
           onClick={(e) => { e.stopPropagation(); onToggleEnabled?.(agent) }}
           className="text-[11px] px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded transition-colors"
@@ -106,5 +125,74 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
         </button>
       </div>
     </Link>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Badges showing confirmation-flow + runnable-modes status
+// ---------------------------------------------------------------------------
+
+function AgentBadges({ agent }: { agent: AgentSummary }) {
+  const cf = agent.confirmation_flow || {}
+  const modes = agent.runnable_modes || ['cron', 'manual']
+  const queueDriven = !modes.includes('manual')
+
+  const badges: { label: string; bg: string; fg: string; title: string }[] = []
+
+  if (cf.kind === 'email-recommendations') {
+    badges.push({
+      label: '✉ confirms via email',
+      bg: 'rgba(34,197,94,0.18)', fg: '#86efac',
+      title: cf.description || 'Recs are emailed; user reply gates implementation.',
+    })
+  } else if (cf.kind === 'upstream-gated') {
+    badges.push({
+      label: '⤴ upstream-gated',
+      bg: 'rgba(168,85,247,0.18)', fg: '#d8b4fe',
+      title: cf.description || 'Confirmation happens at an upstream agent.',
+    })
+  } else if (cf.kind === 'per-action') {
+    badges.push({
+      label: '🛡 per-action',
+      bg: 'rgba(245,158,11,0.18)', fg: '#fcd34d',
+      title: cf.description || 'Each dangerous action requires explicit confirmation.',
+    })
+  } else if (cf.enabled) {
+    badges.push({
+      label: '🛡 confirmation gate',
+      bg: 'rgba(34,197,94,0.18)', fg: '#86efac',
+      title: cf.description || 'Has a confirmation gate before acting.',
+    })
+  }
+
+  if (queueDriven) {
+    badges.push({
+      label: '🔒 queue-driven',
+      bg: 'rgba(100,116,139,0.25)', fg: '#cbd5e1',
+      title: `runnable_modes=${JSON.stringify(modes)} — only triggered by upstream dispatch.`,
+    })
+  } else if (modes.includes('cron') && modes.includes('manual') && !agent.cron_expr) {
+    badges.push({
+      label: '✋ manual',
+      bg: 'rgba(100,116,139,0.18)', fg: '#94a3b8',
+      title: 'No cron schedule — runs only on manual trigger.',
+    })
+  }
+
+  if (badges.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-1 mb-2">
+      {badges.map((b, i) => (
+        <span
+          key={i}
+          title={b.title}
+          className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+          style={{ background: b.bg, color: b.fg }}
+        >
+          {b.label}
+        </span>
+      ))}
+    </div>
   )
 }

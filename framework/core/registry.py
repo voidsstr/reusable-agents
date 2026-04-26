@@ -54,7 +54,36 @@ class AgentManifest:
     # depends_on entries: {agent_id, kind, description?}
     # kind ∈ triggers, feeds-run-dir, polls-replies-for, routes-replies-to,
     # dispatches-to, sends-email-via, config-shared-with
-    # These OVERRIDE / supplement framework defaults.
+
+    runnable_modes: list[str] = field(
+        default_factory=lambda: ["cron", "manual"]
+    )
+    """Allowed trigger sources. Subset of:
+        cron     — scheduled timer (only if cron_expr is set)
+        manual   — Run-now button in dashboard / API trigger
+        chained  — dispatched by another agent (response queue, run-dir feed)
+
+    Pure pipeline-stage agents (e.g. seo-implementer, seo-deployer) are
+    typically ['chained'] only — manually running them with no upstream
+    payload is a footgun. The dashboard greys out the Run-now button
+    when 'manual' is not present."""
+
+    confirmation_flow: dict[str, Any] = field(default_factory=dict)
+    """How this agent gates work behind a human confirmation:
+
+        {
+          "enabled": true,
+          "kind":    "email-recommendations" | "per-action" | "preview-mode" | "none",
+          "description": "Recs are emailed daily; user replies to choose which to ship.",
+          "owner_email": "..."
+        }
+
+    Surfaced in the dashboard so it's clear at a glance whether an agent
+    operates autonomously or behind an email gate. `kind=email-
+    recommendations` means: agent emails ranked recs and waits for the
+    user's reply (via responder-agent) before shipping. Defaults to
+    empty (no confirmation gate)."""
+
     created_at: str = ""
     updated_at: str = ""
 

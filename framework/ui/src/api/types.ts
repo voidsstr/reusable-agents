@@ -3,6 +3,15 @@
 export type AgentState =
   | 'idle' | 'starting' | 'running' | 'success' | 'failure' | 'blocked' | 'cancelled' | 'unknown' | ''
 
+export type RunnableMode = 'cron' | 'manual' | 'chained'
+
+export interface ConfirmationFlow {
+  enabled?: boolean
+  kind?: 'email-recommendations' | 'per-action' | 'preview-mode' | 'upstream-gated' | 'none' | string
+  description?: string
+  owner_email?: string
+}
+
 export interface AgentSummary {
   id: string
   name: string
@@ -16,6 +25,8 @@ export interface AgentSummary {
   last_run_status: AgentState
   last_run_at: string | null
   next_run_at: string | null
+  runnable_modes: RunnableMode[]
+  confirmation_flow: ConfirmationFlow
 }
 
 export interface AgentDetail extends AgentSummary {
@@ -26,6 +37,7 @@ export interface AgentDetail extends AgentSummary {
   capabilities: string[]
   capabilities_detail: CapabilityDetail[]
   metadata: Record<string, unknown>
+  depends_on: { agent_id: string; kind: string; description?: string }[]
   runbook_body: string | null
   skill_body: string | null
   current_status: AgentLiveStatus | null

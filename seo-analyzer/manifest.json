@@ -12,5 +12,13 @@
   "entry_command": "SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG python3 analyzer.py",
   "routine_id": "",
   "trigger_url": "",
-  "trigger_token_env": ""
+  "trigger_token_env": "",
+  "runnable_modes": [
+    "chained"
+  ],
+  "confirmation_flow": {
+    "enabled": false,
+    "kind": "none",
+    "description": "Pipeline-stage agent \u2014 driven by upstream (seo-opportunity-agent / responder-agent). Confirmation gating happens at the upstream agent (seo-reporter emails recs; responder-agent dispatches user replies)."
+  }
 }
