@@ -482,6 +482,57 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
 # Main
 # ---------------------------------------------------------------------------
 
+def _crawl_for_audit(cfg, run_dir):
+    """On-demand crawl of the site's homepage + top GSC pages + sitemap entries.
+
+    Used by the LLM audit when the collector didn't already produce a
+    pages.jsonl. Returns a list of page records (url, title, h1,
+    description, canonical, body_text). Capped at 20 pages.
+    """
+    try:
+        # Reuse the BFS crawler from progressive-improvement-agent
+        sys.path.insert(0, str(_REPO_ROOT / "progressive-improvement-agent"))
+        from crawler import crawl as _crawl
+    except ImportError as e:
+        print(f"  [llm-audit] crawler import failed: {e}", file=sys.stderr)
+        return []
+
+    domain = cfg.get("site", {}).get("domain", "")
+    if not domain:
+        return []
+    base_url = f"https://{domain}"
+
+    # Seed URLs: homepage + top GSC pages + sitemap roots
+    seeds: list[str] = ["/"]
+    gsc_pages = _load(run_dir / "data" / "gsc-pages-90d.json")
+    for r in (gsc_pages.get("rows") or [])[:10]:
+        url = r.get("keys", [None])[0]
+        if url and url.startswith(base_url):
+            seeds.append(url)
+
+    print(f"  [llm-audit] on-demand crawl: {base_url} ({len(seeds)} seeds)",
+          file=sys.stderr)
+    pages = []
+    for page in _crawl(
+        base_url=base_url,
+        seed_urls=seeds,
+        use_sitemap=True,
+        max_depth=1,
+        max_pages=20,
+        path_excludes=["/admin/*", "/api/*", "/auth/*"],
+        request_timeout_s=15,
+        user_agent="reusable-agents-seo-audit/1.0",
+        throttle_ms=400,
+    ):
+        if 200 <= page.status_code < 300 and page.body_text:
+            pages.append({
+                "url": page.url, "title": page.title,
+                "h1": page.h1, "description": page.description,
+                "canonical": page.canonical, "body_text": page.body_text,
+            })
+    return pages
+
+
 def _build_ai_chat_callable(cfg):
     """Return a `(messages, *, temperature, max_tokens) -> str` callable that
     routes through the framework's AI provider config, OR None if unavailable.
@@ -572,8 +623,10 @@ def main() -> None:
             ai_chat = _build_ai_chat_callable(cfg)
             if ai_chat is not None:
                 # Pull the page records the collector scraped (if any).
-                # The collector currently writes data/pages.jsonl when
-                # available; the LLM audit is best-effort otherwise.
+                # The SEO collector currently doesn't crawl pages, so we
+                # do an on-demand crawl using the same crawler the
+                # progressive-improvement agent uses. Caches to
+                # data/pages.jsonl for re-use next run.
                 pages_path = run_dir / "data" / "pages.jsonl"
                 pages: list[dict] = []
                 if pages_path.is_file():
@@ -584,6 +637,12 @@ def main() -> None:
                             pages.append(json.loads(line))
                         except Exception:
                             pass
+                if not pages:
+                    pages = _crawl_for_audit(cfg, run_dir)
+                    if pages:
+                        with pages_path.open("w") as f:
+                            for p in pages:
+                                f.write(json.dumps(p) + "\n")
                 # Cap at 20 pages to keep token usage sane
                 pages = pages[:20]
                 if pages:
