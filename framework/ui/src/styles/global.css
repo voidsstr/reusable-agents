@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-ink-900 text-ink-100 font-sans antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                 Oxygen, Ubuntu, sans-serif;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #475569; }
+}
+
+@layer components {
+  /* Agent card glow — driven by a CSS var --glow-color set by AgentCard. */
+  .agent-card-glow {
+    @apply border-2 rounded-lg transition-all;
+    border-color: rgb(var(--glow-color) / 0.4);
+  }
+  .agent-card-glow.is-active {
+    animation: glow-pulse 2s ease-in-out infinite;
+  }
+
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+    background-color: rgb(var(--glow-color));
+    box-shadow: 0 0 8px rgb(var(--glow-color) / 0.6);
+  }
+  .status-dot.is-pulsing {
+    animation: glow-pulse 1.5s ease-in-out infinite;
+  }
+}

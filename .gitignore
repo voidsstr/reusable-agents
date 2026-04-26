@@ -250,3 +250,13 @@ seen_listings.json
 
 # Bash backups
 *.bak
+
+# UI build output
+framework/ui/dist/
+framework/ui/node_modules/
+framework/ui/package-lock.json
+
+# Python build / cache
+framework/**/__pycache__/
+framework/**/*.pyc
+framework/.pytest_cache/
