@@ -137,6 +137,85 @@ def validate_recs_doc(doc: dict) -> None:
 # Email rendering
 # ---------------------------------------------------------------------------
 
+def _send_via_graph_simple(*, subject: str, body_html: str, to: list[str],
+                           sender: str,
+                           extra_headers: Optional[dict[str, str]] = None,
+                           oauth_file: Optional[str] = None) -> tuple[bool, str]:
+    """Send an HTML email via Microsoft Graph /sendMail using the responder's
+    refresh token. Used as the primary path because the host's msmtp is
+    sandboxed by AppArmor and can't exec the python3 OAuth passwordeval."""
+    import json as _j
+    import os as _os
+    import sys as _s
+    import urllib.error
+    import urllib.request as _ur
+    from pathlib import Path as _P
+
+    here = _P(__file__).resolve().parent
+    repo_root = here.parent
+    mint_path = repo_root / "agents" / "responder-agent"
+    _s.path.insert(0, str(mint_path))
+    try:
+        from importlib import import_module
+        mint = import_module("mint-token")
+        oauth_path = _P(_os.path.expanduser(
+            oauth_file or "~/.reusable-agents/responder/.oauth.json"
+        ))
+        if not oauth_path.is_file():
+            return False, f"no oauth file at {oauth_path}"
+        token, oauth_user, _ = mint.mint_access_token(
+            oauth_path,
+            scope_override="offline_access https://graph.microsoft.com/Mail.Send",
+        )
+    finally:
+        try: _s.path.remove(str(mint_path))
+        except ValueError: pass
+
+    sender_addr = sender
+    if "<" in sender and ">" in sender:
+        sender_addr = sender.split("<", 1)[1].split(">", 1)[0]
+
+    # Graph requires internetMessageHeaders names to start with "x-"; non-x
+    # headers (like Reply-To) get mapped to native message fields. Only
+    # include the field at all when there's at least one valid x-* header
+    # — passing an empty list returns HTTP 400 InvalidInternetMessageHeaderCollection.
+    headers = extra_headers or {}
+    x_headers = [(k, v) for k, v in headers.items() if k.lower().startswith("x-")]
+    msg = {
+        "subject": subject,
+        "body": {"contentType": "HTML", "content": body_html},
+        "toRecipients": [{"emailAddress": {"address": a.strip()}} for a in to if a.strip()],
+    }
+    if x_headers:
+        msg["internetMessageHeaders"] = [{"name": k, "value": v} for k, v in x_headers]
+    if "Reply-To" in headers:
+        msg["replyTo"] = [{"emailAddress": {"address": headers["Reply-To"]}}]
+    attempts = [
+        ("send_as", f"https://graph.microsoft.com/v1.0/users/{sender_addr}/sendMail",
+         {"message": msg, "saveToSentItems": True}),
+        ("send_on_behalf", "https://graph.microsoft.com/v1.0/me/sendMail",
+         {"message": dict(msg, **{"from": {"emailAddress": {"address": sender_addr}}}),
+          "saveToSentItems": True}),
+        ("self", "https://graph.microsoft.com/v1.0/me/sendMail",
+         {"message": msg, "saveToSentItems": True}),
+    ]
+    last_err = ""
+    for method, url, payload in attempts:
+        body = _j.dumps(payload).encode()
+        req = _ur.Request(url, data=body, method="POST",
+                          headers={"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"})
+        try:
+            with _ur.urlopen(req, timeout=30) as resp:
+                if resp.status == 202:
+                    return True, f"graph:{method}"
+        except urllib.error.HTTPError as e:
+            last_err = f"graph:{method} HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
+        except Exception as e:
+            last_err = f"graph:{method} {type(e).__name__}: {e}"
+    return False, last_err
+
+
 def send_via_msmtp(
     *,
     subject: str,
@@ -146,14 +225,26 @@ def send_via_msmtp(
     msmtp_account: str = "automation",
     extra_headers: Optional[dict[str, str]] = None,
 ) -> tuple[bool, str]:
-    """Send an HTML email via local msmtp. Mirrors seo-reporter/send-report.py.
-    Returns (ok, detail). Caller is responsible for setting up ~/.msmtprc with
-    the named account."""
+    """Send an HTML email. Despite the legacy name, tries Microsoft Graph
+    sendMail first (host's msmtp is sandboxed by AppArmor and can't exec the
+    OAuth passwordeval), then falls back to msmtp. Caller doesn't need to
+    care which path is taken; success looks identical."""
     import subprocess
     from email.utils import formatdate, make_msgid
 
     if not to:
         return False, "no recipients"
+
+    # Prefer Graph if oauth file is available
+    import os as _os
+    if _os.path.isfile(_os.path.expanduser("~/.reusable-agents/responder/.oauth.json")):
+        ok, detail = _send_via_graph_simple(
+            subject=subject, body_html=body_html, to=to,
+            sender=sender, extra_headers=extra_headers,
+        )
+        if ok:
+            return True, detail
+
     msg_lines = [
         f"From: {sender}",
         f"To: {', '.join(to)}",

@@ -340,9 +340,37 @@ def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
 # Routing — find the right run dir for a given (agent, site) hint
 # ---------------------------------------------------------------------------
 
-def find_run_dir_for_site(runs_roots: list[Path], site: str, hint_run_ts: Optional[str] = None) -> Optional[Path]:
-    """Find the latest run dir for `site` across all configured runs_roots.
-    If hint_run_ts is given, prefer that exact run."""
+def find_run_dir_for_site(runs_roots: list[Path], site: str,
+                          hint_run_ts: Optional[str] = None,
+                          source_agent: Optional[str] = None) -> Optional[Path]:
+    """Find the latest run dir.
+
+    Two layouts supported (priority order):
+      1. Framework PI/CR (when source_agent is set):
+         <fw_storage>/agents/<source_agent>/runs/<run_ts>/
+      2. SEO legacy: <runs_root>/<site>/<run_ts>/
+
+    Prefers framework storage when source_agent is set so PI/CR agents
+    don't accidentally bind to a stale SEO run dir for the same site.
+    If hint_run_ts is given, prefer that exact run.
+    """
+    # Framework storage layout (PI/CR/etc.) — checked first when source_agent is set
+    if source_agent:
+        fw_storage = Path(os.path.expanduser(
+            os.environ.get("AGENT_STORAGE_LOCAL_PATH",
+                            "~/.reusable-agents/data")
+        ))
+        agent_runs = fw_storage / "agents" / source_agent / "runs"
+        if agent_runs.is_dir():
+            if hint_run_ts:
+                specific = agent_runs / hint_run_ts
+                if specific.is_dir():
+                    return specific
+            candidates = sorted(p for p in agent_runs.iterdir() if p.is_dir())
+            if candidates:
+                return candidates[-1]
+
+    # SEO legacy layout
     for root in runs_roots:
         site_dir = root / site
         if not site_dir.is_dir():
@@ -351,7 +379,6 @@ def find_run_dir_for_site(runs_roots: list[Path], site: str, hint_run_ts: Option
             specific = site_dir / hint_run_ts
             if specific.is_dir():
                 return specific
-        # Latest symlink (preferred) or alphabetically max non-`latest` subdir
         latest = site_dir / "latest"
         if latest.is_symlink() or latest.exists():
             try: return latest.resolve()
@@ -596,13 +623,33 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
 
     recorded = 0
     for action_obj in actions:
+        # Determine site + source_agent. For PI/CR (subject tag is a full
+        # agent id like 'aisleprompt-progressive-improvement-agent'), the
+        # 'site' regex captures the request_id by mistake — derive site
+        # from the agent_id's first component instead.
         site = action_obj.get("prefix_site") or site_hint
+        candidate_source_agent = None
+        if agent_hint and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity)-agent$", agent_hint):
+            candidate_source_agent = agent_hint
+            # Derive site from agent id: '<site>-progressive-improvement-agent'
+            #   → site = '<site>' (everything before the suffix)
+            for suffix in ("-progressive-improvement-agent",
+                            "-competitor-research-agent",
+                            "-seo-opportunity-agent"):
+                if agent_hint.endswith(suffix):
+                    site = agent_hint[: -len(suffix)]
+                    break
         if not site:
             print(f"  [skip] no site for action {action_obj['raw_line']!r}", file=sys.stderr)
             continue
-        run_dir = find_run_dir_for_site(runs_roots, site, hint_run_ts=run_ts_hint)
+        run_dir = find_run_dir_for_site(
+            runs_roots, site,
+            hint_run_ts=run_ts_hint,
+            source_agent=candidate_source_agent,
+        )
         if not run_dir:
-            print(f"  [skip] no run dir found for site={site}", file=sys.stderr)
+            print(f"  [skip] no run dir found for site={site} agent={candidate_source_agent}",
+                  file=sys.stderr)
             continue
         run_ts = run_dir.name
 

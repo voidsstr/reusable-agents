@@ -137,6 +137,9 @@ def _send_via_graph(*, to_list: list[str], from_address: str,
         try: sys.path.remove(str(mint_path))
         except ValueError: pass
 
+    # Graph rejects internetMessageHeaders with non-x-* names AND rejects
+    # an empty list. Filter + omit accordingly.
+    x_headers = [(k, v) for k, v in extra_headers if k.lower().startswith("x-")]
     msg: dict = {
         "subject": subject,
         "body": {"contentType": "HTML", "content": html_body},
@@ -144,10 +147,9 @@ def _send_via_graph(*, to_list: list[str], from_address: str,
             {"emailAddress": {"address": addr.strip()}}
             for addr in to_list if addr.strip()
         ],
-        "internetMessageHeaders": [
-            {"name": k, "value": v} for k, v in extra_headers
-        ],
     }
+    if x_headers:
+        msg["internetMessageHeaders"] = [{"name": k, "value": v} for k, v in x_headers]
     # Try send_as first (shared mailbox), then send_on_behalf, then self
     attempts = [
         ("send_as", f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail",
