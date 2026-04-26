@@ -325,59 +325,97 @@ def _send_via_graph(graph_cfg: dict, site_id: str, *,
         except ValueError: pass
 
     from_address = _extract_address(from_addr) or oauth_user
-    use_shared = graph_cfg.get("use_shared_mailbox", False)
-    if use_shared and from_address:
-        url = f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail"
-    else:
-        url = "https://graph.microsoft.com/v1.0/me/sendMail"
 
-    payload = {
-        "message": {
+    # Three send strategies, in priority order:
+    #   1. send_on_behalf   → POST /me/sendMail with message.from = shared mbx
+    #                          (uses "Send on Behalf Of" permission; "from" line
+    #                          on the message will read 'shared on behalf of user')
+    #   2. send_as          → POST /users/<shared>/sendMail
+    #                          (uses "Send As" permission; "from" line reads as
+    #                          shared mailbox cleanly with no on-behalf-of suffix)
+    #   3. self             → POST /me/sendMail (no shared mailbox, just send as
+    #                          the signed-in user)
+    # Determined by graph_cfg.method (default: "send_as" if use_shared_mailbox=true,
+    # else "self"). If primary fails with 403, automatically retry with the
+    # other shared-mailbox method as a fallback.
+    explicit_method = graph_cfg.get("method")
+    use_shared = graph_cfg.get("use_shared_mailbox", False)
+    if explicit_method:
+        method = explicit_method
+    elif use_shared:
+        method = "send_as"
+    else:
+        method = "self"
+
+    def _build_request(method_: str) -> tuple[str, dict]:
+        msg: dict = {
             "subject": subject,
             "body": {"contentType": "HTML", "content": html_body},
             "toRecipients": [
                 {"emailAddress": {"address": _extract_address(addr) or addr}}
                 for addr in to_list
             ],
-            "from": {"emailAddress": {"address": from_address}} if use_shared else None,
-            # SingleValueExtendedProperties + InternetMessageHeaders for our
-            # X-* headers so the responder can match replies. Graph requires
-            # the X- prefix for custom internet message headers.
             "internetMessageHeaders": [
                 {"name": k, "value": v} for k, v in extra_headers
             ],
-        },
-        "saveToSentItems": True,
-    }
-    # Drop None values that Graph would reject
-    msg = payload["message"]
-    payload["message"] = {k: v for k, v in msg.items() if v is not None}
+        }
+        if method_ == "send_as":
+            url_ = f"https://graph.microsoft.com/v1.0/users/{from_address}/sendMail"
+        elif method_ == "send_on_behalf":
+            url_ = "https://graph.microsoft.com/v1.0/me/sendMail"
+            msg["from"] = {"emailAddress": {"address": from_address}}
+        else:  # self
+            url_ = "https://graph.microsoft.com/v1.0/me/sendMail"
+        return url_, {"message": msg, "saveToSentItems": True}
 
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            # 202 Accepted is the success code for sendMail
-            if resp.status == 202:
-                print(f"[reporter] sent to {', '.join(to_list)} via Graph "
-                      f"({'shared' if use_shared else 'me'}/{from_address})",
+    def _send(method_: str) -> tuple[bool, str]:
+        url, payload = _build_request(method_)
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.status == 202:
+                    return True, ""
+                return False, f"unexpected status {resp.status}"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:600]}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    # Try the configured method first
+    ok, err = _send(method)
+    if ok:
+        print(f"[reporter] sent to {', '.join(to_list)} via Graph ({method}, from={from_address})",
+              file=sys.stderr)
+        return True
+    print(f"[reporter] Graph sendMail [{method}] failed: {err}", file=sys.stderr)
+
+    # Fallback chain — only attempt if we haven't been pinned to a specific method
+    if not explicit_method:
+        if method == "send_as":
+            print(f"[reporter] retrying as send_on_behalf …", file=sys.stderr)
+            ok, err = _send("send_on_behalf")
+            if ok:
+                print(f"[reporter] sent via Graph (send_on_behalf, from={from_address})",
                       file=sys.stderr)
                 return True
-            print(f"[reporter] Graph sendMail unexpected status {resp.status}", file=sys.stderr)
-            return False
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")[:1500]
-        print(f"[reporter] Graph sendMail HTTP {e.code}: {body}", file=sys.stderr)
-        return False
-    except Exception as e:
-        print(f"[reporter] Graph sendMail error: {e}", file=sys.stderr)
-        return False
+            print(f"[reporter] Graph sendMail [send_on_behalf] failed: {err}", file=sys.stderr)
+        elif method == "send_on_behalf":
+            print(f"[reporter] retrying as send_as …", file=sys.stderr)
+            ok, err = _send("send_as")
+            if ok:
+                print(f"[reporter] sent via Graph (send_as, from={from_address})",
+                      file=sys.stderr)
+                return True
+            print(f"[reporter] Graph sendMail [send_as] failed: {err}", file=sys.stderr)
+
+    return False
 
 
 def _send_via_smtplib_oauth2(smtp_cfg: dict, from_addr: str, to_list: list[str], raw: str) -> bool:
