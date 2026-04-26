@@ -1,0 +1,89 @@
+"""{{AGENT_NAME}} — implementation.
+
+Subclasses framework.core.agent_base.AgentBase. All lifecycle plumbing
+(state load, response queue drain, status writes, decision log,
+context summary, error capture) is provided by AgentBase — only `run()`
+must be implemented.
+
+Invoke:
+    python3 agent.py
+or via the framework's Run-now button (which goes through the host-worker).
+"""
+from __future__ import annotations
+
+# Make the framework importable regardless of how this script is invoked
+import os, sys
+_REPO = "{{FRAMEWORK_REPO_DIR}}"
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
+
+from framework.core.agent_base import AgentBase, RunResult
+from framework.core.confirmations import requires_confirmation
+from framework.core.guardrails import declare
+
+
+class {{AGENT_CLASS_NAME}}(AgentBase):
+    agent_id = "{{AGENT_ID}}"
+    name = "{{AGENT_NAME}}"
+    description = "{{AGENT_DESCRIPTION}}"
+    category = "{{AGENT_CATEGORY}}"
+
+    capabilities = [
+        # Declare every meaningful method here so the dashboard can audit
+        # what this agent is allowed to do. confirmation_required=True for
+        # anything that touches production / git / billing / external APIs
+        # with side-effects.
+        declare("read_inputs", "Read external data sources",
+                confirmation_required=False, risk_level="low"),
+        # declare("ship_to_prod", "Push a release tag to production",
+        #         confirmation_required=True, risk_level="high",
+        #         affects=["production", "git"]),
+    ]
+
+    def setup(self) -> None:
+        """One-time process init — load API clients, validate creds."""
+        # self.api_client = ...
+
+    def run(self) -> RunResult:
+        """Main work. Use self.status / self.decide / self.message liberally.
+        Read self.state for carried-forward state and self.responses for any
+        user replies the responder picked up since the last run."""
+        self.status("starting", progress=0.0, current_action="setup")
+        self.decide("plan", "fill this in — what do you intend to do?")
+
+        # Drain any responses the user sent in reply to the last run's email
+        for resp in self.responses:
+            self.decide("observation",
+                        f"User replied: {resp.get('action')} on {resp.get('rec_id', '?')}")
+            # … handle each response …
+
+        # Load prior context (date-indexed summaries, capped at 20K chars)
+        # prior = self.find_context()
+
+        # ── Your work goes here ──────────────────────────────────────────────
+        self.status("doing the work", progress=0.5)
+        # …
+        # ────────────────────────────────────────────────────────────────────
+
+        self.status("finalizing", progress=0.9)
+
+        return RunResult(
+            status="success",
+            summary="finished cleanly",
+            metrics={"items_processed": 0},
+            next_state={"last_run_ok": True},
+        )
+
+    @requires_confirmation(reason="describe the dangerous thing this does")
+    def example_dangerous_method(self) -> None:
+        """Replace this with a real gated method. Decorator handles the
+        confirmation flow — this body only runs after the owner approves
+        via email or the dashboard's Confirmations page."""
+        pass
+
+    def teardown(self) -> None:
+        """Final cleanup — close connections, flush caches."""
+
+
+if __name__ == "__main__":
+    {{AGENT_CLASS_NAME}}().run_once()

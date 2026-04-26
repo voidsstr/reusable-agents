@@ -201,9 +201,82 @@ Why blob keys instead of e.g. Storage Queues for messages:
 - Auditable — humans can read everything in the portal
 - No queue retention limits (Azure Queues cap at 7d)
 
-## Authoring an agent
+## Creating a new agent (the standard flow)
 
-### Subclass `AgentBase` (recommended for new agents)
+The framework ships an `install/create-agent.sh` scaffold script that sets up
+a new agent dir conforming to all framework standards (manifest format,
+runbook conventions, entry-script shape, registration glue). Use this when
+adding a new agent to ANY repo — your repo, my repo, doesn't matter.
+
+```bash
+# Python agent (subclasses AgentBase, gets full lifecycle for free)
+bash /path/to/reusable-agents/install/create-agent.sh \
+    my-new-agent /path/to/your-repo/agents \
+    --name "My New Agent" \
+    --description "Pulls X, computes Y, emits Z" \
+    --category research \
+    --cron "*/30 * * * *" \
+    --timezone "America/Detroit" \
+    --owner "you@example.com" \
+    --kind python
+
+# Bash agent (lighter weight; no AgentBase, just an entry script)
+bash /path/to/reusable-agents/install/create-agent.sh \
+    my-watchdog /path/to/your-repo/agents \
+    --description "..." --kind bash --cron "*/5 * * * *"
+
+# Auto-register immediately after scaffolding
+bash /path/to/reusable-agents/install/create-agent.sh \
+    my-new-agent /path/to/your-repo/agents \
+    --description "..." --register
+```
+
+### What gets created
+
+```
+your-repo/agents/<agent-id>/
+├── manifest.json          # registry metadata (already filled in from CLI args)
+├── AGENT.md               # runbook stub with conventions for decisions, state, gates
+├── SKILL.md               # Claude Desktop task definition (frontmatter + body)
+├── agent.py               # AgentBase subclass with example status/decide/confirm calls
+├── run.sh                 # entry script the framework's host-worker invokes
+├── README.md              # quick reference card
+└── requirements.txt       # extra Python deps the agent needs
+```
+
+For `--kind bash`, you get `run.sh` only (no `agent.py`).
+
+### Standards every new agent follows
+
+1. **Kebab-case ID** — `my-new-agent`, not `MyNewAgent` or `my_new_agent`.
+2. **Manifest schema** — see [Manifest format](#manifest-format) below. The
+   scaffold pre-fills it from the CLI args you pass.
+3. **AGENT.md sections** — every runbook has the same eight headings so a
+   new reader can scan: *What this agent does · Schedule · Inputs/Outputs ·
+   Per-run flow · Hard gates · State carried · Decisions to log · Goals*.
+4. **Lifecycle** (Python agents) — implement `run()` returning a `RunResult`.
+   The framework handles state load + response-queue drain + decision log
+   + context summary + error capture + status updates.
+5. **Capabilities declared** — list every meaningful method on the class
+   with `declare(name, description, confirmation_required=...)`. The UI
+   audits these.
+6. **Confirmation-gated dangers** — wrap any production-affecting method
+   with `@requires_confirmation(reason=...)`. The framework emails the
+   owner; nothing happens until the owner approves (via email reply or
+   the dashboard).
+7. **Status reporting** — call `self.status("doing X", progress=0.5)`
+   liberally. Drives the glow animation in the UI.
+8. **Decision logging** — call `self.decide("plan"|"observation"|"choice"|...)`
+   for anything a future run should know about.
+9. **State persistence** — return `RunResult.next_state` for state to carry
+   forward. Don't write directly to the filesystem; use storage abstraction.
+10. **No `--no-verify`** on git commit (release-tagger enforces).
+
+### Authoring without the scaffold
+
+If you want to hand-roll an agent:
+
+#### Subclass `AgentBase` (recommended for new agents)
 
 ```python
 from framework.core.agent_base import AgentBase, RunResult

@@ -1,0 +1,20 @@
+{
+  "id": "{{AGENT_ID}}",
+  "name": "{{AGENT_NAME}}",
+  "description": "{{AGENT_DESCRIPTION}}",
+  "category": "{{AGENT_CATEGORY}}",
+  "task_type": "desktop-task",
+  "cron_expr": "{{AGENT_CRON}}",
+  "timezone": "{{AGENT_TIMEZONE}}",
+  "enabled": true,
+  "owner": "{{AGENT_OWNER}}",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "{{AGENT_ENTRY_COMMAND}}",
+  "metadata": {
+    "framework": "reusable-agents",
+    "source_repo": "{{SOURCE_REPO}}",
+    "source_path": "{{SOURCE_PATH}}",
+    "created_at": "{{CREATED_AT}}"
+  }
+}
