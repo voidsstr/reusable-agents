@@ -46,12 +46,13 @@ seo-reporter ─sends email─► automation@company.com ─► You read it
 
 ```yaml
 imap:
-  host: imap.example.com
+  host: outlook.office365.com                # or imap.gmail.com for Google
   port: 993
   username: automation@northernsoftwareconsulting.com
-  password_env: REUSABLE_AGENTS_IMAP_PASS    # env var name (NEVER paste the password into the YAML)
   use_tls: true
   mailbox: INBOX
+  auth_method: oauth2                        # recommended; or 'password' for legacy
+  oauth_file: ~/.reusable-agents/responder/.oauth.json
 
 # Map subject prefixes / X-Reusable-Agent-Site headers to a downstream agent.
 # When a reply matches, the responder routes the parsed action to this agent.
@@ -72,6 +73,82 @@ dashboard:
   base_url: http://localhost:8080
   agent_id: responder-agent
 ```
+
+## OAuth setup (recommended — no password in a file)
+
+The responder supports IMAP **XOAUTH2** for both Microsoft 365 and Google
+Workspace. One-time browser consent → refresh token; subsequent polls mint
+short-lived access tokens automatically.
+
+### Microsoft 365 (Office 365)
+
+1. **Create the Azure AD app** (one-time, in your tenant):
+   - portal.azure.com → Azure Active Directory → App registrations → New registration
+   - Name: `reusable-agents responder` (anything)
+   - Supported accounts: *Accounts in this organizational directory only*
+   - Redirect URI: **Public client/native** → `http://localhost`
+   - After creation: **Authentication → Allow public client flows: Yes**
+   - **API permissions → Add a permission → Microsoft Graph (delegated):**
+     - `IMAP.AccessAsUser.All`
+     - `SMTP.Send`
+     - `offline_access`
+     - `User.Read` (auto-added)
+   - Grant admin consent (or have an admin do it).
+   - Copy the **Application (client) ID** and **Directory (tenant) ID**
+     from the Overview tab.
+
+2. **Run the bootstrap** (browser opens, log in as `automation@yourdomain`):
+   ```bash
+   python3 oauth-bootstrap.py \
+       --provider microsoft \
+       --client-id   <client-id-from-azure> \
+       --tenant      <tenant-id-from-azure> \
+       --username    automation@northernsoftwareconsulting.com
+   ```
+   This saves `~/.reusable-agents/responder/.oauth.json` (mode 0600).
+
+3. **Smoke-test**:
+   ```bash
+   python3 mint-token.py --check
+   # → OK provider=microsoft user=automation@... token_chars=2347
+   ```
+
+### Google Workspace
+
+1. **Create the OAuth client**:
+   - console.cloud.google.com → APIs & Services → Credentials
+   - Create OAuth client ID → **Desktop app**
+   - Enable the Gmail API for the project
+
+2. **Bootstrap**:
+   ```bash
+   python3 oauth-bootstrap.py \
+       --provider google \
+       --client-id     <client-id> \
+       --client-secret <client-secret> \
+       --username      automation@yourdomain.com
+   ```
+
+### After bootstrap, use OAuth in:
+
+**responder.py (IMAP)** — already wired. Just set `auth_method: oauth2` in
+the responder config (the example shows both forms).
+
+**msmtp (SMTP)** — for the SEO reporter to send via XOAUTH2:
+```msmtprc
+account automation
+host smtp.office365.com                # or smtp.gmail.com
+port 587
+auth xoauth2
+tls on
+tls_starttls on
+from automation@northernsoftwareconsulting.com
+user automation@northernsoftwareconsulting.com
+passwordeval "python3 /home/voidsstr/development/reusable-agents/responder-agent/mint-token.py"
+```
+
+The `passwordeval` runs `mint-token.py` once per send; it prints a fresh
+access token which msmtp uses as the XOAUTH2 password.
 
 ## Why poll IMAP instead of a webhook?
 

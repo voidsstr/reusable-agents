@@ -78,18 +78,41 @@ def connect_imap(imap_cfg: dict) -> imaplib.IMAP4_SSL:
     host = imap_cfg["host"]
     port = int(imap_cfg.get("port", 993))
     username = imap_cfg["username"]
-    password = os.getenv(imap_cfg["password_env"], "")
-    if not password:
-        raise SystemExit(
-            f"IMAP password not in env (var {imap_cfg['password_env']!r}). "
-            "Set it before running the responder."
-        )
     use_tls = imap_cfg.get("use_tls", True)
-    if use_tls:
-        conn = imaplib.IMAP4_SSL(host, port)
+
+    auth_method = imap_cfg.get("auth_method", "password")  # 'password' | 'oauth2'
+
+    conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(host, port) if use_tls else imaplib.IMAP4(host, port)
+
+    if auth_method == "oauth2":
+        # Use XOAUTH2 — refresh token lives at imap.oauth_file
+        from pathlib import Path as _P
+        oauth_file = _P(os.path.expanduser(imap_cfg.get(
+            "oauth_file", "~/.reusable-agents/responder/.oauth.json"
+        )))
+        # Defer import so the rest of the module loads without mint-token.py
+        sys.path.insert(0, os.path.dirname(__file__))
+        from importlib import import_module
+        mint = import_module("mint-token")  # noqa
+        access_token, oauth_user, _ = mint.mint_access_token(oauth_file)
+        # Prefer the username from oauth file if not explicitly set in config
+        effective_user = username or oauth_user
+        if not effective_user:
+            raise SystemExit(
+                "IMAP username not set. Either set imap.username in config or "
+                "pass --username during oauth-bootstrap."
+            )
+        sasl_bytes = mint.build_xoauth2_string(effective_user, access_token)
+        conn.authenticate("XOAUTH2", lambda _: sasl_bytes)
     else:
-        conn = imaplib.IMAP4(host, port)
-    conn.login(username, password)
+        password = os.getenv(imap_cfg.get("password_env", ""), "")
+        if not password:
+            raise SystemExit(
+                f"IMAP password not in env (var {imap_cfg.get('password_env')!r}). "
+                "Set it, or switch imap.auth_method to 'oauth2'."
+            )
+        conn.login(username, password)
+
     conn.select(imap_cfg.get("mailbox", "INBOX"))
     return conn
 

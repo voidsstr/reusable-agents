@@ -2,15 +2,22 @@
 # Copy to ~/.reusable-agents/responder/config.yaml and edit.
 
 imap:
-  host: imap.example.com
+  host: imap.example.com           # outlook.office365.com for M365, imap.gmail.com for Google
   port: 993
-  username: automation@example.com
-  # Name of the env var holding the IMAP password.
-  # Set the var before running:
-  #   export REUSABLE_AGENTS_IMAP_PASS='your-password-or-app-password'
-  password_env: REUSABLE_AGENTS_IMAP_PASS
+  username: automation@example.com # leave blank to read from oauth file's username_hint
   use_tls: true
   mailbox: INBOX
+
+  # ── Auth method ──────────────────────────────────────────────────────────
+  # Recommended: 'oauth2' (no password sitting in a file; works with M365 +
+  # Google + any other XOAUTH2 IMAP provider). Bootstrap the refresh token
+  # once with `python3 oauth-bootstrap.py …` (see README).
+  auth_method: oauth2
+  oauth_file: ~/.reusable-agents/responder/.oauth.json
+
+  # Legacy fallback: basic-auth password from an env var.
+  # auth_method: password
+  # password_env: REUSABLE_AGENTS_IMAP_PASS
 
 # Runs roots — every reusable-agent run dir we should write responses into.
 # The responder will look for matching site dirs under each of these.
