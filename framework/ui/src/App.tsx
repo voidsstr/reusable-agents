@@ -8,10 +8,12 @@ import AgentList from './pages/AgentList'
 import AgentDetail from './pages/AgentDetail'
 import Confirmations from './pages/Confirmations'
 import Events from './pages/Events'
+import Providers from './pages/Providers'
 
 const NAV = [
   { to: '/',              label: 'Agents' },
   { to: '/confirmations', label: 'Confirmations' },
+  { to: '/providers',     label: 'AI Providers' },
   { to: '/events',        label: 'Events' },
 ]
 
@@ -23,6 +25,7 @@ export default function App() {
           <Route path="/"               element={<AgentList />} />
           <Route path="/agents/:id"     element={<AgentDetail />} />
           <Route path="/confirmations"  element={<Confirmations />} />
+          <Route path="/providers"      element={<Providers />} />
           <Route path="/events"         element={<Events />} />
         </Route>
       </Routes>

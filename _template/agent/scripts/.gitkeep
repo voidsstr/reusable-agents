@@ -1,0 +1,15 @@
+# Per-agent scripts directory.
+#
+# Drop ad-hoc scripts (Python or bash) the agent calls during its run.
+# Each script gets the framework's standard env vars: AGENT_ID, AGENT_RUN_ID,
+# AI_PROVIDER (when invoked via the API), and inherits the agent's PATH.
+#
+# Convention: one script per file, kebab-case names. Scripts can be
+# invoked directly from the agent's run() with subprocess, OR triggered
+# from the dashboard via:
+#   POST /api/agents/<id>/scripts/<script-name>
+#
+# Useful for:
+#   - One-off diagnostics ("re-fetch the GSC data, but only for this site")
+#   - Per-rec implementation steps
+#   - Manual operations the user wants to expose to the dashboard

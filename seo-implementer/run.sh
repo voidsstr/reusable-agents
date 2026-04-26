@@ -28,10 +28,16 @@ fi
 # Ensure changes/ dir exists
 mkdir -p "$RESPONDER_RUN_DIR/changes"
 
-# This is the LLM-driven part. The script's job is to set up the env
-# and invoke an LLM session against AGENT.md. By default we shell out
-# to `claude` (Claude Code CLI). Override IMPLEMENTER_LLM to use a
-# different driver (e.g. an Anthropic API call, an OpenAI script, etc).
+# LLM driver:
+#   IMPLEMENTER_LLM=claude     Claude Code CLI (default — uses the user's
+#                              local Claude Code CLI auth, no framework
+#                              provider needed). Best for code-editing
+#                              tasks since Claude Code has tool use.
+#   IMPLEMENTER_LLM=framework  Use the reusable-agents framework's
+#                              configured AI provider (Azure / Anthropic
+#                              / Ollama / Copilot) via framework.cli.ai_chat.
+#                              Best when running unattended at scale.
+#   IMPLEMENTER_LLM=noop       Dry-run / smoke-test (no LLM call).
 IMPLEMENTER_LLM="${IMPLEMENTER_LLM:-claude}"
 
 case "$IMPLEMENTER_LLM" in
@@ -65,6 +71,40 @@ EOF
             exit $rc
         }
         rm -f "$PROMPT_FILE"
+        ;;
+    framework)
+        # Use the reusable-agents framework's configured AI provider.
+        # Resolves provider from agents/<id>/manifest.json or the global
+        # default in config/ai-defaults.json. The framework writes the
+        # response to a file the script can post-process (this stub just
+        # captures it for inspection — production use would wire it back
+        # into a code-editing flow).
+        if [ ! -x "$REPO_ROOT/install/seed-providers.sh" ]; then
+            echo "ERROR: reusable-agents not at $REPO_ROOT (set RA_REPO env)" >&2
+            exit 3
+        fi
+        PROMPT_FILE=$(mktemp)
+        cat > "$PROMPT_FILE" <<EOF
+You are seo-implementer. Process recommendation(s): $RESPONDER_REC_IDS
+
+Context dir: $RESPONDER_RUN_DIR
+Site config: $SEO_AGENT_CONFIG
+
+Read $SCRIPT_DIR/AGENT.md for the runbook and apply the named recommendations.
+EOF
+        OUT_FILE="$RESPONDER_RUN_DIR/changes/${RESPONDER_REC_IDS//,/-}.framework-ai-response.md"
+        mkdir -p "$(dirname "$OUT_FILE")"
+        cat "$PROMPT_FILE" | python3 -m framework.cli.ai_chat \
+            --agent "${AGENT_ID:-seo-implementer}" \
+            --system "$(cat "$SCRIPT_DIR/AGENT.md")" \
+            > "$OUT_FILE" || {
+                rc=$?
+                echo "[implementer] framework AI call failed rc=$rc" >&2
+                rm -f "$PROMPT_FILE"
+                exit $rc
+            }
+        rm -f "$PROMPT_FILE"
+        echo "[implementer] framework AI response saved to $OUT_FILE"
         ;;
     none|noop)
         # Dry-run / smoke-test mode — just log and exit

@@ -335,6 +335,32 @@ class AgentBase:
             storage=self.storage,
         )
 
+    def ai_client(self, *, provider: Optional[str] = None,
+                  model: Optional[str] = None):
+        """Return an AIClient configured for this agent.
+
+        Resolution order:
+          1. `provider` / `model` arguments (run-time override)
+          2. agent's manifest metadata.ai.{provider,model}
+          3. defaults.json agent_overrides[<this-agent-id>]
+          4. defaults.json default_provider / default_model
+        Raises if no provider can be resolved.
+
+        Usage:
+            client = self.ai_client()
+            response = client.chat([
+                {"role": "system", "content": "You summarize SEO data."},
+                {"role": "user",   "content": "Here are 200 GSC rows: ..."},
+            ])
+        """
+        from . import ai_providers
+        return ai_providers.ai_client_for(
+            self.agent_id,
+            override_provider=provider,
+            override_model=model,
+            storage=self.storage,
+        )
+
     # ---- Class methods for registration ----
 
     @classmethod
