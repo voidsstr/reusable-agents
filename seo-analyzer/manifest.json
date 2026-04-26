@@ -6,7 +6,7 @@
   "task_type": "desktop-task",
   "cron_expr": "",
   "timezone": "UTC",
-  "enabled": true,
+  "enabled": false,
   "runbook": "",
   "skill": "",
   "entry_command": "SEO_AGENT_CONFIG=$SEO_AGENT_CONFIG python3 analyzer.py",
@@ -20,5 +20,9 @@
     "enabled": false,
     "kind": "none",
     "description": "Pipeline-stage agent \u2014 driven by upstream (seo-opportunity-agent / responder-agent). Confirmation gating happens at the upstream agent (seo-reporter emails recs; responder-agent dispatches user replies)."
+  },
+  "metadata": {
+    "is_blueprint": true,
+    "blueprint_kind": "pipeline-stage"
   }
 }

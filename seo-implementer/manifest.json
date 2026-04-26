@@ -6,7 +6,7 @@
   "task_type": "manual",
   "cron_expr": "",
   "timezone": "UTC",
-  "enabled": true,
+  "enabled": false,
   "runbook": "AGENT.md",
   "skill": "",
   "entry_command": "bash run.sh",
@@ -20,5 +20,9 @@
     "enabled": true,
     "kind": "upstream-gated",
     "description": "This agent only acts on items dispatched to its response queue by upstream agents (responder-agent \u2192 user replies, or progressive-improvement-agent \u2192 tier=auto recs when site opts in). The confirmation gate is upstream: seo-reporter emails recs; the user replies; responder-agent dispatches matched recs here. Direct manual triggering is disabled (runnable_modes=['chained'])."
+  },
+  "metadata": {
+    "is_blueprint": true,
+    "blueprint_kind": "pipeline-stage"
   }
 }
