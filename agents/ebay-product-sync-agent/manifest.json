@@ -1,0 +1,27 @@
+{
+  "id": "ebay-product-sync-agent",
+  "name": "eBay Product Sync Agent",
+  "description": "Reusable agent that ingests live eBay Browse API listings into any destination product database (Postgres or Azure SQL). On first run it introspects the destination schema, asks Claude to propose an eBay→DB column mapping, emails the proposal to the operator, and stores the approved mapping in framework storage. Subsequent runs use the approved mapping to upsert listings on a cron schedule and mark stale rows inactive (eBay listings are short-lived).",
+  "category": "ingestion",
+  "task_type": "scheduled-cron",
+  "enabled": true,
+  "owner": "framework",
+  "runbook": "README.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/ebay-product-sync-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "claude-mapped-ingestion-agent",
+    "supports_databases": ["postgres", "azure-sql"],
+    "ai": {
+      "provider": "claude-max-cli",
+      "model": "claude-sonnet-4-6",
+      "rationale": "Schema mapping is one-shot reasoning over destination columns + an eBay sample item. Claude Sonnet via the user's Max subscription handles it cleanly without API costs."
+    }
+  },
+  "runnable_modes": ["cron", "manual"],
+  "confirmation_flow": {
+    "enabled": true,
+    "kind": "schema-mapping-approval",
+    "description": "Phase 1 emails an eBay→destination schema mapping proposal. Operator replies APPROVE / REJECT <reason> / EDIT <json> to approve or amend. Approval is persisted in framework storage; subsequent runs skip the proposal step and ingest directly."
+  }
+}

@@ -1,0 +1,50 @@
+# ebay-product-sync-agent — site config (example)
+#
+# Copy this file per site (e.g. specpicks/agents/ebay-product-sync-agent/site.yaml)
+# and customize for that destination.
+
+# Logical site identifier — unique per operator. Used as the storage key
+# for the approved schema mapping ("agents/ebay-product-sync-agent/mappings/<site_id>.json").
+site_id: my-site
+
+# Email recipient for the schema-mapping approval flow. The agent emails
+# this address with the proposed eBay→DB mapping; reply APPROVE / REJECT
+# / EDIT <json> to resolve.
+owner_email: ops@example.com
+
+# Destination database — Postgres or Azure SQL.
+destination:
+  kind: postgres                    # 'postgres' or 'azure-sql'
+  dsn: "${DATABASE_URL}"            # env-var expansion supported
+  table: products                   # destination table name (schema-qualifiable: "shop.products")
+  # Constants merged into every row. Useful when your products table is
+  # multi-tenant and needs site_id, channel, etc. injected on insert.
+  site_constants:
+    site_id: "00000000-0000-0000-0000-000000000000"
+
+# How long an eBay-sourced row can sit unrefreshed before we mark it
+# is_active=false. eBay listings are short-lived; 72h is a reasonable
+# default for fixed-price items, lower for auctions.
+stale_hours: 72
+
+# Browse API filter — see https://developer.ebay.com/api-docs/buy/static/ref-buy-browse-filters.html
+# Default keeps the catalog clean: fixed price only, sane price range, USD.
+ebay_filter: "buyingOptions:{FIXED_PRICE},conditions:{USED|NEW|REFURBISHED|FOR_PARTS_OR_NOT_WORKING},price:[5..5000],priceCurrency:USD"
+
+# Pagination tuning.
+per_query_limit: 60        # items per Browse API call (max 200)
+max_queries_per_run: 80    # cap queries per cron tick (keeps run bounded)
+
+# Search seeds. Each entry is one logical category and the search queries
+# that populate it. For an affiliate site with a `categories` table whose
+# slugs match `category` here, the agent looks up the category id and
+# fills `category_id` on each row automatically.
+seeds:
+  - category: example-cat-a
+    queries:
+      - "wireless mouse"
+      - "ergonomic mouse"
+  - category: example-cat-b
+    queries:
+      - "mechanical keyboard"
+      - "compact keyboard"

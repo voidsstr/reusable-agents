@@ -1,0 +1,5 @@
+PyYAML>=6.0
+psycopg2-binary>=2.9
+# Azure SQL: install only when you need it — pyodbc requires the Microsoft
+# ODBC Driver 18 for SQL Server on the host.
+pyodbc>=5.1
