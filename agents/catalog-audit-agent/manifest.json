@@ -1,0 +1,17 @@
+{
+  "id": "catalog-audit-agent",
+  "name": "Catalog Audit Agent",
+  "description": "Generic blueprint that wraps a per-site catalog quality audit script and emails findings as standard reusable-agents recommendations. Per-site instances live in nsc-assistant/agents/<site>-catalog-audit-agent and specpicks/agents/specpicks-catalog-audit-agent.",
+  "category": "research",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "README.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "catalog-audit",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/catalog-audit-agent"
+  },
+  "runnable_modes": ["cron", "manual"]
+}

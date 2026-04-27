@@ -629,13 +629,14 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
         # from the agent_id's first component instead.
         site = action_obj.get("prefix_site") or site_hint
         candidate_source_agent = None
-        if agent_hint and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity)-agent$", agent_hint):
+        if agent_hint and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity|catalog-audit)-agent$", agent_hint):
             candidate_source_agent = agent_hint
             # Derive site from agent id: '<site>-progressive-improvement-agent'
             #   → site = '<site>' (everything before the suffix)
             for suffix in ("-progressive-improvement-agent",
                             "-competitor-research-agent",
-                            "-seo-opportunity-agent"):
+                            "-seo-opportunity-agent",
+                            "-catalog-audit-agent"):
                 if agent_hint.endswith(suffix):
                     site = agent_hint[: -len(suffix)]
                     break
