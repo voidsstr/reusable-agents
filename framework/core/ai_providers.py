@@ -235,7 +235,17 @@ def resolve_for_agent(agent_id: str,
 # ---------------------------------------------------------------------------
 
 class AIClient:
-    """Returned by `ai_client_for(...)`. Backend-specific subclasses below."""
+    """Returned by `ai_client_for(...)`. Backend-specific subclasses below.
+
+    Public entry point is `chat(...)`. Subclasses implement `_chat(...)`.
+    The base class wraps every call with framework-level live LLM stream
+    capture: each request + response (or error) is appended as a JSONL
+    record at agents/<id>/runs/<run_ts>/llm-output.jsonl in the framework
+    storage backend. The dashboard's Live LLM tab reads from there. This
+    is uniform across providers — operators see prompts + responses for
+    Anthropic/OpenAI/Ollama/Copilot/AzureOpenAI/claude-cli alike, no
+    per-provider work required.
+    """
 
     def __init__(self, provider: Provider, model: str = ""):
         self.provider = provider
@@ -244,8 +254,43 @@ class AIClient:
     def chat(self, messages: list[dict], *, model: str = "",
              temperature: float = 0.0, max_tokens: int = 1024,
              **kwargs) -> str:
-        """messages: list of {role, content} like OpenAI's format.
-        Returns the assistant's text response. Subclasses override."""
+        """Public entry. Wraps the provider-specific _chat() with
+        framework-level live LLM stream capture."""
+        from . import llm_stream  # avoid circular import at module load
+        import time as _time
+        chosen_model = model or self.model
+        stream = llm_stream.stream_for_current_run()
+        if stream:
+            stream.request(
+                model=chosen_model, messages=messages,
+                provider=self.provider.name,
+                kind_provider=self.provider.kind,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        t0 = _time.time()
+        try:
+            text = self._chat(messages, model=model, temperature=temperature,
+                              max_tokens=max_tokens, **kwargs)
+        except Exception as e:
+            if stream:
+                stream.error(str(e), duration_s=_time.time() - t0)
+            raise
+        if stream:
+            stream.response(
+                text or "", duration_s=_time.time() - t0,
+                provider=self.provider.name,
+                kind_provider=self.provider.kind,
+                model=chosen_model,
+            )
+        return text
+
+    def _chat(self, messages: list[dict], *, model: str = "",
+              temperature: float = 0.0, max_tokens: int = 1024,
+              **kwargs) -> str:
+        """Subclass override — invoke the backend, return text. Don't
+        touch the LLM stream from here; the public `chat()` wrapper
+        handles request/response/error logging uniformly."""
         raise NotImplementedError
 
     def __repr__(self) -> str:
@@ -253,7 +298,7 @@ class AIClient:
 
 
 class _AzureOpenAIClient(AIClient):
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         from openai import AzureOpenAI  # type: ignore
         client = AzureOpenAI(
             api_key=self.provider.resolve_key(),
@@ -271,7 +316,7 @@ class _AzureOpenAIClient(AIClient):
 
 
 class _AnthropicClient(AIClient):
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         from anthropic import Anthropic  # type: ignore
         client = Anthropic(api_key=self.provider.resolve_key())
         # Anthropic separates system from messages
@@ -296,7 +341,7 @@ class _AnthropicClient(AIClient):
 
 
 class _OllamaClient(AIClient):
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         import urllib.request, urllib.error
         url = (self.provider.base_url or "http://localhost:11434").rstrip("/") + "/api/chat"
         body = json.dumps({
@@ -315,7 +360,7 @@ class _OllamaClient(AIClient):
 class _CopilotClient(AIClient):
     """Talks to a copilot-api proxy (OpenAI-compatible) — typical setup is
     `npx copilot-api` running on localhost:4141."""
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         from openai import OpenAI  # type: ignore
         client = OpenAI(
             api_key=self.provider.resolve_key() or "dummy",
@@ -331,7 +376,7 @@ class _CopilotClient(AIClient):
 
 
 class _OpenAIClient(AIClient):
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         from openai import OpenAI  # type: ignore
         client = OpenAI(api_key=self.provider.resolve_key())
         resp = client.chat.completions.create(
@@ -355,7 +400,7 @@ class _ClaudeCliClient(AIClient):
     Caller is responsible for ensuring `claude` is on PATH and authenticated
     on the host that runs the agent.
     """
-    def chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         import subprocess
         # Build a single prompt from messages — claude -p takes one string.
         # Concatenate system + user/assistant turns with role headers; the
@@ -418,21 +463,60 @@ class _ClaudeCliClient(AIClient):
         err_buf: list[str] = []
         prefix = f"[claude-cli {os.environ.get('AGENT_ID','?')} {chosen}]"
 
-        def _pump(stream, buf, sink):
+        # Use the framework's LLM stream for live dashboard updates. Each
+        # line claude emits also lands as a `chunk` record at
+        # agents/<id>/runs/<run_ts>/llm-output.jsonl in framework storage,
+        # so the dashboard's Live LLM tab shows reasoning + tool calls
+        # in near-real-time (regardless of which host ran the agent).
+        from . import llm_stream as _ls
+        live_stream = _ls.stream_for_current_run()
+        import time as _time
+        t_chunk_start = _time.time()
+        # Throttle chunks: write to storage at most every 2s OR when
+        # ≥4KB has accumulated. Avoids hammering Azure blob with one
+        # request per line.
+        _CHUNK_FLUSH_S = 2.0
+        _CHUNK_FLUSH_BYTES = 4096
+
+        def _pump(stream, buf, sink, kind):
+            chunk_buf: list[str] = []
+            chunk_bytes = 0
+            last_flush = _time.time()
             for line in iter(stream.readline, ""):
                 buf.append(line)
                 # Echo to parent stdout/stderr so host-worker's redirect
-                # captures it. Prefix per-line so it's grep-friendly.
+                # captures it (legacy log path; still useful for grep).
                 try:
                     sink.write(f"{prefix} {line}" if not line.startswith(prefix) else line)
                     sink.flush()
                 except Exception:
                     pass
+                # Append to LLM stream throttled.
+                if live_stream and kind == "stdout":
+                    chunk_buf.append(line)
+                    chunk_bytes += len(line)
+                    now = _time.time()
+                    if chunk_bytes >= _CHUNK_FLUSH_BYTES or (now - last_flush) >= _CHUNK_FLUSH_S:
+                        try:
+                            live_stream.chunk("".join(chunk_buf),
+                                              elapsed_s=now - t_chunk_start)
+                        except Exception:
+                            pass
+                        chunk_buf = []
+                        chunk_bytes = 0
+                        last_flush = now
+            # Final flush of anything left.
+            if live_stream and kind == "stdout" and chunk_buf:
+                try:
+                    live_stream.chunk("".join(chunk_buf),
+                                      elapsed_s=_time.time() - t_chunk_start)
+                except Exception:
+                    pass
             stream.close()
 
         import threading
-        t_out = threading.Thread(target=_pump, args=(proc.stdout, out_buf, sys.stdout), daemon=True)
-        t_err = threading.Thread(target=_pump, args=(proc.stderr, err_buf, sys.stderr), daemon=True)
+        t_out = threading.Thread(target=_pump, args=(proc.stdout, out_buf, sys.stdout, "stdout"), daemon=True)
+        t_err = threading.Thread(target=_pump, args=(proc.stderr, err_buf, sys.stderr, "stderr"), daemon=True)
         t_out.start(); t_err.start()
         try:
             rc = proc.wait(timeout=timeout_s)
