@@ -34,25 +34,23 @@ status_write() {
     local state="$3"
     local message="$4"
     local progress="${5:-0.0}"
-    local store_path="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}"
     AGENT_ID="$agent_id" RUN_ID="$run_id" STATE="$state" MESSAGE="$message" \
-    PROGRESS="$progress" STORE="$store_path" python3 - <<'PY' 2>/dev/null || true
-import json, os, time
+    PROGRESS="$progress" PYTHONPATH="/home/voidsstr/development/reusable-agents" \
+    python3 - <<'PY' 2>/dev/null || true
+import json, os
 from datetime import datetime, timezone
+# Use the framework's storage backend — same as the API/agents — so writes
+# go to Azure blob (or local FS) per the configured STORAGE_BACKEND env.
+from framework.core.storage import get_storage
+s = get_storage()
+
 agent = os.environ["AGENT_ID"]
 state = os.environ["STATE"]
-store = os.environ["STORE"]
 run_ts = os.environ.get("RUN_ID") or ""
 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-agent_dir = os.path.join(store, "agents", agent)
-os.makedirs(agent_dir, exist_ok=True)
-sp = os.path.join(agent_dir, "status.json")
-prev = {}
-if os.path.exists(sp):
-    try:
-        prev = json.load(open(sp))
-    except Exception:
-        prev = {}
+sp_key = f"agents/{agent}/status.json"
+
+prev = s.read_json(sp_key) or {}
 started = prev.get("started_at") if state in ("running", "starting") and prev.get("state") in ("running", "starting") else now
 payload = {
     "schema_version": "1",
@@ -67,19 +65,13 @@ payload = {
     "iteration_count": int(prev.get("iteration_count", 0)) + (1 if state == "starting" else 0),
     "internal": {"source": "host-worker"},
 }
-tmp = sp + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(payload, f, indent=2)
-os.replace(tmp, sp)
-# Append to global event log so the activity feed sees it
-events = os.path.join(store, "registry", "events.jsonl")
-os.makedirs(os.path.dirname(events), exist_ok=True)
-with open(events, "a") as f:
-    f.write(json.dumps({
-        "ts": now, "agent_id": agent, "run_ts": run_ts,
-        "state": state, "message": os.environ.get("MESSAGE", ""),
-        "current_action": "host-worker",
-    }) + "\n")
+s.write_json(sp_key, payload)
+# Append to global event log
+s.append_jsonl("registry/events.jsonl", {
+    "ts": now, "agent_id": agent, "run_ts": run_ts,
+    "state": state, "message": os.environ.get("MESSAGE", ""),
+    "current_action": "host-worker",
+})
 PY
 }
 
@@ -93,26 +85,19 @@ heartbeat_loop() {
         sleep 5
         # Only re-touch updated_at if state is still running/starting — don't
         # clobber a terminal state the agent set.
-        local store_path="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}"
-        AGENT_ID="$agent_id" STORE="$store_path" python3 - <<'PY' 2>/dev/null || true
-import json, os
+        AGENT_ID="$agent_id" PYTHONPATH="/home/voidsstr/development/reusable-agents" \
+        python3 - <<'PY' 2>/dev/null || true
+import os
 from datetime import datetime, timezone
+from framework.core.storage import get_storage
+s = get_storage()
 agent = os.environ["AGENT_ID"]
-store = os.environ["STORE"]
-sp = os.path.join(store, "agents", agent, "status.json")
-if not os.path.exists(sp):
+sp_key = f"agents/{agent}/status.json"
+prev = s.read_json(sp_key)
+if not prev or prev.get("state") not in ("running", "starting"):
     raise SystemExit
-try:
-    s = json.load(open(sp))
-except Exception:
-    raise SystemExit
-if s.get("state") not in ("running", "starting"):
-    raise SystemExit
-s["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-tmp = sp + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(s, f, indent=2)
-os.replace(tmp, sp)
+prev["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+s.write_json(sp_key, prev)
 PY
     done
 }
@@ -143,14 +128,15 @@ process_one() {
     local hb_pid=$!
 
     # Pass through framework storage config so agents write to the SAME
-    # store the API container reads from (otherwise the dashboard sees
-    # an empty Runs / Storage / current_status). Defaults match the
-    # docker-compose bind-mount target on this dev box.
+    # store the API container reads from. Defaults to azure since that's the
+    # production backend; falls back to local FS if STORAGE_BACKEND=local.
     set +e
     AGENT_RUN_ID="$run_id" \
     AGENT_ID="$agent_id" \
     AGENT_TRIGGERED_BY="$triggered_by" \
-    STORAGE_BACKEND="${STORAGE_BACKEND:-local}" \
+    STORAGE_BACKEND="${STORAGE_BACKEND:-azure}" \
+    AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING:-}" \
+    AZURE_STORAGE_CONTAINER="${AZURE_STORAGE_CONTAINER:-agents}" \
     AGENT_STORAGE_LOCAL_PATH="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}" \
     FRAMEWORK_API_URL="${FRAMEWORK_API_URL:-http://localhost:8093}" \
         bash -c "$cmd" > "$job_log" 2>&1
@@ -167,21 +153,18 @@ process_one() {
     # never wrote success/failure itself), we set it.
     local final_state="success"
     [ "$rc" -ne 0 ] && final_state="failure"
-    local store_path="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}"
-    AGENT_ID="$agent_id" STORE="$store_path" RC="$rc" FINAL="$final_state" python3 - <<'PY' 2>/dev/null || true
-import json, os
+    AGENT_ID="$agent_id" RC="$rc" FINAL="$final_state" \
+    PYTHONPATH="/home/voidsstr/development/reusable-agents" \
+    python3 - <<'PY' 2>/dev/null || true
+import os
 from datetime import datetime, timezone
+from framework.core.storage import get_storage
+s = get_storage()
 agent = os.environ["AGENT_ID"]
-store = os.environ["STORE"]
 final = os.environ["FINAL"]
 rc = os.environ.get("RC", "0")
-sp = os.path.join(store, "agents", agent, "status.json")
-prev = {}
-if os.path.exists(sp):
-    try:
-        prev = json.load(open(sp))
-    except Exception:
-        prev = {}
+sp_key = f"agents/{agent}/status.json"
+prev = s.read_json(sp_key) or {}
 # Only overwrite if the agent didn't already write a terminal state.
 if prev.get("state") in ("running", "starting", None, ""):
     prev.update({
@@ -193,17 +176,11 @@ if prev.get("state") in ("running", "starting", None, ""):
     })
     prev.setdefault("agent_id", agent)
     prev.setdefault("schema_version", "1")
-    tmp = sp + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(prev, f, indent=2)
-    os.replace(tmp, sp)
-    events = os.path.join(store, "registry", "events.jsonl")
-    os.makedirs(os.path.dirname(events), exist_ok=True)
-    with open(events, "a") as f:
-        f.write(json.dumps({
-            "ts": prev["updated_at"], "agent_id": agent,
-            "state": final, "message": prev["message"],
-        }) + "\n")
+    s.write_json(sp_key, prev)
+    s.append_jsonl("registry/events.jsonl", {
+        "ts": prev["updated_at"], "agent_id": agent,
+        "state": final, "message": prev["message"],
+    })
 PY
 
     rm -f "$tmp"

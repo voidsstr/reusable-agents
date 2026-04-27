@@ -28,6 +28,10 @@ export interface AgentSummary {
   runnable_modes: RunnableMode[]
   confirmation_flow: ConfirmationFlow
   application: string
+  ai_provider?: string
+  ai_kind?: string
+  ai_model?: string
+  ai_uses_claude?: boolean
 }
 
 export interface AgentDetail extends AgentSummary {

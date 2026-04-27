@@ -47,6 +47,9 @@ services:
       - /tmp/agent-trigger-queue:/tmp/agent-trigger-queue
       # Local-storage fallback (only used when STORAGE_BACKEND=local)
       - agent-data:/data/agents
+      # Dispatch + agent logs (read-only) so the API can tail live LLM
+      # output for the dashboard's "Live LLM" tab.
+      - /tmp/reusable-agents-logs:/tmp/reusable-agents-logs:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8090/api/health"]
       interval: 30s

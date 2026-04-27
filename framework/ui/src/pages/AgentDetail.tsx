@@ -9,10 +9,11 @@ import type {
 } from '../api/types'
 import StatusBadge from '../components/StatusBadge'
 
-type TabId = 'overview' | 'goals' | 'directives' | 'runs' | 'messages' | 'storage' | 'confirmations' | 'changelog'
+type TabId = 'overview' | 'live' | 'goals' | 'directives' | 'runs' | 'messages' | 'storage' | 'confirmations' | 'changelog'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview',      label: 'Overview' },
+  { id: 'live',          label: 'Live LLM' },
   { id: 'goals',         label: 'Goals' },
   { id: 'directives',    label: 'Directives' },
   { id: 'runs',          label: 'Runs' },
@@ -45,10 +46,10 @@ export default function AgentDetail() {
   }, [id])
 
   if (error) {
-    return <div className="p-3 bg-glow-failure/10 border border-glow-failure/40 rounded text-glow-failure">{error}</div>
+    return <div className="p-3 bg-status-failure-bg border border-status-failure-glow/40 rounded-lg text-status-failure-fg">{error}</div>
   }
   if (!detail) {
-    return <div className="text-ink-500">Loading…</div>
+    return <div className="text-ink-400 py-12 text-center">Loading…</div>
   }
   const liveState = liveStatus?.state ?? detail.last_run_status ?? ''
   const isActive = liveState === 'running' || liveState === 'starting'
@@ -60,45 +61,37 @@ export default function AgentDetail() {
       {isActive && liveStatus && (
         <div
           data-testid="live-action-banner"
-          className="rounded-lg p-4 flex items-center gap-3 agent-active-banner"
-          style={{
-            background: liveState === 'starting'
-              ? 'linear-gradient(90deg, rgba(168,85,247,0.18) 0%, rgba(168,85,247,0.05) 100%)'
-              : 'linear-gradient(90deg, rgba(56,189,248,0.18) 0%, rgba(56,189,248,0.05) 100%)',
-            border: liveState === 'starting'
-              ? '1px solid rgba(168,85,247,0.6)'
-              : '1px solid rgba(56,189,248,0.6)',
-            boxShadow: liveState === 'starting'
-              ? '0 0 24px rgba(168,85,247,0.3)'
-              : '0 0 24px rgba(56,189,248,0.3)',
-          }}
+          className={`rounded-xl p-4 flex items-center gap-3 agent-active-banner border-2 shadow-card ${
+            liveState === 'starting'
+              ? 'bg-gradient-to-r from-status-starting-bg to-status-starting-bg/30 border-status-starting-glow/60'
+              : 'bg-gradient-to-r from-status-running-bg to-status-running-bg/30 border-status-running-glow/60'
+          }`}
         >
           <div className="text-3xl animate-spin" style={{ animationDuration: '2s' }}>⚙️</div>
           <div className="flex-1 min-w-0">
-            <div className="text-xs uppercase font-bold tracking-wide" style={{
-              color: liveState === 'starting' ? '#d8b4fe' : '#7dd3fc',
-            }}>
+            <div className={`text-xs uppercase font-bold tracking-wide ${
+              liveState === 'starting' ? 'text-status-starting-fg' : 'text-status-running-fg'
+            }`}>
               ● {liveState === 'starting' ? 'Starting up' : 'Working now'}
             </div>
-            <div className="text-base font-semibold text-ink-100 truncate">
+            <div className="text-base font-semibold text-ink-900 truncate">
               {liveStatus.current_action || liveStatus.message || 'Running…'}
             </div>
             {liveStatus.message && liveStatus.current_action && liveStatus.message !== liveStatus.current_action && (
-              <div className="text-xs text-ink-300 mt-0.5 truncate">{liveStatus.message}</div>
+              <div className="text-xs text-ink-600 mt-0.5 truncate">{liveStatus.message}</div>
             )}
           </div>
           {liveStatus.progress > 0 && liveStatus.progress < 1 && (
             <div className="flex flex-col items-end gap-1 min-w-[120px]">
-              <div className="text-xs font-mono text-ink-200">
+              <div className="text-xs font-mono text-ink-700 font-semibold">
                 {(liveStatus.progress * 100).toFixed(0)}%
               </div>
-              <div className="w-32 h-2 bg-ink-900/60 rounded-full overflow-hidden">
+              <div className="w-32 h-2 bg-surface-divider rounded-full overflow-hidden">
                 <div
-                  className="h-full transition-all"
-                  style={{
-                    width: `${(liveStatus.progress * 100).toFixed(0)}%`,
-                    background: liveState === 'starting' ? '#a78bfa' : '#38bdf8',
-                  }}
+                  className={`h-full transition-all rounded-full ${
+                    liveState === 'starting' ? 'bg-status-starting-glow' : 'bg-status-running-glow'
+                  }`}
+                  style={{ width: `${(liveStatus.progress * 100).toFixed(0)}%` }}
                 />
               </div>
               <div className="text-[10px] text-ink-500 font-mono">iter #{liveStatus.iteration_count}</div>
@@ -109,10 +102,10 @@ export default function AgentDetail() {
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <Link to="/" className="text-xs text-ink-500 hover:text-ink-300">← agents</Link>
-          <h1 className="text-2xl font-bold mt-1">{detail.name}</h1>
-          <div className="text-xs text-ink-500 font-mono">{detail.id}</div>
-          {detail.description && <div className="text-sm text-ink-300 mt-2">{detail.description}</div>}
+          <Link to="/" className="text-xs text-ink-500 hover:text-accent-600 transition-colors">← agents</Link>
+          <h1 className="text-2xl font-semibold tracking-tight text-ink-900 mt-1">{detail.name}</h1>
+          <div className="text-xs text-ink-500 font-mono mt-0.5">{detail.id}</div>
+          {detail.description && <div className="text-sm text-ink-600 mt-2 max-w-2xl leading-relaxed">{detail.description}</div>}
         </div>
         <div className="flex flex-col items-end gap-2">
           <StatusBadge state={liveState} pulsing={liveState === 'running' || liveState === 'starting'} />
@@ -124,8 +117,8 @@ export default function AgentDetail() {
                 return (
                   <button
                     disabled
-                    className="text-xs px-3 py-1.5 bg-ink-900 text-ink-600 rounded cursor-not-allowed font-semibold"
-                    title={`runnable_modes=${JSON.stringify(modes)} — queue-driven, dispatched by upstream agent. See Graph tab for incoming edges.`}
+                    className="text-xs px-3 py-1.5 bg-surface-subtle text-ink-400 rounded-lg cursor-not-allowed font-medium"
+                    title={`runnable_modes=${JSON.stringify(modes)} — queue-driven, dispatched by upstream agent.`}
                   >🔒 queue-driven (no manual)</button>
                 )
               }
@@ -140,7 +133,7 @@ export default function AgentDetail() {
                       alert(`Trigger failed: ${e?.message || e}`)
                     }
                   }}
-                  className="text-xs px-3 py-1.5 bg-glow-running/20 hover:bg-glow-running/30 text-glow-running rounded font-semibold"
+                  className="btn-primary"
                   disabled={liveState === 'running'}
                 >▶ Run now</button>
               )
@@ -151,7 +144,7 @@ export default function AgentDetail() {
                 else await api.enableAgent(id)
                 await refresh()
               }}
-              className="text-xs px-3 py-1.5 bg-ink-700 hover:bg-ink-600 rounded"
+              className="btn-secondary"
             >{detail.enabled ? '⏸ disable' : '▶ enable'}</button>
           </div>
         </div>
@@ -166,13 +159,15 @@ export default function AgentDetail() {
         />
       )}
 
-      <div className="border-b border-ink-800 flex gap-1">
+      <div className="border-b border-surface-divider flex gap-1 overflow-x-auto">
         {TABS.map(t => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
-            className={`px-3 py-2 text-sm border-b-2 transition-colors ${
-              tab === t.id ? 'border-glow-running text-ink-100' : 'border-transparent text-ink-400 hover:text-ink-200'
+            className={`px-3 py-2 text-sm border-b-2 transition-colors whitespace-nowrap ${
+              tab === t.id
+                ? 'border-accent-600 text-accent-700 font-semibold'
+                : 'border-transparent text-ink-500 hover:text-ink-800 hover:bg-surface-subtle'
             }`}
           >
             {t.label}
@@ -181,6 +176,7 @@ export default function AgentDetail() {
       </div>
 
       {tab === 'overview' && <OverviewTab detail={detail} liveStatus={liveStatus} />}
+      {tab === 'live' && <LiveLLMTab agentId={id} liveState={liveState} />}
       {tab === 'goals' && <GoalsTab agentId={id} />}
       {tab === 'directives' && <DirectivesTab detail={detail} onUpdated={refresh} />}
       {tab === 'runs' && <RunsTab agentId={id} />}
@@ -998,6 +994,102 @@ function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: strin
             owner: {ownerEmail}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+
+// ---------------------------------------------------------------------------
+// Live LLM tab — tail the active dispatch log + stream the implementer's
+// claude --print output. Auto-refreshes every 2s while state=running.
+// ---------------------------------------------------------------------------
+
+function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string }) {
+  const [content, setContent] = useState<string>('')
+  const [error, setError] = useState<string>('')
+  const [logPath, setLogPath] = useState<string>('')
+  const [autoTail, setAutoTail] = useState(true)
+  const [tailMs, setTailMs] = useState<number>(2000)
+
+  const isActive = liveState === 'running' || liveState === 'starting'
+
+  useEffect(() => {
+    let alive = true
+    const fetchOnce = async () => {
+      try {
+        const res = await api.getLiveLLMOutput(agentId)
+        if (!alive) return
+        setContent(res.content || '')
+        setLogPath(res.log_path || '')
+        setError('')
+      } catch (e: any) {
+        if (!alive) return
+        setError(e?.message || String(e))
+      }
+    }
+    void fetchOnce()
+    if (!autoTail) return
+    const ms = isActive ? tailMs : Math.max(tailMs, 5000)
+    const id = setInterval(fetchOnce, ms)
+    return () => { alive = false; clearInterval(id) }
+  }, [agentId, autoTail, tailMs, isActive])
+
+  return (
+    <div className="space-y-3">
+      <div className="card-surface p-4">
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <div>
+            <h2 className="text-sm font-semibold text-ink-900 flex items-center gap-2">
+              <span aria-hidden>🧠</span> Live LLM output
+              {isActive && (
+                <span className="text-[10px] uppercase tracking-wide text-status-running-fg bg-status-running-bg px-1.5 py-0.5 rounded">
+                  ● tailing
+                </span>
+              )}
+            </h2>
+            <div className="text-xs text-ink-500 mt-0.5">
+              Real-time stdout from the implementer scope (claude --print) for this agent's most recent dispatch.
+              {logPath && (
+                <span className="ml-2 font-mono text-ink-400 break-all">{logPath}</span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ink-500 flex items-center gap-1">
+              <input type="checkbox" checked={autoTail} onChange={e => setAutoTail(e.target.checked)} />
+              auto-tail
+            </label>
+            <select
+              value={tailMs}
+              onChange={(e) => setTailMs(parseInt(e.target.value, 10))}
+              className="px-2 py-1 bg-surface-card border border-surface-divider rounded-md text-xs text-ink-700"
+              disabled={!autoTail}
+            >
+              <option value={1000}>1s</option>
+              <option value={2000}>2s</option>
+              <option value={5000}>5s</option>
+              <option value={10000}>10s</option>
+            </select>
+          </div>
+        </div>
+
+        {error && (
+          <div className="text-xs text-status-failure-fg bg-status-failure-bg p-2 rounded mb-3">
+            {error}
+          </div>
+        )}
+
+        <pre className="bg-ink-900 text-emerald-200 text-[11px] font-mono p-3 rounded-lg max-h-[60vh] overflow-auto whitespace-pre-wrap leading-relaxed">
+          {content || (
+            <span className="text-ink-400 italic">
+              No active dispatch log for this agent.{'\n\n'}
+              Live output appears when the agent dispatches work to seo-implementer
+              and that implementer scope is currently executing claude --print.{'\n\n'}
+              The log includes claude's reasoning + tool calls + final output.
+            </span>
+          )}
+        </pre>
       </div>
     </div>
   )

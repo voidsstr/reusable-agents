@@ -61,6 +61,11 @@ export const api = {
   // status
   status:            (id: string) => http<AgentLiveStatus>(`/api/agents/${encodeURIComponent(id)}/status`),
 
+  // live LLM output — tails the most recent dispatch log for the agent
+  getLiveLLMOutput:  (id: string) => http<{
+    agent_id: string; log_path: string; content: string; tail_bytes: number; mtime: string | null
+  }>(`/api/agents/${encodeURIComponent(id)}/live-llm-output`),
+
   // directives
   getDirectives:     (id: string) => http<{ current: Record<string, unknown>; manifest_summary: { id: string; name: string; description: string; category: string; owner: string } }>(`/api/agents/${encodeURIComponent(id)}/directives`),
   proposeDirectives: (id: string, body: { new_content: string; reason?: string; proposed_by?: string }) =>

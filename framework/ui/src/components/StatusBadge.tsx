@@ -1,44 +1,23 @@
 import type { AgentState } from '../api/types'
 
-const STATE_RGB: Record<string, string> = {
-  running:  '56 189 248',
-  success:  '16 185 129',
-  failure:  '239 68 68',
-  blocked:  '245 158 11',
-  starting: '168 85 247',
-  cancelled:'148 163 184',
-  idle:     '148 163 184',
-  '':       '148 163 184',
-  unknown:  '148 163 184',
-}
-
-const LABEL: Record<string, string> = {
-  running:   '● running',
-  success:   '✓ success',
-  failure:   '✕ failure',
-  blocked:   '⏸ blocked',
-  starting:  '▶ starting',
-  cancelled: '○ cancelled',
-  idle:      '○ idle',
-  '':        '· no runs',
-  unknown:   '· unknown',
+const PILL: Record<string, { fg: string; bg: string; ring: string; label: string }> = {
+  running:   { fg: 'text-status-running-fg',  bg: 'bg-status-running-bg',  ring: 'ring-status-running-glow/30', label: '● running' },
+  starting:  { fg: 'text-status-starting-fg', bg: 'bg-status-starting-bg', ring: 'ring-status-starting-glow/30', label: '▶ starting' },
+  failure:   { fg: 'text-status-failure-fg',  bg: 'bg-status-failure-bg',  ring: 'ring-status-failure-glow/30', label: '✕ failure' },
+  blocked:   { fg: 'text-status-blocked-fg',  bg: 'bg-status-blocked-bg',  ring: 'ring-status-blocked-glow/30', label: '⏸ blocked' },
+  success:   { fg: 'text-status-success-fg',  bg: 'bg-status-success-bg',  ring: 'ring-status-success-glow/30', label: '✓ success' },
+  idle:      { fg: 'text-status-idle-fg',     bg: 'bg-status-idle-bg',     ring: 'ring-status-idle-glow/30',    label: '○ idle' },
+  cancelled: { fg: 'text-status-idle-fg',     bg: 'bg-status-idle-bg',     ring: 'ring-status-idle-glow/30',    label: '○ cancelled' },
 }
 
 export default function StatusBadge({ state, pulsing = false }: { state: AgentState | string; pulsing?: boolean }) {
-  const rgb = STATE_RGB[state ?? ''] ?? STATE_RGB['']
-  const label = LABEL[state ?? ''] ?? state
+  const s = String(state ?? '')
+  const p = PILL[s] ?? { fg: 'text-ink-500', bg: 'bg-surface-subtle', ring: 'ring-surface-divider', label: s || '· no runs' }
   return (
     <span
-      className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded font-mono"
-      style={{
-        ['--glow-color' as string]: rgb,
-        color: `rgb(${rgb})`,
-        backgroundColor: `rgb(${rgb} / 0.12)`,
-        border: `1px solid rgb(${rgb} / 0.4)`,
-        animation: pulsing ? 'glow-pulse 2s ease-in-out infinite' : undefined,
-      }}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ring-1 ring-inset ${p.fg} ${p.bg} ${p.ring} ${pulsing ? 'animate-pulse' : ''}`}
     >
-      {label}
+      {p.label}
     </span>
   )
 }

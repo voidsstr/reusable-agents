@@ -35,6 +35,13 @@ class AgentSummary(BaseModel):
     runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
     confirmation_flow: dict = Field(default_factory=dict)
     application: str = "shared"  # derived: which app/site this agent serves
+    # AI-provider summary — dashboard shows a "Uses Claude" / "Script-only" /
+    # "Ollama" badge so it's at-a-glance which agents incur LLM cost vs which
+    # are pure cron jobs.
+    ai_provider: str = ""        # e.g. "claude-cli", "ollama-local", "" for none
+    ai_kind: str = ""            # e.g. "claude-cli", "ollama", "anthropic"
+    ai_model: str = ""           # default model
+    ai_uses_claude: bool = False # convenience flag — uses Claude (any path)
 
 
 class AgentDetail(AgentSummary):
@@ -145,9 +152,33 @@ def _derive_application(m: registry.AgentManifest) -> str:
     return m.category or "shared"
 
 
+def _resolve_ai_summary(agent_id: str) -> tuple[str, str, str, bool]:
+    """Best-effort resolve the agent's configured AI provider for the
+    dashboard badge. Returns (provider_name, kind, model, uses_claude).
+
+    Falls back gracefully — never raises, just returns blanks if anything
+    is unconfigured."""
+    try:
+        from framework.core import ai_providers as _ap
+        provider, model = _ap.resolve_for_agent(agent_id)
+    except Exception:
+        return "", "", "", False
+    if provider is None:
+        return "", "", "", False
+    name = getattr(provider, "name", "")
+    kind = getattr(provider, "kind", "")
+    uses_claude = (
+        kind in ("claude-cli", "anthropic")
+        or "claude" in (model or "").lower()
+        or "claude" in name.lower()
+    )
+    return name, kind, model or "", bool(uses_claude)
+
+
 def _summary(m: registry.AgentManifest) -> AgentSummary:
     s = get_storage()
     status = s.read_json(f"agents/{m.id}/status.json") or {}
+    ai_name, ai_kind, ai_model, uses_claude = _resolve_ai_summary(m.id)
     return AgentSummary(
         id=m.id, name=m.name, description=m.description, category=m.category,
         task_type=m.task_type, cron_expr=m.cron_expr, timezone=m.timezone,
@@ -157,6 +188,10 @@ def _summary(m: registry.AgentManifest) -> AgentSummary:
         runnable_modes=list(m.runnable_modes or ["cron", "manual"]),
         confirmation_flow=dict(m.confirmation_flow or {}),
         application=_derive_application(m),
+        ai_provider=ai_name,
+        ai_kind=ai_kind,
+        ai_model=ai_model,
+        ai_uses_claude=uses_claude,
     )
 
 

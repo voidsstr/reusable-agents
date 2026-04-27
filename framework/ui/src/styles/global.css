@@ -2,59 +2,132 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Light theme — informed by Linear, Vercel, Stripe, Notion. White card
+   surfaces on a near-white slate-50 page bg, subtle gray dividers, blue
+   primary accent, status colors as fg/bg pairs.
+   ──────────────────────────────────────────────────────────────────────── */
+
 @layer base {
   body {
-    @apply bg-ink-900 text-ink-100 font-sans antialiased;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-                 Oxygen, Ubuntu, sans-serif;
+    @apply bg-surface-page text-ink-900 font-sans antialiased;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                 Roboto, Helvetica, Arial, sans-serif;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
   }
-  ::-webkit-scrollbar { width: 8px; height: 8px; }
-  ::-webkit-scrollbar-track { background: #0f172a; }
-  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-  ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: #f1f5f9; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px;
+                              border: 2px solid #f1f5f9; }
+  ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 }
 
 @layer components {
-  /* Agent card glow — driven by a CSS var --glow-color set by AgentCard. */
-  .agent-card-glow {
-    @apply border-2 rounded-lg transition-all;
-    border-color: rgb(var(--glow-color) / 0.4);
+  /* Card surface — used by AgentCard, info panels, etc. */
+  .card-surface {
+    @apply bg-surface-card border border-surface-divider rounded-xl shadow-card;
+    transition: box-shadow 180ms ease, transform 180ms ease, border-color 200ms ease;
   }
-  .agent-card-glow.is-active {
-    animation: glow-pulse 2s ease-in-out infinite;
+  .card-surface:hover {
+    @apply shadow-card-hover;
+    transform: translateY(-1px);
   }
 
+  /* Status-colored card — driven by --glow-color CSS var on the element.
+     Borrowed from application-research / nsc-dashboard glow pattern but
+     re-tuned for a light surface. */
+  .agent-card-glow {
+    @apply card-surface border-2;
+    border-color: rgb(var(--glow-color) / 0.35);
+  }
+  .agent-card-glow.is-active {
+    /* Pulsing while running — uses the parameterized keyframe from
+       tailwind.config.ts. */
+    animation: glow-pulse-light 2s ease-in-out infinite;
+  }
+  /* Color stripe along the left edge for at-a-glance status — Linear /
+     Vercel pattern. */
+  .agent-card-glow::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 12px; bottom: 12px;
+    width: 3px;
+    border-radius: 999px;
+    background: rgb(var(--glow-color));
+    opacity: 0.85;
+  }
+
+  /* Tiny status pip — used in AgentCard headers + AgentDetail banner */
   .status-dot {
     @apply inline-block w-2 h-2 rounded-full;
     background-color: rgb(var(--glow-color));
-    box-shadow: 0 0 8px rgb(var(--glow-color) / 0.6);
+    box-shadow: 0 0 0 3px rgb(var(--glow-color) / 0.18);
   }
   .status-dot.is-pulsing {
-    animation: glow-pulse 1.5s ease-in-out infinite;
+    animation: status-dot-pulse 1.5s ease-in-out infinite;
+  }
+
+  /* Working-now banner pulse */
+  .agent-active-banner {
+    animation: banner-glow 2.6s ease-in-out infinite;
+  }
+
+  /* Status pill — used in AgentList filter row + AgentCard chip */
+  .status-pill {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full
+           text-xs font-medium ring-1 ring-inset;
+  }
+
+  /* Primary button (Run now, Save) */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-1.5
+           px-3 py-1.5 rounded-lg
+           bg-accent-600 text-white text-xs font-semibold
+           hover:bg-accent-700 transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed
+           shadow-sm;
+  }
+
+  /* Secondary button */
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-1.5
+           px-3 py-1.5 rounded-lg
+           bg-surface-card border border-surface-divider
+           text-ink-700 text-xs font-medium
+           hover:bg-surface-subtle hover:border-ink-300 transition-colors;
+  }
+
+  /* Filter pill (rounded; darkens on hover, accents when active) */
+  .filter-pill {
+    @apply text-xs px-3 py-1 rounded-full transition-colors
+           bg-surface-card border border-surface-divider text-ink-600
+           hover:bg-surface-subtle hover:border-ink-300;
+  }
+  .filter-pill.is-active {
+    @apply bg-accent-50 text-accent-700 border-accent-500;
   }
 }
 
-@keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--glow-color) / 0.65),
-                         0 0 12px 2px rgb(var(--glow-color) / 0.45); }
-  50%      { box-shadow: 0 0 0 6px rgb(var(--glow-color) / 0.20),
-                         0 0 24px 6px rgb(var(--glow-color) / 0.55); }
+/* ── Animations ─────────────────────────────────────────────────────────── */
+
+@keyframes status-dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(var(--glow-color) / 0.18); }
+  50%      { box-shadow: 0 0 0 6px rgb(var(--glow-color) / 0.10); }
 }
 
-/* Graph node pulse — used by AgentNode in Graph.tsx when state=running. */
-@keyframes agent-node-pulse {
-  0%, 100% { filter: brightness(1); }
-  50%      { filter: brightness(1.15); }
-}
-
-/* Agent detail "Working now" banner — subtle pulse so the user notices */
-.agent-active-banner {
-  animation: banner-glow 2.6s ease-in-out infinite;
-}
 @keyframes banner-glow {
   0%, 100% { transform: scale(1); }
   50%      { transform: scale(1.005); }
 }
+
+/* Graph node pulse — used by AgentNode in Graph.tsx when state=running.
+   Subtle on light bg. */
+@keyframes agent-node-pulse {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.08); }
+}
+
+/* Detail-page heading glow when agent is actively working */
 .agent-detail-active h1 {
-  text-shadow: 0 0 18px rgba(56, 189, 248, 0.45);
+  text-shadow: 0 0 18px rgb(59 130 246 / 0.35);
 }
