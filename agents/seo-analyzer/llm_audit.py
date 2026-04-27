@@ -293,6 +293,8 @@ def run_llm_audit(
     primary_objective: str = "top5-rank",
     ai_chat_callable=None,
     batch_size: int = 4,
+    adaptive_context: str = "",
+    active_goals: list[dict] | None = None,
 ) -> list[dict]:
     """Send pages through the LLM audit; return raw issue list.
 
@@ -302,6 +304,17 @@ def run_llm_audit(
     Each returned issue has the schema specified in SEO_AUDIT_CHECKLIST.
     The caller is responsible for converting these into the SEO
     recommendation schema (see `issues_to_recommendations`).
+
+    `adaptive_context` (optional) is rendered output of
+    `framework.core.goal_changes.adaptive_context_block(...)` — a summary
+    of which past recs the user implemented and how each goal's metric
+    moved. The LLM uses it to de-prioritize categories that haven't been
+    moving the needle and double down on what worked.
+
+    `active_goals` (optional) is the list of long-running goals from
+    `agents/<id>/goals/active.json`. Injected so the LLM can prioritize
+    findings that advance current goals + suggest goal updates when the
+    landscape shifts.
     """
     if ai_chat_callable is None or not pages:
         return []
@@ -311,6 +324,18 @@ def run_llm_audit(
         f"Site: {site_label}\n"
         f"Primary SEO objective: {primary_objective}\n\n"
     )
+    if active_goals:
+        user_preamble += "ACTIVE GOALS (your recommendations should advance these):\n"
+        for g in active_goals:
+            metric = g.get("metric") or {}
+            user_preamble += (
+                f"  - {g.get('id','')}: {g.get('title','')} "
+                f"[{metric.get('name','?')}: current={metric.get('current','?')} "
+                f"target={metric.get('target','?')}]\n"
+            )
+        user_preamble += "\n"
+    if adaptive_context:
+        user_preamble += adaptive_context + "\n\n"
 
     for i in range(0, len(pages), batch_size):
         batch = pages[i:i + batch_size]

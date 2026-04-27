@@ -647,6 +647,28 @@ def main() -> None:
                 pages = pages[:20]
                 if pages:
                     print(f"  → LLM audit: {len(pages)} pages", file=sys.stderr)
+                    # Adaptive context: load past goal-changes for this site
+                    # so the LLM can learn from what's been implemented and
+                    # which categories are/aren't moving the metric.
+                    adaptive_ctx = ""
+                    active_goals: list[dict] = []
+                    try:
+                        from framework.core import goal_changes as _gc
+                        from framework.core import goals as _goals_mod
+                        _src = (cfg.get("reporter", {}) or {}).get(
+                            "dashboard", {}).get("agent_id") or f"{cfg.site_id}-seo-opportunity-agent"
+                        adaptive_ctx = _gc.adaptive_context_block(
+                            _src, site=cfg.site_id, horizon=30,
+                        )
+                        active_goals = _goals_mod.read_active_goals(_src)
+                        if adaptive_ctx:
+                            print(f"  → adaptive context: {len(adaptive_ctx)} chars from past changes",
+                                  file=sys.stderr)
+                        if active_goals:
+                            print(f"  → injecting {len(active_goals)} active goals",
+                                  file=sys.stderr)
+                    except Exception as e:
+                        print(f"  → adaptive context unavailable: {e}", file=sys.stderr)
                     issues = run_llm_audit(
                         pages=pages,
                         site_label=cfg.site_id,
@@ -654,6 +676,8 @@ def main() -> None:
                             "primary_objective", "top5-rank"),
                         ai_chat_callable=ai_chat,
                         batch_size=4,
+                        adaptive_context=adaptive_ctx,
+                        active_goals=active_goals,
                     )
                     print(f"  → LLM audit found {len(issues)} issues", file=sys.stderr)
                     next_id_count = {"i": len(recs)}

@@ -49,7 +49,7 @@ export default function AgentDetail() {
     return <div className="p-3 bg-status-failure-bg border border-status-failure-glow/40 rounded-lg text-status-failure-fg">{error}</div>
   }
   if (!detail) {
-    return <div className="text-ink-400 py-12 text-center">Loading…</div>
+    return <div className="text-ink-500 py-12 text-center">Loading…</div>
   }
   const liveState = liveStatus?.state ?? detail.last_run_status ?? ''
   const isActive = liveState === 'running' || liveState === 'starting'
@@ -117,7 +117,7 @@ export default function AgentDetail() {
                 return (
                   <button
                     disabled
-                    className="text-xs px-3 py-1.5 bg-surface-subtle text-ink-400 rounded-lg cursor-not-allowed font-medium"
+                    className="text-xs px-3 py-1.5 bg-surface-subtle text-ink-500 rounded-lg cursor-not-allowed font-medium"
                     title={`runnable_modes=${JSON.stringify(modes)} — queue-driven, dispatched by upstream agent.`}
                   >🔒 queue-driven (no manual)</button>
                 )
@@ -195,16 +195,16 @@ export default function AgentDetail() {
 function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus: AgentLiveStatus | null }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div className="bg-ink-800 p-4 rounded space-y-2">
+      <div className="bg-surface-card border border-surface-divider p-4 rounded space-y-2">
         <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide">Live status</h2>
         {liveStatus ? (
           <>
             <div className="font-mono text-sm">{liveStatus.message || '(no message)'}</div>
             {liveStatus.current_action && (
-              <div className="text-xs text-ink-400">action: <span className="text-ink-200">{liveStatus.current_action}</span></div>
+              <div className="text-xs text-ink-500">action: <span className="text-ink-700">{liveStatus.current_action}</span></div>
             )}
-            <div className="text-xs text-ink-400">progress: {(liveStatus.progress * 100).toFixed(0)}%</div>
-            <div className="text-xs text-ink-400">iteration: <span className="text-ink-200">#{liveStatus.iteration_count}</span></div>
+            <div className="text-xs text-ink-500">progress: {(liveStatus.progress * 100).toFixed(0)}%</div>
+            <div className="text-xs text-ink-500">iteration: <span className="text-ink-700">#{liveStatus.iteration_count}</span></div>
             <div className="text-xs text-ink-500">updated: {liveStatus.updated_at}</div>
           </>
         ) : (
@@ -212,7 +212,7 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
         )}
       </div>
 
-      <div className="bg-ink-800 p-4 rounded space-y-2">
+      <div className="bg-surface-card border border-surface-divider p-4 rounded space-y-2">
         <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide">Configuration</h2>
         <KV label="schedule" value={detail.cron_expr || '(manual)'} />
         <KV label="timezone" value={detail.timezone} />
@@ -222,12 +222,12 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
         <KV label="owner" value={detail.owner || '—'} />
       </div>
 
-      <div className="bg-ink-800 p-4 rounded md:col-span-2">
+      <div className="bg-surface-card border border-surface-divider p-4 rounded md:col-span-2">
         <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Capabilities</h2>
         {detail.capabilities_detail.length === 0 ? (
           <div className="text-ink-500 italic text-sm">
             No capabilities declared. Code-declared capabilities (via
-            <code className="text-ink-300 mx-1">framework.core.guardrails.declare()</code>)
+            <code className="text-ink-600 mx-1">framework.core.guardrails.declare()</code>)
             are surfaced here at run-time once the agent has executed at least once.
           </div>
         ) : (
@@ -235,7 +235,7 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
             {detail.capabilities_detail.map(c => (
               <div key={c.name} className="border border-ink-700 rounded p-2">
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-ink-100">{c.name}</span>
+                  <span className="font-mono text-ink-900">{c.name}</span>
                   {c.confirmation_required && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-glow-blocked/20 text-glow-blocked">
                       ⚠ confirms
@@ -246,10 +246,10 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
                       ? 'bg-glow-failure/20 text-glow-failure'
                       : c.risk_level === 'medium'
                       ? 'bg-glow-blocked/20 text-glow-blocked'
-                      : 'bg-ink-700 text-ink-400'
+                      : 'bg-surface-subtle text-ink-500'
                   }`}>{c.risk_level}</span>
                 </div>
-                <div className="text-xs text-ink-400 mt-1">{c.description}</div>
+                <div className="text-xs text-ink-500 mt-1">{c.description}</div>
                 {c.affects.length > 0 && (
                   <div className="text-[10px] text-ink-500 mt-1">affects: {c.affects.join(', ')}</div>
                 )}
@@ -260,7 +260,7 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
       </div>
 
       {/* Dependencies */}
-      <div className="bg-ink-800 p-4 rounded md:col-span-2">
+      <div className="bg-surface-card border border-surface-divider p-4 rounded md:col-span-2">
         <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">
           Dependencies <span className="text-ink-600">— see <Link to="/graph" className="underline">Graph</Link> for full picture</span>
         </h2>
@@ -270,9 +270,9 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
           <div className="space-y-1 text-sm">
             {detail.depends_on.map((d, i) => (
               <div key={i} className="border border-ink-700 rounded p-2 flex items-start gap-2">
-                <span className="font-mono text-ink-200">→ <Link to={`/agents/${d.agent_id}`} className="underline">{d.agent_id}</Link></span>
-                <span className="text-[10px] px-1.5 py-0.5 bg-ink-700 rounded text-ink-300">{d.kind}</span>
-                {d.description && <span className="text-xs text-ink-400">{d.description}</span>}
+                <span className="font-mono text-ink-700">→ <Link to={`/agents/${d.agent_id}`} className="underline">{d.agent_id}</Link></span>
+                <span className="text-[10px] px-1.5 py-0.5 bg-surface-subtle rounded text-ink-600">{d.kind}</span>
+                {d.description && <span className="text-xs text-ink-500">{d.description}</span>}
               </div>
             ))}
           </div>
@@ -281,9 +281,9 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
 
       {/* README — repo-level docs */}
       {detail.readme_body && (
-        <div className="bg-ink-800 p-4 rounded md:col-span-2">
+        <div className="bg-surface-card border border-surface-divider p-4 rounded md:col-span-2">
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">README</h2>
-          <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-3 rounded max-h-96 overflow-auto">
+          <pre className="whitespace-pre-wrap text-xs text-ink-600 font-mono bg-ink-100 p-3 rounded max-h-96 overflow-auto">
             {detail.readme_body}
           </pre>
         </div>
@@ -291,9 +291,9 @@ function OverviewTab({ detail, liveStatus }: { detail: TAgentDetail; liveStatus:
 
       {/* Metadata */}
       {detail.metadata && Object.keys(detail.metadata).length > 0 && (
-        <div className="bg-ink-800 p-4 rounded md:col-span-2">
+        <div className="bg-surface-card border border-surface-divider p-4 rounded md:col-span-2">
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Metadata</h2>
-          <pre className="whitespace-pre-wrap text-xs font-mono text-ink-300 bg-ink-950 p-3 rounded max-h-72 overflow-auto">
+          <pre className="whitespace-pre-wrap text-xs font-mono text-ink-600 bg-ink-100 p-3 rounded max-h-72 overflow-auto">
             {JSON.stringify(detail.metadata, null, 2)}
           </pre>
         </div>
@@ -306,7 +306,7 @@ function KV({ label, value, mono }: { label: string; value: string; mono?: boole
   return (
     <div className="grid grid-cols-[auto_1fr] gap-2 text-xs">
       <span className="text-ink-500">{label}:</span>
-      <span className={`text-ink-200 truncate ${mono ? 'font-mono' : ''}`}>{value}</span>
+      <span className={`text-ink-700 truncate ${mono ? 'font-mono' : ''}`}>{value}</span>
     </div>
   )
 }
@@ -350,7 +350,7 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
 
   return (
     <div className="space-y-4">
-      <section className="bg-ink-800 p-4 rounded">
+      <section className="bg-surface-card border border-surface-divider p-4 rounded">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide">
             Runbook (AGENT.md) — confirmation required
@@ -361,7 +361,7 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
           value={runbook}
           onChange={(e) => setRunbook(e.target.value)}
           rows={20}
-          className="w-full font-mono text-xs bg-ink-950 border border-ink-700 rounded p-2"
+          className="w-full font-mono text-xs bg-ink-100 border border-ink-700 rounded p-2"
           placeholder="(no AGENT.md found)"
         />
         <div className="flex items-center gap-2 mt-2">
@@ -369,7 +369,7 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
             value={reason}
             onChange={(e) => setReason(e.target.value)}
             placeholder="reason for change…"
-            className="flex-1 px-2 py-1 bg-ink-950 border border-ink-700 rounded text-xs"
+            className="flex-1 px-2 py-1 bg-ink-100 border border-ink-700 rounded text-xs"
           />
           <button
             onClick={proposeRunbookChange}
@@ -382,7 +382,7 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
         )}
       </section>
 
-      <section className="bg-ink-800 p-4 rounded">
+      <section className="bg-surface-card border border-surface-divider p-4 rounded">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide">SKILL.md (Desktop task definition)</h2>
           <span className="text-[10px] text-ink-500 font-mono truncate">{detail.skill_path || '(no file)'}</span>
@@ -391,13 +391,13 @@ function DirectivesTab({ detail, onUpdated }: { detail: TAgentDetail; onUpdated:
           value={skill}
           onChange={(e) => setSkill(e.target.value)}
           rows={10}
-          className="w-full font-mono text-xs bg-ink-950 border border-ink-700 rounded p-2"
+          className="w-full font-mono text-xs bg-ink-100 border border-ink-700 rounded p-2"
           placeholder="(no SKILL.md)"
         />
         <button
           onClick={saveSkillImmediate}
           disabled={busy || !detail.skill_path}
-          className="mt-2 px-3 py-1 bg-ink-700 hover:bg-ink-600 rounded text-xs"
+          className="mt-2 px-3 py-1 bg-surface-subtle hover:bg-ink-200 rounded text-xs"
         >save SKILL.md</button>
       </section>
     </div>
@@ -433,19 +433,19 @@ function RunsTab({ agentId }: { agentId: string }) {
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-ink-400">
+      <div className="flex items-center justify-between text-xs text-ink-500">
         <span>{runs.length} run{runs.length === 1 ? '' : 's'}</span>
-        <button onClick={refresh} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">↻ refresh</button>
+        <button onClick={refresh} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">↻ refresh</button>
       </div>
       {runs.map(r => (
-        <div key={r.run_ts} className="bg-ink-800 rounded">
+        <div key={r.run_ts} className="bg-surface-card border border-surface-divider rounded">
           <button
             onClick={() => setOpenRunTs(openRunTs === r.run_ts ? null : r.run_ts)}
-            className="w-full p-3 flex items-center gap-3 text-left hover:bg-ink-700/50"
+            className="w-full p-3 flex items-center gap-3 text-left hover:bg-surface-subtle"
           >
             <StatusBadge state={r.status as any} />
-            <span className="font-mono text-xs text-ink-300 flex-shrink-0">{r.run_ts}</span>
-            <span className="text-xs text-ink-400 flex-1 truncate">{r.summary || '(no summary)'}</span>
+            <span className="font-mono text-xs text-ink-600 flex-shrink-0">{r.run_ts}</span>
+            <span className="text-xs text-ink-500 flex-1 truncate">{r.summary || '(no summary)'}</span>
             <span className="text-[10px] text-ink-500">#{r.iteration_count}</span>
             <span className="text-[10px] text-ink-500">{openRunTs === r.run_ts ? '▾' : '▸'}</span>
           </button>
@@ -524,11 +524,11 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
         <div className="grid grid-cols-2 gap-3 text-xs">
           <div>
             <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide">Status</div>
-            <div className="text-ink-200 mt-1"><StatusBadge state={(detail.progress as any)?.status} /></div>
+            <div className="text-ink-700 mt-1"><StatusBadge state={(detail.progress as any)?.status} /></div>
           </div>
           <div>
             <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide">Started</div>
-            <div className="text-ink-200 font-mono text-[11px] mt-1">{(detail.progress as any)?.started_at || '—'}</div>
+            <div className="text-ink-700 font-mono text-[11px] mt-1">{(detail.progress as any)?.started_at || '—'}</div>
           </div>
         </div>
       )}
@@ -546,16 +546,16 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
             {Object.entries(groups).map(([groupName, items]) =>
               items.length === 0 ? null : (
                 <div key={groupName}>
-                  <div className="text-[10px] text-ink-400 mb-1 font-semibold">{groupName}</div>
+                  <div className="text-[10px] text-ink-500 mb-1 font-semibold">{groupName}</div>
                   <div className="space-y-1">
                     {items.map(a => (
-                      <div key={a.key} className="bg-ink-900/60 rounded">
+                      <div key={a.key} className="bg-surface-subtle rounded">
                         <button
                           onClick={() => openFile(a)}
-                          className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-ink-700/30"
+                          className="w-full text-left px-3 py-1.5 flex items-center gap-2 text-xs hover:bg-surface-subtle"
                         >
                           <span className="text-[9px] uppercase text-ink-500 font-mono w-12 flex-shrink-0">{a.kind}</span>
-                          <span className="font-mono text-ink-200 flex-1 truncate">{a.name}</span>
+                          <span className="font-mono text-ink-700 flex-1 truncate">{a.name}</span>
                           <span className="text-[10px] text-ink-500">{openArtifact?.key === a.key ? '▾' : '▸'}</span>
                         </button>
                         {openArtifact?.key === a.key && (
@@ -566,7 +566,7 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
                               title={a.name}
                             />
                           ) : (
-                            <pre className="whitespace-pre-wrap text-[11px] text-ink-300 font-mono bg-ink-950 p-3 border-t border-ink-700 max-h-96 overflow-auto">
+                            <pre className="whitespace-pre-wrap text-[11px] text-ink-600 font-mono bg-ink-100 p-3 border-t border-ink-700 max-h-96 overflow-auto">
                               {artifactContent}
                             </pre>
                           )
@@ -585,12 +585,12 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
       {detail && detail.decisions && detail.decisions.length > 0 && (
         <div>
           <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Decisions ({detail.decisions.length})</h3>
-          <div className="space-y-1 text-xs bg-ink-900/60 rounded p-2 max-h-64 overflow-auto">
+          <div className="space-y-1 text-xs bg-surface-subtle rounded p-2 max-h-64 overflow-auto">
             {detail.decisions.map((d, i) => (
               <div key={i} className="grid grid-cols-[auto_auto_1fr] gap-2 items-start">
                 <span className="font-mono text-ink-500 text-[10px]">{d.ts.slice(11, 19)}</span>
-                <span className="px-1.5 py-0.5 bg-ink-700 rounded text-[10px] text-ink-300">{d.category}</span>
-                <span className="text-ink-200">{d.message}</span>
+                <span className="px-1.5 py-0.5 bg-surface-subtle rounded text-[10px] text-ink-600">{d.category}</span>
+                <span className="text-ink-700">{d.message}</span>
               </div>
             ))}
           </div>
@@ -601,7 +601,7 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
       {detail?.context_summary_md && (
         <div>
           <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Context summary</h3>
-          <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-2 rounded max-h-72 overflow-auto">{detail.context_summary_md}</pre>
+          <pre className="whitespace-pre-wrap text-xs text-ink-600 font-mono bg-ink-100 p-2 rounded max-h-72 overflow-auto">{detail.context_summary_md}</pre>
         </div>
       )}
     </div>
@@ -630,27 +630,27 @@ function MessagesTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-xs">
-        <label className="flex items-center gap-1.5 text-ink-300">
+        <label className="flex items-center gap-1.5 text-ink-600">
           <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} />
           unread only
         </label>
-        <button onClick={refresh} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">↻</button>
+        <button onClick={refresh} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">↻</button>
       </div>
       {messages.length === 0 ? (
         <div className="text-ink-500 italic text-center py-8">No messages.</div>
       ) : messages.map(m => (
-        <div key={m.message_id} className="bg-ink-800 p-3 rounded">
+        <div key={m.message_id} className="bg-surface-card border border-surface-divider p-3 rounded">
           <div className="flex justify-between items-start gap-2">
             <div className="text-xs">
-              <span className="font-semibold text-ink-200">{m.from}</span>
+              <span className="font-semibold text-ink-700">{m.from}</span>
               <span className="text-ink-500"> → </span>
-              <span className="text-ink-200">{m.to.join(', ')}</span>
+              <span className="text-ink-700">{m.to.join(', ')}</span>
               <span className="text-ink-500 ml-2">{m.ts}</span>
             </div>
-            <button onClick={() => ack(m)} className="text-[10px] px-2 py-0.5 bg-ink-700 hover:bg-ink-600 rounded">✓ ack</button>
+            <button onClick={() => ack(m)} className="text-[10px] px-2 py-0.5 bg-surface-subtle hover:bg-ink-200 rounded">✓ ack</button>
           </div>
           {m.subject && <div className="text-sm font-semibold mt-1">{m.subject}</div>}
-          <pre className="whitespace-pre-wrap text-xs text-ink-300 font-mono bg-ink-950 p-2 rounded mt-2">
+          <pre className="whitespace-pre-wrap text-xs text-ink-600 font-mono bg-ink-100 p-2 rounded mt-2">
             {JSON.stringify(m.body, null, 2)}
           </pre>
         </div>
@@ -705,15 +705,15 @@ function StorageTab({ agentId }: { agentId: string }) {
       {keys.length === 0 ? (
         <div className="text-ink-500 italic py-4">No blobs yet for this agent.</div>
       ) : keys.map(k => (
-        <div key={k} className="bg-ink-800 rounded">
+        <div key={k} className="bg-surface-card border border-surface-divider rounded">
           <button
             onClick={() => open(k)}
-            className="w-full text-left p-2 font-mono text-xs hover:bg-ink-700/50"
+            className="w-full text-left p-2 font-mono text-xs hover:bg-surface-subtle"
           >
             {k.replace(prefix, '')}
           </button>
           {openKey === k && (
-            <pre className="whitespace-pre-wrap text-[11px] text-ink-300 font-mono bg-ink-950 p-3 border-t border-ink-700 max-h-80 overflow-auto">
+            <pre className="whitespace-pre-wrap text-[11px] text-ink-600 font-mono bg-ink-100 p-3 border-t border-ink-700 max-h-80 overflow-auto">
               {openContent}
             </pre>
           )}
@@ -750,11 +750,11 @@ function ConfirmationsTab({ agentId, onChange }: { agentId: string; onChange: ()
       {confirmations.length === 0 ? (
         <div className="text-ink-500 italic text-center py-8">No pending confirmations.</div>
       ) : confirmations.map(c => (
-        <div key={c.confirmation_id} className="bg-ink-800 p-3 rounded space-y-2">
+        <div key={c.confirmation_id} className="bg-surface-card border border-surface-divider p-3 rounded space-y-2">
           <div className="flex justify-between items-start gap-2">
             <div className="min-w-0 flex-1">
-              <div className="font-mono text-xs text-ink-100">{c.method_name}</div>
-              <div className="text-xs text-ink-400 mt-1">{c.reason}</div>
+              <div className="font-mono text-xs text-ink-900">{c.method_name}</div>
+              <div className="text-xs text-ink-500 mt-1">{c.reason}</div>
             </div>
             <StatusBadge state={c.state as any} />
           </div>
@@ -789,13 +789,13 @@ function ChangelogTab({ agentId }: { agentId: string }) {
   return (
     <div className="space-y-2">
       {entries.map((e, i) => (
-        <div key={i} className="bg-ink-800 p-3 rounded">
+        <div key={i} className="bg-surface-card border border-surface-divider p-3 rounded">
           <div className="flex items-center gap-2 text-xs">
-            <span className="px-2 py-0.5 bg-ink-700 rounded text-ink-300 font-mono">{e.kind}</span>
+            <span className="px-2 py-0.5 bg-surface-subtle rounded text-ink-600 font-mono">{e.kind}</span>
             <span className="text-ink-500 font-mono">{e.ts}</span>
             {e.release_id && <span className="font-mono text-glow-running text-[11px]">{e.release_id}</span>}
           </div>
-          <div className="text-sm text-ink-200 mt-1">{e.message}</div>
+          <div className="text-sm text-ink-700 mt-1">{e.message}</div>
           {e.commit_sha && (
             <div className="text-[10px] font-mono text-ink-500 mt-1">commit: {e.commit_sha.slice(0, 12)}</div>
           )}
@@ -813,26 +813,31 @@ function ChangelogTab({ agentId }: { agentId: string }) {
 // Confirmation-flow banner
 // ---------------------------------------------------------------------------
 
-const KIND_META: Record<string, { emoji: string; label: string; bg: string; fg: string; border: string }> = {
+// Light-theme palette: deep label color readable on a tinted white-ish bg.
+// Each entry uses a saturated bg and a darker fg from the same hue family.
+const KIND_META: Record<string, {
+  emoji: string; label: string;
+  bg: string; fg: string; border: string; subFg: string;
+}> = {
   'email-recommendations': {
     emoji: '✉',
     label: 'Email confirmation gate',
-    bg: 'rgba(34,197,94,0.10)', fg: '#bbf7d0', border: 'rgba(34,197,94,0.45)',
+    bg: '#d1fae5', fg: '#065f46', border: '#10b981', subFg: '#047857',
   },
   'upstream-gated': {
     emoji: '⤴',
     label: 'Upstream-gated',
-    bg: 'rgba(168,85,247,0.10)', fg: '#e9d5ff', border: 'rgba(168,85,247,0.45)',
+    bg: '#ede9fe', fg: '#5b21b6', border: '#8b5cf6', subFg: '#6d28d9',
   },
   'per-action': {
     emoji: '🛡',
     label: 'Per-action confirmation',
-    bg: 'rgba(245,158,11,0.10)', fg: '#fde68a', border: 'rgba(245,158,11,0.45)',
+    bg: '#fef3c7', fg: '#92400e', border: '#f59e0b', subFg: '#b45309',
   },
   'preview-mode': {
     emoji: '👁',
     label: 'Preview mode',
-    bg: 'rgba(56,189,248,0.10)', fg: '#bae6fd', border: 'rgba(56,189,248,0.45)',
+    bg: '#dbeafe', fg: '#1e40af', border: '#3b82f6', subFg: '#1d4ed8',
   },
 }
 
@@ -855,12 +860,12 @@ function GoalsTab({ agentId }: { agentId: string }) {
 
   if (goals.length === 0) {
     return (
-      <div className="bg-ink-800 p-4 rounded text-sm text-ink-400">
-        <div className="font-semibold text-ink-200 mb-1">No goals declared yet.</div>
+      <div className="bg-surface-card border border-surface-divider p-4 rounded text-sm text-ink-500">
+        <div className="font-semibold text-ink-700 mb-1">No goals declared yet.</div>
         <div className="text-ink-500">
           Every agent in the framework should declare 3-7 long-running goals
           that periodic runs incrementally advance. Seed defaults via:
-          <pre className="text-xs bg-ink-950 mt-2 p-2 rounded">
+          <pre className="text-xs bg-ink-100 mt-2 p-2 rounded">
 {`bash /home/voidsstr/development/reusable-agents/install/seed-default-goals.sh`}
           </pre>
           or PUT directly to <code>/api/agents/{agentId}/goals</code> with the
@@ -875,7 +880,7 @@ function GoalsTab({ agentId }: { agentId: string }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 text-xs text-ink-400">
+      <div className="flex items-center gap-2 text-xs text-ink-500">
         <span>{active.length} active</span>
         <span>·</span>
         <span className="text-glow-success">{accomplished.length} accomplished</span>
@@ -923,26 +928,26 @@ function GoalCard({ goal, compact }: { goal: Goal; compact?: boolean }) {
   const sparkMax = Math.max(...sparkline.map(p => p.value), tgt, 1)
 
   return (
-    <div className={`bg-ink-800 rounded p-3 ${accomplished ? 'border-l-4 border-glow-success' : ''}`}>
+    <div className={`bg-surface-card border border-surface-divider rounded p-3 ${accomplished ? 'border-l-4 border-glow-success' : ''}`}>
       <div className="flex items-baseline justify-between gap-2 mb-1">
         <div className="flex items-center gap-2 min-w-0">
           {accomplished && <span className="text-glow-success text-base">✓</span>}
-          <span className="text-sm font-semibold text-ink-100">{goal.title}</span>
+          <span className="text-sm font-semibold text-ink-900">{goal.title}</span>
         </div>
         <span className="font-mono text-[10px] text-ink-500 flex-shrink-0">{goal.id}</span>
       </div>
       {!compact && goal.description && (
-        <div className="text-xs text-ink-400 mb-2">{goal.description}</div>
+        <div className="text-xs text-ink-500 mb-2">{goal.description}</div>
       )}
       {m.name && (
         <div className="grid grid-cols-[1fr_auto] gap-3 items-center">
-          <div className="h-1.5 bg-ink-950 rounded-full overflow-hidden">
+          <div className="h-1.5 bg-ink-100 rounded-full overflow-hidden">
             <div
               className={`h-full ${accomplished ? 'bg-glow-success' : 'bg-glow-running'} transition-all`}
               style={{ width: `${pct.toFixed(0)}%` }}
             />
           </div>
-          <div className="text-[11px] font-mono text-ink-300 whitespace-nowrap">
+          <div className="text-[11px] font-mono text-ink-600 whitespace-nowrap">
             {cur}{unit} {direction === 'increase' ? '↗' : '↘'} {tgt}{unit}
           </div>
         </div>
@@ -977,20 +982,24 @@ function GoalCard({ goal, compact }: { goal: Goal; compact?: boolean }) {
 function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: string; description: string; ownerEmail: string }) {
   const meta = KIND_META[kind] || {
     emoji: '🛡', label: kind || 'Confirmation gate',
-    bg: 'rgba(34,197,94,0.10)', fg: '#bbf7d0', border: 'rgba(34,197,94,0.45)',
+    bg: '#d1fae5', fg: '#065f46', border: '#10b981', subFg: '#047857',
   }
   return (
     <div
       data-testid="confirmation-flow-banner"
-      className="rounded p-3 text-sm flex items-start gap-3"
+      className="rounded-lg p-4 text-sm flex items-start gap-3 shadow-card"
       style={{ background: meta.bg, color: meta.fg, border: `1px solid ${meta.border}` }}
     >
-      <div className="text-2xl leading-none">{meta.emoji}</div>
+      <div className="text-2xl leading-none" aria-hidden>{meta.emoji}</div>
       <div className="flex-1 min-w-0">
-        <div className="font-semibold">{meta.label}</div>
-        {description && <div className="text-xs mt-1 opacity-90">{description}</div>}
+        <div className="font-semibold" style={{ color: meta.fg }}>{meta.label}</div>
+        {description && (
+          <div className="text-[13px] mt-1 leading-relaxed" style={{ color: meta.subFg }}>
+            {description}
+          </div>
+        )}
         {ownerEmail && (
-          <div className="text-[11px] mt-1 opacity-70 font-mono">
+          <div className="text-[11px] mt-2 font-mono" style={{ color: meta.subFg, opacity: 0.85 }}>
             owner: {ownerEmail}
           </div>
         )}
@@ -1051,7 +1060,7 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
             <div className="text-xs text-ink-500 mt-0.5">
               Real-time stdout from the implementer scope (claude --print) for this agent's most recent dispatch.
               {logPath && (
-                <span className="ml-2 font-mono text-ink-400 break-all">{logPath}</span>
+                <span className="ml-2 font-mono text-ink-500 break-all">{logPath}</span>
               )}
             </div>
           </div>
@@ -1080,9 +1089,9 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
           </div>
         )}
 
-        <pre className="bg-ink-900 text-emerald-200 text-[11px] font-mono p-3 rounded-lg max-h-[60vh] overflow-auto whitespace-pre-wrap leading-relaxed">
+        <pre className="bg-surface-page text-emerald-200 text-[11px] font-mono p-3 rounded-lg max-h-[60vh] overflow-auto whitespace-pre-wrap leading-relaxed">
           {content || (
-            <span className="text-ink-400 italic">
+            <span className="text-ink-500 italic">
               No active dispatch log for this agent.{'\n\n'}
               Live output appears when the agent dispatches work to seo-implementer
               and that implementer scope is currently executing claude --print.{'\n\n'}
