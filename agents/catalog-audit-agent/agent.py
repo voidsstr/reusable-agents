@@ -315,7 +315,15 @@ class CatalogAuditAgent(AgentBase):
         recs = assign_rec_ids(recs)
 
         # ── 4. Drain user replies from prior run, write recommendations.json ─
-        applied = apply_user_responses(self.cfg, run_dir=self.run_dir, recs=recs)
+        prior_recs_path = self._most_recent_recs_path()
+        applied = apply_user_responses(
+            responses=getattr(self, "responses", []) or [],
+            prior_recs_path=prior_recs_path,
+        )
+        if applied:
+            self.decide("observation",
+                        f"applied {len(applied)} user response(s) to prior recs",
+                        evidence={"applied": applied})
 
         request_id = new_request_id()
         recs_doc = {
@@ -409,6 +417,19 @@ class CatalogAuditAgent(AgentBase):
                 "site_id": cfg.site_id,
             },
         )
+
+    def _most_recent_recs_path(self) -> Path | None:
+        """Find the most recent prior run's recommendations.json for this site."""
+        site_runs = self.run_dir.parent  # runs_root/<site>/
+        if not site_runs.is_dir():
+            return None
+        candidates = sorted(
+            p for p in site_runs.iterdir()
+            if p.is_dir() and p.name != self.run_ts and (p / "recommendations.json").is_file()
+        )
+        if not candidates:
+            return None
+        return candidates[-1] / "recommendations.json"
 
     def _save_artifact(self, name: str, content: Any) -> None:
         storage_key = f"agents/{self.agent_id}/runs/{self.run_ts}/{name}"

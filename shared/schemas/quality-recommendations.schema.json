@@ -11,8 +11,7 @@
     "site": { "type": "string", "description": "Matches site.id from config." },
     "agent": {
       "type": "string",
-      "enum": ["progressive-improvement-agent", "competitor-research-agent"],
-      "description": "Which agent produced this set."
+      "description": "Which agent produced this set. Accepts the per-site instance id ('aisleprompt-progressive-improvement-agent', 'specpicks-catalog-audit-agent', etc.) or a base agent id."
     },
     "run_ts": { "type": "string" },
     "summary": { "type": "string" },

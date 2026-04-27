@@ -31,11 +31,15 @@ export default function AgentList() {
   const [appFilter, setAppFilter] = useState<string>(
     () => localStorage.getItem('agent-list-app-filter') || 'all'
   )
+  const [statusFilter, setStatusFilter] = useState<string>(
+    () => localStorage.getItem('agent-list-status-filter') || 'all'
+  )
   const [search, setSearch] = useState('')
 
   // Persist filter selections per browser
   useEffect(() => { localStorage.setItem('agent-list-filter', filter) }, [filter])
   useEffect(() => { localStorage.setItem('agent-list-app-filter', appFilter) }, [appFilter])
+  useEffect(() => { localStorage.setItem('agent-list-status-filter', statusFilter) }, [statusFilter])
   const [refreshKey, setRefreshKey] = useState<keyof typeof REFRESH_INTERVALS_MS>('10s')
   const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState(true)
@@ -100,17 +104,40 @@ export default function AgentList() {
     return ['all', ...Array.from(set).sort()]
   }, [agents])
 
+  // Effective state: live status (WS-pushed) takes priority over the
+  // denormalized last_run_status from the registry.
+  const effectiveState = (a: AgentSummary): string => {
+    return statuses[a.id]?.state ?? a.last_run_status ?? ''
+  }
+
   const filtered = useMemo(() => {
     return agents.filter(a => {
       if (filter !== 'all' && a.category !== filter) return false
       if (appFilter !== 'all' && (a.application || 'shared') !== appFilter) return false
+      if (statusFilter !== 'all') {
+        const s = effectiveState(a)
+        if (statusFilter === 'active' && !(s === 'running' || s === 'starting')) return false
+        if (statusFilter !== 'active' && s !== statusFilter) return false
+      }
       if (search) {
         const q = search.toLowerCase()
         if (!`${a.name} ${a.id} ${a.description}`.toLowerCase().includes(q)) return false
       }
       return true
     })
-  }, [agents, filter, appFilter, search])
+  }, [agents, filter, appFilter, statusFilter, search, statuses])
+
+  // Counts for status pills
+  const statusCounts = useMemo(() => {
+    const c: Record<string, number> = { all: agents.length, active: 0 }
+    for (const a of agents) {
+      const s = effectiveState(a)
+      c[s] = (c[s] || 0) + 1
+      if (s === 'running' || s === 'starting') c.active += 1
+    }
+    return c
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents, statuses])
 
   const triggerOne = async (id: string) => {
     try {
@@ -220,6 +247,44 @@ export default function AgentList() {
               )}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Status filter row — currently-running, success, failure, etc. */}
+      <div>
+        <div className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1.5">Status</div>
+        <div className="flex gap-1.5 flex-wrap">
+          {[
+            { key: 'all',       label: 'all',           color: 'ink' },
+            { key: 'active',    label: '⚙ working now', color: 'glow-running' },
+            { key: 'success',   label: '✓ success',     color: 'glow-success' },
+            { key: 'failure',   label: '✗ failure',     color: 'glow-failure' },
+            { key: 'blocked',   label: '⏸ blocked',     color: 'glow-blocked' },
+            { key: 'idle',      label: '· idle',        color: 'ink' },
+          ].map(s => {
+            const count = statusCounts[s.key] || 0
+            const isActive = statusFilter === s.key
+            // Use the same green pill as application filter for the active one
+            const activeCls = s.key === 'active'
+              ? 'bg-glow-running/20 text-glow-running border border-glow-running/40 animate-pulse'
+              : 'bg-glow-running/20 text-glow-running border border-glow-running/40'
+            return (
+              <button
+                key={s.key}
+                data-testid={`status-filter-${s.key}`}
+                onClick={() => setStatusFilter(s.key)}
+                className={`text-xs px-3 py-1 rounded-full transition-colors ${
+                  isActive
+                    ? activeCls
+                    : 'bg-ink-800/50 text-ink-300 border border-ink-700 hover:bg-ink-800'
+                }`}
+                title={s.key === 'active' ? 'Currently running or starting' : ''}
+              >
+                {s.label}
+                <span className="ml-1.5 text-ink-500">{count}</span>
+              </button>
+            )
+          })}
         </div>
       </div>
 

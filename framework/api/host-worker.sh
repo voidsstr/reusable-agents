@@ -218,10 +218,20 @@ log "host-worker starting (queue=$QUEUE_DIR, poll=${POLL_INTERVAL_S}s, once=$ONC
 while true; do
     for job in "$QUEUE_DIR"/*.json; do
         [ -e "$job" ] || continue
-        process_one "$job" &
+        # Detach so the loop keeps scanning the queue while long-running
+        # jobs continue in the background. Without this a slow agent
+        # (e.g., specpicks-catalog-audit, ~30 min of claude-haiku calls)
+        # blocks all other triggers until it finishes.
+        # NOTE: only stdin is redirected — keep stderr open so the log()
+        # messages from process_one still reach the systemd journal /
+        # log file. The agent's own stdout/stderr is captured to job_log.
+        process_one "$job" </dev/null &
+        disown
     done
-    wait
     if [ "$ONCE" -eq 1 ]; then
+        # In one-shot mode we DO want to wait so the script doesn't exit
+        # before the dispatched jobs finish.
+        wait
         break
     fi
     sleep "$POLL_INTERVAL_S"
