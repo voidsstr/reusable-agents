@@ -197,14 +197,15 @@ fi
 # framework-aware responder when it dispatches; legacy paths derive from site.
 SOURCE_AGENT="${RESPONDER_SOURCE_AGENT:-${RESPONDER_SITE:-}-seo-opportunity-agent}"
 
-# Hard-code our own agent id — AGENT_ID env may have been inherited from the
-# responder service ("responder-agent") since we run inside its dispatched
-# scope. Use a different, locally-set variable so tracking lands at
-# agents/seo-implementer/outbound-emails/.
-IMPL_AGENT_ID="${SEO_IMPLEMENTER_AGENT_ID:-seo-implementer}"
+# The completion email is conceptually "the responder reporting back to
+# the user that their reply has been actioned". So the user-facing agent
+# id is responder-agent — that's what shows in the subject + tracking
+# path (agents/responder-agent/outbound-emails/<request-id>.completion.json).
+# The actual code-editing implementer (seo-implementer) is internal detail.
+COMPLETION_AGENT_ID="${COMPLETION_EMAIL_FROM_AGENT:-responder-agent}"
 
 PYTHONPATH="$REPO_ROOT" python3 -m framework.core.completion_email \
-    --agent-id "$IMPL_AGENT_ID" \
+    --agent-id "$COMPLETION_AGENT_ID" \
     --rec-ids "$RESPONDER_REC_IDS" \
     --site "${RESPONDER_SITE:-}" \
     --source-agent "$SOURCE_AGENT" \

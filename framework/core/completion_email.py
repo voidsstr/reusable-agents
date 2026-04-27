@@ -192,6 +192,7 @@ def send_completion_email(
     sender: str = "",
     msmtp_account: str = "automation",
     site_config_path: str = "",
+    site_label: str = "",
     dashboard_base: str = "",
     oauth_file: str = "",
     storage: Optional[StorageBackend] = None,
@@ -229,9 +230,29 @@ def send_completion_email(
         sender_addr = sender.split("<", 1)[1].split(">", 1)[0]
 
     rec_titles = rec_titles or {}
+
+    # Application name in the title — read from site config's site.label
+    # if not passed explicitly, fall back to a TitleCase of the site id.
+    label = site_label
+    if not label and site_config_path and Path(site_config_path).is_file():
+        try:
+            import yaml  # type: ignore
+            cfg = yaml.safe_load(Path(site_config_path).read_text())
+            label = (cfg.get("site") or {}).get("label") or ""
+        except Exception:
+            pass
+    if not label:
+        # Heuristic: "aisleprompt" → "AislePrompt", "specpicks" → "SpecPicks".
+        # Crude but adequate fallback when label is unset.
+        special = {"aisleprompt": "AislePrompt", "specpicks": "SpecPicks"}
+        label = special.get(site, site.title() if site else "Unknown")
+
+    # Subject: application name first (most readable in the inbox), then
+    # the rec count + the agent id as the routing tag. The agent_id used
+    # here is responder-agent (since this email is the responder reporting
+    # back), not the implementer that did the actual code work.
     subject = (
-        f"[{agent_id}:{request_id or 'done'}] Shipped {len(rec_ids)} rec(s)"
-        f" — site={site or 'unknown'}"
+        f"[{agent_id}:{request_id or 'done'}] {label} — Shipped {len(rec_ids)} rec(s)"
     )
     body_html = _build_html(
         agent_id=agent_id, source_agent=source_agent, site=site,
@@ -315,6 +336,10 @@ def main() -> int:
     p.add_argument("--agent-id", required=True)
     p.add_argument("--rec-ids", required=True, help="comma-separated rec ids")
     p.add_argument("--site", default="")
+    p.add_argument("--site-label", default="",
+                   help="Human-readable application name for the email subject "
+                        "(e.g., 'AislePrompt', 'SpecPicks'). Falls back to "
+                        "site.label from site-config, then TitleCase of --site.")
     p.add_argument("--source-agent", default="",
                    help="agent that emitted the recs (lookup target for outbound-emails)")
     p.add_argument("--request-id", default="")
@@ -345,6 +370,7 @@ def main() -> int:
         rec_titles=rec_titles, explicit_to=args.to, sender=args.sender,
         msmtp_account=args.msmtp_account,
         site_config_path=args.site_config,
+        site_label=args.site_label,
         dashboard_base=args.dashboard_base,
     )
     print(f"[completion-email] {'sent' if ok else 'skipped/failed'}: {detail}",
