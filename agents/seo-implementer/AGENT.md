@@ -63,6 +63,62 @@ to the configured site repo.
 - **Don't add npm/pip dependencies** without approval — defer those.
 - **Don't run tests yourself** — that's deployer's job.
 
+## Working-tree etiquette (CRITICAL — added after a 2026-04-27 false-positive revert)
+
+You will frequently see **unrelated changes in the working tree** that you
+did not author. The repos this agent edits are shared with the operator
+and other agents (`progressive-improvement-agent`, `seo-reporter`,
+`benchmark-research-agent`, `ebay-product-sync-agent`, hand-edits in
+interactive Claude Code sessions, etc.). Files may appear, disappear, or
+change between when you read `recommendations.json` and when you commit.
+**This is normal.** Treat the rest of the working tree as untouchable.
+
+**Rules:**
+
+1. **Stage by exact path, never globbing.** Maintain a list of every file
+   you actually wrote during this run. When you commit, stage *only*
+   those paths:
+   ```bash
+   git add path/to/file1 path/to/file2 path/to/file3
+   git commit -m "..."
+   ```
+   **Never** `git add -A`, `git add .`, `git add agents/`, `git add -u`,
+   or any other broad pattern. They sweep up unrelated work and cause
+   the false-positive revert problem.
+
+2. **Do not `git status` and panic.** When you run `git status` you may
+   see modified, untracked, deleted, or renamed files you don't
+   recognize. **Leave them alone.** They are someone else's work in
+   progress — not yours to revert, stash, or "clean up." Even if they
+   look out of scope for the recommendations you're processing, they
+   are NOT scope-creep on your part. They are parallel work from other
+   agents or human sessions.
+
+3. **Do not revert any commit you did not make in this run.** If you see
+   recent commits in the log that look unrelated to your recs, do not
+   touch them. The phrase "scope-creep" is **never** a reason to issue
+   `git revert` from this agent. If you genuinely believe a previous
+   commit is broken, leave a DEFERRED note in the run-dir summary; the
+   operator and framework review tools will handle it.
+
+4. **Verify your commit's contents before any handoff.** Right after
+   `git commit`, run `git show --stat HEAD` and confirm the file list
+   matches the paths you intended to write. If anything else slipped in
+   (broad staging, hook side-effect, amend), `git reset --soft HEAD~1`,
+   re-stage only your paths, and commit again. **Do not push or hand off
+   a commit whose stat doesn't match your edit list.**
+
+5. **Background — the 2026-04-27 incident.** A previous run of this
+   agent staged broadly while editing a single file
+   (`framework/core/completion_email.py`). Three Python files from a
+   user-authored `agents/ebay-product-sync-agent/` were uncommitted in
+   the working tree at the same time and got swept into the implementer
+   commit. The next instance of this agent saw them in the log, decided
+   they were "claude scope-creep," and reverted them — destroying 657
+   lines of authorized user work. Both errors stem from the same root
+   cause: broad staging + after-the-fact policing of commits the agent
+   doesn't own. The rules above eliminate both.
+
 ## When something goes wrong
 
 - A rec turns out to be infeasible: leave `implemented: false`, write the
