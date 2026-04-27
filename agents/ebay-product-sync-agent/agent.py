@@ -74,39 +74,78 @@ log = logging.getLogger(AGENT_ID)
 # ───────────────────────────────────────────────────────────────────
 
 MAPPING_SYS = """You are a database schema mapper. The operator runs an
-e-commerce affiliate site and wants to ingest listings from the eBay
-Browse API into their existing `products`-table-shaped database.
+e-commerce affiliate site. Their model: a `products` table holds CANONICAL
+hardware items (one row per real-world SKU like "3dfx Voodoo 3 3000 AGP")
+with stable hardware specifications. A separate `listings` table holds
+short-lived eBay listings (current price, condition, seller, end-time)
+that link back to the canonical product via foreign key.
+
+eBay listings expire fast — auctions end, items get sold. Listings rotate.
+The canonical product persists. The product page shows current listings
+joined from the listings table.
 
 You receive:
-  1. A list of destination columns (name, type, nullable, length,
-     unique-flag).
-  2. 1–3 sample existing rows (so you can infer conventions like "price
-     is numeric, not string", "image_url is the canonical name").
-  3. A real eBay Browse API itemSummary sample showing the source shape.
+  1. A list of destination columns for the `products` table (or empty if
+     the operator wants you to design one from scratch).
+  2. A list of destination columns for the `listings` table (or empty if
+     the operator wants you to design one from scratch).
+  3. 1–3 sample existing rows from each (or empty if tables don't exist).
+  4. A real eBay Browse API itemSummary sample showing the source shape.
+  5. The operator's selected `mode`:
+        - "use-existing-products-and-listings": both tables already exist
+        - "use-existing-products-new-listings": products exists, create listings
+        - "create-new-tables": create both tables to your design
 
 Produce a STRICT JSON mapping document. No prose, no markdown fences:
 
 {
-  "destination_table": "<table>",
-  "key_columns": ["site_id","asin"],          // unique key for upsert dedup
-  "fields": [
-    {
-      "destination_column": "asin",
-      "source_path": "legacyItemId",           // dotted path into the eBay item
-      "transform": "ebay_id_prefix",           // optional, see transform list
-      "default": null,                          // fallback when source path is null
-      "notes": "..."
-    },
-    ...
-  ],
-  "constants": [
-    {"destination_column": "source",   "value": "ebay"},
-    {"destination_column": "is_active", "value": true}
-  ]
+  "schema_version": "2",
+  "mode": "<one of the modes above>",
+
+  "products_table": {
+    "name": "<table name>",
+    "create_ddl": null,           // SQL CREATE TABLE if mode includes 'create' for products; else null
+    "key_columns": ["site_id","asin"],
+    "match_columns": ["title_fingerprint"],   // how to dedup canonical products at hydrate time
+    "fields": [
+      {
+        "destination_column": "asin",
+        "source_path": "legacyItemId",       // dotted path into eBay item OR null when value comes from hydration
+        "from_hydration": null,              // OR a key like "manufacturer" / "family" / "name" populated by canonical extraction
+        "transform": "ebay_id_prefix",
+        "default": null,
+        "notes": "..."
+      }
+    ],
+    "constants": [
+      {"destination_column": "source", "value": "ebay"},
+      {"destination_column": "is_active", "value": true}
+    ]
+  },
+
+  "listings_table": {
+    "name": "<table name>",
+    "create_ddl": null,           // SQL CREATE TABLE if mode includes 'create' for listings; else null
+    "key_columns": ["ebay_item_id"],
+    "fk_to_product_column": "product_id",   // listings column that holds product FK
+    "fk_target": "id",                       // products column being referenced
+    "fields": [
+      {
+        "destination_column": "ebay_item_id",
+        "source_path": "legacyItemId",
+        "transform": null,
+        "default": null
+      }
+    ],
+    "constants": [
+      {"destination_column": "marketplace", "value": "ebay"}
+    ]
+  },
+
+  "notes": "Anything the operator should know before approving."
 }
 
-Allowed transforms (use ONLY these names — pick "null" or omit for
-direct copy):
+Allowed transforms (use ONLY these names — null or omit for direct copy):
   ebay_id_prefix, parse_float, parse_int, iso_date,
   feedback_pct_to_5, affiliate_url, image_first,
   buying_options_csv, json_dumps, condition_lower,
@@ -114,74 +153,147 @@ direct copy):
   location_country, location_postal
 
 Hard rules:
-- Map every source field that has a clean destination column. If a column
-  has no eBay equivalent, OMIT it (do NOT invent values).
-- Use `condition_lower` for any column that stores condition text.
-- Use `affiliate_url` for any column that stores a click-through URL.
-- For the eBay item ID column (typically `asin` or `external_id`), ALWAYS
-  use transform `ebay_id_prefix` so it shares a namespace with non-eBay
-  listings.
-- Pick `key_columns` to match the destination's unique constraint.
-  If the destination has (site_id, asin) unique, use both.
-- For any column tagged `source` / `marketplace` / `vendor`, add a constant
-  with value "ebay".
-- For boolean is_active / is_published / active columns, add constant true.
+- The CANONICAL product mapping must use only the durable parts of the
+  listing — title, brand, manufacturer, hardware specs. NOT price,
+  condition, seller — those go on the listings row.
+- Listings carry the volatile fields: price, currency, condition, seller,
+  bid count, auction end date, location, listing type.
+- For the listings.<key column> use the eBay legacy item id directly
+  (NOT prefixed). For products.asin (or equivalent durable id) use
+  ebay_id_prefix when the existing product table is keyed by ASIN.
+- If `from_hydration` is set, the value comes from canonical extraction
+  (run separately by Claude per listing) — `source_path` and `transform`
+  are ignored. Common hydration keys: name, manufacturer, family,
+  release_year, form_factor, key_specs (JSON).
+- For mode=create-new-tables: produce idiomatic Postgres DDL in
+  `create_ddl` for the database flavor matched by the operator's existing
+  schema (or PostgreSQL 16 default). Include sensible indexes:
+    products: btree(site_id, asin), btree(manufacturer), GIN(title_fingerprint)
+    listings: btree(ebay_item_id), btree(product_id), btree(updated_at)
+- For mode=use-existing-products-new-listings: products fields fill the
+  EXISTING product table conservatively (only set columns that have an
+  eBay equivalent or hydration source); listings table gets a fresh DDL.
+- For mode=use-existing-both: respect existing schemas, fill what fits,
+  omit columns without a clean source.
+- products.constants must include `source: "ebay"` (or whatever the
+  existing table uses to denote eBay-sourced canonical entries) when
+  applicable.
+"""
+
+HYDRATION_SYS = """You extract canonical hardware product info from a raw
+eBay listing title (and optionally short description). The output is the
+record that goes into the operator's `products` table — the durable
+identity of what the listing is selling, NOT the listing-specific stuff.
+
+Return STRICT JSON only. No prose, no markdown fences:
+
+{
+  "name": "Concise canonical name (e.g. '3dfx Voodoo 3 3000 AGP 16MB')",
+  "manufacturer": "3dfx",
+  "family": "Voodoo 3",                    // model family or null
+  "model_number": "3000",                  // null if not a numbered SKU
+  "release_year": 1999,                    // null if unknown
+  "form_factor": "AGP",                    // socket / interface / connector
+  "key_specs": {                           // arbitrary kind-relevant specs
+    "vram_mb": 16,
+    "memory_type": "SDR",
+    "core_clock_mhz": 166
+  },
+  "category_slug": "retro-gpus",           // best matching category slug
+                                            // from the operator's catalog
+  "title_fingerprint": "voodoo-3-3000-agp-16mb",   // lowercase-slugified
+                                                    // canonical name; used
+                                                    // to dedup products
+  "confidence": 0.92                       // 0-1 how sure you are
+}
+
+Rules:
+- Be CONSERVATIVE. If the listing title is ambiguous (e.g. "vintage GPU
+  lot") set confidence < 0.5 and leave fields you can't read as null.
+- The title_fingerprint MUST collapse to the same string across many
+  listings of the same SKU — drop seller-specific words like "tested",
+  "pulled", "OEM", "lot of 3", capacity duplicates, etc. Two distinct
+  SKUs (Voodoo 3 2000 vs 3000) MUST produce different fingerprints.
+- category_slug must be one of the slugs the operator's catalog uses.
+- If the listing is for a multi-item lot, return confidence < 0.4 (the
+  agent will skip it).
 """
 
 
-def propose_mapping_via_claude(
-    ai,
-    destination_columns: list[ColumnInfo],
-    sample_rows: list[dict],
-    sample_ebay_item: dict,
-    destination_table: str,
-    site_id_value: Optional[str] = None,
-) -> dict:
-    """Build the prompt + call Claude + parse JSON. Returns the mapping doc.
-    Raises on parse failure."""
-    cols_lines = []
-    for c in destination_columns:
+def _format_columns(cols: list[ColumnInfo]) -> str:
+    out = []
+    for c in cols:
         flags = []
         if c.is_unique: flags.append("UNIQUE")
         if not c.nullable: flags.append("NOT NULL")
         flag_s = " " + "/".join(flags) if flags else ""
         len_s = f"({c.max_length})" if c.max_length else ""
-        cols_lines.append(f"  - {c.name}: {c.data_type}{len_s}{flag_s}")
-    cols_text = "\n".join(cols_lines)
+        out.append(f"  - {c.name}: {c.data_type}{len_s}{flag_s}")
+    return "\n".join(out) if out else "  (table doesn't exist yet — agent will create it)"
 
-    # Truncate sample rows to avoid blowing context — show only the shape.
-    sample_text = "(no rows yet)"
-    if sample_rows:
-        compact = []
-        for r in sample_rows[:3]:
-            compact.append({k: (str(v)[:120] if v is not None else None) for k, v in r.items()})
-        sample_text = json.dumps(compact, indent=2, default=str)
 
+def _format_samples(rows: list[dict]) -> str:
+    if not rows: return "(no rows yet)"
+    compact = [{k: (str(v)[:120] if v is not None else None) for k, v in r.items()} for r in rows[:3]]
+    return json.dumps(compact, indent=2, default=str)
+
+
+def propose_mapping_via_claude(
+    ai,
+    products_columns: list[ColumnInfo],
+    products_samples: list[dict],
+    listings_columns: list[ColumnInfo],
+    listings_samples: list[dict],
+    sample_ebay_item: dict,
+    products_table_name: str,
+    listings_table_name: str,
+    mode: str,
+    site_id_value: Optional[str] = None,
+    db_kind: str = "postgres",
+    category_slugs: Optional[list[str]] = None,
+) -> dict:
+    """Build the prompt + call Claude + parse JSON. Returns the v2 mapping doc.
+    Raises on parse failure."""
     item_text = json.dumps(sample_ebay_item, indent=2, default=str)
     if len(item_text) > 4000:
         item_text = item_text[:4000] + "\n... (truncated)"
 
-    user_prompt = f"""Destination table: `{destination_table}`
-Operator-provided site_id constant: {site_id_value or '(none — emit a constant if needed)'}
+    cat_text = ""
+    if category_slugs:
+        cat_text = "\nCategory slugs operator's catalog uses:\n  " + ", ".join(sorted(category_slugs)[:60])
 
-Destination columns:
-{cols_text}
+    user_prompt = f"""Database flavor: {db_kind}
+Mode: {mode}
+Operator-provided site_id constant: {site_id_value or '(none)'}
 
-Sample existing rows:
-{sample_text}
+PRODUCTS table: `{products_table_name}`
+{_format_columns(products_columns)}
+
+Sample products rows:
+{_format_samples(products_samples)}
+
+LISTINGS table: `{listings_table_name}`
+{_format_columns(listings_columns)}
+
+Sample listings rows:
+{_format_samples(listings_samples)}
+{cat_text}
 
 Sample eBay Browse API itemSummary:
 {item_text}
 
-Produce the mapping JSON."""
+Produce the v2 mapping JSON. If `mode` includes "create" for a table,
+include an idiomatic CREATE TABLE statement in `create_ddl` for that
+section. If the table already exists for that section, set
+`create_ddl: null` and only fill columns that exist."""
 
     raw = ai.chat(
         [{"role": "system", "content": MAPPING_SYS},
          {"role": "user", "content": user_prompt}],
         model="claude-sonnet-4-6",
-        max_tokens=8000,
+        max_tokens=10000,
         max_turns=4,
-        timeout=420,
+        timeout=600,
     )
     s = raw.strip()
     if s.startswith("```"):
@@ -199,80 +311,178 @@ Produce the mapping JSON."""
 # Mapping email proposal
 # ───────────────────────────────────────────────────────────────────
 
-def _render_mapping_html(mapping: dict, destination_columns: list[ColumnInfo],
-                          confirmation_id: str, request_id: str, agent_id: str,
-                          site_id: str) -> tuple[str, str]:
-    """Returns (subject, html). Subject embeds the request_id so inbound
-    replies can be matched by the responder agent."""
-    rows_html = ""
-    for f in mapping.get("fields", []):
-        rows_html += (
+def _render_table_section(label: str, section: dict, accent: str = "#1e293b") -> str:
+    name = section.get("name") or "?"
+    keys = section.get("key_columns") or []
+    fields = section.get("fields") or []
+    consts = section.get("constants") or []
+    create_ddl = section.get("create_ddl")
+
+    rows = ""
+    for f in fields:
+        src = f.get("source_path") or ""
+        if f.get("from_hydration"):
+            src = f"&lt;hydration:{f['from_hydration']}&gt;"
+        rows += (
             f"<tr>"
             f"<td><code>{f.get('destination_column','')}</code></td>"
-            f"<td><code>{f.get('source_path','') or '—'}</code></td>"
+            f"<td><code>{src or '—'}</code></td>"
             f"<td>{f.get('transform') or '<i>direct</i>'}</td>"
             f"<td><code>{f.get('default') if f.get('default') is not None else ''}</code></td>"
             f"<td>{f.get('notes','') or ''}</td>"
             f"</tr>"
         )
-    consts_html = ""
-    for c in mapping.get("constants", []):
-        consts_html += (
-            f"<li><code>{c.get('destination_column')}</code> = "
-            f"<code>{json.dumps(c.get('value'))}</code></li>"
+    consts_html = "".join(
+        f"<li><code>{c.get('destination_column')}</code> = "
+        f"<code>{json.dumps(c.get('value'))}</code></li>"
+        for c in consts
+    )
+    ddl_html = ""
+    if create_ddl:
+        ddl_html = f"""<details style="margin:12px 0">
+  <summary style="cursor:pointer;color:{accent};font-weight:600">
+    Proposed CREATE TABLE statement (this section will run on approval)
+  </summary>
+  <pre style="background:#0f172a;color:#e2e8f0;padding:12px;border-radius:6px;
+              font-size:12px;overflow-x:auto;margin-top:8px">{create_ddl}</pre>
+</details>"""
+
+    fk = ""
+    if section.get("fk_to_product_column"):
+        fk = (f"<p style='margin:6px 0;font-size:13px'>"
+              f"<strong>FK to products:</strong> "
+              f"<code>{section['fk_to_product_column']}</code> → "
+              f"<code>{section.get('fk_target','id')}</code></p>")
+
+    return f"""<h2 style="color:{accent}">{label}: <code>{name}</code></h2>
+<p style="margin:6px 0;font-size:13px"><strong>Upsert key:</strong>
+   {", ".join(f"<code>{k}</code>" for k in keys) or "<i>none</i>"}</p>
+{fk}{ddl_html}
+<h3 style="font-size:1rem;margin:14px 0 6px">Field mapping ({len(fields)} columns)</h3>
+<table>
+  <thead><tr><th>Destination column</th><th>Source</th>
+    <th>Transform</th><th>Default</th><th>Notes</th></tr></thead>
+  <tbody>{rows or '<tr><td colspan=5><i>(no fields)</i></td></tr>'}</tbody>
+</table>
+<h3 style="font-size:1rem;margin:14px 0 6px">Constants</h3>
+<ul>{consts_html or '<li><i>none</i></li>'}</ul>"""
+
+
+def _render_mapping_html(mapping: dict, *,
+                          confirmation_id: str, request_id: str, agent_id: str,
+                          site_id: str,
+                          existing_products_table: str,
+                          existing_listings_table: str,
+                          existing_listings_exists: bool,
+                          ) -> tuple[str, str]:
+    """Returns (subject, html). Subject embeds the request_id so inbound
+    replies can be matched by the responder agent."""
+    pt = mapping.get("products_table") or {}
+    lt = mapping.get("listings_table") or {}
+    mode = mapping.get("mode") or "use-existing-products-new-listings"
+
+    # Mode-specific banner.
+    if mode == "create-new-tables":
+        mode_label = "Create both tables"
+        mode_color = "#16a34a"
+    elif mode == "use-existing-products-new-listings":
+        mode_label = "Use existing products table, create new listings table"
+        mode_color = "#2563eb"
+    else:
+        mode_label = "Use existing tables for both"
+        mode_color = "#9333ea"
+
+    products_section = _render_table_section("Canonical products", pt, "#1e293b")
+    listings_section = _render_table_section("eBay listings", lt, "#dc2626")
+
+    notes_html = ""
+    if mapping.get("notes"):
+        notes_html = (
+            f'<div class="kbox"><strong>Notes from Claude:</strong> '
+            f'{mapping["notes"]}</div>'
         )
-    keys = mapping.get("key_columns") or []
+
     subject_text = encode_subject(
         agent_id, request_id,
-        f"eBay → {site_id}.{mapping.get('destination_table','products')} mapping",
+        f"eBay product/listings mapping for {site_id}",
     )
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:780px;margin:0 auto;padding:24px;}}
-h1{{font-size:1.5rem;margin:0 0 8px}}
-h2{{font-size:1.1rem;margin:24px 0 8px;color:#1e293b}}
-table{{border-collapse:collapse;width:100%;font-size:13.5px}}
+body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:820px;margin:0 auto;padding:24px;}}
+h1{{font-size:1.55rem;margin:0 0 8px}}
+h2{{font-size:1.15rem;margin:28px 0 8px}}
+h3{{margin:14px 0 6px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
 th,td{{border:1px solid #e2e8f0;padding:6px 10px;text-align:left;vertical-align:top}}
 th{{background:#f1f5f9}}
 code{{background:#f8fafc;padding:1px 4px;border-radius:3px;font-size:12.5px}}
 .kbox{{background:#fff7ed;border:1px solid #fdba74;padding:12px 14px;border-radius:8px;margin:18px 0}}
-.actions{{margin-top:28px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}}
-.actions code{{background:#fff}}
+.modebox{{background:#eff6ff;border:1px solid #93c5fd;padding:14px 16px;border-radius:8px;margin:14px 0}}
+.actions{{margin-top:32px;padding:18px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0}}
+.option{{padding:10px 12px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin:8px 0}}
+.option strong{{display:inline-block;background:#f1f5f9;padding:2px 8px;border-radius:4px;font-family:monospace;font-size:12.5px;margin-right:8px}}
 </style></head><body>
-<h1>eBay → <code>{mapping.get('destination_table','products')}</code> schema mapping proposal</h1>
-<p>Site: <strong>{site_id}</strong>. Generated by <code>{agent_id}</code>.</p>
 
-<div class="kbox">
-  <strong>Upsert key columns:</strong> {", ".join(f"<code>{k}</code>" for k in keys) or "<i>none</i>"}<br>
-  These determine how the agent dedups across runs. Make sure they match
-  the destination's unique constraint.
+<h1>eBay product/listings ingestion proposal</h1>
+<p>Site: <strong>{site_id}</strong>. Generated by <code>{agent_id}</code>.
+   Two-table architecture: canonical <strong>products</strong> ←→ short-lived
+   <strong>listings</strong> joined by foreign key.</p>
+
+<div class="modebox">
+  <strong>Proposed mode:</strong>
+  <span style="color:{mode_color};font-weight:700">{mode_label}</span>
 </div>
 
-<h2>Field mapping ({len(mapping.get('fields', []))} columns)</h2>
-<table>
-  <thead><tr><th>Destination column</th><th>Source path (eBay item)</th>
-    <th>Transform</th><th>Default</th><th>Notes</th></tr></thead>
-  <tbody>{rows_html}</tbody>
-</table>
+{notes_html}
 
-<h2>Constants (always written)</h2>
-<ul>{consts_html or '<li><i>none</i></li>'}</ul>
+{products_section}
+
+{listings_section}
 
 <div class="actions">
   <h2 style="margin-top:0">How to respond</h2>
-  <p>Reply to this email with one of:</p>
-  <ul>
-    <li><code>APPROVE</code> — store this mapping and start ingesting on the next run.</li>
-    <li><code>REJECT &lt;reason&gt;</code> — discard the mapping. Re-run the agent to
-      generate a new proposal (e.g. after schema changes).</li>
-    <li><code>EDIT &lt;json&gt;</code> — paste a corrected JSON mapping. The agent
-      will overwrite the proposal with your version on approval.</li>
-  </ul>
-  <p style="font-size:12px;color:#64748b;margin-top:12px">
+  <p>Reply to this email with one of the following commands:</p>
+
+  <div class="option">
+    <strong>APPROVE</strong>
+    Use this mode + mapping as-is. The next agent run executes any
+    `create_ddl` (if mode includes new-tables), stores the mapping, and
+    begins ingesting + hydrating canonical products from listings.
+  </div>
+
+  <div class="option">
+    <strong>CREATE NEW</strong>
+    Discard the existing-table assumptions. Agent generates fresh
+    <code>products</code> and <code>listings</code> tables to its own
+    canonical design and uses those instead.
+  </div>
+
+  <div class="option">
+    <strong>USE TABLES products=&lt;name&gt; listings=&lt;name&gt;</strong>
+    Re-target both tables. Example:<br>
+    <code>USE TABLES products=catalog.hardware listings=catalog.ebay_listings</code><br>
+    Agent regenerates the mapping against those tables on the next run.
+  </div>
+
+  <div class="option">
+    <strong>EDIT &lt;json&gt;</strong>
+    Paste a corrected v2 mapping JSON below the EDIT line. The agent
+    overwrites the proposal with your version, then proceeds as if you
+    had typed APPROVE.
+  </div>
+
+  <div class="option">
+    <strong>REJECT &lt;reason&gt;</strong>
+    Discard. Re-run the agent later to generate a new proposal.
+  </div>
+
+  <p style="font-size:12px;color:#64748b;margin-top:14px">
     Confirmation id: <code>{confirmation_id}</code><br>
     Request id: <code>{request_id}</code><br>
-    Storage key:
-    <code>{mapping_storage_key(agent_id, site_id)}</code>
+    Storage key: <code>{mapping_storage_key(agent_id, site_id)}</code><br>
+    Existing products table inspected: <code>{existing_products_table}</code><br>
+    Existing listings table inspected:
+    <code>{existing_listings_table}</code> ({"present" if existing_listings_exists else "does not exist yet"})
   </p>
 </div>
 </body></html>"""
@@ -348,7 +558,14 @@ class EbayProductSyncAgent(AgentBase):
         dest = cfg["destination"]
         dsn = os.path.expandvars(dest["dsn"])
         db_kind = dest.get("kind", "postgres")
-        table = dest.get("table", "products")
+        # v2 supports both single-table legacy `table:` and the new
+        # two-table `products_table:` + `listings_table:` form.
+        products_table = (dest.get("products_table")
+                          or dest.get("table")
+                          or "products")
+        listings_table = dest.get("listings_table") or "ebay_listings"
+        proposed_mode = (dest.get("mode")
+                         or "use-existing-products-new-listings")
         site_constants = dest.get("site_constants") or {}
         stale_hours = int(cfg.get("stale_hours", 72))
 
@@ -371,8 +588,10 @@ class EbayProductSyncAgent(AgentBase):
         # ─── Bring up clients ──────────────────────────────────────
         adapter = make_adapter(db_kind, dsn)
         try:
+            self._cfg = cfg
             return self._run_inner(
-                adapter, table, site_id, site_constants, dest, cfg,
+                adapter, products_table, listings_table, proposed_mode,
+                site_id, site_constants, dest, cfg,
                 seeds, per_query_limit, max_queries_per_run, ebay_filter,
                 stale_hours, kwargs,
             )
@@ -381,9 +600,9 @@ class EbayProductSyncAgent(AgentBase):
 
     # ───────────────────────────────────────────────────────────────
     def _run_inner(
-        self, adapter: DbAdapter, table: str, site_id: str,
-        site_constants: dict, dest: dict, cfg: dict,
-        seeds: list, per_query_limit: int, max_queries_per_run: int,
+        self, adapter: DbAdapter, products_table: str, listings_table: str,
+        proposed_mode: str, site_id: str, site_constants: dict, dest: dict,
+        cfg: dict, seeds: list, per_query_limit: int, max_queries_per_run: int,
         ebay_filter: str, stale_hours: int, kwargs: dict,
     ) -> RunResult:
         storage = get_storage()
@@ -398,138 +617,575 @@ class EbayProductSyncAgent(AgentBase):
         mapping = None
         if not force_remap:
             existing = storage.read_json(mapping_storage_key(self.agent_id, site_id))
-            if existing and existing.get("approved_at"):
+            if existing and existing.get("approved_at") and existing.get("schema_version") == "2":
                 mapping = existing
-                log.info("loaded approved mapping for site=%s (approved %s by %s)",
+                log.info("loaded approved v2 mapping for site=%s (approved %s by %s)",
                          site_id, mapping.get("approved_at"), mapping.get("approved_by"))
 
         if not mapping:
             if force_remap:
-                # Wipe any prior pending proposal so we can produce a fresh one.
                 storage.write_json(mapping_storage_key(self.agent_id, site_id), {})
                 log.info("--force-remap: cleared prior mapping state for %s", site_id)
             mapping = self._propose_or_resume_mapping(
-                adapter, table, site_id, site_constants, ebay, ebay_filter,
+                adapter, products_table, listings_table, proposed_mode,
+                site_id, site_constants, ebay, ebay_filter,
                 cfg.get("owner_email"),
             )
-            # propose_or_resume_mapping raises ConfirmationPending if not yet approved.
 
-        # ─── PHASE 2 — ingest ──────────────────────────────────────
-        return self._ingest(
-            adapter, table, site_id, site_constants, mapping, ebay, ebay_filter,
+        # ─── PHASE 2 — apply create_ddl if any (one-time per approval)
+        if not mapping.get("ddl_applied"):
+            self._apply_ddl(adapter, mapping, dry_run)
+            if not dry_run:
+                mapping["ddl_applied"] = True
+                storage.write_json(mapping_storage_key(self.agent_id, site_id), mapping)
+
+        # ─── PHASE 3 — ingest with hydration
+        return self._ingest_v2(
+            adapter, mapping, site_id, site_constants, ebay, ebay_filter,
             seeds, per_query_limit, max_queries_per_run, stale_hours, dry_run,
         )
 
     # ───────────────────────────────────────────────────────────────
+    def _drain_responses_queue(self, storage) -> list[dict]:
+        """Pull any pending email replies dropped by the responder-agent."""
+        prefix = f"agents/{self.agent_id}/responses-queue/"
+        out = []
+        for key in storage.list_prefix(prefix):
+            d = storage.read_json(key)
+            if d:
+                out.append(d)
+                # Mark consumed by deleting (or moving). We delete here.
+                try: storage.delete(key)
+                except Exception: pass
+        if out:
+            log.info("drained %d email replies from responses-queue", len(out))
+        return out
+
+    def _resolve_reply(self, reply_text: str) -> dict:
+        """Parse the operator's email reply into a structured action.
+        Recognized commands (case-insensitive on the keyword):
+          APPROVE
+          CREATE NEW
+          USE TABLES products=<name> listings=<name>
+          EDIT <json>
+          REJECT <reason>
+        Anything else returns action='unknown'.
+        """
+        s = (reply_text or "").strip()
+        if not s:
+            return {"action": "unknown", "raw": ""}
+        first_line = s.splitlines()[0].strip()
+        upper = first_line.upper()
+
+        if upper.startswith("APPROVE"):
+            return {"action": "approve"}
+        if upper.startswith("CREATE NEW"):
+            return {"action": "create-new-tables"}
+        if upper.startswith("USE TABLES"):
+            # Parse "USE TABLES products=X listings=Y"
+            tail = first_line[len("USE TABLES"):].strip()
+            kv = {}
+            for tok in tail.split():
+                if "=" in tok:
+                    k, v = tok.split("=", 1)
+                    kv[k.strip().lower()] = v.strip()
+            return {"action": "use-tables", "products": kv.get("products"),
+                    "listings": kv.get("listings")}
+        if upper.startswith("EDIT"):
+            tail = s[4:].strip()
+            try: return {"action": "edit", "mapping": json.loads(tail)}
+            except json.JSONDecodeError as e:
+                return {"action": "edit-bad-json", "error": str(e), "raw": tail[:300]}
+        if upper.startswith("REJECT"):
+            return {"action": "reject", "reason": s[6:].strip()[:300]}
+        return {"action": "unknown", "raw": s[:300]}
+
     def _propose_or_resume_mapping(
-        self, adapter: DbAdapter, table: str, site_id: str,
-        site_constants: dict, ebay: EbayClient, ebay_filter: str,
-        owner_email: Optional[str],
+        self, adapter: DbAdapter, products_table: str, listings_table: str,
+        proposed_mode: str, site_id: str, site_constants: dict,
+        ebay: EbayClient, ebay_filter: str, owner_email: Optional[str],
     ) -> dict:
-        """Returns the approved mapping. Raises ConfirmationPending if a
-        proposal is already out and not yet answered, or if a fresh one
-        was just emitted."""
+        """Returns the approved v2 mapping. Raises ConfirmationPending if a
+        proposal is out + unanswered, or if a fresh one was just emitted."""
         storage = get_storage()
         mapping_key = mapping_storage_key(self.agent_id, site_id)
         existing = storage.read_json(mapping_key) or {}
 
-        # Was there already a pending proposal? Look up its confirmation.
+        # Drain any inbound replies the responder-agent has parked.
+        replies = self._drain_responses_queue(storage)
+
+        # If we have a pending proposal, look at its confirmation + replies.
         pending_cid = existing.get("pending_confirmation_id")
         if pending_cid:
             cr = get_confirmation(self.agent_id, pending_cid, storage)
+            # Apply any new email replies that match this confirmation.
+            for r in replies:
+                if r.get("confirmation_id") == pending_cid or r.get("request_id") == cr.request_id:
+                    cmd = self._resolve_reply(r.get("reply_text") or r.get("notes") or "")
+                    log.info("reply command: %s", cmd)
+                    cr = self._apply_reply_to_confirmation(
+                        cr, cmd, storage, mapping_key,
+                        adapter, products_table, listings_table,
+                        site_id, site_constants, ebay, ebay_filter, owner_email,
+                    )
+
             if cr is None:
-                log.warning("pending confirmation %s not found — re-proposing", pending_cid)
+                log.warning("pending confirmation %s lost — re-proposing", pending_cid)
             elif cr.state == "approved":
-                # Operator approved. Promote pending to approved.
-                approved = dict(existing)
+                approved = dict(storage.read_json(mapping_key) or {})
                 approved["approved_at"] = cr.resolved_at or _now()
                 approved["approved_by"] = cr.approved_by or "unknown"
                 approved.pop("pending_confirmation_id", None)
-                # If the operator pasted EDIT <json> in their reply, the
-                # responder will have stashed it in cr.notes — apply that.
-                edit_json = self._extract_edit_json(cr.notes or "")
-                if edit_json:
-                    log.info("applying operator's EDIT <json> override")
-                    edit_json["approved_at"] = approved["approved_at"]
-                    edit_json["approved_by"] = approved["approved_by"]
-                    approved = edit_json
                 storage.write_json(mapping_key, approved)
-                log.info("mapping approved for site=%s", site_id)
+                log.info("v2 mapping approved for site=%s", site_id)
                 return approved
             elif cr.state == "rejected":
-                log.warning("operator rejected mapping (notes=%s) — clearing and re-proposing",
+                log.warning("rejected — clearing and re-proposing (notes=%s)",
                             (cr.notes or "")[:200])
                 storage.write_json(mapping_key, {})
             elif cr.state == "pending":
                 raise ConfirmationPending(pending_cid, "mapping awaiting approval")
 
-        # No approved/pending mapping → propose one.
-        log.info("introspecting destination table %s", table)
-        cols = adapter.introspect_table(table)
-        if not cols:
-            raise RuntimeError(f"Destination table `{table}` has no columns. Misconfigured?")
-        log.info("introspected %d columns", len(cols))
-        sample = []
-        try: sample = adapter.sample_rows(table, n=3)
-        except Exception as e:
-            log.warning("sample_rows failed (continuing without): %s", e)
+        # No approved/pending mapping → propose a fresh one.
+        proposal = self._build_proposal(
+            adapter, products_table, listings_table, proposed_mode,
+            site_id, site_constants, ebay, ebay_filter,
+        )
+        return self._send_proposal_and_park(
+            proposal, site_id, owner_email,
+            existing_products_table=products_table,
+            existing_listings_table=listings_table,
+            existing_listings_exists=self._table_exists(adapter, listings_table),
+        )
 
-        log.info("fetching one eBay sample item")
-        sample_items = ebay.search(q="raspberry pi", filter_str=ebay_filter, limit=1)
+    def _table_exists(self, adapter: DbAdapter, table: str) -> bool:
+        try:
+            cols = adapter.introspect_table(table)
+            return bool(cols)
+        except Exception:
+            return False
+
+    def _build_proposal(self, adapter: DbAdapter, products_table: str,
+                        listings_table: str, proposed_mode: str, site_id: str,
+                        site_constants: dict, ebay: EbayClient, ebay_filter: str,
+                        ) -> dict:
+        """Run schema introspection + Claude → return v2 proposal dict
+        (with pending_confirmation_id NOT yet set)."""
+        log.info("introspecting products table %s", products_table)
+        prod_cols = adapter.introspect_table(products_table)
+        prod_samples = []
+        try:
+            prod_samples = adapter.sample_rows(products_table, n=3) if prod_cols else []
+        except Exception as e:
+            log.warning("products sample_rows failed: %s", e)
+
+        log.info("introspecting listings table %s (may not exist)", listings_table)
+        list_cols: list[ColumnInfo] = []
+        list_samples: list[dict] = []
+        try:
+            list_cols = adapter.introspect_table(listings_table)
+            if list_cols:
+                list_samples = adapter.sample_rows(listings_table, n=3)
+        except Exception as e:
+            log.info("listings table not found: %s", e)
+
+        # Auto-pick mode if not specified or if existing-state contradicts:
+        mode = proposed_mode
+        if not prod_cols and not list_cols:
+            mode = "create-new-tables"
+        elif prod_cols and not list_cols:
+            mode = "use-existing-products-new-listings"
+        elif prod_cols and list_cols:
+            mode = "use-existing-products-and-listings"
+        log.info("auto-picked mode: %s", mode)
+
+        # Pull category slugs from operator's catalog (if `categories` table exists)
+        cats = self._fetch_category_slugs(adapter)
+
+        log.info("fetching eBay sample item")
+        sample_items = ebay.search(q="Voodoo 3", filter_str=ebay_filter, limit=1)
         if not sample_items:
-            sample_items = ebay.search(q="laptop", limit=1)
+            sample_items = ebay.search(q="raspberry pi", limit=1)
         if not sample_items:
-            raise RuntimeError("eBay search returned no items — credentials OK but search empty?")
+            raise RuntimeError("eBay search returned no items.")
         sample_item = sample_items[0]
 
         ai = ai_client_for(self.agent_id)
-        log.info("calling Claude to propose mapping (%s)", type(ai).__name__)
+        log.info("calling Claude (%s) to propose v2 mapping", type(ai).__name__)
         site_id_value = site_constants.get("site_id")
         proposal = propose_mapping_via_claude(
-            ai, cols, sample, sample_item, table, site_id_value=site_id_value,
+            ai,
+            products_columns=prod_cols, products_samples=prod_samples,
+            listings_columns=list_cols, listings_samples=list_samples,
+            sample_ebay_item=sample_item,
+            products_table_name=products_table,
+            listings_table_name=listings_table,
+            mode=mode,
+            site_id_value=site_id_value,
+            db_kind=adapter.kind,
+            category_slugs=cats,
         )
+        proposal.setdefault("schema_version", "2")
         proposal["site_id"] = site_id
+        proposal.setdefault("mode", mode)
+        return proposal
 
-        # Send proposal email + record confirmation.
+    def _fetch_category_slugs(self, adapter: DbAdapter) -> list[str]:
+        try:
+            if adapter.kind == "postgres":
+                cur = adapter.conn.cursor()
+                cur.execute("SELECT slug FROM categories WHERE is_active = true ORDER BY slug")
+                rows = [r[0] for r in cur.fetchall()]
+                cur.close()
+                return rows
+        except Exception:
+            return []
+        return []
+
+    def _send_proposal_and_park(
+        self, proposal: dict, site_id: str, owner_email: Optional[str],
+        *, existing_products_table: str, existing_listings_table: str,
+        existing_listings_exists: bool,
+    ) -> dict:
+        """Send proposal email, write a pending ConfirmationRecord, persist
+        the proposal in storage with pending_confirmation_id, and raise
+        ConfirmationPending."""
+        storage = get_storage()
+        mapping_key = mapping_storage_key(self.agent_id, site_id)
         confirmation_id = f"map-{site_id}-{int(time.time())}"
         request_id = new_request_id()
+
         subject, html = _render_mapping_html(
-            proposal, cols, confirmation_id, request_id, self.agent_id, site_id,
+            proposal,
+            confirmation_id=confirmation_id,
+            request_id=request_id,
+            agent_id=self.agent_id,
+            site_id=site_id,
+            existing_products_table=existing_products_table,
+            existing_listings_table=existing_listings_table,
+            existing_listings_exists=existing_listings_exists,
         )
 
-        mailer = self._get_mailer()
         recipients = [owner_email] if owner_email else []
-        try:
-            sent = mailer.send(
-                agent_id=self.agent_id, request_id=request_id,
-                subject=subject, body_html=html, to=recipients,
-                expects_response=True,
-            )
-            if not sent:
-                log.warning("mailer reported failure")
-        except Exception as e:
-            log.warning("mailer failed: %s", e)
+        ok, detail = self._send_email(
+            subject=subject, body_html=html, to=recipients,
+            request_id=request_id,
+        )
+        log.info("proposal email sent: %s — %s", ok, detail)
 
         cr = ConfirmationRecord(
             confirmation_id=confirmation_id,
             agent_id=self.agent_id,
             method_name="ingest_to_destination",
-            reason=f"Approve eBay→{table} mapping for site {site_id}",
+            reason=f"Approve eBay→{site_id} v2 mapping",
             state="pending",
             requested_at=_now(),
             request_id=request_id,
         )
         write_confirmation(cr, storage)
 
-        # Store the proposal alongside the pending confirmation id so the next
-        # run can pick up where we left off.
         proposal_with_pending = dict(proposal)
         proposal_with_pending["pending_confirmation_id"] = confirmation_id
         storage.write_json(mapping_key, proposal_with_pending)
 
         raise ConfirmationPending(
             confirmation_id,
-            "mapping proposal emailed; waiting for operator approval",
+            "v2 mapping proposal emailed; waiting for operator approval",
+        )
+
+    def _apply_reply_to_confirmation(
+        self, cr: ConfirmationRecord, cmd: dict, storage,
+        mapping_key: str,
+        adapter: DbAdapter, products_table: str, listings_table: str,
+        site_id: str, site_constants: dict,
+        ebay: EbayClient, ebay_filter: str, owner_email: Optional[str],
+    ) -> Optional[ConfirmationRecord]:
+        """Mutate the confirmation + stored proposal based on the operator's
+        reply. Returns the updated record (still 'pending' if more action
+        is needed; 'approved' or 'rejected' otherwise)."""
+        action = cmd.get("action")
+        existing = storage.read_json(mapping_key) or {}
+
+        if action == "approve":
+            cr.state = "approved"
+            cr.resolved_at = _now()
+            cr.approved_by = cr.approved_by or "email-reply"
+            cr.notes = (cr.notes or "") + "\nAPPROVED via email reply"
+            write_confirmation(cr, storage)
+
+        elif action == "edit":
+            edited = cmd.get("mapping") or {}
+            edited.setdefault("schema_version", "2")
+            edited.setdefault("site_id", site_id)
+            edited["approved_at"] = _now()
+            edited["approved_by"] = "email-edit"
+            storage.write_json(mapping_key, edited)
+            cr.state = "approved"
+            cr.resolved_at = _now()
+            cr.approved_by = "email-edit"
+            cr.notes = (cr.notes or "") + "\nEDITED + APPROVED via email reply"
+            write_confirmation(cr, storage)
+
+        elif action == "create-new-tables":
+            log.info("operator chose CREATE NEW TABLES — regenerating proposal")
+            proposal = self._build_proposal(
+                adapter, products_table, listings_table,
+                "create-new-tables", site_id, site_constants, ebay, ebay_filter,
+            )
+            return self._send_proposal_and_park(
+                proposal, site_id, owner_email,
+                existing_products_table=products_table,
+                existing_listings_table=listings_table,
+                existing_listings_exists=self._table_exists(adapter, listings_table),
+            )
+
+        elif action == "use-tables":
+            new_p = cmd.get("products") or products_table
+            new_l = cmd.get("listings") or listings_table
+            log.info("operator re-targeted tables: products=%s listings=%s", new_p, new_l)
+            proposal = self._build_proposal(
+                adapter, new_p, new_l, "use-existing-products-new-listings",
+                site_id, site_constants, ebay, ebay_filter,
+            )
+            return self._send_proposal_and_park(
+                proposal, site_id, owner_email,
+                existing_products_table=new_p,
+                existing_listings_table=new_l,
+                existing_listings_exists=self._table_exists(adapter, new_l),
+            )
+
+        elif action == "reject":
+            cr.state = "rejected"
+            cr.resolved_at = _now()
+            cr.notes = (cr.notes or "") + "\nREJECTED: " + (cmd.get("reason") or "")
+            write_confirmation(cr, storage)
+
+        else:
+            log.warning("unrecognized reply action %s — leaving pending", action)
+
+        return cr
+
+    # ───────────────────────────────────────────────────────────────
+    def _hydrate_canonical_products(self, items: list[dict], cat_hint: Optional[str]) -> list[dict]:
+        """Batch-canonicalize listings → canonical product fingerprints
+        via Claude. Returns parallel list of {name, manufacturer, family,
+        title_fingerprint, key_specs, category_slug, confidence, ...} or
+        None for entries that should be skipped (low confidence / lots)."""
+        if not items: return []
+        ai = ai_client_for(self.agent_id)
+        # Batch listings to amortize Claude calls — 8 per call works well.
+        out: list[dict] = []
+        BATCH = 8
+        for i in range(0, len(items), BATCH):
+            chunk = items[i:i + BATCH]
+            user_prompt = "Canonicalize each listing. Return a JSON array of objects (one per listing, in order):\n\n"
+            for j, it in enumerate(chunk):
+                hint = f" (category hint: {cat_hint})" if cat_hint else ""
+                user_prompt += (
+                    f"#{j}{hint}\n  title: {it.get('title','')[:240]}\n"
+                    f"  short: {(it.get('shortDescription') or '')[:160]}\n\n"
+                )
+            try:
+                raw = ai.chat(
+                    [{"role": "system", "content": HYDRATION_SYS},
+                     {"role": "user", "content": user_prompt}],
+                    model="claude-sonnet-4-6",
+                    max_tokens=4000, max_turns=2, timeout=300,
+                )
+                s = raw.strip()
+                if s.startswith("```"):
+                    s = s.split("\n", 1)[1] if "\n" in s else s[3:]
+                    if s.endswith("```"): s = s.rsplit("```", 1)[0]
+                ia = s.find("[")
+                ja = s.rfind("]")
+                if ia < 0 or ja <= ia:
+                    log.warning("hydration: non-array response, skipping batch")
+                    out.extend([None] * len(chunk))
+                    continue
+                arr = json.loads(s[ia:ja+1])
+                if not isinstance(arr, list) or len(arr) != len(chunk):
+                    log.warning("hydration: array length mismatch (%d vs %d)", len(arr) if isinstance(arr, list) else 0, len(chunk))
+                    arr = (arr if isinstance(arr, list) else []) + [None] * (len(chunk) - (len(arr) if isinstance(arr, list) else 0))
+                out.extend(arr)
+            except Exception as e:
+                log.warning("hydration batch failed: %s", e)
+                out.extend([None] * len(chunk))
+        return out
+
+    def _upsert_canonical_product(
+        self, adapter: DbAdapter, mapping: dict, item: dict, hyd: dict,
+        cat_id: Optional[int], site_constants: dict,
+    ) -> Optional[Any]:
+        """Insert/update one canonical product row, return its primary
+        key value so we can FK from the listing."""
+        pt = mapping["products_table"]
+        match_cols = pt.get("match_columns") or ["title_fingerprint"]
+        # Build the row from the products field-mapping.
+        row = self._build_row_from_section(pt, item, hyd, site_constants, cat_id)
+        # Look up by match columns first (so multiple listings of same
+        # SKU dedup to one canonical product).
+        existing_id = self._lookup_existing_product(adapter, pt["name"], match_cols, row)
+        if existing_id is not None:
+            return existing_id
+        # Insert via upsert on key_columns.
+        key_cols = pt.get("key_columns") or ["asin"]
+        # If destination has an `id` column we want returned, capture it.
+        try:
+            ir = adapter.upsert_rows(pt["name"], [row], key_cols)
+            if adapter.kind == "postgres":
+                cur = adapter.conn.cursor()
+                where_clauses = " AND ".join(f"{k} = %s" for k in key_cols)
+                cur.execute(f"SELECT id FROM {pt['name']} WHERE {where_clauses} LIMIT 1",
+                            [row[k] for k in key_cols])
+                r = cur.fetchone(); cur.close()
+                return r[0] if r else None
+        except Exception as e:
+            log.warning("product upsert failed: %s", e)
+            return None
+        return None
+
+    def _build_row_from_section(self, section: dict, item: dict,
+                                 hydration: Optional[dict],
+                                 site_constants: dict,
+                                 cat_id: Optional[int] = None) -> dict:
+        """Build a destination row from a section's fields + constants."""
+        row: dict = {}
+        for f in section.get("fields", []):
+            col = f["destination_column"]
+            if f.get("from_hydration"):
+                if hydration:
+                    val = hydration.get(f["from_hydration"])
+                    if isinstance(val, (dict, list)):
+                        val = json.dumps(val)
+                    row[col] = val if val is not None else f.get("default")
+                else:
+                    row[col] = f.get("default")
+            else:
+                row[col] = self._extract_field(item, f)
+        # Constants.
+        for c in section.get("constants", []):
+            row[c["destination_column"]] = c["value"]
+        # Site-level constants override.
+        row.update(site_constants or {})
+        if cat_id is not None and "category_id" in row and row["category_id"] is None:
+            row["category_id"] = cat_id
+        return row
+
+    def _extract_field(self, item: dict, f: dict) -> Any:
+        from mapping import _resolve_path, TRANSFORMS  # type: ignore
+        val = _resolve_path(item, f.get("source_path") or "")
+        tform = f.get("transform")
+        if tform and tform in TRANSFORMS:
+            try: return TRANSFORMS[tform](val, item)
+            except Exception: return f.get("default")
+        return val if val is not None else f.get("default")
+
+    def _lookup_existing_product(self, adapter: DbAdapter, table: str,
+                                  match_cols: list[str], row: dict) -> Optional[Any]:
+        """Find existing canonical product by match columns (e.g.
+        title_fingerprint). Returns id or None."""
+        present = [c for c in match_cols if row.get(c) not in (None, "")]
+        if not present:
+            return None
+        try:
+            if adapter.kind == "postgres":
+                cur = adapter.conn.cursor()
+                where = " AND ".join(f"{c} = %s" for c in present)
+                cur.execute(f"SELECT id FROM {table} WHERE {where} LIMIT 1",
+                            [row[c] for c in present])
+                r = cur.fetchone(); cur.close()
+                return r[0] if r else None
+        except Exception as e:
+            log.debug("product lookup failed: %s", e)
+        return None
+
+    # ───────────────────────────────────────────────────────────────
+    def _ingest_v2(
+        self, adapter: DbAdapter, mapping: dict, site_id: str,
+        site_constants: dict, ebay: EbayClient,
+        ebay_filter: str, seeds: list, per_query_limit: int,
+        max_queries_per_run: int, stale_hours: int, dry_run: bool,
+    ) -> RunResult:
+        """Two-table ingestion: hydrate canonical products from each
+        listing batch, upsert into products table, then write listings
+        rows referencing the product's primary key."""
+        stats = {"queries_run": 0, "items_seen": 0,
+                 "products_upserted": 0, "products_skipped_low_conf": 0,
+                 "listings_inserted": 0, "listings_updated": 0,
+                 "errors": []}
+        pt = mapping["products_table"]
+        lt = mapping["listings_table"]
+        listings_keys = lt.get("key_columns") or ["ebay_item_id"]
+        fk_col = lt.get("fk_to_product_column") or "product_id"
+
+        plan: list[tuple[Optional[str], str]] = []
+        for entry in seeds:
+            cat = entry.get("category") or entry.get("category_slug")
+            for q in (entry.get("queries") or []):
+                plan.append((cat, q))
+        plan = plan[:max_queries_per_run]
+        if not plan:
+            return RunResult(status="success", summary="no seeds configured")
+
+        for cat, q in plan:
+            stats["queries_run"] += 1
+            try:
+                items = ebay.search(q=q, filter_str=ebay_filter, limit=per_query_limit)
+            except Exception as e:
+                stats["errors"].append({"q": q, "err": str(e)[:300]})
+                continue
+            stats["items_seen"] += len(items)
+            log.info("[%s] %r → %d items", cat or "?", q, len(items))
+            if not items: continue
+
+            cat_id = self._resolve_category_id(adapter, cat) if cat else None
+
+            # Phase A: canonicalize the whole batch in one or two LLM calls.
+            hyd_list = self._hydrate_canonical_products(items, cat)
+
+            listings_rows = []
+            for item, hyd in zip(items, hyd_list):
+                if not hyd or float(hyd.get("confidence") or 0) < 0.5:
+                    stats["products_skipped_low_conf"] += 1
+                    continue
+                if dry_run:
+                    continue
+                product_pk = self._upsert_canonical_product(
+                    adapter, mapping, item, hyd, cat_id, site_constants,
+                )
+                if product_pk is None:
+                    stats["errors"].append({"item": item.get("legacyItemId"), "err": "product upsert failed"})
+                    continue
+                stats["products_upserted"] += 1
+
+                # Build the listings row, with fk to the product.
+                lrow = self._build_row_from_section(lt, item, hyd, site_constants={})
+                lrow[fk_col] = product_pk
+                # ensure listing has updated_at-style col if present in mapping
+                listings_rows.append(lrow)
+
+            if listings_rows:
+                ir = adapter.upsert_rows(lt["name"], listings_rows, listings_keys)
+                stats["listings_inserted"] += ir.inserted
+                stats["listings_updated"] += ir.updated
+                if ir.failed_samples:
+                    for s in ir.failed_samples[:2]:
+                        log.warning("  listing upsert err: %s", s["err"])
+
+            time.sleep(0.05)
+
+        if not dry_run:
+            stale = _mark_stale_inactive(adapter, lt["name"], stale_hours)
+            stats["stale_listings_inactive"] = stale
+
+        log.info("v2 ingestion complete: %s", json.dumps(stats, default=str))
+        return RunResult(
+            status="success",
+            summary=(f"queries={stats['queries_run']} items={stats['items_seen']} "
+                     f"products={stats['products_upserted']} "
+                     f"listings_in={stats['listings_inserted']} "
+                     f"listings_up={stats['listings_updated']}"),
+            metrics=stats,
         )
 
     # ───────────────────────────────────────────────────────────────
@@ -701,15 +1357,80 @@ class EbayProductSyncAgent(AgentBase):
         )
 
     # ───────────────────────────────────────────────────────────────
-    def _get_mailer(self):
-        # The framework upgrades to SmtpMailer / SesMailer when configured.
-        # Fall back to LogMailer (writes to storage) — the operator can
-        # poll outbound-emails/ to see the proposal even without SMTP.
+    def _send_email(self, *, subject: str, body_html: str, to: list[str],
+                    request_id: str) -> tuple[bool, str]:
+        """Real mail send. Tries the framework's Graph-or-msmtp path
+        (shared.site_quality.send_via_msmtp). Falls back to LogMailer when
+        neither is configured. Always records to storage either way so the
+        dashboard's outbound-emails view shows the proposal."""
+        sender = (self._cfg.get("sender_email")
+                  or "noreply@reusable-agents.local")
+        ok, detail = False, ""
         try:
-            from framework.core.mailer import SmtpMailer  # type: ignore
-            return SmtpMailer()
+            from shared.site_quality import send_via_msmtp  # type: ignore
+            ok, detail = send_via_msmtp(
+                subject=subject, body_html=body_html, to=to, sender=sender,
+            )
+        except Exception as e:
+            ok, detail = False, f"send_via_msmtp unavailable: {e}"
+
+        # Always record to outbound-emails/ for audit, regardless of send.
+        try:
+            storage = get_storage()
+            from framework.core.mailer import outbound_email_key
+            storage.write_json(outbound_email_key(self.agent_id, request_id), {
+                "schema_version": "1",
+                "request_id": request_id,
+                "agent_id": self.agent_id,
+                "subject": subject,
+                "to": to,
+                "body_html": body_html,
+                "expects_response": True,
+                "sent_at": _now(),
+                "transport": "send_via_msmtp" if ok else "log-only",
+                "ok": ok,
+                "detail": detail,
+            })
         except Exception:
-            return LogMailer()
+            pass
+
+        if not ok:
+            log.warning("real email send failed: %s — proposal stored in outbound-emails/", detail)
+        return ok, detail
+
+    # ───────────────────────────────────────────────────────────────
+    def _apply_ddl(self, adapter: DbAdapter, mapping: dict, dry_run: bool):
+        """If mapping has CREATE TABLE statements, run them. Idempotent —
+        the LLM is told to use IF NOT EXISTS where supported."""
+        for section_name in ("products_table", "listings_table"):
+            sec = mapping.get(section_name) or {}
+            ddl = sec.get("create_ddl")
+            if not ddl:
+                continue
+            log.info("applying %s.create_ddl (%d chars)", section_name, len(ddl))
+            if dry_run:
+                continue
+            try:
+                if adapter.kind == "postgres":
+                    cur = adapter.conn.cursor()
+                    cur.execute(ddl)
+                    adapter.conn.commit()
+                    cur.close()
+                elif adapter.kind == "azure-sql":
+                    cur = adapter.conn.cursor()
+                    # Azure SQL doesn't have IF NOT EXISTS for CREATE TABLE
+                    # uniformly; trust the LLM to gate appropriately or wrap.
+                    cur.execute(ddl)
+                    adapter.conn.commit()
+                    cur.close()
+                log.info("DDL for %s applied", section_name)
+            except Exception as e:
+                # If table already exists, that's fine. Anything else: surface.
+                msg = str(e).lower()
+                if "already exists" in msg or "object_name" in msg:
+                    log.info("DDL for %s skipped (already exists)", section_name)
+                else:
+                    raise
 
     # ───────────────────────────────────────────────────────────────
     def _extract_edit_json(self, notes: str) -> Optional[dict]:

@@ -223,4 +223,69 @@ PYTHONPATH="$REPO_ROOT" python3 -m framework.core.completion_email \
 
 [ -n "$REC_TITLES_JSON" ] && rm -f "$REC_TITLES_JSON"
 
+# ── End-of-run results file ────────────────────────────────────────────────
+# Persist the implementer's full claude --print output + summary metadata
+# to framework storage so it's queryable from the dashboard's per-run
+# artifact view. The /tmp dispatch log is host-only (deleted on reboot).
+PYTHONPATH="$REPO_ROOT" \
+SOURCE_AGENT="$SOURCE_AGENT" \
+IMPL_AGENT_ID="${SEO_IMPLEMENTER_AGENT_ID:-seo-implementer}" \
+RESPONDER_RUN_TS="${RESPONDER_RUN_TS:-}" \
+RESPONDER_REC_IDS="$RESPONDER_REC_IDS" \
+RESPONDER_SITE="${RESPONDER_SITE:-}" \
+RESPONDER_RUN_DIR="${RESPONDER_RUN_DIR:-}" \
+DISPATCH_LOG_PATH="${DISPATCH_LOG_PATH:-}" \
+GIT_SHA="$GIT_SHA" \
+python3 - <<'PY' 2>/dev/null || true
+import json, os, sys
+from datetime import datetime, timezone
+from framework.core.storage import get_storage
+s = get_storage()
+agent_id = os.environ.get("IMPL_AGENT_ID", "seo-implementer")
+run_ts = os.environ.get("RESPONDER_RUN_TS") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+# Read the dispatch log (the actual claude --print output) — fall back to
+# the most-recent dispatch log for this site if DISPATCH_LOG_PATH wasn't set.
+log_path = os.environ.get("DISPATCH_LOG_PATH") or ""
+if not log_path:
+    log_dir = "/tmp/reusable-agents-logs"
+    site = os.environ.get("RESPONDER_SITE", "")
+    if os.path.isdir(log_dir):
+        from glob import glob
+        matches = sorted(glob(f"{log_dir}/dispatch-seo-implementer-{site}-*.log"),
+                          key=os.path.getmtime, reverse=True)
+        log_path = matches[0] if matches else ""
+
+llm_output = ""
+if log_path and os.path.isfile(log_path):
+    try:
+        with open(log_path) as f:
+            llm_output = f.read()
+    except Exception:
+        pass
+
+results = {
+    "schema_version": "1",
+    "agent_id": agent_id,
+    "run_ts": run_ts,
+    "source_agent": os.environ.get("SOURCE_AGENT", ""),
+    "site": os.environ.get("RESPONDER_SITE", ""),
+    "rec_ids": (os.environ.get("RESPONDER_REC_IDS", "") or "").split(","),
+    "run_dir": os.environ.get("RESPONDER_RUN_DIR", ""),
+    "git_sha": os.environ.get("GIT_SHA", ""),
+    "dispatch_log_path": log_path,
+    "llm_output": llm_output,
+    "llm_output_chars": len(llm_output),
+    "ai_provider": "claude-cli",
+    "ended_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+}
+try:
+    s.write_json(f"agents/{agent_id}/runs/{run_ts}/results.json", results)
+    # Also save just the LLM stdout as a separate text file for easy
+    # download / grep from the dashboard's Storage tab.
+    s.write_text(f"agents/{agent_id}/runs/{run_ts}/llm-output.txt", llm_output or "")
+except Exception as e:
+    print(f"[implementer] results.json write failed: {e}", file=sys.stderr)
+PY
+
 echo "[implementer] done"
