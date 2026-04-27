@@ -326,7 +326,23 @@ class EbayProductSyncAgent(AgentBase):
         config_path = os.environ.get("EBAY_PRODUCT_SYNC_CONFIG")
         if not config_path:
             raise RuntimeError("EBAY_PRODUCT_SYNC_CONFIG env var not set")
-        cfg = yaml.safe_load(Path(config_path).read_text())
+        config_path = Path(config_path).resolve()
+        cfg = yaml.safe_load(config_path.read_text())
+
+        # Load secrets_file (gitignored .env) into process env BEFORE
+        # building any clients, so EbayClient + the destination DSN can
+        # reference its values via ${ENV_VAR}. Path is relative to the
+        # site.yaml directory unless absolute.
+        secrets_file = cfg.get("secrets_file")
+        if secrets_file:
+            sp = Path(secrets_file)
+            if not sp.is_absolute():
+                sp = config_path.parent / sp
+            if sp.exists():
+                _load_dotenv(sp)
+                log.info("loaded secrets from %s", sp)
+            else:
+                log.warning("secrets_file %s not found — relying on process env", sp)
 
         site_id = cfg["site_id"]
         dest = cfg["destination"]
@@ -335,6 +351,10 @@ class EbayProductSyncAgent(AgentBase):
         table = dest.get("table", "products")
         site_constants = dest.get("site_constants") or {}
         stale_hours = int(cfg.get("stale_hours", 72))
+
+        # Resolve eBay client config from yaml `ebay:` block, with
+        # `*_env: NAME` indirection or inline strings.
+        self._ebay_cfg = cfg.get("ebay") or {}
 
         # Seeds: list of {category_slug, queries[]} or simpler {queries[]}
         seeds = cfg.get("seeds") or []
@@ -370,7 +390,7 @@ class EbayProductSyncAgent(AgentBase):
         dry_run = bool(kwargs.get("dry_run", False))
         force_remap = bool(kwargs.get("force_remap", False))
 
-        ebay = EbayClient.from_env()
+        ebay = self._make_ebay_client()
         ebay_health = ebay.healthcheck()
         log.info("eBay OK: %s", ebay_health)
 
@@ -384,6 +404,10 @@ class EbayProductSyncAgent(AgentBase):
                          site_id, mapping.get("approved_at"), mapping.get("approved_by"))
 
         if not mapping:
+            if force_remap:
+                # Wipe any prior pending proposal so we can produce a fresh one.
+                storage.write_json(mapping_storage_key(self.agent_id, site_id), {})
+                log.info("--force-remap: cleared prior mapping state for %s", site_id)
             mapping = self._propose_or_resume_mapping(
                 adapter, table, site_id, site_constants, ebay, ebay_filter,
                 cfg.get("owner_email"),
@@ -635,6 +659,48 @@ class EbayProductSyncAgent(AgentBase):
         return cache[slug]
 
     # ───────────────────────────────────────────────────────────────
+    def _make_ebay_client(self) -> "EbayClient":
+        """Build an EbayClient from the site.yaml `ebay:` block.
+
+        Each setting supports two forms:
+          - `<name>_env: VAR_NAME`  → read `os.environ[VAR_NAME]`
+          - `<name>: literal`       → use the literal string (dev only)
+        Falls back to the conventional EBAY_* env vars when neither is set.
+        """
+        ec = self._ebay_cfg or {}
+
+        def _resolve(key: str, default_env: str) -> str:
+            env_key = ec.get(f"{key}_env") or default_env
+            inline = ec.get(key)
+            if inline:
+                return str(inline)
+            v = os.environ.get(env_key, "")
+            return v
+
+        client_id = _resolve("client_id", "EBAY_CLIENT_ID")
+        client_secret = _resolve("client_secret", "EBAY_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            raise RuntimeError(
+                "eBay credentials not configured. Either set EBAY_CLIENT_ID/"
+                "EBAY_CLIENT_SECRET in the env, point `ebay.client_id_env` "
+                "and `ebay.client_secret_env` at custom var names in "
+                "site.yaml, or store inline values under `ebay.client_id` "
+                "and `ebay.client_secret` (dev only)."
+            )
+        env = (ec.get("env") or os.environ.get("EBAY_ENV", "PRODUCTION")).upper()
+        marketplace = (ec.get("marketplace_id")
+                        or os.environ.get("EBAY_MARKETPLACE_ID", "EBAY_US"))
+        campaign_id = _resolve("campaign_id", "EBAY_CAMPAIGN_ID") or None
+
+        return EbayClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            env=env,
+            marketplace=marketplace,
+            campaign_id=campaign_id,
+        )
+
+    # ───────────────────────────────────────────────────────────────
     def _get_mailer(self):
         # The framework upgrades to SmtpMailer / SesMailer when configured.
         # Fall back to LogMailer (writes to storage) — the operator can
@@ -663,6 +729,31 @@ class EbayProductSyncAgent(AgentBase):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _load_dotenv(path: Path) -> None:
+    """Minimal dotenv loader (no extra dep). Reads `KEY=VALUE` lines from
+    `path` and writes any missing keys into `os.environ`. Existing env
+    vars are NOT overwritten — process env wins, file is the fallback."""
+    try:
+        text = path.read_text()
+    except Exception as e:
+        log.warning("could not read %s: %s", path, e)
+        return
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        # Strip wrapping quotes if present.
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        if k and k not in os.environ:
+            os.environ[k] = v
 
 
 # ───────────────────────────────────────────────────────────────────
