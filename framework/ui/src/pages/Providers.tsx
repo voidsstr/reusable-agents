@@ -100,7 +100,7 @@ export default function Providers() {
         <div>
           <h1 className="text-xl font-bold">AI Providers</h1>
           <div className="text-sm text-ink-400">
-            Default: <code className="text-glow-running">{defaults.default_provider || '(none)'}</code>
+            Default: <code className="text-status-running-fg">{defaults.default_provider || '(none)'}</code>
             {defaults.default_model && (
               <>{' '}· model <code>{defaults.default_model}</code></>
             )}
@@ -108,12 +108,12 @@ export default function Providers() {
         </div>
         <button
           onClick={() => { setAdding(true); setEditing(blank()) }}
-          className="px-3 py-1.5 bg-glow-running/20 hover:bg-glow-running/30 text-glow-running rounded text-sm font-semibold"
+          className="px-3 py-1.5 bg-status-running-bg hover:bg-accent-700 text-status-running-fg rounded text-sm font-semibold"
         >+ add provider</button>
       </div>
 
       {error && (
-        <div className="px-3 py-2 bg-glow-failure/10 border border-glow-failure/40 rounded text-sm text-glow-failure">
+        <div className="px-3 py-2 bg-status-failure-bg border border-status-failure-glow/40 rounded text-sm text-status-failure-fg">
           {error}
         </div>
       )}
@@ -125,21 +125,35 @@ export default function Providers() {
       ) : (
         <div className="space-y-2">
           {providers.map(p => (
-            <div key={p.name} className={`bg-ink-800 p-4 rounded border ${
-              defaults.default_provider === p.name ? 'border-glow-running' : 'border-ink-700'
+            <div key={p.name} className={`bg-surface-card border border-surface-divider p-4 rounded border ${
+              defaults.default_provider === p.name ? 'border-accent-500' : 'border-surface-divider'
             }`}>
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-mono font-semibold text-ink-100">{p.name}</span>
-                    <span className="text-[10px] px-2 py-0.5 bg-ink-700 rounded text-ink-300">{p.kind}</span>
+                    <span className="font-mono font-semibold text-ink-900">{p.name}</span>
+                    <span className="text-[10px] px-2 py-0.5 bg-surface-subtle rounded text-ink-600">{p.kind}</span>
                     {p.has_key ? (
-                      <span className="text-[10px] px-2 py-0.5 bg-glow-success/20 text-glow-success rounded">🔑 key configured</span>
+                      <span className="text-[10px] px-2 py-0.5 bg-status-success-bg text-status-success-fg rounded">🔑 key configured</span>
+                    ) : !p.api_key_env && (p.kind === 'claude-cli' || p.kind === 'ollama' || p.kind === 'copilot') ? (
+                      <span
+                        className="text-[10px] px-2 py-0.5 bg-status-success-bg text-status-success-fg rounded"
+                        title={
+                          p.kind === 'claude-cli'
+                            ? 'Uses your local Claude CLI session (Max subscription) — no API key required'
+                            : p.kind === 'ollama'
+                            ? 'Local Ollama server — authentication is host-based, no API key needed'
+                            : 'GitHub Copilot via copilot-api proxy — auth is handled by the proxy, no key here'
+                        }
+                      >🔓 no key needed</span>
                     ) : (
-                      <span className="text-[10px] px-2 py-0.5 bg-glow-failure/20 text-glow-failure rounded">⚠ no key</span>
+                      <span
+                        className="text-[10px] px-2 py-0.5 bg-status-failure-bg text-status-failure-fg rounded"
+                        title={`Set the ${p.api_key_env || 'API key'} env var on the framework's host (or container) and restart, OR put the inline key into this provider's config (DEV ONLY).`}
+                      >⚠ no key</span>
                     )}
                     {defaults.default_provider === p.name && (
-                      <span className="text-[10px] px-2 py-0.5 bg-glow-running/20 text-glow-running rounded">★ default</span>
+                      <span className="text-[10px] px-2 py-0.5 bg-status-running-bg text-status-running-fg rounded">★ default</span>
                     )}
                   </div>
                   {p.description && <div className="text-xs text-ink-400 mt-1">{p.description}</div>}
@@ -154,16 +168,16 @@ export default function Providers() {
                   {defaults.default_provider !== p.name && (
                     <button
                       onClick={() => setDefault(p.name, p.default_model || '')}
-                      className="px-2 py-1 bg-ink-700 hover:bg-glow-running/20 hover:text-glow-running rounded text-xs"
+                      className="px-2 py-1 bg-surface-subtle hover:bg-status-running-bg hover:text-status-running-fg rounded text-xs"
                     >set default</button>
                   )}
                   <button
                     onClick={() => setEditing(p)}
-                    className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded text-xs"
+                    className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded text-xs"
                   >edit</button>
                   <button
                     onClick={() => remove(p.name)}
-                    className="px-2 py-1 bg-ink-700 hover:bg-glow-failure/20 hover:text-glow-failure rounded text-xs"
+                    className="px-2 py-1 bg-surface-subtle hover:bg-status-failure-bg hover:text-status-failure-fg rounded text-xs"
                   >delete</button>
                 </div>
               </div>
@@ -173,14 +187,14 @@ export default function Providers() {
       )}
 
       {Object.keys(defaults.agent_overrides).length > 0 && (
-        <section className="bg-ink-800 p-4 rounded">
+        <section className="bg-surface-card border border-surface-divider p-4 rounded">
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Per-agent overrides</h2>
           <div className="space-y-1 text-sm">
             {Object.entries(defaults.agent_overrides).map(([agentId, override]) => (
               <div key={agentId} className="font-mono text-xs flex gap-3">
-                <span className="text-ink-300">{agentId}</span>
+                <span className="text-ink-600">{agentId}</span>
                 <span className="text-ink-500">→</span>
-                <span className="text-ink-200">{override.provider || '(no provider)'}</span>
+                <span className="text-ink-700">{override.provider || '(no provider)'}</span>
                 {override.model && <span className="text-ink-400">model: {override.model}</span>}
               </div>
             ))}
@@ -208,10 +222,10 @@ function ProviderEditModal({
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-ink-800 border border-ink-700 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto">
-        <div className="p-4 border-b border-ink-700 flex justify-between items-center">
+      <div className="bg-surface-card border border-surface-divider border-surface-divider rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto">
+        <div className="p-4 border-b border-surface-divider flex justify-between items-center">
           <h2 className="font-bold">{isNew ? 'Add Provider' : `Edit ${provider.name}`}</h2>
-          <button onClick={onCancel} className="text-ink-400 hover:text-ink-100">✕</button>
+          <button onClick={onCancel} className="text-ink-400 hover:text-ink-900">✕</button>
         </div>
         <div className="p-4 space-y-3 text-sm">
           <Field label="name (kebab-case, unique)" disabled={!isNew}
@@ -221,7 +235,7 @@ function ProviderEditModal({
             <select
               value={draft.kind}
               onChange={(e) => set('kind', e.target.value)}
-              className="w-full px-3 py-1.5 bg-ink-950 border border-ink-700 rounded font-mono text-xs"
+              className="w-full px-3 py-1.5 bg-surface-subtle border-surface-divider rounded font-mono text-xs"
             >{KINDS.map(k => <option key={k} value={k}>{k}</option>)}</select>
           </div>
           <Field label="description" value={draft.description} onChange={(v) => set('description', v)} />
@@ -244,9 +258,9 @@ function ProviderEditModal({
                  value={draft.available_models.join(', ')}
                  onChange={(v) => set('available_models', v.split(',').map(s => s.trim()).filter(Boolean))} />
         </div>
-        <div className="p-4 border-t border-ink-700 flex gap-2 justify-end">
-          <button onClick={onCancel} className="px-3 py-1.5 bg-ink-700 hover:bg-ink-600 rounded text-sm">cancel</button>
-          <button onClick={() => onSave(draft)} className="px-3 py-1.5 bg-glow-running/20 hover:bg-glow-running/30 text-glow-running rounded text-sm font-semibold">save</button>
+        <div className="p-4 border-t border-surface-divider flex gap-2 justify-end">
+          <button onClick={onCancel} className="px-3 py-1.5 bg-surface-subtle hover:bg-ink-200 rounded text-sm">cancel</button>
+          <button onClick={() => onSave(draft)} className="px-3 py-1.5 bg-status-running-bg hover:bg-accent-700 text-status-running-fg rounded text-sm font-semibold">save</button>
         </div>
       </div>
     </div>
@@ -266,7 +280,7 @@ function Field({ label, value, onChange, type = 'text', disabled, placeholder }:
         disabled={disabled}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-1.5 bg-ink-950 border border-ink-700 rounded font-mono text-xs disabled:opacity-50"
+        className="w-full px-3 py-1.5 bg-surface-subtle border-surface-divider rounded font-mono text-xs disabled:opacity-50"
       />
     </div>
   )

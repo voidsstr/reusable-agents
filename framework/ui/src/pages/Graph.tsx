@@ -352,15 +352,15 @@ function GraphInner() {
   const selectedOutgoing = useMemo(() => edges.filter(e => e.source === selectedId), [edges, selectedId])
 
   return (
-    <div className="h-[calc(100vh-65px)] w-full flex flex-col bg-ink-950 text-ink-100 -m-4">
-      <div className="px-4 py-2 border-b border-ink-800 flex items-center gap-3 bg-ink-900">
+    <div className="h-[calc(100vh-65px)] w-full flex flex-col bg-surface-subtle text-ink-900 -m-4">
+      <div className="px-4 py-2 border-b border-surface-divider flex items-center gap-3 bg-surface-page">
         <h1 className="text-sm font-semibold">Agent Dependency Graph</h1>
         <span className="text-xs text-ink-500">{nodes.length} agents · {edges.length} dependencies</span>
         <div className="ml-auto flex items-center gap-2 text-xs">
           {savedAt && <span className="text-ink-500">saved {savedAt}</span>}
-          <button onClick={saveLayout} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">💾 save layout</button>
-          <button onClick={autoLayout} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">⤴ auto layout</button>
-          <button onClick={() => { localStorage.removeItem(STORAGE_KEY); window.location.reload() }} className="px-2 py-1 bg-ink-700 hover:bg-ink-600 rounded">⟲ reset</button>
+          <button onClick={saveLayout} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">💾 save layout</button>
+          <button onClick={autoLayout} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⤴ auto layout</button>
+          <button onClick={() => { localStorage.removeItem(STORAGE_KEY); window.location.reload() }} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⟲ reset</button>
         </div>
       </div>
 
@@ -387,7 +387,7 @@ function GraphInner() {
             defaultEdgeOptions={{ type: 'smoothstep' }}
           >
             <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#1e293b" />
-            <Controls className="!bg-ink-800 !border-ink-700" />
+            <Controls className="!bg-surface-card border border-surface-divider !border-surface-divider" />
             <MiniMap
               nodeColor={(n) => {
                 const cat = (n.data as any)?.category || 'misc'
@@ -396,14 +396,14 @@ function GraphInner() {
               maskColor="rgba(15, 23, 42, 0.6)"
               style={{ background: '#0f172a', border: '1px solid #1e293b' }}
             />
-            <Panel position="bottom-left" className="!bg-ink-900 !border !border-ink-800 !rounded p-2 text-xs space-y-1">
+            <Panel position="bottom-left" className="!bg-surface-page !border !border-surface-divider !rounded p-2 text-xs space-y-1">
               <div className="text-ink-400 font-semibold mb-1">Edge kinds</div>
               {legend.map(k => {
                 const s = KIND_STYLES[k.id] || KIND_STYLES['depends-on']
                 return (
                   <div key={k.id} className="flex items-center gap-2">
                     <svg width="36" height="6"><line x1="0" y1="3" x2="36" y2="3" stroke={s.stroke} strokeWidth="2" strokeDasharray={s.strokeDasharray} /></svg>
-                    <span className="text-ink-300">{k.label}</span>
+                    <span className="text-ink-600">{k.label}</span>
                   </div>
                 )
               })}
@@ -413,27 +413,27 @@ function GraphInner() {
 
         {/* Side panel */}
         {selectedNode && (
-          <aside className="w-80 border-l border-ink-800 bg-ink-900 p-4 overflow-auto text-xs">
+          <aside className="w-80 border-l border-surface-divider bg-surface-page p-4 overflow-auto text-xs">
             <div className="flex items-start justify-between mb-3">
               <div>
-                <div className="text-sm font-semibold text-ink-100">{(selectedNode.data as any).name}</div>
+                <div className="text-sm font-semibold text-ink-900">{(selectedNode.data as any).name}</div>
                 <div className="font-mono text-ink-500 text-[11px] mt-0.5">{selectedNode.id}</div>
               </div>
-              <button onClick={() => { setSelectedId(null); setNodes(ns => ns.map(n => ({ ...n, data: { ...n.data, selected: false } }))) }} className="text-ink-500 hover:text-ink-200">✕</button>
+              <button onClick={() => { setSelectedId(null); setNodes(ns => ns.map(n => ({ ...n, data: { ...n.data, selected: false } }))) }} className="text-ink-500 hover:text-ink-700">✕</button>
             </div>
-            <Link to={`/agents/${selectedNode.id}`} className="block mb-3 text-glow-running underline">Open agent →</Link>
+            <Link to={`/agents/${selectedNode.id}`} className="block mb-3 text-status-running-fg underline">Open agent →</Link>
 
             <div className="mb-3 grid grid-cols-2 gap-2">
-              <div><div className="text-[10px] uppercase text-ink-500">Category</div><div className="text-ink-200 mt-0.5">{(selectedNode.data as any).category}</div></div>
-              <div><div className="text-[10px] uppercase text-ink-500">Cron</div><div className="font-mono text-ink-200 mt-0.5">{(selectedNode.data as any).cron || '(none)'}</div></div>
-              <div><div className="text-[10px] uppercase text-ink-500">State</div><div className="text-ink-200 mt-0.5">{(selectedNode.data as any).enabled ? 'enabled' : 'disabled'}</div></div>
+              <div><div className="text-[10px] uppercase text-ink-500">Category</div><div className="text-ink-700 mt-0.5">{(selectedNode.data as any).category}</div></div>
+              <div><div className="text-[10px] uppercase text-ink-500">Cron</div><div className="font-mono text-ink-700 mt-0.5">{(selectedNode.data as any).cron || '(none)'}</div></div>
+              <div><div className="text-[10px] uppercase text-ink-500">State</div><div className="text-ink-700 mt-0.5">{(selectedNode.data as any).enabled ? 'enabled' : 'disabled'}</div></div>
             </div>
 
             <div className="mb-3">
               <div className="text-[10px] uppercase text-ink-500 mb-1">Incoming ({selectedIncoming.length})</div>
               {selectedIncoming.length === 0 ? <div className="text-ink-600 italic">— none —</div> : selectedIncoming.map(e => (
-                <div key={e.id} className="bg-ink-800 rounded p-2 mb-1">
-                  <div className="font-mono text-ink-300">{e.source}</div>
+                <div key={e.id} className="bg-surface-card border border-surface-divider rounded p-2 mb-1">
+                  <div className="font-mono text-ink-600">{e.source}</div>
                   <div className="text-[10px] text-ink-500 mt-0.5">{(e.data as any).kind}</div>
                   <div className="text-ink-400 mt-1">{(e.data as any).description}</div>
                 </div>
@@ -443,8 +443,8 @@ function GraphInner() {
             <div>
               <div className="text-[10px] uppercase text-ink-500 mb-1">Outgoing ({selectedOutgoing.length})</div>
               {selectedOutgoing.length === 0 ? <div className="text-ink-600 italic">— none —</div> : selectedOutgoing.map(e => (
-                <div key={e.id} className="bg-ink-800 rounded p-2 mb-1">
-                  <div className="font-mono text-ink-300">→ {e.target}</div>
+                <div key={e.id} className="bg-surface-card border border-surface-divider rounded p-2 mb-1">
+                  <div className="font-mono text-ink-600">→ {e.target}</div>
                   <div className="text-[10px] text-ink-500 mt-0.5">{(e.data as any).kind}</div>
                   <div className="text-ink-400 mt-1">{(e.data as any).description}</div>
                 </div>

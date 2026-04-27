@@ -42,24 +42,24 @@ export default function Events() {
           <select
             value={refreshKey}
             onChange={(e) => setRefreshKey(e.target.value as 'manual' | '5s' | '10s' | '30s')}
-            className="px-3 py-1.5 bg-ink-800 border border-ink-700 rounded text-sm"
+            className="px-3 py-1.5 bg-surface-card border border-surface-divider border-surface-divider rounded text-sm"
           >
             {['5s', '10s', '30s', 'manual'].map(k => <option key={k}>{k}</option>)}
           </select>
           <button
             onClick={() => refresh(true)}
-            className="px-3 py-1.5 bg-ink-800 border border-ink-700 rounded text-sm hover:bg-ink-700"
+            className="px-3 py-1.5 bg-surface-card border border-surface-divider border-surface-divider rounded text-sm hover:bg-surface-subtle"
           >↻ reset</button>
         </div>
       </div>
 
       {error && (
-        <div className="px-3 py-2 bg-glow-failure/10 border border-glow-failure/40 rounded text-sm text-glow-failure">
+        <div className="px-3 py-2 bg-status-failure-bg border border-status-failure-glow/40 rounded text-sm text-status-failure-fg">
           {error}
         </div>
       )}
 
-      <div className="bg-ink-800 rounded font-mono text-xs overflow-hidden">
+      <div className="bg-surface-card border border-surface-divider rounded font-mono text-xs overflow-hidden">
         {events.length === 0 ? (
           <div className="p-4 text-ink-500 italic">No events recorded yet.</div>
         ) : (
@@ -67,18 +67,18 @@ export default function Events() {
             {events.slice().reverse().map((e, i) => (
               <div
                 key={`${e.ts}-${i}`}
-                className="grid grid-cols-[auto_120px_120px_1fr] gap-3 px-3 py-1.5 border-b border-ink-700/40 hover:bg-ink-700/30"
+                className="grid grid-cols-[auto_120px_120px_1fr] gap-3 px-3 py-1.5 border-b border-surface-divider hover:bg-surface-subtle"
               >
                 <span className="text-ink-500">{(e.ts || '').slice(0, 19)}</span>
-                <span className="text-ink-300 truncate">{e.agent_id ?? '·'}</span>
+                <span className="text-ink-600 truncate">{e.agent_id ?? '·'}</span>
                 <span className={`${
-                  e.state === 'running' ? 'text-glow-running' :
-                  e.state === 'success' ? 'text-glow-success' :
-                  e.state === 'failure' ? 'text-glow-failure' :
-                  e.state === 'blocked' ? 'text-glow-blocked' :
+                  e.state === 'running' ? 'text-status-running-fg' :
+                  e.state === 'success' ? 'text-status-success-fg' :
+                  e.state === 'failure' ? 'text-status-failure-fg' :
+                  e.state === 'blocked' ? 'text-status-blocked-fg' :
                   'text-ink-400'
                 }`}>{e.state ?? e.action ?? e.kind ?? '·'}</span>
-                <span className="text-ink-300 truncate">{e.message ?? e.current_action ?? ''}</span>
+                <span className="text-ink-600 truncate">{e.message ?? e.current_action ?? ''}</span>
               </div>
             ))}
           </div>
