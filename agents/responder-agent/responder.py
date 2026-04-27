@@ -834,15 +834,51 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
 
 
 def tick(cfg: dict, state: dict) -> dict:
-    """One poll cycle. Returns updated state."""
+    """One poll cycle. Returns updated state.
+
+    Resilience: IMAP connect retries with exponential backoff (transient
+    network blips, SSL renegotiation, server hiccups). After exhausting
+    retries, emails the operator and bails — the next timer firing will
+    try again. Per-message processing failures don't block other messages."""
+    # Lazy import to avoid pulling resilience into anything that imports
+    # this module just for parse_actions / regex helpers.
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+        from framework.core.resilience import with_retry, notify_operator
+    except Exception:
+        with_retry = None  # type: ignore[assignment]
+        notify_operator = None  # type: ignore[assignment]
+
     runs_roots = [Path(os.path.expanduser(r)) for r in cfg.get("runs_roots", [])]
     if not runs_roots:
         runs_roots = [Path(os.path.expanduser("~/.reusable-agents/seo/runs"))]
 
+    # IMAP connect with retry — up to 3 retries with backoff
+    if with_retry is not None:
+        @with_retry(retries=3, backoff=2.0, base_delay=2.0,
+                    on=(IOError, OSError, imaplib.IMAP4.error))
+        def _connect():
+            return connect_imap(cfg["imap"])
+    else:
+        _connect = lambda: connect_imap(cfg["imap"])
+
     try:
-        conn = connect_imap(cfg["imap"])
+        conn = _connect()
     except Exception as e:
-        print(f"[responder] IMAP connect failed: {e}", file=sys.stderr)
+        print(f"[responder] IMAP connect failed (after retries): {e}", file=sys.stderr)
+        if notify_operator is not None:
+            try:
+                notify_operator(
+                    agent_id="responder-agent", error=e,
+                    context={
+                        "phase": "imap-connect",
+                        "host": cfg.get("imap", {}).get("host", ""),
+                        "username": cfg.get("imap", {}).get("username", ""),
+                    },
+                    severity="high",
+                )
+            except Exception as ne:
+                print(f"[responder] notify_operator failed: {ne}", file=sys.stderr)
         return state
 
     try:
@@ -859,6 +895,20 @@ def tick(cfg: dict, state: dict) -> dict:
                 process_message(cfg, msg, runs_roots)
             except Exception as e:
                 print(f"[responder] error processing message: {e}", file=sys.stderr)
+                if notify_operator is not None:
+                    try:
+                        notify_operator(
+                            agent_id="responder-agent", error=e,
+                            context={
+                                "phase": "process-message",
+                                "msg_id": msg_id,
+                                "subject": msg.get("Subject", "")[:200],
+                                "from": msg.get("From", "")[:120],
+                            },
+                            severity="medium",
+                        )
+                    except Exception as ne:
+                        print(f"[responder] notify_operator failed: {ne}", file=sys.stderr)
             mark_seen(conn, uid)
             if msg_id:
                 processed_ids.add(msg_id)

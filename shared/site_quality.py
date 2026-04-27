@@ -202,17 +202,47 @@ def _send_via_graph_simple(*, subject: str, body_html: str, to: list[str],
     last_err = ""
     for method, url, payload in attempts:
         body = _j.dumps(payload).encode()
-        req = _ur.Request(url, data=body, method="POST",
-                          headers={"Authorization": f"Bearer {token}",
-                                   "Content-Type": "application/json"})
-        try:
-            with _ur.urlopen(req, timeout=30) as resp:
-                if resp.status == 202:
-                    return True, f"graph:{method}"
-        except urllib.error.HTTPError as e:
-            last_err = f"graph:{method} HTTP {e.code}: {e.read().decode(errors='replace')[:200]}"
-        except Exception as e:
-            last_err = f"graph:{method} {type(e).__name__}: {e}"
+        # Per-method retry: 3 attempts on transient failures (5xx, timeouts,
+        # SSL handshake errors, rate limits). Permanent failures (4xx other
+        # than 429) fall through immediately to try the next method.
+        retry_attempts = 3
+        for retry_i in range(retry_attempts):
+            req = _ur.Request(url, data=body, method="POST",
+                              headers={"Authorization": f"Bearer {token}",
+                                       "Content-Type": "application/json"})
+            try:
+                with _ur.urlopen(req, timeout=30) as resp:
+                    if resp.status == 202:
+                        return True, f"graph:{method}" + (f" (retry {retry_i})" if retry_i else "")
+                    last_err = f"graph:{method} unexpected status {resp.status}"
+                    break  # not transient
+            except urllib.error.HTTPError as e:
+                code = e.code
+                err_body = e.read().decode(errors='replace')[:200]
+                last_err = f"graph:{method} HTTP {code}: {err_body}"
+                # Retry on 429 (rate limit) and 5xx (transient server error)
+                if code == 429 or 500 <= code < 600:
+                    if retry_i < retry_attempts - 1:
+                        # Honor Retry-After if present, else exponential backoff
+                        try:
+                            ra = float(e.headers.get("Retry-After", "0"))
+                        except Exception:
+                            ra = 0
+                        delay = ra if ra > 0 else (1.5 ** retry_i)
+                        import time as _t
+                        _t.sleep(delay)
+                        continue
+                break  # permanent
+            except (TimeoutError, urllib.error.URLError) as e:
+                last_err = f"graph:{method} {type(e).__name__}: {e}"
+                if retry_i < retry_attempts - 1:
+                    import time as _t
+                    _t.sleep(1.5 ** retry_i)
+                    continue
+                break
+            except Exception as e:
+                last_err = f"graph:{method} {type(e).__name__}: {e}"
+                break
     return False, last_err
 
 

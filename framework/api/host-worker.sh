@@ -127,21 +127,58 @@ process_one() {
     heartbeat_loop "$agent_id" "$run_id" &
     local hb_pid=$!
 
+    # Stuck-process watchdog: kill the agent if it runs longer than the
+    # configured wall-clock cap. Default 2h — most legitimate runs finish
+    # well under this; anything beyond is almost certainly hung. Override
+    # per-agent via $AGENT_TIMEOUT_<ID> env var (uppercased, dashes →
+    # underscores) or globally via $AGENT_DEFAULT_TIMEOUT_S.
+    local default_timeout="${AGENT_DEFAULT_TIMEOUT_S:-7200}"
+    local id_env_key="AGENT_TIMEOUT_$(echo "$agent_id" | tr 'a-z-' 'A-Z_')"
+    local agent_timeout="${!id_env_key:-$default_timeout}"
+
     # Pass through framework storage config so agents write to the SAME
     # store the API container reads from. Defaults to azure since that's the
     # production backend; falls back to local FS if STORAGE_BACKEND=local.
     set +e
-    AGENT_RUN_ID="$run_id" \
-    AGENT_ID="$agent_id" \
-    AGENT_TRIGGERED_BY="$triggered_by" \
-    STORAGE_BACKEND="${STORAGE_BACKEND:-azure}" \
-    AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING:-}" \
-    AZURE_STORAGE_CONTAINER="${AZURE_STORAGE_CONTAINER:-agents}" \
-    AGENT_STORAGE_LOCAL_PATH="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}" \
-    FRAMEWORK_API_URL="${FRAMEWORK_API_URL:-http://localhost:8093}" \
+    timeout --signal=TERM --kill-after=30s "$agent_timeout" \
+    env AGENT_RUN_ID="$run_id" \
+        AGENT_ID="$agent_id" \
+        AGENT_TRIGGERED_BY="$triggered_by" \
+        STORAGE_BACKEND="${STORAGE_BACKEND:-azure}" \
+        AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING:-}" \
+        AZURE_STORAGE_CONTAINER="${AZURE_STORAGE_CONTAINER:-agents}" \
+        AGENT_STORAGE_LOCAL_PATH="${AGENT_STORAGE_LOCAL_PATH:-$HOME/.reusable-agents/data}" \
+        FRAMEWORK_API_URL="${FRAMEWORK_API_URL:-http://localhost:8093}" \
         bash -c "$cmd" > "$job_log" 2>&1
     local rc=$?
     set -e
+    # rc=124 means the timeout fired
+    if [ "$rc" -eq 124 ]; then
+        log "TIMEOUT agent=$agent_id run_id=$run_id after ${agent_timeout}s — killed"
+        # Notify operator via the framework's resilience module
+        AGENT_ID="$agent_id" RUN_ID="$run_id" TIMEOUT_S="$agent_timeout" LOG_PATH="$job_log" \
+        PYTHONPATH="/home/voidsstr/development/reusable-agents" \
+        python3 - <<'PY' 2>/dev/null || true
+import os
+from framework.core.resilience import notify_operator
+class TimeoutFromHostWorker(TimeoutError):
+    pass
+err = TimeoutFromHostWorker(
+    f"{os.environ['AGENT_ID']} run {os.environ['RUN_ID']} exceeded "
+    f"{os.environ['TIMEOUT_S']}s wall-clock — host-worker killed it.")
+notify_operator(
+    agent_id=os.environ["AGENT_ID"], error=err,
+    context={
+        "phase": "host-worker-watchdog",
+        "run_id": os.environ["RUN_ID"],
+        "timeout_s": int(os.environ["TIMEOUT_S"]),
+        "log_path": os.environ["LOG_PATH"],
+    },
+    severity="high",
+    cooldown_s=600,  # 10 min — timeouts on the same agent are usually correlated
+)
+PY
+    fi
 
     kill "$hb_pid" 2>/dev/null || true
     wait "$hb_pid" 2>/dev/null || true
