@@ -93,10 +93,19 @@ def connect_imap(imap_cfg: dict) -> imaplib.IMAP4_SSL:
     port = int(imap_cfg.get("port", 993))
     username = imap_cfg["username"]
     use_tls = imap_cfg.get("use_tls", True)
+    # 30s socket timeout — without this an IMAP hang (network blip, server
+    # SSL renegotiation, etc.) leaves the responder.service in 'activating'
+    # state forever and the timer can never fire again. Past incident:
+    # 2.5 hours of timer firings silently dropped because the previous
+    # responder process was stuck in IMAP read.
+    timeout_s = float(imap_cfg.get("timeout_s", 30))
 
     auth_method = imap_cfg.get("auth_method", "password")  # 'password' | 'oauth2'
 
-    conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(host, port) if use_tls else imaplib.IMAP4(host, port)
+    if use_tls:
+        conn = imaplib.IMAP4_SSL(host, port, timeout=timeout_s)
+    else:
+        conn = imaplib.IMAP4(host, port, timeout=timeout_s)
 
     if auth_method == "oauth2":
         # Use XOAUTH2 — refresh token lives at imap.oauth_file
@@ -479,19 +488,52 @@ def _record_goal_change_for_rec(*, source_agent_id: str, rec: dict,
 
 
 def record_action(runs_roots: list[Path], site: str, run_ts: str, run_dir: Path,
-                  rec_id: str, action: str, notes: str = "") -> None:
-    """Append to the run's responses.json + the global queue."""
+                  rec_id: str, action: str, notes: str = "",
+                  source_agent: str = "", target_agent: str = "seo-implementer") -> None:
+    """Persist the user's reply request three places, in priority order:
+
+    1. Framework Azure storage at agents/<target>/responses-queue/<request-id>.json
+       — this is the canonical home that survives container restarts and is
+       visible to the dashboard's Confirmations + Storage tabs.
+    2. The run dir's local responses.json (legacy SEO local-FS path) +
+       global queue — kept for backwards compatibility with the legacy
+       implementer that reads from local FS.
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # 1. Framework storage queue — this is what the user's spec asks for.
+    try:
+        from framework.core.storage import get_storage
+        s = get_storage()
+        # request-id format: r-<run_ts>-<rec_id> (deterministic, dedupable)
+        request_id = f"r-{run_ts}-{rec_id}"
+        s.write_json(
+            f"agents/{target_agent}/responses-queue/{request_id}.json",
+            {
+                "schema_version": "1",
+                "request_id": request_id,
+                "ts": ts,
+                "from_agent": source_agent,
+                "site": site,
+                "from_run": run_ts,
+                "rec_id": rec_id,
+                "action": action,
+                "source": "email-reply",
+                "notes": notes,
+            },
+        )
+    except Exception as e:
+        print(f"  [warn] framework-queue write failed for {rec_id}: {e}", file=sys.stderr)
+
+    # 2. Legacy local-FS run dir
     run_files.append_response(
         run_dir,
         site=site, from_run=run_ts, rec_id=rec_id, action=action,
         source="email-reply", notes=notes,
     )
-    # Global queue
     for root in runs_roots:
         if str(run_dir).startswith(str(root)):
             run_files.append_to_global_response_queue(root, {
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "site": site, "from_run": run_ts, "rec_id": rec_id,
+                "ts": ts, "site": site, "from_run": run_ts, "rec_id": rec_id,
                 "action": action, "source": "email-reply", "notes": notes,
             })
             break
@@ -711,7 +753,9 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
 
         for rec_id in rec_ids:
             record_action(runs_roots, site, run_ts, run_dir, rec_id,
-                          action_obj["action"], notes=action_obj["raw_line"])
+                          action_obj["action"], notes=action_obj["raw_line"],
+                          source_agent=candidate_source_agent or "",
+                          target_agent="seo-implementer")
             print(f"  [recorded] {site}/{run_ts} {rec_id} → {action_obj['action']}", file=sys.stderr)
             recorded += 1
             # Goal-change tracking: only when (a) rec carries goal_ids, AND
