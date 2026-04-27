@@ -138,7 +138,7 @@ def _derive_application(m: registry.AgentManifest) -> str:
     if aid == "seo-opportunity-agent":
         return "seo-pipeline"
     if aid in ("seo-data-collector", "seo-analyzer", "seo-reporter",
-                "seo-implementer", "seo-deployer"):
+                "implementer", "seo-deployer"):
         return "seo-pipeline"
     if aid == "responder-agent":
         return "shared"
@@ -152,14 +152,39 @@ def _derive_application(m: registry.AgentManifest) -> str:
     return m.category or "shared"
 
 
-def _resolve_ai_summary(agent_id: str) -> tuple[str, str, str, bool]:
+def _resolve_ai_summary(agent_id: str,
+                         providers_cache: dict | None = None,
+                         defaults_cache: dict | None = None) -> tuple[str, str, str, bool]:
     """Best-effort resolve the agent's configured AI provider for the
     dashboard badge. Returns (provider_name, kind, model, uses_claude).
 
-    Falls back gracefully — never raises, just returns blanks if anything
-    is unconfigured."""
+    The list endpoint resolves N agents at once; pass providers_cache +
+    defaults_cache (read once at the top of the call) so each agent
+    doesn't trigger its own Azure-blob round-trip. Without this, the
+    list endpoint took ~30s on Azure storage (~600ms per blob read × 2
+    config blobs × 25 agents = 30s)."""
     try:
         from framework.core import ai_providers as _ap
+        if providers_cache is not None and defaults_cache is not None:
+            # In-process resolve using the pre-fetched config blobs
+            override = (defaults_cache.get("agent_overrides", {}) or {}).get(agent_id, {})
+            provider_name = override.get("provider") or defaults_cache.get("default_provider", "")
+            model = override.get("model") or defaults_cache.get("default_model", "")
+            if not provider_name:
+                return "", "", "", False
+            pdict = (providers_cache or {}).get(provider_name)
+            if not pdict:
+                return "", "", "", False
+            kind = pdict.get("kind", "")
+            if not model:
+                model = pdict.get("default_model", "")
+            uses_claude = (
+                kind in ("claude-cli", "anthropic")
+                or "claude" in (model or "").lower()
+                or "claude" in provider_name.lower()
+            )
+            return provider_name, kind, model or "", bool(uses_claude)
+        # Slow path — single agent, no cache
         provider, model = _ap.resolve_for_agent(agent_id)
     except Exception:
         return "", "", "", False
@@ -175,10 +200,19 @@ def _resolve_ai_summary(agent_id: str) -> tuple[str, str, str, bool]:
     return name, kind, model or "", bool(uses_claude)
 
 
-def _summary(m: registry.AgentManifest) -> AgentSummary:
-    s = get_storage()
-    status = s.read_json(f"agents/{m.id}/status.json") or {}
-    ai_name, ai_kind, ai_model, uses_claude = _resolve_ai_summary(m.id)
+def _summary(m: registry.AgentManifest,
+              providers_cache: dict | None = None,
+              defaults_cache: dict | None = None,
+              status: dict | None = None) -> AgentSummary:
+    """Build one AgentSummary. `status` (dict) can be passed pre-fetched
+    so the caller can parallelize blob reads — list_all() does this to
+    avoid 29 serial Azure roundtrips."""
+    if status is None:
+        s = get_storage()
+        status = s.read_json(f"agents/{m.id}/status.json") or {}
+    ai_name, ai_kind, ai_model, uses_claude = _resolve_ai_summary(
+        m.id, providers_cache=providers_cache, defaults_cache=defaults_cache,
+    )
     return AgentSummary(
         id=m.id, name=m.name, description=m.description, category=m.category,
         task_type=m.task_type, cron_expr=m.cron_expr, timezone=m.timezone,
@@ -201,7 +235,33 @@ def _summary(m: registry.AgentManifest) -> AgentSummary:
 
 @router.get("", response_model=list[AgentSummary])
 def list_all():
-    return [_summary(m) for m in registry.list_agents()]
+    # Pre-cache the two config blobs we'd otherwise read 2× per agent.
+    s = get_storage()
+    providers_cache = s.read_json("config/ai-providers.json") or {}
+    defaults_cache = s.read_json("config/ai-defaults.json") or {}
+    manifests = list(registry.list_agents())
+
+    # Status reads are the slow part — each one is an Azure blob round-trip
+    # (~150-300ms). With 29+ agents the serial chain exceeded the dashboard's
+    # 5s timeout. Parallelize via a thread pool — Azure blob client is
+    # thread-safe, and even capped at 16 workers we cover the full agent
+    # list in a single round-trip's worth of latency.
+    from concurrent.futures import ThreadPoolExecutor
+    statuses: dict[str, dict] = {}
+    def _fetch_status(agent_id: str) -> tuple[str, dict]:
+        try:
+            return agent_id, (s.read_json(f"agents/{agent_id}/status.json") or {})
+        except Exception:
+            return agent_id, {}
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for aid, st in ex.map(_fetch_status, [m.id for m in manifests]):
+            statuses[aid] = st
+
+    return [
+        _summary(m, providers_cache=providers_cache,
+                 defaults_cache=defaults_cache, status=statuses.get(m.id, {}))
+        for m in manifests
+    ]
 
 
 @router.post("/register", response_model=AgentSummary)
@@ -258,13 +318,20 @@ def get_one(agent_id: str):
     if m is None:
         raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
     s = get_storage()
+    # Pre-fetch configs for the AI summary (single Azure round-trip each)
+    providers_cache = s.read_json("config/ai-providers.json") or {}
+    defaults_cache = s.read_json("config/ai-defaults.json") or {}
+
     status = s.read_json(f"agents/{agent_id}/status.json")
     runs = []
     runs_prefix = f"agents/{agent_id}/runs/"
+    # Only fetch the 5 most recent runs in the detail load. The Runs tab
+    # has its own listRuns endpoint for the full history. Cuts 15
+    # sequential Azure reads — the page's biggest latency source.
     run_keys = sorted(
         (k for k in s.list_prefix(runs_prefix) if k.endswith("/progress.json")),
         reverse=True,
-    )[:20]
+    )[:5]
     for key in run_keys:
         rd = s.read_json(key)
         if rd:
@@ -284,7 +351,7 @@ def get_one(agent_id: str):
     skill_body   = _load_md(f"agents/{m.id}/skill.md", m.skill_path)
     readme_body  = _load_md(f"agents/{m.id}/readme.md", "")
 
-    base = _summary(m).dict()
+    base = _summary(m, providers_cache=providers_cache, defaults_cache=defaults_cache).dict()
     return AgentDetail(
         **base,
         repo_dir=m.repo_dir,

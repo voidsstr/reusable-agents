@@ -718,16 +718,22 @@ class EbayProductSyncAgent(AgentBase):
         pending_cid = existing.get("pending_confirmation_id")
         if pending_cid:
             cr = get_confirmation(self.agent_id, pending_cid, storage)
-            # Apply any new email replies that match this confirmation.
+            # Apply any new email replies. The responder pre-filters by
+            # subject route, so anything in our queue is meant for us. We
+            # don't strictly match on request_id because the responder
+            # generates its own request_id from run_ts, not from our
+            # original confirmation request_id — instead, if we have any
+            # pending confirmation and any reply, we apply it.
             for r in replies:
-                if r.get("confirmation_id") == pending_cid or r.get("request_id") == cr.request_id:
-                    cmd = self._resolve_reply(r.get("reply_text") or r.get("notes") or "")
-                    log.info("reply command: %s", cmd)
-                    cr = self._apply_reply_to_confirmation(
-                        cr, cmd, storage, mapping_key,
-                        adapter, products_table, listings_table,
-                        site_id, site_constants, ebay, ebay_filter, owner_email,
-                    )
+                cmd = self._resolve_reply(
+                    r.get("reply_text") or r.get("notes") or r.get("action") or ""
+                )
+                log.info("reply command: %s", cmd)
+                cr = self._apply_reply_to_confirmation(
+                    cr, cmd, storage, mapping_key,
+                    adapter, products_table, listings_table,
+                    site_id, site_constants, ebay, ebay_filter, owner_email,
+                )
 
             if cr is None:
                 log.warning("pending confirmation %s lost — re-proposing", pending_cid)
@@ -1112,7 +1118,20 @@ class EbayProductSyncAgent(AgentBase):
         stats = {"queries_run": 0, "items_seen": 0,
                  "products_upserted": 0, "products_skipped_low_conf": 0,
                  "listings_inserted": 0, "listings_updated": 0,
+                 "by_category": {},
+                 "product_samples": [],   # up to 30 — for the completion email
+                 "listing_samples": [],   # up to 30 — for the completion email
                  "errors": []}
+        # Per-category running totals for the email's breakdown table.
+        def _bump_cat(cat_slug: str | None, *, products: int = 0,
+                      listings_in: int = 0, listings_up: int = 0):
+            if not cat_slug: return
+            bk = stats["by_category"].setdefault(
+                cat_slug, {"products": 0, "listings_inserted": 0,
+                           "listings_updated": 0})
+            bk["products"] += products
+            bk["listings_inserted"] += listings_in
+            bk["listings_updated"] += listings_up
         pt = mapping["products_table"]
         lt = mapping["listings_table"]
         listings_keys = lt.get("key_columns") or ["ebay_item_id"]
@@ -1157,17 +1176,39 @@ class EbayProductSyncAgent(AgentBase):
                     stats["errors"].append({"item": item.get("legacyItemId"), "err": "product upsert failed"})
                     continue
                 stats["products_upserted"] += 1
+                _bump_cat(cat, products=1)
+                if len(stats["product_samples"]) < 30:
+                    stats["product_samples"].append({
+                        "name": hyd.get("name") or "",
+                        "manufacturer": hyd.get("manufacturer") or "",
+                        "family": hyd.get("family") or "",
+                        "category": cat or hyd.get("category_slug") or "",
+                        "product_pk": product_pk,
+                        "confidence": hyd.get("confidence"),
+                    })
 
                 # Build the listings row, with fk to the product.
                 lrow = self._build_row_from_section(lt, item, hyd, site_constants={})
                 lrow[fk_col] = product_pk
                 # ensure listing has updated_at-style col if present in mapping
                 listings_rows.append(lrow)
+                if len(stats["listing_samples"]) < 30:
+                    stats["listing_samples"].append({
+                        "ebay_item_id": item.get("legacyItemId") or "",
+                        "title": (item.get("title") or "")[:120],
+                        "price": (item.get("price") or {}).get("value"),
+                        "currency": (item.get("price") or {}).get("currency", "USD"),
+                        "condition": item.get("condition"),
+                        "url": item.get("itemAffiliateWebUrl") or item.get("itemWebUrl"),
+                        "category": cat,
+                        "product_pk": product_pk,
+                    })
 
             if listings_rows:
                 ir = adapter.upsert_rows(lt["name"], listings_rows, listings_keys)
                 stats["listings_inserted"] += ir.inserted
                 stats["listings_updated"] += ir.updated
+                _bump_cat(cat, listings_in=ir.inserted, listings_up=ir.updated)
                 if ir.failed_samples:
                     for s in ir.failed_samples[:2]:
                         log.warning("  listing upsert err: %s", s["err"])
@@ -1179,6 +1220,15 @@ class EbayProductSyncAgent(AgentBase):
             stats["stale_listings_inactive"] = stale
 
         log.info("v2 ingestion complete: %s", json.dumps(stats, default=str))
+
+        # Send a completion-summary email to the operator with the actual
+        # products + listings created. Skipped on dry-run.
+        if not dry_run:
+            try:
+                self._send_completion_email(site_id, stats, mapping)
+            except Exception as e:
+                log.warning("completion email failed: %s", e)
+
         return RunResult(
             status="success",
             summary=(f"queries={stats['queries_run']} items={stats['items_seen']} "
@@ -1187,6 +1237,147 @@ class EbayProductSyncAgent(AgentBase):
                      f"listings_up={stats['listings_updated']}"),
             metrics=stats,
         )
+
+    # ───────────────────────────────────────────────────────────────
+    def _send_completion_email(self, site_id: str, stats: dict, mapping: dict) -> None:
+        """After ingestion, email the operator a summary of what canonical
+        products and listings were created/updated this run, with samples
+        and per-category breakdown so they can audit at a glance."""
+        owner_email = (self._cfg or {}).get("owner_email")
+        if not owner_email:
+            log.info("no owner_email configured — skipping completion email")
+            return
+
+        prod_table = (mapping.get("products_table") or {}).get("name", "products")
+        list_table = (mapping.get("listings_table") or {}).get("name", "ebay_listings")
+
+        # Headline KPIs
+        n_queries = stats.get("queries_run", 0)
+        n_items = stats.get("items_seen", 0)
+        n_products = stats.get("products_upserted", 0)
+        n_listings_in = stats.get("listings_inserted", 0)
+        n_listings_up = stats.get("listings_updated", 0)
+        n_skipped = stats.get("products_skipped_low_conf", 0)
+        n_stale = stats.get("stale_listings_inactive", 0)
+
+        # By-category rows (sorted by total volume).
+        cats = sorted(
+            (stats.get("by_category") or {}).items(),
+            key=lambda kv: -(kv[1].get("listings_inserted", 0)
+                             + kv[1].get("listings_updated", 0)),
+        )
+        cat_rows = "".join(
+            f"<tr><td><code>{slug}</code></td>"
+            f"<td>{c.get('products',0)}</td>"
+            f"<td>{c.get('listings_inserted',0)}</td>"
+            f"<td>{c.get('listings_updated',0)}</td></tr>"
+            for slug, c in cats
+        ) or "<tr><td colspan=4><i>(no category activity)</i></td></tr>"
+
+        # Sample products
+        prod_rows = ""
+        for p in (stats.get("product_samples") or [])[:15]:
+            prod_rows += (
+                f"<tr><td><strong>{p.get('name','')}</strong><br>"
+                f"<small>{p.get('manufacturer','')}"
+                f"{(' · ' + p.get('family')) if p.get('family') else ''}</small></td>"
+                f"<td><code>{p.get('category','')}</code></td>"
+                f"<td>{p.get('product_pk','?')}</td>"
+                f"<td>{(p.get('confidence') or 0):.2f}</td></tr>"
+            )
+        prod_rows = prod_rows or "<tr><td colspan=4><i>(no products created)</i></td></tr>"
+
+        # Sample listings
+        list_rows = ""
+        for l in (stats.get("listing_samples") or [])[:15]:
+            price = l.get("price")
+            price_s = f"${float(price):.2f}" if price else "—"
+            url = l.get("url") or "#"
+            list_rows += (
+                f"<tr><td><a href=\"{url}\" target=\"_blank\">{(l.get('title') or '')[:80]}</a></td>"
+                f"<td>{price_s}</td>"
+                f"<td>{(l.get('condition') or '').replace('_',' ').title()}</td>"
+                f"<td><code>{l.get('category','')}</code></td>"
+                f"<td>{l.get('product_pk','?')}</td></tr>"
+            )
+        list_rows = list_rows or "<tr><td colspan=5><i>(no listings ingested)</i></td></tr>"
+
+        # Errors (truncate noisy lists)
+        err_rows = ""
+        for e in (stats.get("errors") or [])[:5]:
+            err_rows += f"<li><code>{e.get('q') or e.get('item') or ''}</code> — {e.get('err','')[:160]}</li>"
+        err_html = f"<h2>Errors ({len(stats.get('errors') or [])})</h2><ul>{err_rows}</ul>" \
+                   if err_rows else ""
+
+        request_id = new_request_id()
+        subject = encode_subject(
+            self.agent_id, request_id,
+            f"eBay sync results — {site_id}: {n_products} products, "
+            f"{n_listings_in} new + {n_listings_up} updated listings",
+        )
+
+        body = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;max-width:820px;margin:0 auto;padding:24px;}}
+h1{{font-size:1.5rem;margin:0 0 8px}}
+h2{{font-size:1.1rem;margin:24px 0 8px}}
+.kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0 18px}}
+.kpi{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center}}
+.kpi .n{{font-size:1.6rem;font-weight:700;color:#1e293b}}
+.kpi .l{{font-size:.78rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-top:4px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{border:1px solid #e2e8f0;padding:6px 10px;text-align:left;vertical-align:top}}
+th{{background:#f1f5f9}}
+code{{background:#f8fafc;padding:1px 4px;border-radius:3px;font-size:12.5px}}
+small{{color:#64748b}}
+</style></head><body>
+<h1>eBay sync results — <code>{site_id}</code></h1>
+<p>Run finished. Wrote canonical products into <code>{prod_table}</code> and live
+   listings into <code>{list_table}</code>.</p>
+
+<div class="kpis">
+  <div class="kpi"><div class="n">{n_queries}</div><div class="l">queries</div></div>
+  <div class="kpi"><div class="n">{n_items}</div><div class="l">items seen</div></div>
+  <div class="kpi"><div class="n">{n_products}</div><div class="l">products upserted</div></div>
+  <div class="kpi"><div class="n">{n_listings_in + n_listings_up}</div><div class="l">listings touched</div></div>
+</div>
+<p style="font-size:13px;color:#64748b">
+  Listings inserted: <strong>{n_listings_in}</strong> &middot;
+  updated: <strong>{n_listings_up}</strong> &middot;
+  stale &rarr; inactive: <strong>{n_stale}</strong> &middot;
+  skipped (low confidence / lots): <strong>{n_skipped}</strong>
+</p>
+
+<h2>Per-category activity</h2>
+<table>
+  <thead><tr><th>Category</th><th>Products</th><th>Listings inserted</th><th>Listings updated</th></tr></thead>
+  <tbody>{cat_rows}</tbody>
+</table>
+
+<h2>Sample canonical products created (up to 15)</h2>
+<table>
+  <thead><tr><th>Product</th><th>Category</th><th>PK</th><th>Conf.</th></tr></thead>
+  <tbody>{prod_rows}</tbody>
+</table>
+
+<h2>Sample listings ingested (up to 15)</h2>
+<table>
+  <thead><tr><th>Listing</th><th>Price</th><th>Condition</th><th>Category</th><th>Product PK</th></tr></thead>
+  <tbody>{list_rows}</tbody>
+</table>
+
+{err_html}
+
+<p style="font-size:11px;color:#94a3b8;margin-top:32px">
+  Sent by <code>{self.agent_id}</code> · request_id <code>{request_id}</code> ·
+  next cron tick: see manifest cron_expr · listings older than
+  {(self._cfg or {}).get("stale_hours", 36)}h are auto-marked inactive.
+</p>
+</body></html>"""
+
+        ok, detail = self._send_email(
+            subject=subject, body_html=body, to=[owner_email], request_id=request_id,
+        )
+        log.info("completion email: ok=%s detail=%s recipient=%s", ok, detail, owner_email)
 
     # ───────────────────────────────────────────────────────────────
     def _ingest(

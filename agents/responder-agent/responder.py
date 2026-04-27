@@ -481,7 +481,7 @@ def _record_goal_change_for_rec(*, source_agent_id: str, rec: dict,
         rec_check_id=rec.get("check_id") or "",
         rec_severity=rec.get("severity") or "",
         rec_tier=rec.get("tier") or "",
-        implementer_agent="seo-implementer",
+        implementer_agent="implementer",
         implementer_run_ts=run_ts,
         metric_before=metric_before or None,
     )
@@ -489,7 +489,7 @@ def _record_goal_change_for_rec(*, source_agent_id: str, rec: dict,
 
 def record_action(runs_roots: list[Path], site: str, run_ts: str, run_dir: Path,
                   rec_id: str, action: str, notes: str = "",
-                  source_agent: str = "", target_agent: str = "seo-implementer") -> None:
+                  source_agent: str = "", target_agent: str = "implementer") -> None:
     """Persist the user's reply request three places, in priority order:
 
     1. Framework Azure storage at agents/<target>/responses-queue/<request-id>.json
@@ -537,6 +537,48 @@ def record_action(runs_roots: list[Path], site: str, run_ts: str, run_dir: Path,
                 "action": action, "source": "email-reply", "notes": notes,
             })
             break
+
+
+def _match_route_for_email(cfg: dict, *, x_agent: Optional[str] = None,
+                           agent_hint: Optional[str] = None,
+                           prefix_agent: Optional[str] = None) -> Optional[dict]:
+    """Look up which route in cfg.routes matches this email's metadata.
+    Pulled out of the per-action loop so the result is available BEFORE
+    record_action (so we can route replies into the right agent's
+    responses-queue, not just the implementer's). Returns the matched
+    route dict (with `match`, `dispatcher`, optional `target_agent`) or
+    None if nothing matched."""
+    for route in cfg.get("routes", []):
+        match = route.get("match", {})
+        hdr_eq = match.get("equals")
+        if match.get("header") == "X-Reusable-Agent" and x_agent and hdr_eq:
+            if isinstance(hdr_eq, list):
+                if x_agent in hdr_eq:
+                    return route
+            elif hdr_eq == x_agent:
+                return route
+        ap = match.get("agent_prefix")
+        if ap and prefix_agent:
+            pa = prefix_agent.lower()
+            if isinstance(ap, list):
+                if pa in [x.lower() for x in ap]:
+                    return route
+            elif pa == ap.lower():
+                return route
+        sub_tag = match.get("agent_subject_tag")
+        if sub_tag and agent_hint:
+            ah = agent_hint.lower()
+            if isinstance(sub_tag, list):
+                if ah in [x.lower() for x in sub_tag]:
+                    return route
+            elif ah == sub_tag.lower():
+                return route
+        sub_re = match.get("agent_subject_tag_re")
+        if sub_re and agent_hint and re.search(sub_re, agent_hint, re.I):
+            return route
+        if match.get("fallback") and agent_hint:
+            return route
+    return None
 
 
 def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
@@ -751,11 +793,23 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
         except Exception:
             pass
 
+        # Pre-match the route so we know where to park the reply *before*
+        # we record it. Default target is "implementer" for backward compat
+        # with SEO/PIA/CR/audit pipelines; routes can override via
+        # `target_agent: <id>` to send replies into another agent's
+        # responses-queue (e.g. ebay-product-sync-agent that drains its
+        # own queue).
+        pre_matched = _match_route_for_email(
+            cfg, x_agent=x_agent, agent_hint=agent_hint,
+            prefix_agent=action_obj.get("prefix_agent"),
+        )
+        target_agent = (pre_matched or {}).get("target_agent") or "implementer"
+
         for rec_id in rec_ids:
             record_action(runs_roots, site, run_ts, run_dir, rec_id,
                           action_obj["action"], notes=action_obj["raw_line"],
                           source_agent=candidate_source_agent or "",
-                          target_agent="seo-implementer")
+                          target_agent=target_agent)
             print(f"  [recorded] {site}/{run_ts} {rec_id} → {action_obj['action']}", file=sys.stderr)
             recorded += 1
             # Goal-change tracking: only when (a) rec carries goal_ids, AND
