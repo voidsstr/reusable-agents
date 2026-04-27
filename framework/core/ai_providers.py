@@ -41,6 +41,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
@@ -153,7 +155,7 @@ class Defaults:
         "default_provider": "azure-openai-prod",
         "default_model": "gpt-4o-mini",
         "agent_overrides": {
-          "seo-implementer":   {"provider": "anthropic-claude", "model": "claude-opus-4-7"},
+          "implementer":   {"provider": "anthropic-claude", "model": "claude-opus-4-7"},
           "market-research":   {"provider": "ollama-local",     "model": "qwen3:8b"}
         }
       }
@@ -389,20 +391,64 @@ class _ClaudeCliClient(AIClient):
             "--dangerously-skip-permissions",
             prompt,
         ]
+        # Stream claude --print output line-by-line through the parent's
+        # stdout AND capture into a buffer. Why both:
+        #   * The buffer is what we return to the caller (the agent code
+        #     parses it as JSON / text).
+        #   * The parent's stdout is what the host-worker redirects to
+        #     /tmp/reusable-agents-logs/<agent_id>-<run_ts>.log, which the
+        #     dashboard's Live LLM panel tails.
+        # Previously subprocess.run(capture_output=True) PIPED everything
+        # into the Python string only, leaving the job log empty for any
+        # Python-driven agent (vs the bash-shell implementer that wrote
+        # straight to stdout).
+        timeout_s = kwargs.get("timeout", 600)
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=kwargs.get("timeout", 600),
+                bufsize=1,  # line-buffered
             )
         except FileNotFoundError as e:
             raise RuntimeError("claude CLI not on PATH — install Claude Code first") from e
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(f"claude CLI timed out after {kwargs.get('timeout', 600)}s") from e
+
+        out_buf: list[str] = []
+        err_buf: list[str] = []
+        prefix = f"[claude-cli {os.environ.get('AGENT_ID','?')} {chosen}]"
+
+        def _pump(stream, buf, sink):
+            for line in iter(stream.readline, ""):
+                buf.append(line)
+                # Echo to parent stdout/stderr so host-worker's redirect
+                # captures it. Prefix per-line so it's grep-friendly.
+                try:
+                    sink.write(f"{prefix} {line}" if not line.startswith(prefix) else line)
+                    sink.flush()
+                except Exception:
+                    pass
+            stream.close()
+
+        import threading
+        t_out = threading.Thread(target=_pump, args=(proc.stdout, out_buf, sys.stdout), daemon=True)
+        t_err = threading.Thread(target=_pump, args=(proc.stderr, err_buf, sys.stderr), daemon=True)
+        t_out.start(); t_err.start()
+        try:
+            rc = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            t_out.join(timeout=2); t_err.join(timeout=2)
+            raise RuntimeError(f"claude CLI timed out after {timeout_s}s")
+        t_out.join(timeout=5); t_err.join(timeout=5)
+
+        # Build a duck-typed result so the rest of this method's logic works.
+        class _R:
+            returncode = rc
+            stdout = "".join(out_buf)
+            stderr = "".join(err_buf)
+        proc = _R()
         if proc.returncode != 0:
-            # Surface stdout when stderr is empty — Claude CLI writes
-            # "Error: Reached max turns (1)" and similar messages there.
             err = (proc.stderr or proc.stdout or "")[:500]
             raise RuntimeError(
                 f"claude CLI exited rc={proc.returncode}: {err}"
