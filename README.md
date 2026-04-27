@@ -213,46 +213,182 @@ Field reference:
 | `entry_command` | no | Shell command for the host-worker to exec on "Run now" |
 | `metadata` | no | Free-form JSON — flow through to the registry |
 
-## Storage layout
+## Where everything lives
 
-The framework writes everything to a single Azure Blob container (default
-name `agents`). Hierarchical via key prefixes:
+When an agent runs there are three places state lands: **agent data**
+(the canonical, durable home in the framework storage backend), **logs**
+(transient process output on the host), and **config** (some in the
+storage backend, some in version-controlled repos, some on the host).
+This section is the operator reference for finding any of it.
+
+### 1. Agent data — Azure Blob (`agents` container)
+
+Everything an agent produces or accumulates lives here. One container,
+hierarchical by key prefix. Backend is selected via env (default azure
+when `AZURE_STORAGE_CONNECTION_STRING` is set; falls back to local FS at
+`AGENT_STORAGE_LOCAL_PATH`, default `~/.reusable-agents/data`, for dev).
 
 ```
 registry/
-  agents.json                          # master agent list
-  events.jsonl                         # framework event log
+  agents.json                          # master registry — every registered agent's manifest
+  events.jsonl                         # global event log (state transitions, registrations, etc.)
+
+config/
+  ai-providers.json                    # registered AI providers (azure-openai, anthropic, ollama, copilot, claude-cli)
+  ai-defaults.json                     # global default + per-agent overrides
 
 agents/<agent-id>/
-  manifest.json                        # canonical manifest
-  status.json                          # live status (UI reads)
-  state/latest.json                    # carried-forward state
-  state/history/<run-ts>.json
-  goals/current.json
-  goals/history/<run-ts>.json
+  manifest.json                        # canonical manifest (mirror of registry/agents.json[id])
+  status.json                          # current state, message, progress — what the dashboard reads
+  runbook.md                           # the AGENT.md prompt (embedded at registration)
+  skill.md                             # the SKILL.md prompt (embedded at registration)
+  readme.md                            # human-readable overview (embedded at registration)
+
+  state/latest.json                    # carried-forward state (next-run uses this)
+  state/history/<run-ts>.json          # snapshot per run for audit
+
+  goals/active.json                    # long-running goals + current metric values
+  goals/changes.jsonl                  # append-only log of recs dispatched against goals,
+                                       # with metric_before/after deltas (drives adaptive prompts)
+
   runs/<run-ts>/
-    progress.json                      # success criteria, metrics
-    errors.json                        # exceptions + tracebacks
-    decisions.jsonl                    # streaming decision log
-    context-summary.md                 # narrative for next run
-    recommendations.json               # SEO-style recs (where applicable)
-    responses.json                     # parsed user replies
-    deploy.json                        # deployer artifacts
-  context-summaries/<YYYY-MM-DD>.md    # daily rollups (smart cap on next-run context)
-  changelog.jsonl                      # release tags + commits
-  outbound-emails/<request-id>.json    # routing for replies
-  responses-queue/<request-id>.json    # parsed user replies awaiting pickup
-  confirmations/<request-id>.json      # pending dangerous-action approvals
+    progress.json                      # start/end ts, status, metrics
+    decisions.jsonl                    # streaming log of decisions/observations from the run
+    context-summary.md                 # human-readable narrative for next run
+    recommendations.json               # generated recs (SEO/PI/CR/catalog-audit)
+    responses.json                     # parsed user replies for THIS run
+    email-rendered.html                # body of the email this run sent (where applicable)
+    pages.jsonl                        # crawl output (PI/CR)
+    snapshot.json / comparison.json    # pre/post run diff (SEO)
+    data/                              # raw ingest (GSC, GA4, etc.)
+    deploy.json                        # deployer artifacts (where applicable)
+    artifacts/*                        # agent-specific extras
+
+  context-summaries/<YYYY-MM-DD>.md    # daily rollups (caps prompt size for older runs)
+  changelog.jsonl                      # release tags + commit SHAs from production-affecting runs
+
+  outbound-emails/<request-id>.json    # email metadata (subject, recipients, rec ids) — used to
+                                       # route replies and render the dashboard's Confirmations tab
+  responses-queue/<request-id>.json    # parsed user replies awaiting pickup by an implementer
+  confirmations/<request-id>.json      # pending dangerous-action approvals (per-action gate)
+  errors/<ts>-<class>.json             # unrecoverable errors recorded by the resilience layer
 
 shared/
-  messages/<message-id>.json           # inter-agent async messages
+  messages/<message-id>.json           # inter-agent async messages (target_agent in body)
   inboxes/<agent-id>/<message-id>      # zero-byte markers for fast inbox listing
 ```
 
-Why blob keys instead of e.g. Storage Queues for messages:
-- Indexable by date — agents pull a bounded window each run
-- Auditable — humans can read everything in the portal
-- No queue retention limits (Azure Queues cap at 7d)
+Why blob keys over Storage Queues for messages: indexable by date,
+auditable in the portal, no 7-day queue retention cap.
+
+### 2. Logs — host filesystem (`/tmp/reusable-agents-logs/`)
+
+Process stdout/stderr that doesn't belong in durable storage. Cleared on
+host reboot; the API container bind-mounts this read-only so the
+dashboard's "Live LLM" tab can tail them.
+
+```
+/tmp/reusable-agents-host-worker.log                          # host-worker service stdout/stderr
+/tmp/reusable-agents-logs/<agent-id>-<run-ts>.log             # per-run agent stdout
+/tmp/reusable-agents-logs/agent-<id>.log                      # systemd-user service log (responder, etc.)
+/tmp/reusable-agents-logs/dispatch-seo-implementer-<site>-<ts>.log
+                                                              # transient implementer scope output
+                                                              # (claude --print + tool calls)
+```
+
+The dispatch logs are what the **Live LLM** tab tails in real time.
+Decision logs (`decisions.jsonl`) and progress JSONs go to **storage**
+(durable), not here.
+
+### 3. Configuration — three layers
+
+Config is split intentionally so secrets stay on the host, agent code
+stays in version control, and per-instance settings stay in the repo
+that owns the application.
+
+#### 3a. Framework config (host + storage)
+
+| What | Where | Purpose |
+|---|---|---|
+| Storage backend choice + connection string | `reusable-agents/.env` (gitignored) | `STORAGE_BACKEND=azure`, `AZURE_STORAGE_CONNECTION_STRING=…`, `AZURE_STORAGE_CONTAINER=agents`, `FRAMEWORK_API_TOKEN=…` |
+| Host-worker systemd env | `~/.config/systemd/user/reusable-agents-host-worker.service` | Same Azure env as `.env` so the host-worker writes to the same storage |
+| Docker-compose host overrides | `reusable-agents/docker-compose.override.yml` (gitignored) | Per-host port bindings, bind mounts |
+| AI provider registry | `agents/config/ai-providers.json` (in storage) | Editable from the dashboard's AI Providers page |
+| AI provider defaults / per-agent overrides | `agents/config/ai-defaults.json` (in storage) | Same, editable from UI |
+| Responder IMAP/OAuth config | `~/.reusable-agents/responder/config.yaml` (host, gitignored) | IMAP host, mailbox, oauth file path, dispatcher routes |
+| Responder OAuth token | `~/.reusable-agents/responder/.oauth.json` (host, mode 0600) | XOAUTH2 refresh token; used by responder + Graph email send |
+
+#### 3b. Reusable agent code
+
+The reusable framework + agents repo (this repo). Cloned to a known
+path on the host (default `/home/voidsstr/development/reusable-agents`).
+
+```
+reusable-agents/
+  framework/                       # core lib (storage, status, registry, scheduler, …)
+    api/                           # FastAPI service (Dockerized)
+    ui/                            # React dashboard (Dockerized)
+    core/                          # AgentBase, ai_providers, goals, goal_changes,
+                                   #   email_codes, completion_email, resilience, …
+  agents/<reusable-agent-id>/      # generic agent bodies (no per-site assumptions)
+    agent.py                       # subclass of AgentBase
+    AGENT.md                       # runbook prompt
+    SKILL.md                       # task definition for Claude Desktop
+    manifest.json                  # template manifest
+    requirements.txt
+    README.md
+  shared/                          # cross-agent helpers (site_quality, run_files, schemas)
+  blueprints/                      # cookiecutter-style templates for new agents
+  install/                         # bootstrap scripts (create-agent.sh, install-host-worker.sh)
+  examples/sites/<site>.yaml       # generic per-site configs (used by SEO/PI/CR)
+```
+
+#### 3c. Per-instance manifests + site configs
+
+Per-app/site instances live in the repo that owns the application — NOT
+in the reusable repo. This way each app's deploy pipeline carries its
+own agent configs.
+
+```
+nsc-assistant/agents/<agent-id>/
+  manifest.json                    # registers id, cron, owner, entry_command
+  site.yaml                        # per-site config (DB URL, audit script command,
+                                   #   reporter recipients, implementer repo path)
+  README.md                        # operator notes for THIS instance
+
+specpicks/agents/<agent-id>/
+  manifest.json
+  site.yaml
+  README.md
+```
+
+The manifest's `entry_command` is what the host-worker exec's. It
+typically points back at a reusable agent body in this repo:
+
+```bash
+# example from nsc-assistant/agents/aisleprompt-progressive-improvement-agent/manifest.json:
+"entry_command": "PROGRESSIVE_IMPROVEMENT_CONFIG=$HOME/development/nsc-assistant/agents/aisleprompt-progressive-improvement-agent/site.yaml \
+                  python3 $HOME/development/reusable-agents/agents/progressive-improvement-agent/agent.py"
+```
+
+### Quick lookup — "I want to find X for agent Y"
+
+| Looking for… | Path |
+|---|---|
+| Current state of agent | dashboard `/agents/<id>` (reads `agents/<id>/status.json` from storage) |
+| Live LLM output during a run | dashboard `/agents/<id>` → "Live LLM" tab (tails `/tmp/reusable-agents-logs/dispatch-seo-implementer-*.log`) |
+| Why an agent failed last run | `agents/<id>/runs/<run-ts>/decisions.jsonl` + `agents/<id>/errors/<ts>-*.json` in storage |
+| What recs the agent generated | `agents/<id>/runs/<run-ts>/recommendations.json` (or the legacy `~/.openclaw/.../seo/runs/<site>/<ts>/` for SEO) |
+| What user replied to | `agents/<id>/runs/<run-ts>/responses.json` |
+| Email metadata for routing replies | `agents/<id>/outbound-emails/<request-id>.json` |
+| What's queued for the implementer | `agents/seo-implementer/responses-queue/*.json` |
+| Goals + progress | `agents/<id>/goals/active.json` + `goals/changes.jsonl` |
+| Agent's runbook prompt | `agents/<id>/runbook.md` (embedded at registration; source-of-truth is `manifest.runbook_path` in the repo) |
+| Cron schedule | `~/.config/systemd/user/agent-<id>.timer` (auto-wired from manifest.cron_expr) |
+| Host-worker log | `/tmp/reusable-agents-host-worker.log` |
+| Responder log | `/tmp/reusable-agents-logs/agent-responder-agent.log` |
+| AI provider for an agent | dashboard `/providers`, or `GET /api/providers/resolve/<id>` |
+| Storage browser | dashboard `/agents/<id>` → "Storage" tab |
 
 ## Creating a new agent (the standard flow)
 
