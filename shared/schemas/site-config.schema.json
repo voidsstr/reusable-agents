@@ -61,8 +61,35 @@
             "container": { "type": "string", "description": "For type=docker-exec: container name to docker exec into." },
             "queries_file": { "type": "string", "description": "Path (relative to config) to SQL or .js script that emits stats JSON to stdout." }
           }
+        },
+        "google_ads": {
+          "type": ["object", "null"],
+          "description": "Optional: Google Ads account. Pulls 90d search-terms, keyword performance, ad copy, and the paid-vs-organic 'goldmine' report. Skip block to disable.",
+          "properties": {
+            "customer_id": { "type": "string", "description": "Google Ads customer id (digits only, no dashes). MCC-managed or non-MCC both supported." },
+            "developer_token": { "type": "string", "description": "Developer token for the Google Ads API. Treated as a secret — keep out of git." },
+            "login_customer_id": { "type": "string", "description": "MCC manager account id, only required if customer_id is below an MCC. Digits only." }
+          }
         }
       }
+    },
+    "page_inventory": {
+      "type": "array",
+      "description": "Optional: page-type inventory crawl rules. Each rule names a page type and the regex its URLs match in the sitemap. The collector samples up to sample_size URLs (preferring GSC-impression-rich pages) and crawls them so the analyzer can run page-type-aware audits. Empty/missing = skip the inventory crawl entirely.",
+      "items": {
+        "type": "object",
+        "required": ["type", "sitemap_pattern"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "description": "Page-type label (e.g. recipe, product, head_to_head, article, feature, shop_category, hardware)." },
+          "sitemap_pattern": { "type": "string", "description": "Regex matched against each sitemap URL's path (or full URL). Anchored matching is up to the regex." },
+          "sample_size": { "type": "integer", "minimum": 1, "default": 20, "description": "Max URLs to sample per run. Sampling is weighted toward GSC-impression-rich pages when GSC data is available, else random." }
+        }
+      }
+    },
+    "sitemap_url": {
+      "type": "string",
+      "description": "Optional: override sitemap URL. Defaults to https://<site.domain>/sitemap.xml. Index sitemaps are auto-followed."
     },
     "revenue_kpis": {
       "type": "array",
@@ -89,7 +116,10 @@
         },
         "max_recs_per_run": { "type": "integer", "minimum": 1, "maximum": 50, "default": 12 },
         "us_traffic_weight": { "type": "number", "default": 1.5 },
-        "min_impressions_for_target": { "type": "integer", "default": 3 }
+        "min_impressions_for_target": { "type": "integer", "default": 3 },
+        "max_llm_audit_pages": { "type": "integer", "minimum": 1, "maximum": 200, "default": 30, "description": "Cap on number of pages fed to the LLM audit pass per run. Caps cost." },
+        "ai_provider": { "type": "string", "description": "Optional override for the LLM provider used by the analyzer's audit pass." },
+        "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." }
       }
     },
     "implementer": {

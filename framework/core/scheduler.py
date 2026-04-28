@@ -68,12 +68,15 @@ def cron_to_oncalendar(cron_expr: str) -> str:
     minute, hour, dom, month, dow = parts
 
     def _expand(field: str, lo: int, hi: int) -> str:
-        # systemd accepts: '*', '*/N' (step), 'A-B' (range), 'A,B,C' (list), 'N' (single)
+        # systemd accepts: '*', 'N/M' (start/step), 'A-B' (range), 'A,B,C' (list), 'N' (single).
+        # NOTE: systemd does NOT accept '*/N' inside a multi-field calendar
+        # expression — `*:*/30:00` is invalid. Use `0/N` instead so the start
+        # value is explicit ("from minute 0, every N").
         if field == "*":
             return "*"
-        if "/" in field and field.startswith("*/"):
+        if field.startswith("*/"):
             step = field[2:]
-            return f"*/{step}"
+            return f"{lo}/{step}"
         return field  # ranges and lists pass through
 
     minute_o = _expand(minute, 0, 59)
@@ -174,6 +177,22 @@ def write_systemd_units(
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     log_path = f"{log_dir}/agent-{agent_id}.log"
 
+    # systemd's ExecStart= doesn't accept the shell-style "VAR=value command..."
+    # prefix. If the entry_command starts with one or more VAR=value pairs,
+    # wrap the whole thing in /bin/sh -c so the shell handles them.
+    exec_cmd = entry_command.strip()
+    needs_shell = False
+    head = exec_cmd.split(None, 1)[0] if exec_cmd else ""
+    if "=" in head and not head.startswith("/") and not head.startswith("-"):
+        needs_shell = True
+    # Also wrap if the command uses shell features (pipes, redirects, etc.)
+    if any(c in exec_cmd for c in ("|", ">", "<", "&&", "||", ";", "$(", "`", "*", "?")):
+        needs_shell = True
+    if needs_shell:
+        # Escape single-quotes for sh -c '...'
+        escaped = exec_cmd.replace("'", "'\"'\"'")
+        exec_cmd = f"/bin/sh -c '{escaped}'"
+
     extra_env_block = "\n".join(
         f"Environment={k}={v}" for k, v in (extra_env or {}).items()
     )
@@ -181,7 +200,7 @@ def write_systemd_units(
     service_content = SERVICE_TEMPLATE.format(
         agent_id=agent_id,
         working_directory=working_directory,
-        exec_start=entry_command,
+        exec_start=exec_cmd,
         extra_env=extra_env_block,
         log_path=log_path,
     )

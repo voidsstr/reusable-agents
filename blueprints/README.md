@@ -28,7 +28,7 @@ Each blueprint here documents:
 | [site-quality-recommender](site-quality-recommender/BLUEPRINT.md) | Crawl a site → LLM analysis → email ranked recs with rec-id reply syntax → optional auto-implement dispatch | `progressive-improvement-agent`, `competitor-research-agent` | daily |
 | [pipeline-stage](pipeline-stage/BLUEPRINT.md) | Read upstream stage's run dir → do one thing → write downstream stage's expected outputs | `seo-data-collector`, `seo-analyzer`, `seo-reporter`, `seo-deployer` | event-driven (chained from cron) |
 | [inbox-poller](inbox-poller/BLUEPRINT.md) | Poll IMAP every N min → parse subject tags / commands → dispatch to other agents' response queues | `responder-agent` | minutely |
-| [llm-code-editor](llm-code-editor/BLUEPRINT.md) | Read recommendations → drive an LLM (or `claude` CLI) to apply edits → tests → commit + tag → optional deploy | `seo-implementer` | on-demand or chained |
+| [llm-code-editor](llm-code-editor/BLUEPRINT.md) | Read recommendations → drive an LLM (or `claude` CLI) to apply edits → tests → commit + tag → optional deploy | `implementer` | on-demand or chained |
 | [scheduled-task](scheduled-task/BLUEPRINT.md) | Run a script on a cron schedule with framework lifecycle bookkeeping. The "default" blueprint when nothing else fits. | most agents in `nsc-assistant/agents/` | cron |
 
 ## Using a blueprint

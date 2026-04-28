@@ -19,8 +19,10 @@ imap:
   # auth_method: password
   # password_env: REUSABLE_AGENTS_IMAP_PASS
 
-# Runs roots — every reusable-agent run dir we should write responses into.
-# The responder will look for matching site dirs under each of these.
+# Runs roots — LEGACY local-FS lookup. The responder's primary lookup
+# walks framework storage (Azure Blob) at agents/<source-agent>/runs/<ts>/
+# when the email subject identifies an orchestrator agent. This list is
+# the fallback for legacy non-framework runs.
 runs_roots:
   - ~/.reusable-agents/seo/runs
 
@@ -32,15 +34,15 @@ routes:
       header: X-Reusable-Agent
       equals: seo-reporter
     dispatcher:
-      type: seo-implementer
-      script: /home/voidsstr/development/reusable-agents/agents/seo-implementer/run.sh
+      type: implementer
+      script: /home/voidsstr/development/reusable-agents/agents/implementer/run.sh
 
   # Optional: explicit agent-prefix match (user typed "[seo:my-site] implement rec-001")
   # - match:
   #     agent_prefix: seo
   #   dispatcher:
-  #     type: seo-implementer
-  #     script: /home/voidsstr/development/reusable-agents/agents/seo-implementer/run.sh
+  #     type: implementer
+  #     script: /home/voidsstr/development/reusable-agents/agents/implementer/run.sh
 
 # Optional: post a status line to the dashboard every tick
 # dashboard:

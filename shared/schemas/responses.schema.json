@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/responses.schema.json",
   "title": "User responses to recommendations (the feedback queue)",
-  "description": "Each entry is one user decision on one recommendation. Written by the dashboard or by a human editing the file. Read by responder-agent which dispatches actions to seo-implementer.",
+  "description": "Each entry is one user decision on one recommendation. Written by the dashboard or by a human editing the file. Read by responder-agent which dispatches actions to implementer.",
   "type": "object",
   "required": ["schema_version", "responses"],
   "additionalProperties": false,

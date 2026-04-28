@@ -171,7 +171,7 @@ def imap_inject_reply(*, agent_id: str, subject: str, body_text: str,
 # ---------------------------------------------------------------------------
 
 def find_dispatch_log(agent_subject_tag: str, since_ts: float) -> Path | None:
-    pat = f"dispatch-seo-implementer-*-*.log"
+    pat = f"dispatch-implementer-*-*.log"
     candidates = [
         p for p in LOG_DIR.glob(pat)
         if p.stat().st_mtime > since_ts and agent_subject_tag in p.read_text(errors="ignore")[:200]
@@ -196,7 +196,7 @@ def wait_for_implementer_done(dlog: Path, timeout: int = 3600, poll: int = 15) -
 # ---------------------------------------------------------------------------
 
 def find_completion_email(*, request_id: str,
-                           implementer_id: str = "seo-implementer") -> dict | None:
+                           implementer_id: str = "implementer") -> dict | None:
     p = DATA / "agents" / implementer_id / "outbound-emails" / f"{request_id}.completion.json"
     return json.loads(p.read_text()) if p.is_file() else None
 
@@ -269,7 +269,7 @@ def main() -> int:
     log_path = None
     deadline = time.time() + 180
     while time.time() < deadline:
-        candidates = sorted(LOG_DIR.glob("dispatch-seo-implementer-*.log"),
+        candidates = sorted(LOG_DIR.glob("dispatch-implementer-*.log"),
                             key=lambda p: p.stat().st_mtime, reverse=True)
         for p in candidates:
             if p.stat().st_mtime <= since_ts:
@@ -286,7 +286,7 @@ def main() -> int:
     if not log_path:
         log("  NO DISPATCH LOG MATCHED — failing")
         # Show all recent dispatch logs for debugging
-        for p in sorted(LOG_DIR.glob("dispatch-seo-implementer-*.log"), key=lambda x: x.stat().st_mtime)[-3:]:
+        for p in sorted(LOG_DIR.glob("dispatch-implementer-*.log"), key=lambda x: x.stat().st_mtime)[-3:]:
             log(f"    recent: {p.name} (mtime {p.stat().st_mtime})")
         return 1
     log(f"  dispatch log: {log_path.name}")

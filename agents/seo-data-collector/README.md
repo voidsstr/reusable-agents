@@ -30,6 +30,61 @@ This agent is site-agnostic — point it at your config and it works.
 stats, content coverage, and revenue KPI counts (rows in `instacart_clicks`,
 `kitchen_click_events`, etc.).
 
+**Google Ads** (optional, only if `data_sources.google_ads` is configured): 4
+reports across the last 90 days. Enables `paid-organic-gap` and
+`ad-copy-headline-winner` recommendations from the analyzer.
+
+- `ads-search-terms.json` — search-term-view: what users actually typed.
+- `ads-keyword-perf.json` — keyword-view: targeted keywords + match types.
+- `ads-ad-copy.json` — ad-group-ad: top-CTR responsive search ad headlines.
+- `ads-paid-vs-organic.json` — paid-organic-search-term-view (the goldmine).
+  Pairs each search term with paid clicks/impressions AND organic
+  clicks/impressions side-by-side, surfacing queries paid wins but organic
+  loses.
+
+Setup: install the optional google-ads SDK (`pip install google-ads`) — without
+it the collector falls back to the REST API via urllib (slower; same data).
+The collector reuses the OAuth file from `auth.oauth_file`; the bootstrap
+script now requests the `https://www.googleapis.com/auth/adwords` scope along
+with GSC + GA4. Existing OAuth files keep working for GSC/GA4 — re-run
+`refresh-token.py --bootstrap` once to add the Ads scope.
+
+The Ads SDK requires a developer-token (set in
+`data_sources.google_ads.developer_token`) and the target customer id
+(`customer_id`). MCC-managed accounts also need `login_customer_id`. All
+errors are non-fatal — empty result files are written and the run continues.
+
+**Page-type inventory crawl** (optional, only if `page_inventory` is set in
+the site config): the collector reads the site's sitemap (and recurses into
+sitemap-indexes), filters URLs by per-type regex, samples up to `sample_size`
+per type (weighted by GSC impressions when available), and crawls the sampled
+pages with a polite 1.5s delay + per-URL HTML cache. Output:
+
+- `pages-by-type.jsonl` — one record per crawled page: `{url, type, status,
+  html_size, fetched_at, cache_path, title, description, h1, canonical, body_text}`.
+- `page-cache/<sha1>.html` — persistent across runs. The collector sends
+  `If-Modified-Since` from the cache file's mtime; 304 responses use cached
+  HTML and skip re-parsing.
+
+The analyzer feeds these records (capped at `analyzer.max_llm_audit_pages`,
+default 30, per site) into the LLM audit pass. Each record's `type` field
+activates page-type-specific checks (`recipe-*`, `product-*`, `h2h-*`,
+`article-*`, `feature-*`).
+
+**Repository scan** (always runs when `implementer.repo_path` is configured):
+the collector walks the site's repo, identifies SEO-surface files (server
+routes, page components, sitemap generators, files with `<title>`,
+`Helmet`, `<meta name=`, JSON-LD, etc.), and writes:
+
+- `repo-routes.json` — `{routes: [{url_pattern, file, line, emits, missing,
+  todos}]}`. The analyzer wires this into each rec's
+  `implementation_outline.files` so recommendations point at concrete file
+  locations the implementer can read.
+
+The repo scan skips: `node_modules`, `.git`, `dist`, `build`, `.next`, `.venv`,
+`__pycache__`, `*.lock`, `*.log`, `*.db`, test/spec files. No external
+network calls; safe to run on locked-down hosts.
+
 **Derived files** (computed locally from the raw data):
 - `gsc-top5-targets.json` — keywords currently ranking pos 6-50 with measurable
   demand. The primary work-list for the analyzer.
@@ -81,8 +136,9 @@ The `latest` symlink points at the most recent run dir for that site.
 ## OAuth setup
 
 This agent uses Google's OAuth2 with the
-`https://www.googleapis.com/auth/webmasters.readonly` and
-`https://www.googleapis.com/auth/analytics.readonly` scopes.
+`https://www.googleapis.com/auth/webmasters.readonly`,
+`https://www.googleapis.com/auth/analytics.readonly`, and (for the optional
+Google Ads collector) `https://www.googleapis.com/auth/adwords` scopes.
 
 `refresh-token.py --bootstrap` walks you through the OOB flow once. After
 that, the access token is auto-refreshed each run from `.oauth.json`
@@ -104,5 +160,5 @@ for the full schema. The collector reads:
 
 This collector works on its own — useful if you just want the broadest GSC/GA4
 data dump and you'll do your own analysis. The downstream sub-agents
-(`seo-analyzer`, `seo-reporter`, `seo-implementer`, `seo-deployer`) all
+(`seo-analyzer`, `seo-reporter`, `implementer`, `seo-deployer`) all
 read from the run dir this collector produces.

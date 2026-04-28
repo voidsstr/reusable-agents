@@ -1,6 +1,6 @@
 {
-  "id": "seo-implementer",
-  "name": "SEO Implementer",
+  "id": "implementer",
+  "name": "Implementer",
   "description": "LLM-driven code editor \u2014 reads selected recommendations and applies them to the configured site repo. Only agent in the suite that needs Claude.",
   "category": "seo",
   "task_type": "manual",

@@ -24,7 +24,7 @@ implementer doesn't run, so there's nothing to deploy.
 ## Usage
 
 ```bash
-# Triggered by seo-implementer
+# Triggered by implementer
 bash run.sh --run-dir ~/.reusable-agents/seo/runs/my-site/20260425T140245Z
 
 # Manual smoke

@@ -2,7 +2,7 @@
 
 Polls an IMAP inbox every 60 seconds, parses replies to agent-sent emails,
 and dispatches actions to the right downstream agent (e.g.,
-`seo-implementer --recommendations rec-001,rec-005`).
+`implementer --recommendations rec-001,rec-005`).
 
 This is the human-in-the-loop bridge. The flow:
 
@@ -19,7 +19,7 @@ seo-reporter ─sends email─► automation@company.com ─► You read it
                                        ▼
                            Write to <run>/responses.json
                            Write to global responses queue
-                           Trigger seo-implementer
+                           Trigger implementer
 ```
 
 ## What it does each tick
@@ -61,8 +61,8 @@ routes:
       header: X-Reusable-Agent
       equals: seo-reporter
     dispatcher:
-      type: seo-implementer
-      script: /home/voidsstr/development/reusable-agents/agents/seo-implementer/run.sh
+      type: implementer
+      script: /home/voidsstr/development/reusable-agents/agents/implementer/run.sh
 
 # Where to find each site's runs (so we can append to <run>/responses.json)
 runs_roots:

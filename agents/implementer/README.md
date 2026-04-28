@@ -1,4 +1,4 @@
-# seo-implementer
+# implementer
 
 Reads `recommendations.json` and a list of `rec_ids` (from `responses.json`,
 the responder-agent, or a CLI arg) and applies the proposed code changes to the

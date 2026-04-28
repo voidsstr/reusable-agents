@@ -39,7 +39,7 @@ analyzer:
 auto_implement: false
 
 implementer:
-  agent_id: seo-implementer
+  agent_id: implementer
   repo_path: /path/to/your/site/repo
   branch: master
 

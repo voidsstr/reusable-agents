@@ -1,6 +1,6 @@
-# seo-implementer — AGENT.md (runbook)
+# implementer — AGENT.md (runbook)
 
-You are the **seo-implementer**. Your job is to take a list of approved
+You are the **implementer**. Your job is to take a list of approved
 recommendations from a previous SEO agent run and apply the code changes
 to the configured site repo.
 
@@ -118,6 +118,90 @@ change between when you read `recommendations.json` and when you commit.
    lines of authorized user work. Both errors stem from the same root
    cause: broad staging + after-the-fact policing of commits the agent
    doesn't own. The rules above eliminate both.
+
+## Article-author mode (when recommendations are article proposals, not code edits)
+
+If the loaded `recommendations.json` rec rows have
+`"type": "article-author-proposal"` (and carry an `article_proposal`
+sub-object), you are NOT editing repo code — you are **writing articles
+into the SpecPicks Postgres DB**. Different rules apply:
+
+1. **Read** `$RESPONDER_RUN_DIR/proposals.json` (the article-author's
+   primary artifact — same content as `recommendations.json` but in the
+   richer schema). Each entry has `bucket`, `format`, `title`, `slug`,
+   `primary_keyword`, `secondary_keywords`, `target_query`, `outline`,
+   `why_now`, `expected_products_or_hardware`, `expected_word_count`.
+
+2. **Read** `/home/voidsstr/development/specpicks/docs/testbench-content-standards.md`
+   — the canonical editorial standards. Section 11 is the
+   studio-supplies template that buying-guide bucket articles follow
+   verbatim.
+
+3. **For each rec id in `$RESPONDER_REC_IDS`:**
+   - Look up the matching proposal in `proposals.json`.
+   - **If `format == "testbench"`**:
+     - Pull real benchmark data from `gaming_benchmarks`, `ai_benchmarks`,
+       `synthetic_benchmarks`, `hardware_specs` for any SKU in
+       `expected_products_or_hardware`. Every quantitative claim must
+       trace to a DB row.
+     - Write 1,800–2,800 words (or `expected_word_count`) following the
+       depth rules in Sections 1–7 of the content-standards doc.
+     - Emit `FAQPage` JSON-LD at the end of the body (5+ Q&A).
+     - Insert into `editorial_articles` with `status='published'`,
+       `published_at=NOW()`, `written_at=NOW()`, `written_by='claude-opus-{model}'`,
+       `slug`, `title`, `subtitle`, `excerpt` (≤160 chars), `body_md`,
+       `category` (mapped from bucket), `tags`, `related_hardware_slugs`,
+       `primary_keyword`, `secondary_keywords`.
+   - **If `format == "buying-guide"`**:
+     - Look for a matching `buying_guides` row by `new_slug` (it's
+       likely already pending). If present, UPDATE it; if absent,
+       INSERT.
+     - Pick exactly 5 products from the matching `categories.slug`
+       category, ranked by `(rating * log(review_count + 1)) DESC`.
+       Award badges: 🏆 Best Overall · 💰 Best Value · 🎯 Best for
+       <Niche> · ⚡ Best Performance · 🧪 Budget Pick.
+     - Write following Section 11 of the content standards verbatim:
+       affiliate disclosure → H1 → byline with "Last verified" date →
+       280w intro → 5-col comparison table → 5 ranked picks (each with
+       hero image + spec chips + ✅ pros + ❌ cons + 200w narrative +
+       Amazon CTA + price disclaimer + "See Full Details →" internal
+       link) → "What to look for" 300w → FAQ (5 Q&A, NO FAQPage
+       JSON-LD on guides) → Sources (3-5 outbound citations to Tom's
+       Hardware / TechPowerUp / Gamers Nexus / Phoronix / Notebookcheck
+       / etc.) → Related guides → closing meta line.
+     - 1,800-word floor, 2,500 typical.
+     - Set `body_md`, `picks` (JSONB array of `{asin, award, rank}`),
+       `seo_title`, `seo_description`, `last_verified_at=NOW()`,
+       `written_at=NOW()`, `written_by='claude-opus-{model}'`,
+       `status='published'`, `published_at=COALESCE(published_at,NOW())`.
+   - **DB connection** comes from `DATABASE_URL` (or
+     `DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require'`).
+     Prefer a small TypeScript helper in `scripts/_write-next-article.ts` /
+     `scripts/_write-next-guide.ts` over ad-hoc psql commands; delete
+     after the article is inserted.
+   - Write `<run-dir>/changes/<rec_id>.summary.md` with the new article's
+     URL (`https://specpicks.com/testbench/<slug>` or
+     `/buying-guide/<new_slug>`) + a 2-sentence summary.
+
+4. **DO NOT commit code in article-author mode.** No git operations. The
+   article body lives in Postgres; there is no repo edit.
+
+5. **DO NOT chain to seo-deployer in article-author mode.** Set
+   `IMPLEMENTER_SKIP_DEPLOY=1` for the chained call OR detect the mode
+   and exit before the deployer hand-off (article-author run dirs do
+   NOT need a build/test/deploy pass — articles are server-rendered
+   from the DB on next request).
+
+6. **Update each rec in-place** the same way as code-edit mode:
+   `implemented: true`, `implemented_at: <ISO>`,
+   `implemented_run_ts: <this run>`. Article-author runs propagate this
+   back to `proposals.json` too if you want — but updating
+   `recommendations.json` is sufficient for the framework to mark
+   completion.
+
+7. **Confirmation email** still runs at the end (the standard
+   completion-email path). The user receives a "shipped art-001 art-003"
+   confirmation with each article's published URL.
 
 ## When something goes wrong
 

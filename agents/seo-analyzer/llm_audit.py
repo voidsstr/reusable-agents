@@ -153,6 +153,42 @@ CONVERSION-RELEVANT (revenue-tracking sites)
 [cta-weak]                     CTA text is generic (\"submit\") not specific (\"start free trial\")
 [cta-position]                 Primary CTA below the fold on revenue page
 [trust-signals-missing]        Conversion page lacks reviews / testimonials / guarantees
+
+LLM-SEARCH READINESS (apply to ALL pages — generative-engine optimization)
+─────────────────────────────────────────────────────────────────────
+[llm-search-direct-answer-missing]  No extractable single paragraph at top answering the page's primary query
+[llm-search-citation-readiness]     Fewer than 3 specific quantitative claims (numbers, dates, comparisons) — LLMs prefer citable facts
+[llm-search-quote-extractability]   No memorable single-sentence verdict / conclusion (LLMs love quote-worthy passages)
+[llm-search-faq-format]             No Q&A formatted content (FAQ schema or H2/H3 question-form headers)
+
+PAGE-TYPE: RECIPE (only when the input record has type=recipe)
+─────────────────────────────────────────────────────────────────────
+[recipe-schema-incomplete]          Recipe JSON-LD missing yield, prepTime, cookTime, totalTime, recipeIngredient[], recipeInstructions[], nutrition, image, author, datePublished
+[recipe-internal-links-thin]        No links to sibling recipes in same category, no breadcrumb
+[recipe-conversational-intro-missing]  No 2-3 sentence intro answering \"what is this dish, why make it\"
+
+PAGE-TYPE: PRODUCT (only when the input record has type=product)
+─────────────────────────────────────────────────────────────────────
+[product-schema-incomplete]         Product JSON-LD missing brand, mpn/sku, offers.price, offers.priceCurrency, aggregateRating, review[]
+[product-comparison-link-missing]   No link to head-to-head pages featuring this product
+[product-affiliate-cta-position]    Amazon CTA below the fold (hurts conversion)
+
+PAGE-TYPE: HEAD-TO-HEAD / VS (only when type=head_to_head)
+─────────────────────────────────────────────────────────────────────
+[h2h-comparison-format-readiness]   No spec table, no winner verdict, no buy-advice block
+[h2h-quote-worthy-verdict-missing]  No single-sentence \"X wins for Y, Z wins for W\" line
+[h2h-stale-pricing]                 Prices in HTML > 14 days old vs DB current price
+
+PAGE-TYPE: ARTICLE / BLOG (only when type=article)
+─────────────────────────────────────────────────────────────────────
+[article-author-credentials-missing]  No author byline with bio link
+[article-publish-update-dates]        Missing or future-dated publish/update date
+[article-cited-sources-missing]       Fewer than 3 outbound citations
+
+PAGE-TYPE: FEATURE / APP-PAGE (only when type=feature)
+─────────────────────────────────────────────────────────────────────
+[feature-conversational-content]    Page is mostly UI, no prose explaining the feature for SEO/LLM
+[feature-internal-link-cluster]     Feature page doesn't link to sibling features
 ═════════════════════════════════════════════════════════════════════
 
 For EACH issue found, return a JSON object:
@@ -235,6 +271,26 @@ CHECK_ID_TO_REC_TYPE = {
     # cta
     "cta-missing": "conversion-path", "cta-weak": "conversion-path",
     "cta-position": "conversion-path", "trust-signals-missing": "conversion-path",
+    # LLM-search readiness (apply everywhere)
+    "llm-search-direct-answer-missing": "content-expansion",
+    "llm-search-citation-readiness": "content-expansion",
+    "llm-search-quote-extractability": "content-expansion",
+    "llm-search-faq-format": "schema-markup",
+    # Page-type checks — rec.type is the check_id itself (open enum)
+    "recipe-schema-incomplete": "recipe-schema-incomplete",
+    "recipe-internal-links-thin": "recipe-internal-links-thin",
+    "recipe-conversational-intro-missing": "recipe-conversational-intro-missing",
+    "product-schema-incomplete": "product-schema-incomplete",
+    "product-comparison-link-missing": "product-comparison-link-missing",
+    "product-affiliate-cta-position": "product-affiliate-cta-position",
+    "h2h-comparison-format-readiness": "h2h-comparison-format-readiness",
+    "h2h-quote-worthy-verdict-missing": "h2h-quote-worthy-verdict-missing",
+    "h2h-stale-pricing": "h2h-stale-pricing",
+    "article-author-credentials-missing": "article-author-credentials-missing",
+    "article-publish-update-dates": "article-publish-update-dates",
+    "article-cited-sources-missing": "article-cited-sources-missing",
+    "feature-conversational-content": "feature-conversational-content",
+    "feature-internal-link-cluster": "feature-internal-link-cluster",
 }
 
 
@@ -270,12 +326,20 @@ def _parse_llm_json(raw: str) -> list[dict]:
 
 
 def format_pages_for_audit(pages: list[dict], cap_chars: int = 2000) -> str:
-    """Render a small batch of page records for the audit prompt."""
+    """Render a small batch of page records for the audit prompt.
+
+    If a page record has a `type` field (set by the page-inventory crawl
+    in seo-data-collector), it's included so the LLM can apply the
+    page-type-specific checks (recipe-*, product-*, h2h-*, etc.).
+    """
     parts = []
     for p in pages:
         body = (p.get("body_text") or p.get("content") or "")[:cap_chars]
+        page_type = p.get("type", "")
+        type_line = f"TYPE: {page_type}\n" if page_type else ""
         parts.append(
             f"\nURL: {p.get('url','?')}\n"
+            f"{type_line}"
             f"TITLE: {p.get('title','')}\n"
             f"DESCRIPTION: {p.get('description','')}\n"
             f"H1: {p.get('h1','')}\n"
@@ -425,4 +489,10 @@ CHECK_CATEGORIES = {
     "url-images": [c for c in ALL_CHECK_IDS if c.startswith(("url-", "image-"))],
     "ai-search-geo": [c for c in ALL_CHECK_IDS if c.startswith("geo-")],
     "conversion": [c for c in ALL_CHECK_IDS if c.startswith(("cta-", "trust-"))],
+    "llm-search-readiness": [c for c in ALL_CHECK_IDS if c.startswith("llm-search-")],
+    "page-type-recipe": [c for c in ALL_CHECK_IDS if c.startswith("recipe-")],
+    "page-type-product": [c for c in ALL_CHECK_IDS if c.startswith("product-")],
+    "page-type-h2h": [c for c in ALL_CHECK_IDS if c.startswith("h2h-")],
+    "page-type-article": [c for c in ALL_CHECK_IDS if c.startswith("article-")],
+    "page-type-feature": [c for c in ALL_CHECK_IDS if c.startswith("feature-")],
 }

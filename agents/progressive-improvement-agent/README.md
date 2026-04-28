@@ -39,7 +39,7 @@ Key fields:
 | `analyzer.auto_implement_threshold` | confidence cutoff for `tier=auto` (default 0.95) |
 | `analyzer.max_recs_per_run` | cap; default 15 |
 | `auto_implement` | master toggle (off until track record proven) |
-| `implementer.agent_id` | downstream agent for auto-tier dispatch (default `seo-implementer`) |
+| `implementer.agent_id` | downstream agent for auto-tier dispatch (default `implementer`) |
 | `reporter.email.to` / `subject_template` | who gets the report |
 
 ## Outputs

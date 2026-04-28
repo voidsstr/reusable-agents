@@ -40,19 +40,7 @@
         },
         "type": {
           "type": "string",
-          "enum": [
-            "top5-target-page",
-            "indexing-fix",
-            "ctr-fix",
-            "ssr-fix",
-            "schema-markup",
-            "internal-link",
-            "sitemap-fix",
-            "conversion-path",
-            "content-expansion",
-            "redirect-fix",
-            "other"
-          ]
+          "description": "Recommendation kind. Open enum: deterministic types listed below, plus any check_id from llm_audit.py (e.g. recipe-schema-incomplete, h2h-quote-worthy-verdict-missing, paid-organic-gap)."
         },
         "priority": {
           "type": "string",
@@ -96,7 +84,10 @@
             "ts": { "type": "string" },
             "notes": { "type": "string" }
           }
-        }
+        },
+        "llm_check_id": { "type": "string", "description": "If this rec came from the LLM audit pass, the check_id from llm_audit.SEO_AUDIT_CHECKLIST." },
+        "llm_confidence": { "type": "number", "description": "0.0-1.0 confidence reported by the LLM audit." },
+        "llm_evidence": { "type": "string", "description": "Exact snippet from the audited page that the LLM cites as evidence." }
       }
     }
   }

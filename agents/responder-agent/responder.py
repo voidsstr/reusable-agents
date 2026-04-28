@@ -354,16 +354,57 @@ def find_run_dir_for_site(runs_roots: list[Path], site: str,
                           source_agent: Optional[str] = None) -> Optional[Path]:
     """Find the latest run dir.
 
-    Two layouts supported (priority order):
-      1. Framework PI/CR (when source_agent is set):
+    Three layouts supported (priority order):
+      1. Framework Azure storage (when source_agent is set + Azure backend):
+         agents/<source_agent>/runs/<run_ts>/  — materialized to a tempdir.
+      2. Framework local FS (when source_agent is set + local backend):
          <fw_storage>/agents/<source_agent>/runs/<run_ts>/
-      2. SEO legacy: <runs_root>/<site>/<run_ts>/
+      3. SEO legacy: <runs_root>/<site>/<run_ts>/
 
-    Prefers framework storage when source_agent is set so PI/CR agents
-    don't accidentally bind to a stale SEO run dir for the same site.
+    For Azure-backed runs (typical for SEO post-2026-04-27 migration), the
+    returned Path is a tempdir holding a materialized copy of the run-dir
+    contents. Caller is responsible for cleanup (or relying on systemd to
+    GC /tmp). The dispatcher passes RESPONDER_AGENT_ID + RESPONDER_RUN_TS
+    env vars so downstream stages can re-read from Azure directly.
+
     If hint_run_ts is given, prefer that exact run.
     """
-    # Framework storage layout (PI/CR/etc.) — checked first when source_agent is set
+    # 1. Framework Azure storage — checked first when source_agent is set.
+    #    The dispatched implementer needs a real local FS path (claude
+    #    --print operates on files), so we materialize the run dir into
+    #    a tempdir keyed by (source_agent, run_ts).
+    if source_agent:
+        try:
+            from framework.core.run_dir import RunDir
+            from framework.core.storage import get_storage
+            s = get_storage()
+            prefix = f"agents/{source_agent}/runs/"
+            keys = s.list_prefix(prefix)
+            ts_set: set[str] = set()
+            for k in keys:
+                rest = k[len(prefix):]
+                if "/" in rest:
+                    ts_set.add(rest.split("/", 1)[0])
+            if ts_set:
+                pick: Optional[str] = None
+                if hint_run_ts and hint_run_ts in ts_set:
+                    pick = hint_run_ts
+                elif not hint_run_ts:
+                    pick = sorted(ts_set)[-1]
+                if pick:
+                    rd = RunDir(source_agent, pick, site=site)
+                    # Persistent tempdir (NOT auto-cleaned) — the dispatcher
+                    # spawns a systemd-run scope that outlives the responder.
+                    import tempfile
+                    td = Path(tempfile.mkdtemp(
+                        prefix=f"rundir-{source_agent}-{pick}-",
+                    ))
+                    rd.materialize(td)
+                    return td
+        except Exception as e:
+            print(f"[responder] azure run-dir lookup failed: {e}", file=sys.stderr)
+
+    # 2. Framework local FS layout
     if source_agent:
         fw_storage = Path(os.path.expanduser(
             os.environ.get("AGENT_STORAGE_LOCAL_PATH",
@@ -379,7 +420,7 @@ def find_run_dir_for_site(runs_roots: list[Path], site: str,
             if candidates:
                 return candidates[-1]
 
-    # SEO legacy layout
+    # 3. SEO legacy layout
     for root in runs_roots:
         site_dir = root / site
         if not site_dir.is_dir():
@@ -596,17 +637,34 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     env["RESPONDER_SITE"] = site
     env["RESPONDER_RUN_TS"] = run_ts
     env["RESPONDER_RUN_DIR"] = str(run_dir)
-    # Derive source agent from run_dir path (agents/<id>/runs/<ts>/...) so
-    # the dispatched implementer can look up the original outbound-email
-    # metadata + send a confirmation email back to that recipient.
+    # Derive source agent from run_dir path. Three sources, in priority order:
+    #   1. tempdir prefix (Azure-materialized): "rundir-<source_agent>-<run_ts>-..."
+    #   2. local FS layout: <fw_storage>/agents/<source_agent>/runs/<run_ts>/
+    #   3. legacy SEO layout: seo/runs/<site>/<run-ts>/  → site-seo-opportunity-agent
     try:
+        rd_name = Path(run_dir).name
         parts = Path(run_dir).resolve().parts
-        if "agents" in parts and "runs" in parts:
+        # 1. Azure-materialized tempdir name pattern
+        td_basename = Path(run_dir).name
+        if td_basename.startswith("rundir-"):
+            # Format: rundir-<agent_id>-<run_ts>-<random>. Strip 'rundir-' prefix
+            # and -<random> suffix; the leftover is '<agent_id>-<run_ts>'.
+            tail = td_basename[len("rundir-"):]
+            # Drop the trailing random component (mkdtemp adds a separator
+            # then random chars). Walk backwards to find the run_ts.
+            m = re.search(r"^(?P<agent>.+?)-(?P<ts>\d{8}T\d{6}Z)-", tail)
+            if m:
+                env["RESPONDER_SOURCE_AGENT"] = m.group("agent")
+                env["RESPONDER_AGENT_ID"] = m.group("agent")
+        # 2. Standard local FS framework layout
+        if "RESPONDER_SOURCE_AGENT" not in env and "agents" in parts and "runs" in parts:
             idx = parts.index("agents")
             env["RESPONDER_SOURCE_AGENT"] = parts[idx + 1]
-        elif "seo" in parts and "runs" in parts:
-            # Legacy SEO layout: seo/runs/<site>/<run-ts>/
+            env["RESPONDER_AGENT_ID"] = parts[idx + 1]
+        # 3. Legacy SEO local layout
+        elif "RESPONDER_SOURCE_AGENT" not in env and "seo" in parts and "runs" in parts:
             env["RESPONDER_SOURCE_AGENT"] = f"{site}-seo-opportunity-agent"
+            env["RESPONDER_AGENT_ID"] = f"{site}-seo-opportunity-agent"
     except Exception:
         pass
     env["RESPONDER_REQUEST_ID"] = run_ts  # best-effort thread id
@@ -616,6 +674,11 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     log_dir.mkdir(parents=True, exist_ok=True)
     from datetime import datetime as _dt, timezone as _tz
     log_path = log_dir / f"dispatch-{typ}-{site}-{_dt.now(_tz.utc).strftime('%Y%m%dT%H%M%SZ')}.log"
+    # Export the dispatch log path so the implementer's run.sh can launch
+    # framework.core.llm_flush_sidecar to push the live tail into Azure
+    # blob storage in parallel with the local-FS capture below. Without
+    # this the dashboard's Live LLM tab can't see implementer output.
+    env["DISPATCH_LOG_PATH"] = str(log_path)
     # Detach the dispatcher into its own systemd transient scope so it
     # survives the responder's exit. Otherwise the responder.service
     # (Type=oneshot) cgroup teardown kills our spawned implementer +
@@ -713,17 +776,32 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
         # from the agent_id's first component instead.
         site = action_obj.get("prefix_site") or site_hint
         candidate_source_agent = None
-        if agent_hint and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity|catalog-audit)-agent$", agent_hint):
+        if agent_hint and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity|catalog-audit|head-to-head)-agent$", agent_hint):
             candidate_source_agent = agent_hint
             # Derive site from agent id: '<site>-progressive-improvement-agent'
             #   → site = '<site>' (everything before the suffix)
             for suffix in ("-progressive-improvement-agent",
                             "-competitor-research-agent",
                             "-seo-opportunity-agent",
-                            "-catalog-audit-agent"):
+                            "-catalog-audit-agent",
+                            "-head-to-head-agent"):
                 if agent_hint.endswith(suffix):
                     site = agent_hint[: -len(suffix)]
                     break
+        # H2H short-tag mapping: subject tag `[H2H:<site>]` is shorthand
+        # for `<site>-head-to-head-agent`. Mirrors the SEO short tag.
+        elif agent_hint and agent_hint.lower() == "h2h" and site:
+            candidate_source_agent = f"{site}-head-to-head-agent"
+        # SEO short-tag mapping: subject tag `[SEO:<site>]` is shorthand
+        # for `<site>-seo-opportunity-agent`. Required so the responder
+        # walks Azure storage at agents/<site>-seo-opportunity-agent/runs/
+        # for the run-dir lookup (post-2026-04-27 migration: SEO no longer
+        # writes to ~/.reusable-agents/seo/runs/<site>/<run_ts>/ on local FS).
+        elif agent_hint and agent_hint.lower() == "seo" and site:
+            candidate_source_agent = f"{site}-seo-opportunity-agent"
+        # ARTICLE short-tag mapping (specpicks-article-author-agent).
+        elif agent_hint and agent_hint.lower() == "article" and site:
+            candidate_source_agent = f"{site}-article-author-agent"
         if not site:
             print(f"  [skip] no site for action {action_obj['raw_line']!r}", file=sys.stderr)
             continue

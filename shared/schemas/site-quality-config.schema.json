@@ -125,7 +125,7 @@
       "properties": {
         "agent_id": {
           "type": "string",
-          "default": "seo-implementer",
+          "default": "implementer",
           "description": "Downstream agent to receive auto-tier recs."
         },
         "repo_path": { "type": "string" },

@@ -14,7 +14,7 @@ repo:
 - Runs the repo's tests
 - Commits + tags + (optionally) deploys
 
-Example: `seo-implementer` — applies SEO recs to AislePrompt /
+Example: `implementer` — applies SEO recs to AislePrompt /
 SpecPicks codebases.
 
 ## What you get
@@ -70,7 +70,7 @@ Cons:
 - You handle the file-IO yourself
 - Multi-file edits require careful prompting
 
-`seo-implementer/run.sh` supports both via `IMPLEMENTER_LLM=claude|framework|noop`.
+`implementer/run.sh` supports both via `IMPLEMENTER_LLM=claude|framework|noop`.
 Default is `claude` for production, `framework` for testing the
 backend-swap path, `noop` for smoke tests.
 
@@ -87,7 +87,7 @@ backend-swap path, `noop` for smoke tests.
 
 ## Reference implementation
 
-`seo-implementer/run.sh` — drives the Claude CLI against the AislePrompt
+`implementer/run.sh` — drives the Claude CLI against the AislePrompt
 + SpecPicks repos. ~200 lines of bash + a substantial markdown prompt
 template.
 

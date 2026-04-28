@@ -1,0 +1,22 @@
+{
+  "id": "product-hydration-agent",
+  "name": "Product Hydration Agent",
+  "description": "BASE CODE for the product-hydration-agent blueprint. Per-site instances live in customer repos (e.g. specpicks/agents/product-hydration-agent) and reference this code via entry_command. This base entry exists only so the framework can show the code's existence + run-history; it is never scheduled.",
+  "category": "research",
+  "task_type": "desktop-task",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": false,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "entry_command": "PRODUCT_HYDRATION_CONFIG=$PRODUCT_HYDRATION_CONFIG DATABASE_URL=$DATABASE_URL python3 agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "is_blueprint": true,
+    "ai": {
+      "provider": "claude-cli",
+      "model": "opus"
+    }
+  }
+}

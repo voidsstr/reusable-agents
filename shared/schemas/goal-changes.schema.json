@@ -23,7 +23,7 @@
     },
     "rec_severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
     "rec_tier": { "type": "string", "enum": ["auto", "review", "experimental"] },
-    "implementer_agent": { "type": "string", "description": "Agent that actually applied the change (e.g. seo-implementer)." },
+    "implementer_agent": { "type": "string", "description": "Agent that actually applied the change (e.g. implementer)." },
     "implemented_at": { "type": "string" },
     "implementer_run_ts": { "type": "string" },
     "commit_sha": { "type": "string" },

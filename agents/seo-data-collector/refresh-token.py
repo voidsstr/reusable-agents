@@ -24,6 +24,11 @@ DEFAULT_OAUTH_PATH = os.path.expanduser("~/.reusable-agents/seo/.oauth.json")
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
     "https://www.googleapis.com/auth/webmasters.readonly",
+    # adwords scope is requested too so a single OAuth bootstrap covers
+    # Google Ads in addition to GSC + GA4. Existing oauth.json files
+    # without this scope still work for GSC/GA4; pull_google_ads will
+    # cleanly skip when the access token can't authorize the Ads API.
+    "https://www.googleapis.com/auth/adwords",
 ]
 
 

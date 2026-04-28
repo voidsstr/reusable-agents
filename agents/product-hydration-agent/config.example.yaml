@@ -1,0 +1,56 @@
+# product-hydration-agent — site config example
+#
+# Per-site instance lives in a customer repo (e.g.
+# specpicks/agents/product-hydration-agent/site.yaml) and is passed
+# via env var PRODUCT_HYDRATION_CONFIG.
+#
+# The agent picks a batch of products that need hydration (any of the
+# requested content_types missing OR hydrated_at older than
+# stale_after_days), asks Claude for SEO-optimized JSON content per
+# product, validates it, and writes it back to the products table —
+# stamping hydrated_at and hydration_model.
+
+site:
+  id: example-site
+  domain: example.com
+
+database:
+  url_env: DATABASE_URL          # name of the env var holding the DSN
+  site_id_filter: example-site   # optional — filter products to one site_id
+
+hydration:
+  # Which columns to hydrate. Each maps to a column on the products
+  # table and a JSON key Claude must emit. Allowed values:
+  #   description  → products.description (TEXT, 150-200 word copy)
+  #   pros_cons    → products.pros_cons (JSONB {pros:[5], cons:[5]})
+  #   faq          → products.faq (JSONB [{question,answer}] x5)
+  #   seo_meta     → products.seo_meta (JSONB {title<=60, meta_description<=160, keywords[3-7]})
+  content_types:
+    - description
+    - pros_cons
+    - faq
+    - seo_meta
+  batch_size: 25                 # products hydrated per run
+  max_runtime_minutes: 30        # wall-clock budget; in-flight finishes
+  stale_after_days: 90           # rebuild any product older than this
+  selection_priority: review_count   # ORDER BY <col> DESC NULLS LAST
+
+claude:
+  model: opus                    # Claude Max plan model name
+  max_turns: 10                  # tool-use budget per product
+  per_call_timeout_s: 300
+
+email:
+  to: [you@example.com]
+  from: Hydration <automation@example.com>
+  msmtp_account: automation
+  subject_template: "[HYDRATION:{site}] {n} products hydrated — {date}"
+  send_only_when_failures: true  # daily digest only on failure days;
+                                 # always emails on Monday for status
+
+goals:
+  primary: "100% of active products have all configured content_types populated"
+  freshness: "no products older than 90d without re-hydration"
+  quality: "every hydrated field passes JSON validation when applicable"
+
+runs_root: ~/.reusable-agents/product-hydration-agent/runs

@@ -10,7 +10,7 @@ Your agent is one step in a multi-stage pipeline:
 
 Examples: `seo-data-collector` (writes raw GSC/GA4 data) →
 `seo-analyzer` (reads data, writes recommendations) → `seo-reporter`
-(reads recs, sends email) → `seo-implementer` (reads recs + replies,
+(reads recs, sends email) → `implementer` (reads recs + replies,
 writes code) → `seo-deployer` (reads commits, ships).
 
 ## What you get

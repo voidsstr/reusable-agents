@@ -3,7 +3,7 @@
 Reusable framework agent that runs a per-site catalog quality audit, converts
 findings into the standard recommendations.json schema, emails ranked
 recommendations with reply-syntax, and supports the email-reply →
-seo-implementer → completion-email loop.
+implementer → completion-email loop.
 
 ## How it works
 
@@ -15,10 +15,10 @@ seo-implementer → completion-email loop.
    and can't exec the OAuth passwordeval).
 5. Record outbound-email metadata at `agents/<agent_id>/outbound-emails/<request_id>.json`.
 6. User replies with `implement rec-001 rec-005` (or `implement critical and high`).
-7. Responder (cron, every minute) picks up the reply, dispatches `seo-implementer`
+7. Responder (cron, every minute) picks up the reply, dispatches `implementer`
    in a transient systemd-run scope.
-8. seo-implementer (claude --print, tool use) applies the changes.
-9. seo-implementer sends a completion email back to the user.
+8. implementer (claude --print, tool use) applies the changes.
+9. implementer sends a completion email back to the user.
 
 ## Per-site instance pattern
 

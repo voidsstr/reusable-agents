@@ -14,7 +14,7 @@ Phases (per site):
   G. Wait for the implementer's transient scope to finish ([implementer]
      done in the dispatch log).
   H. Verify completion-email metadata exists at
-     agents/seo-implementer/outbound-emails/<request-id>.completion.json.
+     agents/implementer/outbound-emails/<request-id>.completion.json.
 
 Run:
   python3 tests/e2e_seo_flow.py                    # both sites, default reply
@@ -223,7 +223,7 @@ def send_reply_self(*, site: str, run_ts: str, body_text: str,
 
 def find_dispatch_log(site: str, since_ts: float) -> Path | None:
     candidates = [
-        p for p in LOG_DIR.glob(f"dispatch-seo-implementer-{site}-*.log")
+        p for p in LOG_DIR.glob(f"dispatch-implementer-{site}-*.log")
         if p.stat().st_mtime > since_ts
     ]
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
@@ -265,7 +265,7 @@ def wait_for_implementer_done(dispatch_log: Path, timeout: int = 3600,
 # ---------------------------------------------------------------------------
 
 def find_completion_email(*, run_ts: str,
-                           agent_id: str = "seo-implementer") -> dict | None:
+                           agent_id: str = "implementer") -> dict | None:
     p = DATA / "agents" / agent_id / "outbound-emails" / f"{run_ts}.completion.json"
     return json.loads(p.read_text()) if p.is_file() else None
 
@@ -368,7 +368,7 @@ def phase_verify_completion_emails(site_results: list[dict]) -> dict:
                 f"to={meta.get('to')}")
         else:
             log(f"  {r['site']}: NO completion-email metadata at "
-                f"agents/seo-implementer/outbound-emails/{r['run_ts']}.completion.json")
+                f"agents/implementer/outbound-emails/{r['run_ts']}.completion.json")
         out[r["site"]] = meta
     return out
 

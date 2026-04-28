@@ -189,7 +189,17 @@ def _send_via_graph_simple(*, subject: str, body_html: str, to: list[str],
     if x_headers:
         msg["internetMessageHeaders"] = [{"name": k, "value": v} for k, v in x_headers]
     if "Reply-To" in headers:
-        msg["replyTo"] = [{"emailAddress": {"address": headers["Reply-To"]}}]
+        # Graph requires a bare email address (no display-name + angle
+        # brackets). Strip any "Display Name <addr@x>" wrapper before
+        # passing through, otherwise Graph 400s with
+        # ErrorParticipantDoesntHaveAnEmailAddress.
+        reply_to_raw = headers["Reply-To"]
+        if "<" in reply_to_raw and ">" in reply_to_raw:
+            reply_to_addr = reply_to_raw.split("<", 1)[1].split(">", 1)[0]
+        else:
+            reply_to_addr = reply_to_raw.strip()
+        if reply_to_addr:
+            msg["replyTo"] = [{"emailAddress": {"address": reply_to_addr}}]
     attempts = [
         ("send_as", f"https://graph.microsoft.com/v1.0/users/{sender_addr}/sendMail",
          {"message": msg, "saveToSentItems": True}),
@@ -572,7 +582,7 @@ def dispatch_auto_recs(
     if not cfg.get("auto_implement"):
         return []
     impl = cfg.get("implementer") or {}
-    target = impl.get("agent_id", "seo-implementer")
+    target = impl.get("agent_id", "implementer")
     auto_recs = [r for r in recs if r.get("tier") == "auto"
                  and not r.get("user_response")]
     if not auto_recs:

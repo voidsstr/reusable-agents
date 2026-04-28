@@ -75,7 +75,7 @@ Key per-site knobs:
 | AI provider | `self.ai_client()` — backend resolved per-agent via `/api/providers/defaults/agent-override`. |
 | Mailer | `self.mailer` — `LogMailer` in dev (records-only), `GraphMailer`/`SmtpMailer` when configured by the API service. |
 | Reply routing | The responder-agent reads inbox, parses `[<agent-id>:<request-id>]` subjects, drops payloads in `agents/<agent-id>/responses-queue/`. AgentBase drains the queue at `pre_run()`. |
-| Auto-implement | `dispatch_auto_recs(...)` writes to the implementer's response-queue. The implementer (typically `seo-implementer`) does the actual code work. |
+| Auto-implement | `dispatch_auto_recs(...)` writes to the implementer's response-queue. The implementer (typically `implementer`) does the actual code work. |
 
 ## Reference implementations
 

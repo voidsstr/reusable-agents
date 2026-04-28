@@ -76,7 +76,7 @@ The agent is `AgentBase`-backed. Each run:
 
 Until the user opts a site in via `auto_implement: true` in the config,
 all recs require explicit reply ("implement rec-007"). Once enabled,
-each tick the agent dispatches `tier=auto` recs to seo-implementer
+each tick the agent dispatches `tier=auto` recs to implementer
 directly (logged in `decisions.jsonl`, no email gate).
 
 The promotion criteria for adding `auto_implement: true` for a site:

@@ -32,7 +32,7 @@ auto_implement: false
 
 # Required if auto_implement: true.
 implementer:
-  agent_id: seo-implementer
+  agent_id: implementer
   repo_path: /path/to/your/site/repo
   branch: master
 

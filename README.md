@@ -291,7 +291,7 @@ dashboard's "Live LLM" tab can tail them.
 /tmp/reusable-agents-host-worker.log                          # host-worker service stdout/stderr
 /tmp/reusable-agents-logs/<agent-id>-<run-ts>.log             # per-run agent stdout
 /tmp/reusable-agents-logs/agent-<id>.log                      # systemd-user service log (responder, etc.)
-/tmp/reusable-agents-logs/dispatch-seo-implementer-<site>-<ts>.log
+/tmp/reusable-agents-logs/dispatch-implementer-<site>-<ts>.log
                                                               # transient implementer scope output
                                                               # (claude --print + tool calls)
 ```
@@ -376,12 +376,12 @@ typically points back at a reusable agent body in this repo:
 | Looking for… | Path |
 |---|---|
 | Current state of agent | dashboard `/agents/<id>` (reads `agents/<id>/status.json` from storage) |
-| Live LLM output during a run | dashboard `/agents/<id>` → "Live LLM" tab (tails `/tmp/reusable-agents-logs/dispatch-seo-implementer-*.log`) |
+| Live LLM output during a run | dashboard `/agents/<id>` → "Live LLM" tab (tails `/tmp/reusable-agents-logs/dispatch-implementer-*.log`) |
 | Why an agent failed last run | `agents/<id>/runs/<run-ts>/decisions.jsonl` + `agents/<id>/errors/<ts>-*.json` in storage |
 | What recs the agent generated | `agents/<id>/runs/<run-ts>/recommendations.json` (or the legacy `~/.openclaw/.../seo/runs/<site>/<ts>/` for SEO) |
 | What user replied to | `agents/<id>/runs/<run-ts>/responses.json` |
 | Email metadata for routing replies | `agents/<id>/outbound-emails/<request-id>.json` |
-| What's queued for the implementer | `agents/seo-implementer/responses-queue/*.json` |
+| What's queued for the implementer | `agents/implementer/responses-queue/*.json` |
 | Goals + progress | `agents/<id>/goals/active.json` + `goals/changes.jsonl` |
 | Agent's runbook prompt | `agents/<id>/runbook.md` (embedded at registration; source-of-truth is `manifest.runbook_path` in the repo) |
 | Cron schedule | `~/.config/systemd/user/agent-<id>.timer` (auto-wired from manifest.cron_expr) |

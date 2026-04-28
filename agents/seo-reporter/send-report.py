@@ -56,13 +56,17 @@ REC_TYPE_EMOJI = {
 }
 
 
-def render_html(cfg, run_dir: Path) -> tuple[str, str]:
+def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, str]:
     """Return (subject, html_body)."""
     site = cfg.site_id
     domain = cfg.domain
     label = cfg.get("site", {}).get("label") or site
     mode = cfg.mode
-    run_ts = run_dir.name
+    # Prefer explicit run_ts (Azure-mode tempdir.name doesn't equal run_ts);
+    # fall back to recommendations.json's run_ts; finally to run_dir.name (legacy).
+    if not run_ts:
+        rec_doc = _load(run_dir / "recommendations.json")
+        run_ts = rec_doc.get("run_ts") or run_dir.name
 
     recs_data = _load(run_dir / "recommendations.json")
     comparison = _load(run_dir / "comparison.json")
@@ -520,17 +524,38 @@ def post_to_dashboard(cfg, run_dir: Path, subject: str) -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-ts", default=None)
+    p.add_argument("--agent-id", default=None,
+                   help="Framework orchestrator agent id. Routes run-dir reads "
+                        "through Azure under agents/<agent-id>/runs/<run-ts>/. "
+                        "Required with --run-ts when using the new Azure-backed flow.")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--no-email", action="store_true")
     p.add_argument("--no-dashboard", action="store_true")
     args = p.parse_args()
 
     cfg = load_config_from_env()
+
+    # Azure-backed mode
+    if args.agent_id and args.run_ts:
+        from framework.core.run_dir import RunDir
+        rd = RunDir(args.agent_id, args.run_ts, site=cfg.site_id)
+        print(f"[reporter] site={cfg.site_id} run_ts={args.run_ts} agent_id={args.agent_id} (azure)",
+              file=sys.stderr)
+        with rd.tempdir(skip_globs=["data/page-cache/*"]) as td:
+            _run_reporter(cfg, td, args, run_ts=args.run_ts)
+        return
+    if args.agent_id and not args.run_ts:
+        raise SystemExit("--agent-id requires --run-ts")
+
+    # Legacy local-FS
     run_dir = cfg.run_dir_for_ts(args.run_ts) if args.run_ts else cfg.latest_run_dir()
     if not run_dir or not run_dir.is_dir():
         raise SystemExit(f"No run dir for site={cfg.site_id} ts={args.run_ts or 'latest'}")
+    _run_reporter(cfg, run_dir, args)
 
-    subject, html = render_html(cfg, run_dir)
+
+def _run_reporter(cfg, run_dir, args, run_ts: Optional[str] = None) -> None:
+    subject, html = render_html(cfg, run_dir, run_ts=run_ts)
     print(f"[reporter] {subject}", file=sys.stderr)
 
     if args.dry_run:
@@ -542,26 +567,33 @@ def main() -> None:
         # Record the outbound email in framework storage so the dashboard's
         # Confirmations page can surface it as a pending recommendation.
         if sent:
-            _record_outbound_email(cfg, run_dir, subject, html)
+            _record_outbound_email(cfg, run_dir, subject, html, run_ts=run_ts)
     if not args.no_dashboard:
         post_to_dashboard(cfg, run_dir, subject)
 
 
-def _record_outbound_email(cfg, run_dir: Path, subject: str, body_html: str) -> None:
+def _record_outbound_email(cfg, run_dir: Path, subject: str, body_html: str,
+                           run_ts: Optional[str] = None) -> None:
     """Write an entry to agents/<seo-opportunity-agent-id>/outbound-emails/
     in framework storage so the Confirmations page can render it as a
     pending email-recommendation awaiting reply."""
     try:
         agent_id = cfg.get("reporter", {}).get("dashboard", {}).get("agent_id") \
             or f"{cfg.site_id}-seo-opportunity-agent"
-        run_ts = run_dir.name
+        if not run_ts:
+            run_ts = run_dir.name
         recs_doc = _load(run_dir / "recommendations.json")
         recs = recs_doc.get("recommendations", [])
         # Build a synthetic request_id from agent + run_ts
         request_id = f"r-{run_ts}-seo-{cfg.site_id}"
-        # Use the framework's storage backend
+        # Use the framework's storage backend. Honor STORAGE_BACKEND from
+        # env (production: 'azure'); fall back to local FS for dev.
         import os
-        os.environ.setdefault("STORAGE_BACKEND", "local")
+        if not os.environ.get("STORAGE_BACKEND"):
+            if os.environ.get("AZURE_STORAGE_CONNECTION_STRING"):
+                os.environ["STORAGE_BACKEND"] = "azure"
+            else:
+                os.environ["STORAGE_BACKEND"] = "local"
         os.environ.setdefault(
             "AGENT_STORAGE_LOCAL_PATH",
             os.path.expanduser("~/.reusable-agents/data"),

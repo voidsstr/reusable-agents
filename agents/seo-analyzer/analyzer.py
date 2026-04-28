@@ -13,10 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -51,6 +53,11 @@ def build_snapshot(cfg, run_dir: Path) -> dict:
     geo_28 = _load(data / "ga4-geo-28d.json")
     sources_28 = _load(data / "ga4-traffic-sources-28d.json")
     db_stats = _load(data / "db-stats.json")
+    # Optional ads data — surfaces in snapshot.ads if present
+    ads_paid_organic = _load(data / "ads-paid-vs-organic.json")
+    ads_search_terms = _load(data / "ads-search-terms.json")
+    ads_keyword_perf = _load(data / "ads-keyword-perf.json")
+    ads_ad_copy = _load(data / "ads-ad-copy.json")
 
     rows = queries_90.get("rows", [])
     total_impr = sum(r.get("impressions", 0) for r in rows)
@@ -175,6 +182,19 @@ def build_snapshot(cfg, run_dir: Path) -> dict:
             "bounce": round(float(r["metricValues"][2]["value"]), 4) if len(r["metricValues"]) > 2 else 0,
         }
 
+    # Ads rollup (only populated if google_ads is configured)
+    ads_summary = {}
+    if ads_paid_organic.get("results"):
+        ads_summary["paid_organic_rows"] = len(ads_paid_organic["results"])
+    if ads_search_terms.get("results"):
+        ads_summary["search_term_rows"] = len(ads_search_terms["results"])
+    if ads_keyword_perf.get("results"):
+        ads_summary["keyword_perf_rows"] = len(ads_keyword_perf["results"])
+    if ads_ad_copy.get("results"):
+        ads_summary["ad_copy_rows"] = len(ads_ad_copy["results"])
+    if ads_summary:
+        snap["ads_90d"] = ads_summary
+
     return snap
 
 
@@ -287,6 +307,62 @@ def score_prior_goals(snap: dict, prior_goals: dict) -> dict:
 # Recommendations
 # ---------------------------------------------------------------------------
 
+def _load_repo_routes(run_dir: Path) -> list[dict]:
+    """Read data/repo-routes.json (written by collector's scan_repo).
+    Returns [] when the file is absent or empty."""
+    rr = _load(run_dir / "data" / "repo-routes.json")
+    return rr.get("routes", []) if rr else []
+
+
+def _files_for_url(routes: list[dict], url: str) -> list[str]:
+    """Match a URL against repo-routes patterns, return candidate file paths.
+
+    Lightweight: regex-converts :slug / [slug] / :slug* to wildcards and
+    checks if path matches. Returns "<file>:<line>" strings the implementer
+    can use directly.
+    """
+    if not url or not routes:
+        return []
+    try:
+        path = urlparse(url).path or url
+    except Exception:
+        path = url
+    matches = []
+    for r in routes:
+        pat = r.get("url_pattern", "")
+        if not pat:
+            continue
+        # Build regex from pattern by replacing :params + [slug] segments.
+        # Apply substitutions on the unescaped pattern, then anchor.
+        rx_pat = re.sub(r":[A-Za-z_][A-Za-z0-9_]*\*", "PARAMSPLAT", pat)
+        rx_pat = re.sub(r":[A-Za-z_][A-Za-z0-9_]*", "PARAMSEG", rx_pat)
+        rx_pat = re.sub(r"\[\.\.\.([^\]]+)\]", "PARAMSPLAT", rx_pat)
+        rx_pat = re.sub(r"\[([^\]]+)\]", "PARAMSEG", rx_pat)
+        rx_str = re.escape(rx_pat)
+        rx_str = rx_str.replace("PARAMSPLAT", ".+")
+        rx_str = rx_str.replace("PARAMSEG", "[^/]+")
+        rx_str = "^" + rx_str + "/?$"
+        try:
+            if re.match(rx_str, path) or pat == path:
+                matches.append(f"{r['file']}:{r.get('line', 1)}")
+        except re.error:
+            continue
+    return matches[:5]
+
+
+def _match_files_by_type(routes: list[dict], page_type: str) -> list[str]:
+    """Heuristic: match repo-route file by page type when URL matching fails.
+    Returns first-match file paths whose path contains the type keyword."""
+    if not page_type:
+        return []
+    out = []
+    for r in routes:
+        f = r.get("file", "").lower()
+        if page_type.replace("_", "-") in f or page_type in f:
+            out.append(f"{r['file']}:{r.get('line', 1)}")
+    return out[:3]
+
+
 def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], list[dict]]:
     """Return (recommendations, declared_goals)."""
     data = run_dir / "data"
@@ -298,6 +374,7 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
         rid = f"rec-{rec_id_counter:03d}"; rec_id_counter += 1; return rid
 
     max_recs = cfg.get("analyzer", {}).get("max_recs_per_run", 12)
+    repo_routes = _load_repo_routes(run_dir)
 
     # ---- Top-5 rank targets (US-first) ----
     country = cfg["data_sources"]["gsc"].get("default_country_filter", "usa")
@@ -443,6 +520,116 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
                 "implemented": False,
             })
 
+    # ---- Ads: paid-organic gap (queries paid wins, organic loses) ----
+    if len(recs) < max_recs:
+        paid_org = _load(data / "ads-paid-vs-organic.json").get("results", [])
+        # Index our query positions for lookup
+        q_pos = snap.get("gsc_90d", {}).get("query_position", {})
+        # Score: ads_clicks high, organic_clicks low, organic position > 10
+        gap_candidates = []
+        for row in paid_org:
+            # SDK + REST shapes both have nested metrics + dimensions
+            term = ""
+            try:
+                term = (
+                    row.get("paid_organic_search_term_view", {}).get("search_term")
+                    or row.get("paidOrganicSearchTermView", {}).get("searchTerm")
+                    or ""
+                )
+            except Exception:
+                continue
+            if not term:
+                continue
+            metrics = row.get("metrics", {}) or {}
+            ad_clicks = int(metrics.get("clicks", 0) or 0)
+            org_clicks = int(metrics.get("organic_clicks", metrics.get("organicClicks", 0)) or 0)
+            ad_impr = int(metrics.get("impressions", 0) or 0)
+            term_l = term.strip().lower()
+            organic_pos = q_pos.get(term_l, {}).get("position", 100.0)
+            if ad_clicks >= 3 and organic_pos > 10 and org_clicks < ad_clicks:
+                gap_candidates.append({
+                    "term": term, "ad_clicks": ad_clicks, "ad_impressions": ad_impr,
+                    "organic_clicks": org_clicks, "organic_position": organic_pos,
+                })
+        gap_candidates.sort(key=lambda r: -r["ad_clicks"])
+        for cand in gap_candidates[:3]:
+            if len(recs) >= max_recs: break
+            rid = next_id()
+            recs.append({
+                "id": rid,
+                "type": "paid-organic-gap",
+                "priority": "high",
+                "title": f"Paid wins, organic loses for \"{cand['term']}\" — close the gap",
+                "rationale": (
+                    f"Ads pulled {cand['ad_clicks']} clicks ({cand['ad_impressions']} impr) for "
+                    f"\"{cand['term']}\" in 90d while organic only got {cand['organic_clicks']} "
+                    f"clicks at pos {cand['organic_position']:.1f}. We're paying for traffic we "
+                    f"could rank for organically."
+                ),
+                "expected_impact": {
+                    "metric": f"gsc.query_position.{cand['term']}",
+                    "baseline": cand["organic_position"],
+                    "target": 10.0,
+                    "horizon_weeks": 8,
+                },
+                "implementation_outline": {
+                    "files": _match_files_by_type(repo_routes, "page") or
+                             [r["file"] for r in repo_routes[:3]],
+                    "notes": (
+                        f"Build/optimize an organic landing page targeting \"{cand['term']}\". "
+                        f"Use the ad copy from ads-ad-copy.json that converts for this term as "
+                        f"the page title/H1 starting point."
+                    ),
+                },
+                "data_refs": ["data/ads-paid-vs-organic.json", "data/ads-ad-copy.json"],
+                "implemented": False,
+            })
+
+    # ---- Ads: ad-copy headline winner (port to organic) ----
+    if len(recs) < max_recs:
+        ad_copy = _load(data / "ads-ad-copy.json").get("results", [])
+        # Find top-CTR ads
+        top_ads = []
+        for row in ad_copy:
+            metrics = row.get("metrics", {}) or {}
+            ctr = float(metrics.get("ctr", 0) or 0)
+            if ctr <= 0.05:  # only meaningfully good CTRs
+                continue
+            ad = (row.get("ad_group_ad", {}) or row.get("adGroupAd", {})).get("ad", {}) or {}
+            rsa = ad.get("responsive_search_ad") or ad.get("responsiveSearchAd") or {}
+            heads = rsa.get("headlines", [])
+            head_texts = []
+            for h in heads:
+                if isinstance(h, dict):
+                    head_texts.append(h.get("text", ""))
+                else:
+                    head_texts.append(str(h))
+            if head_texts:
+                top_ads.append({"ctr": ctr, "headlines": head_texts[:5]})
+        top_ads.sort(key=lambda a: -a["ctr"])
+        if top_ads:
+            best = top_ads[0]
+            if len(recs) < max_recs:
+                rid = next_id()
+                head_str = " | ".join(h for h in best["headlines"] if h)[:160]
+                recs.append({
+                    "id": rid,
+                    "type": "ad-copy-headline-winner",
+                    "priority": "medium",
+                    "title": f"Port top-CTR ad headline to organic title/H1 ({best['ctr']*100:.1f}% CTR)",
+                    "rationale": (
+                        f"Ad copy with CTR {best['ctr']*100:.1f}% uses headlines: {head_str}. "
+                        f"These phrases are proven click-magnets — port them into <title>/<h1> on "
+                        f"the matching organic page."
+                    ),
+                    "implementation_outline": {
+                        "files": [r["file"] for r in repo_routes[:5] if "title" not in r.get("emits", [])],
+                        "notes": "Identify the organic page that ranks for the same query the ad targets, then update its <title> and H1 to mirror the high-CTR ad headline pattern.",
+                    },
+                    "data_refs": ["data/ads-ad-copy.json"],
+                    "implemented": False,
+                })
+
     # ---- Revenue conversion alarm (if KPIs configured + dropping) ----
     revenue = snap.get("revenue_28d", {})
     if revenue and len(recs) < max_recs:
@@ -564,9 +751,22 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-ts", default=None,
                    help="Specific run-ts dir to analyze (default: latest)")
+    p.add_argument("--agent-id", default=None,
+                   help="Framework orchestrator agent id. Routes run-dir reads/writes "
+                        "through Azure under agents/<agent-id>/runs/<run-ts>/. Required "
+                        "with --run-ts when using the new Azure-backed flow.")
     args = p.parse_args()
 
     cfg = load_config_from_env()
+
+    # Azure-backed mode: orchestrator pins (--agent-id, --run-ts).
+    if args.agent_id and args.run_ts:
+        _main_azure(cfg, args.agent_id, args.run_ts)
+        return
+    if args.agent_id and not args.run_ts:
+        raise SystemExit("--agent-id requires --run-ts")
+
+    # Legacy local-FS mode.
     if args.run_ts:
         run_dir = cfg.run_dir_for_ts(args.run_ts)
     else:
@@ -577,8 +777,28 @@ def main() -> None:
         raise SystemExit(f"Run dir not found: {run_dir}")
     run_ts = run_dir.name
 
-    print(f"[analyzer] site={cfg.site_id} run_ts={run_ts}", file=sys.stderr)
+    print(f"[analyzer] site={cfg.site_id} run_ts={run_ts} (legacy local-fs)", file=sys.stderr)
+    _run_analyzer(cfg, run_dir, run_ts)
 
+
+def _main_azure(cfg, agent_id: str, run_ts: str) -> None:
+    """Azure-backed mode: materialize the run dir from Azure into a tempdir
+    structured as <tmp>/<site>/<run_ts>/ so analyzer.find_prior_snapshot()
+    keeps working. Sync back on exit."""
+    from framework.core.run_dir import RunDir
+    rd = RunDir(agent_id, run_ts, site=cfg.site_id)
+    print(f"[analyzer] site={cfg.site_id} run_ts={run_ts} agent_id={agent_id} (azure)",
+          file=sys.stderr)
+    with rd.tempdir(structured_parent=True, skip_globs=["data/page-cache/*"]) as td:
+        # td = <tmp>/<site>/<run_ts>/   so site_runs_dir = <tmp>/<site>
+        # and runs_root = <tmp>. Patch cfg so cfg.site_runs_dir resolves to td.parent.
+        cfg["runs_root"] = str(td.parent.parent)
+        _run_analyzer(cfg, td, run_ts)
+    print(rd.handle)
+
+
+def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
+    """The analyzer body — pathlib-based, used by both legacy and Azure modes."""
     # 1. Snapshot
     snap = build_snapshot(cfg, run_dir)
     (run_dir / "snapshot.json").write_text(json.dumps(snap, indent=2))
@@ -610,6 +830,8 @@ def main() -> None:
 
     # 4. Build recommendations + declare new goals
     recs, declared_goals = build_recommendations(cfg, run_dir, snap)
+    # Repo routes are useful in the LLM-audit post-processing below too
+    repo_routes = _load_repo_routes(run_dir)
 
     # 4b. LLM-driven adaptive audit pass — flags evolving SEO opportunities
     # the deterministic pass can't see (CWV, schema, EEAT, AI search,
@@ -622,14 +844,39 @@ def main() -> None:
             )
             ai_chat = _build_ai_chat_callable(cfg)
             if ai_chat is not None:
-                # Pull the page records the collector scraped (if any).
-                # The SEO collector currently doesn't crawl pages, so we
-                # do an on-demand crawl using the same crawler the
-                # progressive-improvement agent uses. Caches to
-                # data/pages.jsonl for re-use next run.
+                # Pull the page records.
+                # Source preference order:
+                #  1. data/pages-by-type.jsonl  — page-type inventory crawl
+                #     (driven by site.yaml page_inventory). Each row carries
+                #     a `type` field that activates page-type-specific LLM
+                #     checks (recipe-*, product-*, h2h-*, ...).
+                #  2. data/pages.jsonl          — legacy: cached from a prior
+                #     on-demand crawl.
+                #  3. on-demand BFS crawl       — fallback, top-10 GSC pages.
+                #
+                # The cap is `analyzer.max_llm_audit_pages` (default 30) to
+                # bound LLM cost.
+                max_audit_pages = int(
+                    cfg.get("analyzer", {}).get("max_llm_audit_pages", 30)
+                )
+                pages_by_type_path = run_dir / "data" / "pages-by-type.jsonl"
                 pages_path = run_dir / "data" / "pages.jsonl"
                 pages: list[dict] = []
-                if pages_path.is_file():
+                if pages_by_type_path.is_file():
+                    for line in pages_by_type_path.read_text().splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        # Skip non-2xx records; they have no body to audit
+                        if rec.get("status") and not (
+                            200 <= rec["status"] < 300 or rec["status"] == 304
+                        ):
+                            continue
+                        pages.append(rec)
+                if not pages and pages_path.is_file():
                     for line in pages_path.read_text().splitlines():
                         if not line.strip():
                             continue
@@ -643,8 +890,8 @@ def main() -> None:
                         with pages_path.open("w") as f:
                             for p in pages:
                                 f.write(json.dumps(p) + "\n")
-                # Cap at 20 pages to keep token usage sane
-                pages = pages[:20]
+                # Cap to bound cost (default 30, configurable per-site)
+                pages = pages[:max_audit_pages]
                 if pages:
                     print(f"  → LLM audit: {len(pages)} pages", file=sys.stderr)
                     # Adaptive context: load past goal-changes for this site
@@ -685,15 +932,38 @@ def main() -> None:
                         next_id_count["i"] += 1
                         return f"rec-{next_id_count['i']:03d}"
                     llm_recs = issues_to_recommendations(issues, _next_id)
-                    # De-dupe by (url, llm_check_id) to avoid stomping
+                    # Wire repo-routes into implementation_outline.files so
+                    # the implementer + the human reading the email get a
+                    # concrete file:line target instead of guessing.
+                    if repo_routes:
+                        for r in llm_recs:
+                            url = (r.get("data_refs") or [""])[0]
+                            files = _files_for_url(repo_routes, url)
+                            if not files:
+                                # Fall back to page-type heuristic from llm_check_id
+                                cid = r.get("llm_check_id", "")
+                                pt = cid.split("-", 1)[0] if "-" in cid else ""
+                                files = _match_files_by_type(repo_routes, pt)
+                            if files:
+                                outline = r.setdefault("implementation_outline", {})
+                                outline.setdefault("files", []).extend(files)
+                    # De-dupe by (url, llm_check_id) to avoid stomping.
+                    # Reserve up to half the total budget for LLM audit recs.
+                    max_llm_recs = max(max_recs // 2, max_recs - len(recs))
                     seen = {(r.get("data_refs",[None])[0], r.get("llm_check_id"))
                             for r in recs if r.get("llm_check_id")}
+                    llm_added = 0
                     for r in llm_recs:
+                        if llm_added >= max_llm_recs:
+                            break
                         key = (r.get("data_refs",[None])[0], r.get("llm_check_id"))
                         if key in seen:
                             continue
                         recs.append(r)
                         seen.add(key)
+                        llm_added += 1
+                    # Final hard cap in case strategic recs were already at budget
+                    recs = recs[:max_recs]
                 else:
                     print(f"  → LLM audit skipped (no pages.jsonl)", file=sys.stderr)
             else:
@@ -707,6 +977,8 @@ def main() -> None:
         f"{sum(1 for r in recs if r['type'] == 'ctr-fix')} CTR fixes, "
         f"{sum(1 for r in recs if r['type'] == 'indexing-fix')} indexing fixes, "
         f"{sum(1 for r in recs if r['type'] == 'conversion-path')} conversion-path, "
+        f"{sum(1 for r in recs if r['type'] == 'paid-organic-gap')} paid-organic gaps, "
+        f"{sum(1 for r in recs if r['type'] == 'ad-copy-headline-winner')} ad-copy ports, "
         f"{sum(1 for r in recs if r.get('llm_check_id'))} from adaptive LLM audit."
     )
     run_files.write_recommendations(

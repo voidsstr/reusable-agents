@@ -20,6 +20,6 @@ The responder writes user actions to:
 - `<runs-root>/_queue/responses.jsonl` (global queue any agent can drain)
 
 …and (if configured) calls the downstream dispatcher script to actually
-execute the action (e.g., trigger seo-implementer with the marked rec_ids).
+execute the action (e.g., trigger implementer with the marked rec_ids).
 
 See README.md for the full reply grammar.
