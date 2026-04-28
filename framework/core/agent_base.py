@@ -135,6 +135,13 @@ class AgentBase:
         self._ended_at: Optional[str] = None
         self._heartbeat_thread = None
         self._heartbeat_stop = None
+        # Start heartbeat eagerly. Some agents (e.g. ebay-product-sync)
+        # call self.run() directly from main() instead of going through
+        # run_once(), which would otherwise skip the lifecycle hook.
+        # Cheap when idle — only writes when state is running/starting.
+        self._start_heartbeat()
+        import atexit as _atexit
+        _atexit.register(self._stop_heartbeat)
 
     # ---- Lifecycle hooks ----
 
