@@ -10,7 +10,7 @@ Subclasses AgentBase. Each run:
   5. Renders a recommendations email with rec-id reply syntax, sends it
      via the framework's mailer (LogMailer in dev — record-only).
   6. If site config has auto_implement: true, dispatches tier=auto recs
-     to the configured implementer (default seo-implementer) by writing
+     to the configured implementer (default implementer) by writing
      to its responses-queue.
 
 Invoke:
@@ -150,6 +150,7 @@ def _category_to_goal_ids(category: str) -> list[str]:
 
 class ProgressiveImprovementAgent(AgentBase):
     agent_id = AGENT_ID
+    send_run_summary_email = False  # emails ranked recommendations directly
     name = "Progressive Improvement Agent"
     description = (
         "Crawls configured sites top-down, identifies quality issues "

@@ -396,7 +396,7 @@ site:
   domain: on.example.com
 auto_implement: true
 implementer:
-  agent_id: seo-implementer
+  agent_id: implementer
 """)
     cfg = load_quality_config(cfg_path)
     dispatched = dispatch_auto_recs(
@@ -410,7 +410,7 @@ implementer:
     )
     assert sorted(dispatched) == ["rec-001", "rec-003"]
     # Verify it landed in the implementer's response queue
-    keys = storage.list_prefix("agents/seo-implementer/responses-queue/")
+    keys = storage.list_prefix("agents/implementer/responses-queue/")
     assert len(keys) == 1
     payload = storage.read_json(keys[0])
     assert payload["action"] == "implement"

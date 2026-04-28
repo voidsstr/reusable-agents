@@ -18,7 +18,7 @@ Why this exists:
 
 Lifecycle:
   1. Agent emits a rec with `goal_ids: [goal-001, ...]`
-  2. responder dispatches the rec to seo-implementer's response queue
+  2. responder dispatches the rec to implementer's response queue
   3. responder ALSO calls record_goal_change(...) to log the dispatch
      with metric_before captured from the agent's current goals state
   4. On a subsequent run, the agent calls update_post_change_metrics(...)

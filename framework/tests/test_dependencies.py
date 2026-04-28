@@ -104,8 +104,8 @@ def test_seo_pipeline_default_chain():
     assert ("seo-data-collector", "seo-analyzer") in sources
     assert ("seo-analyzer", "seo-reporter") in sources
     assert ("seo-reporter", "responder-agent") in sources
-    assert ("responder-agent", "seo-implementer") in sources
-    assert ("seo-implementer", "seo-deployer") in sources
+    assert ("responder-agent", "implementer") in sources
+    assert ("implementer", "seo-deployer") in sources
 
 
 def test_progressive_improvement_default_edges():
@@ -113,4 +113,4 @@ def test_progressive_improvement_default_edges():
     # PI agents send email + receive responses + dispatch auto recs
     assert ("aisleprompt-progressive-improvement-agent", "responder-agent") in sources
     assert ("responder-agent", "aisleprompt-progressive-improvement-agent") in sources
-    assert ("aisleprompt-progressive-improvement-agent", "seo-implementer") in sources
+    assert ("aisleprompt-progressive-improvement-agent", "implementer") in sources

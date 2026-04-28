@@ -23,6 +23,30 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'changelog',     label: 'Changelog' },
 ]
 
+function formatRunDuration(sec: number): string {
+  if (sec < 0 || !Number.isFinite(sec)) return ''
+  if (sec < 60) return `${Math.floor(sec)}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  if (m < 60) return `${m}m ${s}s`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  return `${h}h ${mm}m ${s}s`
+}
+
+function useRunDuration(startedAt: string | null | undefined): string {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!startedAt) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [startedAt])
+  if (!startedAt) return ''
+  const t = Date.parse(startedAt)
+  if (!Number.isFinite(t)) return ''
+  return formatRunDuration((now - t) / 1000)
+}
+
 export default function AgentDetail() {
   const { id = '' } = useParams<{ id: string }>()
   const [detail, setDetail] = useState<TAgentDetail | null>(null)
@@ -53,6 +77,7 @@ export default function AgentDetail() {
   }
   const liveState = liveStatus?.state ?? detail.last_run_status ?? ''
   const isActive = liveState === 'running' || liveState === 'starting'
+  const runDuration = useRunDuration(isActive ? liveStatus?.started_at : null)
 
   return (
     <div className={`space-y-4 ${isActive ? 'agent-detail-active' : ''}`}>
@@ -95,6 +120,14 @@ export default function AgentDetail() {
                 />
               </div>
               <div className="text-[10px] text-ink-500 font-mono">iter #{liveStatus.iteration_count}</div>
+            </div>
+          )}
+          {runDuration && (
+            <div className="flex flex-col items-end gap-0.5 ml-3 pl-3 border-l border-surface-divider">
+              <div className="text-[10px] uppercase tracking-wide text-ink-500 font-mono">running for</div>
+              <div className="text-base font-mono font-bold text-status-running-fg" title={`Started ${liveStatus.started_at}`}>
+                ⏱ {runDuration}
+              </div>
             </div>
           )}
         </div>
@@ -1018,10 +1051,23 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
   const [content, setContent] = useState<string>('')
   const [error, setError] = useState<string>('')
   const [logPath, setLogPath] = useState<string>('')
+  const [source, setSource] = useState<string>('')
+  const [runTs, setRunTs] = useState<string>('')
+  const [updatedAt, setUpdatedAt] = useState<string>('')
+  // Server-reported "is this run currently active" — derived from the
+  // live-tail blob's __META__ header. Authoritative for the ● tailing
+  // badge once the new endpoint has populated the field; falls back to
+  // the websocket liveState until then.
+  const [serverIsActive, setServerIsActive] = useState<boolean | null>(null)
   const [autoTail, setAutoTail] = useState(true)
   const [tailMs, setTailMs] = useState<number>(2000)
 
-  const isActive = liveState === 'running' || liveState === 'starting'
+  // Use the server's is_active when it's been observed; otherwise use
+  // the websocket-derived liveState. Avoids a "● tailing" flicker
+  // during the gap between WS-says-running and the first live-tail
+  // flush.
+  const wsIsActive = liveState === 'running' || liveState === 'starting'
+  const isActive = serverIsActive !== null ? serverIsActive : wsIsActive
 
   useEffect(() => {
     let alive = true
@@ -1031,6 +1077,12 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
         if (!alive) return
         setContent(res.content || '')
         setLogPath(res.log_path || '')
+        setSource(res.source || '')
+        setRunTs(res.run_ts || '')
+        setUpdatedAt(res.updated_at || '')
+        if (typeof res.is_active === 'boolean') {
+          setServerIsActive(res.is_active)
+        }
         setError('')
       } catch (e: any) {
         if (!alive) return
@@ -1044,6 +1096,19 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
     return () => { alive = false; clearInterval(id) }
   }, [agentId, autoTail, tailMs, isActive])
 
+  // Pretty-print "N min ago" relative to updatedAt for the inactive label.
+  const updatedAgo = (() => {
+    if (!updatedAt) return ''
+    const t = Date.parse(updatedAt)
+    if (Number.isNaN(t)) return ''
+    const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
+    if (sec < 60) return `${sec}s ago`
+    const min = Math.round(sec / 60)
+    if (min < 60) return `${min} min ago`
+    const hr = Math.round(min / 60)
+    return `${hr} h ago`
+  })()
+
   return (
     <div className="space-y-3">
       <div className="card-surface p-4">
@@ -1051,14 +1116,21 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
           <div>
             <h2 className="text-sm font-semibold text-ink-900 flex items-center gap-2">
               <span aria-hidden>🧠</span> Live LLM output
-              {isActive && (
+              {isActive ? (
                 <span className="text-[10px] uppercase tracking-wide text-status-running-fg bg-status-running-bg px-1.5 py-0.5 rounded">
                   ● tailing
                 </span>
-              )}
+              ) : updatedAt ? (
+                <span className="text-[10px] uppercase tracking-wide text-ink-500 bg-surface-page px-1.5 py-0.5 rounded">
+                  last run ended {updatedAgo}
+                </span>
+              ) : null}
             </h2>
             <div className="text-xs text-ink-500 mt-0.5">
               Real-time stdout from the implementer scope (claude --print) for this agent's most recent dispatch.
+              {source && (
+                <span className="ml-2 text-ink-500">[source: <code>{source}</code>{runTs ? ` · run ${runTs}` : ''}]</span>
+              )}
               {logPath && (
                 <span className="ml-2 font-mono text-ink-500 break-all">{logPath}</span>
               )}
@@ -1089,13 +1161,24 @@ function LiveLLMTab({ agentId, liveState }: { agentId: string; liveState: string
           </div>
         )}
 
-        <pre className="bg-surface-page text-emerald-200 text-[11px] font-mono p-3 rounded-lg max-h-[60vh] overflow-auto whitespace-pre-wrap leading-relaxed">
+        <pre
+          className="text-[12px] font-mono p-4 rounded-lg max-h-[70vh] overflow-auto whitespace-pre-wrap leading-relaxed"
+          style={{
+            backgroundColor: '#000',
+            color: '#00ff66',
+            textShadow: '0 0 4px rgba(0, 255, 102, 0.45)',
+            border: '1px solid #003311',
+            fontFamily: '"JetBrains Mono", "Fira Code", "Menlo", "Consolas", monospace',
+          }}
+        >
           {content || (
-            <span className="text-ink-500 italic">
+            <span style={{ color: '#007733', fontStyle: 'italic' }}>
+              {'> awaiting transmission…'}{'\n\n'}
               No active dispatch log for this agent.{'\n\n'}
-              Live output appears when the agent dispatches work to seo-implementer
+              Live output appears when the agent dispatches work to implementer
               and that implementer scope is currently executing claude --print.{'\n\n'}
-              The log includes claude's reasoning + tool calls + final output.
+              Each line is prefixed with [HH:MM:SS] — UTC timestamp of the
+              streamed chunk so you can see how stale the messages are.
             </span>
           )}
         </pre>

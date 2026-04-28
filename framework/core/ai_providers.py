@@ -104,7 +104,8 @@ def _read_providers(s: StorageBackend) -> dict[str, dict]:
 
 
 def _write_providers(s: StorageBackend, providers: dict[str, dict]) -> None:
-    s.write_json(PROVIDERS_KEY, providers)
+    s.write_json(PROVIDERS_KEY, providers,
+                 cache_control="public, max-age=86400")
 
 
 def list_providers(storage: Optional[StorageBackend] = None) -> list[Provider]:
@@ -180,7 +181,8 @@ def read_defaults(storage: Optional[StorageBackend] = None) -> Defaults:
 
 def write_defaults(defaults: Defaults, storage: Optional[StorageBackend] = None) -> None:
     s = storage or get_storage()
-    s.write_json(DEFAULTS_KEY, defaults.to_dict())
+    s.write_json(DEFAULTS_KEY, defaults.to_dict(),
+                 cache_control="public, max-age=86400")
 
 
 def set_default_provider(provider_name: str, model: str = "",
@@ -426,8 +428,11 @@ class _ClaudeCliClient(AIClient):
         # it for callers that need tool use (web_search etc.) — the CLI
         # counts each tool invocation as a turn.
         max_turns = int(kwargs.get("max_turns", 1))
+        # CLAUDE_CLI_CMD lets you swap in a round-robin wrapper (e.g. claude-rr)
+        # or a version pinned to a specific Claude Max account.
+        claude_bin = os.environ.get("CLAUDE_CLI_CMD", "claude")
         cmd = [
-            "claude",
+            claude_bin,
             "--print",
             "--output-format", "text",
             "--no-session-persistence",

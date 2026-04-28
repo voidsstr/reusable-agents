@@ -19,16 +19,20 @@ RUN npm run build
 
 FROM nginx:1.27-alpine AS runtime
 
-# Healthcheck deps
-RUN apk add --no-cache curl
+# Healthcheck deps + envsubst (gettext)
+RUN apk add --no-cache curl gettext
 
 # Static bundle
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Reverse-proxy config
-COPY framework/ui/nginx.conf /etc/nginx/conf.d/default.conf
+# Templated reverse-proxy config (rendered at startup with envsubst)
+COPY framework/ui/nginx.conf.template /etc/nginx/templates/default.conf.template
 
-# Run as non-root (nginx-alpine ships an `nginx` user by default)
+# Default upstream — Docker compose service name. Override with
+# AGENT_API_UPSTREAM=localhost:8090 for Azure Container Apps
+# multi-container deployments.
+ENV AGENT_API_UPSTREAM=agent-api:8090
+
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -63,7 +63,7 @@ class AgentManifest:
         manual   — Run-now button in dashboard / API trigger
         chained  — dispatched by another agent (response queue, run-dir feed)
 
-    Pure pipeline-stage agents (e.g. seo-implementer, seo-deployer) are
+    Pure pipeline-stage agents (e.g. implementer, seo-deployer) are
     typically ['chained'] only — manually running them with no upstream
     payload is a footgun. The dashboard greys out the Run-now button
     when 'manual' is not present."""
@@ -110,7 +110,8 @@ def _read_registry(storage: StorageBackend) -> dict[str, dict]:
 
 
 def _write_registry(storage: StorageBackend, registry: dict[str, dict]) -> None:
-    storage.write_json(REGISTRY_KEY, registry)
+    storage.write_json(REGISTRY_KEY, registry,
+                       cache_control="public, max-age=300")
 
 
 def _log_registry_event(storage: StorageBackend, action: str, agent_id: str, **kw) -> None:
@@ -152,7 +153,8 @@ def register_agent(manifest: AgentManifest, storage: Optional[StorageBackend] = 
         is_new = manifest.id not in registry
         registry[manifest.id] = manifest.to_dict()
         _write_registry(s, registry)
-    s.write_json(f"agents/{manifest.id}/manifest.json", manifest.to_dict())
+    s.write_json(f"agents/{manifest.id}/manifest.json", manifest.to_dict(),
+                 cache_control="public, max-age=300")
     _log_registry_event(s, "registered" if is_new else "updated", manifest.id)
     logger.info(f"{'registered' if is_new else 'updated'} agent: {manifest.id}")
     return manifest

@@ -2,7 +2,7 @@
 finishes applying recs that came in via an email reply.
 
 Use case: user replies to a rec email with "implement rec-001 rec-005",
-the responder dispatches to seo-implementer, which applies the changes.
+the responder dispatches to implementer, which applies the changes.
 This module is what the implementer calls at the end to email the user
 back ("done — here's what shipped").
 
@@ -327,7 +327,7 @@ def send_completion_email(
 
 
 # ---------------------------------------------------------------------------
-# CLI shim — for shell-based implementers (e.g. seo-implementer/run.sh) to
+# CLI shim — for shell-based implementers (e.g. implementer/run.sh) to
 # invoke without re-implementing the email plumbing.
 # ---------------------------------------------------------------------------
 

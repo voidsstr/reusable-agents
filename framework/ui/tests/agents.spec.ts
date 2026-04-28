@@ -155,8 +155,8 @@ test.describe('Application filter', () => {
 
 test.describe('Runnable modes + confirmation flow', () => {
   test('queue-driven agent has disabled Run-now and shows tooltip', async ({ page }) => {
-    // seo-implementer is registered with runnable_modes=['chained'].
-    await page.goto('/agents/seo-implementer')
+    // implementer is registered with runnable_modes=['chained'].
+    await page.goto('/agents/implementer')
     // Disabled "queue-driven" button instead of Run now
     const lockBtn = page.getByText(/queue-driven/i)
     await expect(lockBtn).toBeVisible()
@@ -177,8 +177,8 @@ test.describe('Runnable modes + confirmation flow', () => {
     await expect(banner).toContainText(/Email confirmation gate/i)
   })
 
-  test('upstream-gated banner is shown on seo-implementer', async ({ page }) => {
-    await page.goto('/agents/seo-implementer')
+  test('upstream-gated banner is shown on implementer', async ({ page }) => {
+    await page.goto('/agents/implementer')
     const banner = page.getByTestId('confirmation-flow-banner')
     await expect(banner).toBeVisible()
     await expect(banner).toContainText(/Upstream-gated/i)

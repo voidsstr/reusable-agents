@@ -23,7 +23,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from framework.core.status import read_status
 
-from .auth import get_expected_token
+from .auth import allowed_emails, auth_enabled, get_expected_token
 
 
 logger = logging.getLogger("framework.api.ws")
@@ -33,17 +33,34 @@ router = APIRouter(tags=["websocket"])
 WS_POLL_INTERVAL_S = float(os.getenv("WS_POLL_INTERVAL_S", "2.0"))
 
 
-def _ws_token_ok(token: str | None) -> bool:
+def _ws_authorized(websocket: WebSocket, token: str | None) -> bool:
+    """Authorize a WebSocket connection. Two paths:
+      1. ?token=... matches FRAMEWORK_API_TOKEN
+      2. session cookie present and email in ALLOWED_EMAILS (browsers
+         send cookies on WS handshake automatically)
+    Returns True when auth is disabled.
+    """
+    if not auth_enabled():
+        return True
     expected = get_expected_token()
-    if not expected:
-        return True  # auth disabled
-    return token == expected
+    if expected and token == expected:
+        return True
+    # Session cookie path — SessionMiddleware decodes cookies on the
+    # incoming handshake just like for HTTP, so websocket.session works.
+    try:
+        sess = websocket.session
+        email = (sess.get("email") or "").lower()
+        if email and email in allowed_emails():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 @router.websocket("/ws/agents/{agent_id}/status")
 async def status_stream(websocket: WebSocket, agent_id: str, token: str | None = Query(None)):
-    if not _ws_token_ok(token):
-        await websocket.close(code=4401, reason="invalid token")
+    if not _ws_authorized(websocket, token):
+        await websocket.close(code=4401, reason="not authorized")
         return
     await websocket.accept()
     last_snapshot_json: str = ""

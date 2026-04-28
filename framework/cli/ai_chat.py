@@ -8,14 +8,14 @@ Usage:
 
     # Pipe stdin → response on stdout
     echo "summarize the GSC data: ..." | \\
-      python3 -m framework.cli.ai_chat --agent seo-implementer
+      python3 -m framework.cli.ai_chat --agent implementer
 
     # Override provider for a one-off call
-    python3 -m framework.cli.ai_chat --agent seo-implementer \\
+    python3 -m framework.cli.ai_chat --agent implementer \\
        --provider anthropic --model claude-opus-4-7 --prompt "..."
 
     # Multi-message chat with a system prompt
-    python3 -m framework.cli.ai_chat --agent seo-implementer \\
+    python3 -m framework.cli.ai_chat --agent implementer \\
        --system "You summarize tersely." \\
        --prompt "Summarize this: ..."
 

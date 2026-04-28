@@ -27,6 +27,25 @@ Subclasses of AIClient call:
 
 …and the wrapper handles request/response logging + duration tracking +
 error capture automatically. Existing callers don't change.
+
+Live tail blob — fast-path for the dashboard's poll loop
+--------------------------------------------------------
+
+The JSONL file grows unbounded (one line per request/chunk/response). To
+avoid forcing the dashboard to download + parse a megabyte-sized JSONL
+on every 2-second poll, every append also bumps a debounced-write
+companion blob:
+
+  agents/<agent_id>/live-llm-output.txt
+
+Layout: a single `__META__: {...}` JSON header line followed by the
+last ~256KB of *rendered* (human-readable) stream content. Rendered
+once on the agent host at flush time; the dashboard does ONE blob read
+and shows the bytes verbatim, with the meta header letting it surface
+"is_active=true/false", "started_at", "updated_at" alongside.
+
+Writes are throttled by `LiveLLMTail` (default once per 3s) — chunk
+records appended faster than that don't trigger extra blob writes.
 """
 from __future__ import annotations
 
@@ -68,6 +87,157 @@ def _truncate(s: Any) -> str:
     return s
 
 
+def live_llm_tail_key(agent_id: str) -> str:
+    """Per-agent flat live-tail blob — what the dashboard polls."""
+    return f"agents/{agent_id}/live-llm-output.txt"
+
+
+# Cap the live-tail blob so the dashboard read is always cheap.
+LIVE_TAIL_MAX_BYTES = int(os.environ.get("LLM_STREAM_LIVE_TAIL_BYTES", "262144"))  # 256 KB
+LIVE_TAIL_FLUSH_S   = float(os.environ.get("LLM_STREAM_LIVE_TAIL_FLUSH_S", "3.0"))
+
+
+def _render_records_for_tail(records: list[dict]) -> str:
+    """Render a list of stream records as the human-readable log the
+    dashboard's `<pre>` element shows. Same shape the API endpoint
+    produces for the JSONL fallback path — mirrored here so the live
+    tail blob is drop-in compatible.
+    """
+    out: list[str] = []
+    for r in records:
+        kind = r.get("kind")
+        ts = r.get("ts", "")
+        # HH:MM:SS prefix — short, fixed-width, dashboard-friendly.
+        tshort = ts[11:19] if len(ts) >= 19 else ts
+        if kind == "request":
+            out.append(f"\n[{tshort}] === REQUEST · {r.get('model','')} "
+                       f"({(r.get('meta') or {}).get('provider','')}) ===")
+            if r.get("system"):
+                out.append(f"\n[{tshort}] [SYSTEM]\n{r['system']}")
+            if r.get("user"):
+                out.append(f"\n[{tshort}] [USER]\n{r['user']}\n")
+        elif kind == "chunk":
+            text = r.get("text", "")
+            if text:
+                # Prefix each non-empty line with the chunk's timestamp so
+                # log staleness is visible per line in the dashboard.
+                lines = text.split("\n")
+                stamped = [f"[{tshort}] {ln}" if ln else "" for ln in lines]
+                out.append("\n".join(stamped))
+        elif kind == "response":
+            meta = r.get("meta") or {}
+            out.append(f"\n[{tshort}] === RESPONSE · {meta.get('model','')} · "
+                       f"{r.get('duration_s', 0):.1f}s ===")
+            out.append(r.get("text", ""))
+            out.append("\n---\n")
+        elif kind == "error":
+            out.append(f"\n[{tshort}] === ERROR ===\n{r.get('msg','')}\n---\n")
+    return "".join(out)
+
+
+def _read_records_for_run(storage: StorageBackend, agent_id: str,
+                          run_ts: str) -> list[dict]:
+    text = storage.read_text(llm_stream_key(agent_id, run_ts)) or ""
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+class LiveLLMTail:
+    """Debounced writer for `agents/<id>/live-llm-output.txt`.
+
+    Lives one-per-LLMStream so we share the throttle clock across all
+    request/chunk/response/error appends in a run. Writes happen in the
+    foreground but at most once per `flush_interval_s`; if a caller
+    appends faster than that, intermediate writes are coalesced.
+
+    Final flush (with `is_active=False`) is invoked from `finalize()` —
+    LLMStream.response() / LLMStream.error() / agent_base.post_run all
+    call it. Atexit-handler also calls it as a safety net.
+    """
+
+    def __init__(self, agent_id: str, run_ts: str,
+                 storage: Optional[StorageBackend] = None,
+                 flush_interval_s: float = LIVE_TAIL_FLUSH_S,
+                 max_bytes: int = LIVE_TAIL_MAX_BYTES):
+        self.agent_id = agent_id
+        self.run_ts = run_ts
+        self.storage = storage or get_storage()
+        self.key = live_llm_tail_key(agent_id)
+        self.flush_interval_s = flush_interval_s
+        self.max_bytes = max_bytes
+        self.started_at = _now_iso()
+        self._last_flush_at = 0.0
+        # Whether finalize() already wrote `is_active=False` — guards
+        # against duplicate "ended" writes from finalize + atexit.
+        self._closed = False
+
+    def _build_body(self, *, is_active: bool) -> str:
+        # Render all records for the run; cap the text at max_bytes
+        # (keep the END of the rendered output, that's the latest claude
+        # output the operator wants to see).
+        try:
+            records = _read_records_for_run(self.storage, self.agent_id, self.run_ts)
+        except Exception:
+            records = []
+        rendered = _render_records_for_tail(records)
+        if len(rendered.encode("utf-8")) > self.max_bytes:
+            # Truncate from the front — keep the tail (latest output).
+            tail_bytes = rendered.encode("utf-8")[-self.max_bytes:]
+            # Drop a possibly-partial first line.
+            i = tail_bytes.find(b"\n")
+            if i >= 0 and i < 2048:
+                tail_bytes = tail_bytes[i + 1:]
+            rendered = b"...[truncated; older output dropped]\n".decode() + \
+                       tail_bytes.decode("utf-8", errors="replace")
+        meta = {
+            "agent_id":   self.agent_id,
+            "run_ts":     self.run_ts,
+            "started_at": self.started_at,
+            "updated_at": _now_iso(),
+            "is_active":  is_active,
+            "n_records":  len(records),
+            "tail_bytes": len(rendered.encode("utf-8")),
+        }
+        return "__META__: " + json.dumps(meta) + "\n" + rendered
+
+    def _write(self, *, is_active: bool) -> None:
+        try:
+            body = self._build_body(is_active=is_active)
+            # cache_control=2s — actively-updated blob; browsers can use
+            # a tiny window without serving stale snapshots.
+            self.storage.write_text(
+                self.key, body,
+                cache_control="public, max-age=2",
+            )
+            self._last_flush_at = time.time()
+        except Exception as e:
+            logger.warning("live-tail write failed (%s): %s", self.key, e)
+
+    def maybe_flush(self) -> None:
+        """Throttled flush — called after each append. Skips if last
+        flush was within `flush_interval_s`."""
+        if self._closed:
+            return
+        now = time.time()
+        if (now - self._last_flush_at) >= self.flush_interval_s:
+            self._write(is_active=True)
+
+    def finalize(self) -> None:
+        """Final flush with is_active=False. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self._write(is_active=False)
+
+
 class LLMStream:
     """Append-only stream of LLM I/O for one agent run."""
 
@@ -77,12 +247,30 @@ class LLMStream:
         self.run_ts = run_ts
         self.storage = storage or get_storage()
         self.key = llm_stream_key(agent_id, run_ts)
+        # Companion live-tail writer; same storage backend so the
+        # dashboard read & the agent write go to the same place.
+        self.live_tail = LiveLLMTail(agent_id, run_ts, storage=self.storage)
 
     def _append(self, record: dict) -> None:
         try:
             self.storage.append_jsonl(self.key, record)
         except Exception as e:
             logger.warning("llm-stream append failed (%s): %s", self.key, e)
+        # After every append, ask the live-tail writer to maybe-flush
+        # (no-op if last write was within `flush_interval_s`).
+        try:
+            self.live_tail.maybe_flush()
+        except Exception:
+            pass
+
+    def finalize(self) -> None:
+        """Mark the run finished. Writes one final live-tail with
+        is_active=False so the dashboard can show 'last run ended N
+        min ago' instead of a stale ● tailing badge."""
+        try:
+            self.live_tail.finalize()
+        except Exception:
+            pass
 
     # ── Public API ─────────────────────────────────────────────────
     def request(self, *, model: str, messages: list[dict], **meta) -> None:
@@ -134,6 +322,17 @@ class LLMStream:
         })
 
 
+# Process-level cache so all callers within one run share the same
+# LiveLLMTail instance (and therefore the same throttle clock). Without
+# this, an agent that calls `stream_for_current_run()` from N places
+# would build N independent throttled writers — they'd each "fire" on
+# their own timer and potentially write the same blob N times in quick
+# succession.
+_STREAM_CACHE: dict[tuple[str, str], LLMStream] = {}
+_STREAM_CACHE_LOCK = __import__("threading").Lock()
+_ATEXIT_REGISTERED = False
+
+
 def stream_for_current_run(storage: Optional[StorageBackend] = None) -> Optional[LLMStream]:
     """Build a stream from env vars set by the host-worker. Returns None
     when invoked outside an agent run (e.g. unit tests, ad-hoc scripts)
@@ -142,7 +341,41 @@ def stream_for_current_run(storage: Optional[StorageBackend] = None) -> Optional
     run_ts = os.environ.get("AGENT_RUN_ID") or os.environ.get("RUN_ID")
     if not agent_id or not run_ts:
         return None
-    return LLMStream(agent_id, run_ts, storage=storage)
+    key = (agent_id, run_ts)
+    with _STREAM_CACHE_LOCK:
+        s = _STREAM_CACHE.get(key)
+        if s is None:
+            s = LLMStream(agent_id, run_ts, storage=storage)
+            _STREAM_CACHE[key] = s
+        global _ATEXIT_REGISTERED
+        if not _ATEXIT_REGISTERED:
+            import atexit
+            atexit.register(_finalize_all_streams)
+            _ATEXIT_REGISTERED = True
+    return s
+
+
+def _finalize_all_streams() -> None:
+    """atexit safety net — flip every cached stream's live-tail to
+    is_active=false on process exit. Idempotent."""
+    with _STREAM_CACHE_LOCK:
+        for s in _STREAM_CACHE.values():
+            try: s.finalize()
+            except Exception: pass
+
+
+def finalize_current_run(*, storage: Optional[StorageBackend] = None) -> None:
+    """Public API: agents call this from post_run() (or run.sh after
+    `claude --print` finishes) to mark the live-tail blob as inactive
+    immediately, instead of waiting for atexit."""
+    agent_id = os.environ.get("AGENT_ID")
+    run_ts = os.environ.get("AGENT_RUN_ID") or os.environ.get("RUN_ID")
+    if not agent_id or not run_ts:
+        return
+    with _STREAM_CACHE_LOCK:
+        s = _STREAM_CACHE.get((agent_id, run_ts))
+    if s is not None:
+        s.finalize()
 
 
 @contextmanager
@@ -173,7 +406,14 @@ def stream_call(*, agent_id: Optional[str] = None,
         # No active run — yield None so callers can be no-ops.
         yield None
         return
-    s = LLMStream(agent_id, run_ts, storage=storage)
+    # Reuse the per-run cached LLMStream when possible so the live-tail
+    # throttle clock is shared with other concurrent callers in the
+    # same run.
+    with _STREAM_CACHE_LOCK:
+        s = _STREAM_CACHE.get((agent_id, run_ts))
+        if s is None:
+            s = LLMStream(agent_id, run_ts, storage=storage)
+            _STREAM_CACHE[(agent_id, run_ts)] = s
     if messages:
         s.request(model=model, messages=messages,
                   provider=provider, kind_provider=kind_provider)

@@ -5,7 +5,7 @@
 
 import type {
   AgentDetail, AgentLiveStatus, AgentSummary, ChangelogEntry,
-  ConfirmationRecord, FrameworkEvent, Goal, Message, RunDetail, RunSummary,
+  ConfirmationRecord, DispatchEntry, FrameworkEvent, Goal, Message, RunDetail, RunSummary,
 } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
@@ -24,7 +24,19 @@ async function http<T>(path: string, opts?: RequestInit): Promise<T> {
   const headers = new Headers(opts?.headers)
   headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
-  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers })
+  // credentials:'include' so the OAuth session cookie is sent on cross-origin
+  // dev (UI on :8091, API on :8090). Same-origin (prod) is unaffected.
+  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers, credentials: 'include' })
+  if (res.status === 401) {
+    // Browser flow: bounce to Google login. Skip if we're already on the
+    // login page or this is the /me probe (handled by caller).
+    if (!path.startsWith('/api/auth/') && typeof window !== 'undefined') {
+      const next = encodeURIComponent(window.location.pathname + window.location.search)
+      window.location.href = `${API_BASE}/api/auth/google/login?next=${next}`
+      // Throw so callers see a rejected promise rather than undefined.
+      throw new Error('401 redirecting to login')
+    }
+  }
   if (!res.ok) {
     let detail: string
     try { detail = (await res.json()).detail ?? res.statusText }
@@ -63,7 +75,16 @@ export const api = {
 
   // live LLM output — tails the most recent dispatch log for the agent
   getLiveLLMOutput:  (id: string) => http<{
-    agent_id: string; log_path: string; content: string; tail_bytes: number; mtime: string | null
+    agent_id: string;
+    source?: string;          // 'azure-live-blob' | 'framework-storage' | 'local-fs' | 'none'
+    run_ts?: string;
+    log_path: string;
+    content: string;
+    is_active?: boolean;      // server-reported "is this run currently writing?"
+    started_at?: string;
+    updated_at?: string;
+    tail_bytes: number;
+    mtime: string | null;
   }>(`/api/agents/${encodeURIComponent(id)}/live-llm-output`),
 
   // directives
@@ -105,6 +126,14 @@ export const api = {
   putAgentGoals:     (id: string, goals: Goal[]) => http<{ schema_version: string; goals: Goal[] }>(`/api/agents/${encodeURIComponent(id)}/goals`, { method: 'PUT', body: JSON.stringify({ goals }) }),
   postGoalProgress:  (id: string, goalId: string, body: { value: number; run_ts?: string; note?: string; accomplished?: boolean }) => http<unknown>(`/api/agents/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/progress`, { method: 'POST', body: JSON.stringify(body) }),
   goalsAccomplished: (id: string) => http<{ entries: { ts: string; goal_id: string; title: string; value: number }[] }>(`/api/agents/${encodeURIComponent(id)}/goals/accomplished`),
+
+  // implementer dispatch queue
+  implementerQueue: (limit = 20) => http<{
+    pending: { agent_id: string; request_id?: string; site?: string; from_run?: string; rec_ids?: string[]; action?: string; ts?: string; _key?: string }[];
+    dispatches: DispatchEntry[];
+  }>(`/api/implementer/queue?limit=${limit}`),
+  implementerDispatches: (limit = 20) => http<DispatchEntry[]>(`/api/implementer/dispatches?limit=${limit}`),
+  getDispatchLog: (dispatchId: string, tailBytes = 32768) => http<DispatchEntry & { content: string }>(`/api/implementer/dispatches/${encodeURIComponent(dispatchId)}/log?tail_bytes=${tailBytes}`),
 
   // dependencies / graph
   dependencyGraph:   (includeBlueprints = false) => http<{

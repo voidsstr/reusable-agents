@@ -85,6 +85,13 @@ class AgentBase:
     category: str = "misc"
     capabilities: list = []  # list[Capability] — see guardrails.py
 
+    # When True, post_run() sends a verbose run-summary email to the
+    # configured owner. Agents that already send their own
+    # completion/proposal email (eBay sync, SEO opportunity, progressive
+    # improvement, competitor research) should set this to False so
+    # operators don't get duplicates.
+    send_run_summary_email: bool = True
+
     def __init__(
         self,
         *,
@@ -188,13 +195,15 @@ class AgentBase:
         """Framework-provided: persist run artifacts, update state, status."""
         run_dir_prefix = f"agents/{self.agent_id}/runs/{self.run_ts}/"
 
+        ended_at = self._ended_at or _now()
+
         # Progress + metrics
         self.storage.write_json(run_dir_prefix + "progress.json", {
             "schema_version": "1",
             "agent_id": self.agent_id,
             "run_ts": self.run_ts,
             "started_at": self._started_at,
-            "ended_at": self._ended_at or _now(),
+            "ended_at": ended_at,
             "iteration_count": self.iteration_count,
             "status": result.status,
             "progress": result.progress,
@@ -202,6 +211,37 @@ class AgentBase:
             "summary": result.summary,
             "triggered_by": self.triggered_by,
         })
+
+        # Update agents/<id>/run-index.json so the dashboard can list
+        # recent runs in O(1) instead of list_prefix + N progress.json
+        # round-trips. Atomic via read-modify-write; we tolerate races
+        # (the index is regenerable from runs/* by backfill-run-indexes).
+        try:
+            idx_key = f"agents/{self.agent_id}/run-index.json"
+            idx = self.storage.read_json(idx_key) or {"total_runs": 0, "recent": []}
+            entry = {
+                "agent_id":     self.agent_id,
+                "run_ts":       self.run_ts,
+                "status":       result.status,
+                "summary":      result.summary,
+                "started_at":   self._started_at,
+                "ended_at":     ended_at,
+                "iteration_count": self.iteration_count,
+                "progress":     result.progress,
+                "metrics":      result.metrics or {},
+                "triggered_by": self.triggered_by,
+            }
+            recent = [entry] + [
+                r for r in (idx.get("recent") or [])
+                if r.get("run_ts") != self.run_ts
+            ]
+            idx = {
+                "total_runs": int(idx.get("total_runs", 0)) + 1,
+                "recent": recent[:50],
+            }
+            self.storage.write_json(idx_key, idx)
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] run-index update failed: {e}")
 
         # Decision summary as Markdown narrative
         summary_md = result.summary_md or ""
@@ -242,6 +282,209 @@ class AgentBase:
             self.status_reporter.cancelled(message=result.summary or "cancelled")
         else:
             self.status_reporter.idle()
+
+        # Flip the live-LLM-tail blob to is_active=false so the dashboard
+        # immediately stops showing the "● tailing" badge for this run.
+        try:
+            from . import llm_stream
+            llm_stream.finalize_current_run(storage=self.storage)
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] live-tail finalize failed: {e}")
+
+        # Verbose post-run summary email — opt-out for agents that send
+        # their own completion email. Best-effort: never fail the run.
+        try:
+            self._maybe_send_run_summary_email(result, summary_md, ended_at)
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] run-summary email failed: {e}")
+
+    def _maybe_send_run_summary_email(
+        self, result: RunResult, summary_md: str, ended_at: str,
+    ) -> None:
+        """Default post-run summary mailer. Pulls owner email from the
+        registered manifest, renders decisions + metrics + summary_md +
+        result narrative, and sends via the shared msmtp/Graph helper.
+
+        Skipped when:
+          - `send_run_summary_email` class flag is False
+          - the run was blocked-on-confirmation (subclass already emailed
+            the operator with the proposal)
+          - no owner_email is configured
+        """
+        if not getattr(self, "send_run_summary_email", True):
+            return
+        if result.status == "blocked":
+            return
+        manifest = get_agent(self.agent_id)
+        owner = (manifest.owner if manifest else "") or os.environ.get(
+            "AGENT_DEFAULT_OWNER_EMAIL", "")
+        if not owner:
+            return
+
+        # Pull goals from a per-agent site config if the subclass
+        # exposes one — many agents stash this on `self._cfg`.
+        goals = {}
+        cfg = getattr(self, "_cfg", None)
+        if isinstance(cfg, dict):
+            goals = cfg.get("goals") or {}
+
+        body_html = self._render_run_summary_html(
+            result=result, summary_md=summary_md, ended_at=ended_at,
+            owner=owner, goals=goals,
+        )
+        subject = (
+            f"[{self.agent_id}] {result.status} — {result.summary[:80]}"
+            if result.summary else f"[{self.agent_id}] {result.status}"
+        )
+        sender = os.environ.get(
+            "AGENT_SUMMARY_SENDER",
+            "automation@northernsoftwareconsulting.com",
+        )
+        try:
+            from shared.site_quality import send_via_msmtp  # type: ignore
+            ok, detail = send_via_msmtp(
+                subject=subject, body_html=body_html,
+                to=[owner], sender=sender,
+            )
+            if not ok:
+                logger.warning(
+                    "[%s] run-summary email send failed: %s",
+                    self.agent_id, detail,
+                )
+        except Exception as e:
+            logger.warning(
+                "[%s] run-summary email transport unavailable: %s",
+                self.agent_id, e,
+            )
+
+    def _render_run_summary_html(
+        self, *, result: RunResult, summary_md: str, ended_at: str,
+        owner: str, goals: dict,
+    ) -> str:
+        """Render a verbose run-summary HTML email — investigations,
+        LLM thoughts (decisions log), goal progress, metrics, and
+        terminal output."""
+        import html as _html
+        import json as _json
+        try:
+            from . import decision_log as _dl
+            decisions = _dl.read_decisions(
+                self.agent_id, self.run_ts, self.storage,
+            ) or []
+        except Exception:
+            decisions = []
+
+        def _esc(s: Any) -> str:
+            return _html.escape(str(s) if s is not None else "")
+
+        # Goals section
+        goals_html = ""
+        if goals:
+            rows = "".join(
+                f"<tr><td style='padding:4px 8px;border-bottom:1px solid #eee'>"
+                f"<code>{_esc(k)}</code></td>"
+                f"<td style='padding:4px 8px;border-bottom:1px solid #eee'>"
+                f"{_esc(v)}</td></tr>"
+                for k, v in goals.items()
+            )
+            goals_html = (
+                "<h3>Goals (from site.yaml)</h3>"
+                f"<table style='border-collapse:collapse;font-family:monospace;font-size:12px'>"
+                f"{rows}</table>"
+            )
+
+        # Decisions / LLM thoughts grouped by category
+        dec_html = ""
+        if decisions:
+            grouped: dict[str, list[dict]] = {}
+            for d in decisions:
+                grouped.setdefault(d.get("category", "other"), []).append(d)
+            chunks = []
+            order = ["plan", "observation", "choice", "skip", "defer",
+                     "warning", "result", "thought"]
+            for cat in order + sorted(c for c in grouped if c not in order):
+                if cat not in grouped:
+                    continue
+                items = "".join(
+                    f"<li><span style='color:#888;font-family:monospace;"
+                    f"font-size:11px'>{_esc(d.get('ts','')[11:19])}</span> "
+                    f"{_esc(d.get('message',''))}"
+                    + (
+                        f"<pre style='background:#f6f8fa;border:1px solid #eee;"
+                        f"padding:6px;border-radius:4px;font-size:11px;"
+                        f"overflow:auto;max-width:760px;white-space:pre-wrap;"
+                        f"margin:4px 0 8px 0'>"
+                        f"{_esc(_json.dumps(d.get('evidence'), indent=2, default=str))}"
+                        f"</pre>"
+                        if d.get("evidence") else ""
+                    )
+                    + "</li>"
+                    for d in grouped[cat]
+                )
+                chunks.append(f"<h4 style='margin:14px 0 4px'>{_esc(cat.title())}</h4><ul>{items}</ul>")
+            dec_html = (
+                "<h3>What the agent thought + did</h3>"
+                + "".join(chunks)
+            )
+        else:
+            dec_html = (
+                "<h3>What the agent thought + did</h3>"
+                "<p style='color:#888'><em>No structured decisions recorded for this run.</em></p>"
+            )
+
+        # Metrics
+        metrics = result.metrics or {}
+        metrics_html = ""
+        if metrics:
+            rows = "".join(
+                f"<tr><td style='padding:4px 8px;border-bottom:1px solid #eee'>"
+                f"<code>{_esc(k)}</code></td>"
+                f"<td style='padding:4px 8px;border-bottom:1px solid #eee;"
+                f"font-family:monospace;font-size:12px'>"
+                f"{_esc(_json.dumps(v, default=str) if isinstance(v, (dict, list)) else v)}"
+                f"</td></tr>"
+                for k, v in metrics.items()
+            )
+            metrics_html = (
+                "<h3>Metrics</h3>"
+                f"<table style='border-collapse:collapse'>{rows}</table>"
+            )
+
+        # Summary markdown rendered as <pre>
+        summary_block = (
+            f"<h3>Run narrative</h3>"
+            f"<pre style='background:#f6f8fa;padding:12px;border-radius:6px;"
+            f"font-size:12px;white-space:pre-wrap;line-height:1.45'>"
+            f"{_esc(summary_md)}</pre>"
+            if summary_md.strip() else ""
+        )
+
+        status_color = {
+            "success": "#16a34a", "failure": "#dc2626",
+            "blocked": "#d97706", "cancelled": "#64748b",
+        }.get(result.status, "#0ea5e9")
+
+        return f"""<!doctype html>
+<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+                   color:#0f172a;max-width:820px;margin:0 auto;padding:18px">
+  <h2 style="margin-bottom:4px">{_esc(self.agent_id)}</h2>
+  <div style="color:#64748b;font-size:13px;margin-bottom:14px">
+    Run <code>{_esc(self.run_ts)}</code> · ended <code>{_esc(ended_at)}</code> ·
+    iterations <strong>{int(self.iteration_count)}</strong> ·
+    status <strong style="color:{status_color}">{_esc(result.status)}</strong>
+  </div>
+  <p style="font-size:14px"><strong>Summary:</strong> {_esc(result.summary or '(no summary)')}</p>
+  {goals_html}
+  {summary_block}
+  {dec_html}
+  {metrics_html}
+  <hr style="margin:24px 0;border:none;border-top:1px solid #e2e8f0">
+  <p style="color:#94a3b8;font-size:11px">
+    Sent automatically by reusable-agents AgentBase post-run hook.
+    Agents that already send their own completion email opt out via
+    <code>send_run_summary_email = False</code>.
+  </p>
+</body></html>"""
 
     def teardown(self) -> None:
         """Override for final cleanup."""

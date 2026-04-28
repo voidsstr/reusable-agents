@@ -16,6 +16,7 @@
 //   └──────────────────────────────────┘
 //      ↑ left edge stripe in status color (auto via .agent-card-glow::before)
 
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AgentSummary, AgentLiveStatus } from '../api/types'
 
@@ -51,12 +52,38 @@ interface Props {
   onToggleEnabled?: (a: AgentSummary) => void
 }
 
+function formatDuration(sec: number): string {
+  if (sec < 0 || !Number.isFinite(sec)) return ''
+  if (sec < 60) return `${Math.floor(sec)}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.floor(sec % 60)
+  if (m < 60) return `${m}m ${s}s`
+  const h = Math.floor(m / 60)
+  const mm = m % 60
+  return `${h}h ${mm}m`
+}
+
+function useTickingNow(active: boolean): number {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!active) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [active])
+  return now
+}
+
 export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }: Props) {
   const liveState = status?.state ?? agent.last_run_status ?? ''
   const isActive = liveState === 'running' || liveState === 'starting'
   const rgb = STATE_RGB[liveState] ?? STATE_RGB['']
   const pill = STATE_PILL[liveState] ?? STATE_PILL.idle
   const emoji = CATEGORY_EMOJI[agent.category] ?? CATEGORY_EMOJI.misc
+  const now = useTickingNow(isActive)
+  const startedMs = status?.started_at ? Date.parse(status.started_at) : NaN
+  const runDuration = isActive && Number.isFinite(startedMs)
+    ? formatDuration((now - startedMs) / 1000)
+    : ''
 
   return (
     <Link
@@ -73,10 +100,17 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
           </div>
           <div className="text-[10px] text-ink-400 font-mono truncate mt-0.5">{agent.id}</div>
         </div>
-        <span className={`status-pill ${pill.fg} ${pill.bg} ${pill.ring}`}>
-          <span className="status-dot" style={{ ['--glow-color' as string]: rgb }} />
-          {pill.label}
-        </span>
+        <div className="flex flex-col items-end gap-0.5">
+          <span className={`status-pill ${pill.fg} ${pill.bg} ${pill.ring}`}>
+            <span className="status-dot" style={{ ['--glow-color' as string]: rgb }} />
+            {pill.label}
+          </span>
+          {runDuration && (
+            <span className="text-[10px] font-mono text-status-running-fg" title={`Running since ${status?.started_at}`}>
+              ⏱ {runDuration}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Description */}

@@ -118,7 +118,10 @@ class StatusReporter:
             "internal": internal or {},
         }
         try:
-            self.storage.write_json(status_key(self.agent_id), payload)
+            self.storage.write_json(
+                status_key(self.agent_id), payload,
+                cache_control="public, max-age=2",
+            )
         except Exception as e:
             logger.warning(f"status write failed for {self.agent_id}: {e}")
 

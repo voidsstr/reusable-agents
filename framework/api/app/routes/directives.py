@@ -149,5 +149,5 @@ def apply_proposed(agent_id: str, request_id: str):
         "applied_at": found_confirmation.get("resolved_at"),
         "applied_via_request_id": request_id,
         "applied_by": found_confirmation.get("approved_by", ""),
-    })
+    }, cache_control="public, max-age=86400")
     return {"ok": True, "applied": True}

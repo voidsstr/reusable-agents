@@ -179,3 +179,19 @@ export interface ChangelogEntry {
   files?: string[]
   extra?: Record<string, unknown>
 }
+
+export interface DispatchEntry {
+  id: string
+  site: string
+  run_ts: string
+  log_filename: string
+  started_at: string
+  size_bytes: number
+  status: 'running' | 'completed' | 'not_found'
+  rec_ids: string[]
+  rec_count: number
+  commit_sha: string
+  done: boolean
+  tail?: string
+  content?: string
+}

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -17,6 +19,69 @@ from ..auth import require_token
 
 
 router = APIRouter(prefix="/api/agents", tags=["agents"], dependencies=[Depends(require_token)])
+
+
+# ---------------------------------------------------------------------------
+# Module-level 60s TTL cache for the AI provider/defaults config blobs.
+# Both `list_all` and `get_one` resolve `_summary` for one or more agents
+# and previously read these two blobs on every request — that's 2 Azure
+# round-trips for the hot detail path, and N+1 for the (already-fixed) list.
+# Now: at most one fetch per 60s, lock-protected.
+# ---------------------------------------------------------------------------
+
+_CFG_CACHE: dict = {"providers": None, "defaults": None}
+_CFG_CACHE_TS: float = 0.0
+_CFG_CACHE_LOCK = threading.Lock()
+_CFG_CACHE_TTL_S = 60.0
+
+
+def _get_config_caches(force_refresh: bool = False) -> tuple[dict, dict]:
+    """Return (providers, defaults) JSON dicts, cached for 60s.
+
+    On read error, keeps the existing stale cache rather than blanking out —
+    the dashboard's AI badges will lag rather than disappear if blob storage
+    hiccups.
+    """
+    global _CFG_CACHE_TS, _CFG_CACHE
+    now = time.time()
+    if (not force_refresh
+            and (now - _CFG_CACHE_TS) < _CFG_CACHE_TTL_S
+            and _CFG_CACHE["providers"] is not None):
+        return _CFG_CACHE["providers"], _CFG_CACHE["defaults"]
+    with _CFG_CACHE_LOCK:
+        # Double-check under lock
+        now = time.time()
+        if (not force_refresh
+                and (now - _CFG_CACHE_TS) < _CFG_CACHE_TTL_S
+                and _CFG_CACHE["providers"] is not None):
+            return _CFG_CACHE["providers"], _CFG_CACHE["defaults"]
+        try:
+            s = get_storage()
+            providers = s.read_json("config/ai-providers.json") or {}
+            defaults = s.read_json("config/ai-defaults.json") or {}
+            _CFG_CACHE = {"providers": providers, "defaults": defaults}
+            _CFG_CACHE_TS = now
+        except Exception:
+            # On error: keep stale cache rather than blanking
+            if _CFG_CACHE["providers"] is None:
+                _CFG_CACHE = {"providers": {}, "defaults": {}}
+                _CFG_CACHE_TS = now
+        return _CFG_CACHE["providers"], _CFG_CACHE["defaults"]
+
+
+def _age_seconds(iso_ts: str) -> float:
+    """Age in seconds of an ISO-8601 UTC timestamp. Returns +inf on error."""
+    if not iso_ts:
+        return float("inf")
+    try:
+        # Tolerate both ...Z and ...+00:00
+        s = iso_ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return float("inf")
 
 
 class AgentSummary(BaseModel):
@@ -235,27 +300,37 @@ def _summary(m: registry.AgentManifest,
 
 @router.get("", response_model=list[AgentSummary])
 def list_all():
-    # Pre-cache the two config blobs we'd otherwise read 2× per agent.
     s = get_storage()
-    providers_cache = s.read_json("config/ai-providers.json") or {}
-    defaults_cache = s.read_json("config/ai-defaults.json") or {}
+    # Module-level 60s cache — eliminates the 2 per-request blob reads.
+    providers_cache, defaults_cache = _get_config_caches()
     manifests = list(registry.list_agents())
 
-    # Status reads are the slow part — each one is an Azure blob round-trip
-    # (~150-300ms). With 29+ agents the serial chain exceeded the dashboard's
-    # 5s timeout. Parallelize via a thread pool — Azure blob client is
-    # thread-safe, and even capped at 16 workers we cover the full agent
-    # list in a single round-trip's worth of latency.
-    from concurrent.futures import ThreadPoolExecutor
+    # ------------------------------------------------------------------
+    # Status fetch:
+    #   1. Try the single-blob snapshot (registry/agent-snapshot.json),
+    #      written every 5s by snapshot_updater. One blob read replaces
+    #      N parallel reads.
+    #   2. If the snapshot is missing or stale (>30s old), fall back to
+    #      the existing parallel-read path — never break if the updater
+    #      thread is down.
+    # ------------------------------------------------------------------
     statuses: dict[str, dict] = {}
-    def _fetch_status(agent_id: str) -> tuple[str, dict]:
-        try:
-            return agent_id, (s.read_json(f"agents/{agent_id}/status.json") or {})
-        except Exception:
-            return agent_id, {}
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        for aid, st in ex.map(_fetch_status, [m.id for m in manifests]):
-            statuses[aid] = st
+    snap = s.read_json("registry/agent-snapshot.json") or {}
+    snap_age_s = _age_seconds(snap.get("updated_at", ""))
+    use_snapshot = snap_age_s < 30.0 and bool(snap.get("agents"))
+    if use_snapshot:
+        statuses = snap.get("agents") or {}
+    else:
+        # Fallback: parallel-read each agent's status.json.
+        from concurrent.futures import ThreadPoolExecutor
+        def _fetch_status(agent_id: str) -> tuple[str, dict]:
+            try:
+                return agent_id, (s.read_json(f"agents/{agent_id}/status.json") or {})
+            except Exception:
+                return agent_id, {}
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            for aid, st in ex.map(_fetch_status, [m.id for m in manifests]):
+                statuses[aid] = st
 
     return [
         _summary(m, providers_cache=providers_cache,
@@ -289,11 +364,21 @@ def register(req: RegisterRequest):
         s.write_text(f"agents/{req.id}/readme.md", req.readme_body)
     if req.autowire_cron and req.cron_expr and req.entry_command:
         try:
+            # Forward storage env vars so agent service units inherit them —
+            # otherwise dispatched sub-processes (e.g. implementer) default to
+            # local storage even when Azure is configured.
+            _storage_env = {
+                k: os.environ[k]
+                for k in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_CONTAINER",
+                           "STORAGE_BACKEND")
+                if os.environ.get(k)
+            }
             scheduler.write_systemd_units(
                 agent_id=req.id, cron_expr=req.cron_expr,
                 entry_command=req.entry_command,
                 working_directory=req.repo_dir or os.path.expanduser("~"),
                 timezone=req.timezone,
+                extra_env=_storage_env or None,
             )
             scheduler.reload_and_enable(req.id)
         except Exception as e:
@@ -318,9 +403,8 @@ def get_one(agent_id: str):
     if m is None:
         raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
     s = get_storage()
-    # Pre-fetch configs for the AI summary (single Azure round-trip each)
-    providers_cache = s.read_json("config/ai-providers.json") or {}
-    defaults_cache = s.read_json("config/ai-defaults.json") or {}
+    # Configs come from the module-level 60s TTL cache.
+    providers_cache, defaults_cache = _get_config_caches()
 
     status = s.read_json(f"agents/{agent_id}/status.json")
     runs = []

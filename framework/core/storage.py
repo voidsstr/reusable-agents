@@ -47,8 +47,12 @@ class StorageBackend(ABC):
         """Return the raw bytes at `key`, or None if not found."""
 
     @abstractmethod
-    def write_bytes(self, key: str, data: bytes) -> None:
-        """Write bytes at `key`. Overwrites if exists."""
+    def write_bytes(self, key: str, data: bytes,
+                    cache_control: Optional[str] = None) -> None:
+        """Write bytes at `key`. Overwrites if exists.
+
+        `cache_control` (optional) sets the HTTP Cache-Control response
+        header on backends that support it (Azure Blob). Local FS ignores."""
 
     @abstractmethod
     def exists(self, key: str) -> bool: ...
@@ -71,8 +75,9 @@ class StorageBackend(ABC):
         b = self.read_bytes(key)
         return b.decode(encoding) if b is not None else None
 
-    def write_text(self, key: str, text: str, encoding: str = "utf-8") -> None:
-        self.write_bytes(key, text.encode(encoding))
+    def write_text(self, key: str, text: str, encoding: str = "utf-8",
+                   cache_control: Optional[str] = None) -> None:
+        self.write_bytes(key, text.encode(encoding), cache_control=cache_control)
 
     def read_json(self, key: str) -> Optional[Any]:
         b = self.read_bytes(key)
@@ -84,8 +89,12 @@ class StorageBackend(ABC):
             logger.warning(f"read_json: invalid JSON at {key}: {e}")
             return None
 
-    def write_json(self, key: str, obj: Any, indent: int = 2) -> None:
-        self.write_bytes(key, json.dumps(obj, indent=indent, default=str).encode("utf-8"))
+    def write_json(self, key: str, obj: Any, indent: int = 2,
+                   cache_control: Optional[str] = None) -> None:
+        self.write_bytes(
+            key, json.dumps(obj, indent=indent, default=str).encode("utf-8"),
+            cache_control=cache_control,
+        )
 
     def append_jsonl(self, key: str, obj: Any) -> None:
         self.append_bytes(key, (json.dumps(obj, default=str) + "\n").encode("utf-8"))
@@ -180,12 +189,14 @@ class AzureBlobStorage(StorageBackend):
             logger.warning(f"azure read_bytes {key}: {e}")
             return None
 
-    def write_bytes(self, key: str, data: bytes) -> None:
+    def write_bytes(self, key: str, data: bytes,
+                    cache_control: Optional[str] = None) -> None:
+        cs_kwargs = {"content_type": _guess_content_type(key)}
+        if cache_control:
+            cs_kwargs["cache_control"] = cache_control
         self._blob(key).upload_blob(
             data, overwrite=True,
-            content_settings=self._ContentSettings(
-                content_type=_guess_content_type(key),
-            ),
+            content_settings=self._ContentSettings(**cs_kwargs),
         )
 
     def append_bytes(self, key: str, data: bytes) -> None:
@@ -268,7 +279,9 @@ class LocalFilesystemStorage(StorageBackend):
             return None
         return p.read_bytes()
 
-    def write_bytes(self, key: str, data: bytes) -> None:
+    def write_bytes(self, key: str, data: bytes,
+                    cache_control: Optional[str] = None) -> None:
+        # cache_control is a no-op on local FS (no HTTP serving layer).
         p = self._path(key)
         p.parent.mkdir(parents=True, exist_ok=True)
         # Atomic write — write to .tmp then rename

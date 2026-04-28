@@ -493,10 +493,100 @@ code{{background:#f8fafc;padding:1px 4px;border-radius:3px;font-size:12.5px}}
 # Stale-listing reaper
 # ───────────────────────────────────────────────────────────────────
 
+def _products_lacking_listings(
+    adapter: DbAdapter, products_table: str, listings_table: str,
+    fk_col: str, limit: int = 40,
+) -> list[dict]:
+    """Coverage goal — products with zero ACTIVE eBay listings should be
+    queried first. Returns a list of `{query, category_slug}` dicts where
+    `query` is derived from the product's canonical name, suitable to
+    feed back into the eBay Browse API.
+
+    Best-effort: errors are swallowed so the agent falls back to seed
+    rotation cleanly if the schema differs from what we expect.
+    """
+    if limit <= 0:
+        return []
+    out: list[dict] = []
+    try:
+        if adapter.kind == "postgres":
+            cur = adapter.conn.cursor()
+            cur.execute(f"""
+                SELECT p.id, p.name,
+                       COALESCE(p.category_slug, '') AS category_slug
+                  FROM {products_table} p
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM {listings_table} l
+                      WHERE l.{fk_col} = p.id
+                        AND l.is_active = true
+                 )
+                 ORDER BY p.id
+                 LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            for r in rows:
+                name = (r[1] or "").strip()
+                if not name:
+                    continue
+                out.append({"query": name, "category_slug": r[2] or None})
+        elif adapter.kind == "azure-sql":
+            cur = adapter.conn.cursor()
+            cur.execute(f"""
+                SELECT TOP (?) p.id, p.name,
+                       COALESCE(p.category_slug, '') AS category_slug
+                  FROM {products_table} p
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM {listings_table} l
+                      WHERE l.{fk_col} = p.id
+                        AND l.is_active = 1
+                 )
+                 ORDER BY p.id
+            """, (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            for r in rows:
+                name = (r[1] or "").strip()
+                if not name:
+                    continue
+                out.append({"query": name, "category_slug": r[2] or None})
+    except Exception as e:
+        log.warning("coverage probe failed (%s) — falling back to seeds only", e)
+    return out
+
+
+def _ensure_item_end_date_column(adapter: DbAdapter, table: str) -> None:
+    """Idempotent ALTER TABLE — adds `item_end_date` if missing. Safe to
+    call every run; cheap when the column already exists."""
+    try:
+        if adapter.kind == "postgres":
+            cur = adapter.conn.cursor()
+            cur.execute(
+                f"ALTER TABLE {table} "
+                f"ADD COLUMN IF NOT EXISTS item_end_date TIMESTAMPTZ"
+            )
+            adapter.conn.commit()
+            cur.close()
+        elif adapter.kind == "azure-sql":
+            cur = adapter.conn.cursor()
+            cur.execute(f"""
+                IF COL_LENGTH('{table}', 'item_end_date') IS NULL
+                BEGIN
+                  ALTER TABLE {table} ADD item_end_date DATETIMEOFFSET NULL
+                END
+            """)
+            adapter.conn.commit()
+            cur.close()
+    except Exception as e:
+        log.warning("ensure item_end_date column on %s failed: %s", table, e)
+
+
 def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
     """eBay listings expire (auctions end, items get sold). Mark any
-    `source='ebay'` row whose updated_at hasn't been touched in the last
-    `hours` as is_active=false. Returns the count.
+    `source='ebay'` row inactive if EITHER:
+      - `item_end_date` is in the past, OR
+      - `updated_at` hasn't been touched in the last `hours`.
+    Returns the count of newly-marked-inactive rows.
     """
     if hours <= 0:
         return 0
@@ -505,7 +595,10 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
         cur.execute(f"""
             UPDATE {table} SET is_active = false
              WHERE source = 'ebay' AND is_active = true
-               AND updated_at < NOW() - INTERVAL '{int(hours)} hours'
+               AND (
+                 (item_end_date IS NOT NULL AND item_end_date < NOW())
+                 OR updated_at < NOW() - INTERVAL '{int(hours)} hours'
+               )
         """)
         adapter.conn.commit()
         n = cur.rowcount
@@ -516,7 +609,10 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
         cur.execute(f"""
             UPDATE {table} SET is_active = 0
              WHERE source = 'ebay' AND is_active = 1
-               AND updated_at < DATEADD(hour, -?, SYSUTCDATETIME())
+               AND (
+                 (item_end_date IS NOT NULL AND item_end_date < SYSUTCDATETIME())
+                 OR updated_at < DATEADD(hour, -?, SYSUTCDATETIME())
+               )
         """, (int(hours),))
         adapter.conn.commit()
         n = cur.rowcount
@@ -531,6 +627,7 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
 
 class EbayProductSyncAgent(AgentBase):
     agent_id = AGENT_ID
+    send_run_summary_email = False  # sends its own completion email
 
     def run(self, *, run_kind: str = "manual", **kwargs) -> RunResult:
         config_path = os.environ.get("EBAY_PRODUCT_SYNC_CONFIG")
@@ -1138,6 +1235,17 @@ class EbayProductSyncAgent(AgentBase):
         fk_col = lt.get("fk_to_product_column") or "product_id"
 
         plan: list[tuple[Optional[str], str]] = []
+        # ─── Coverage goal: products without any active listing get
+        # priority. Prepends per-product queries derived from product
+        # names so each run actively closes coverage gaps before
+        # rotating through generic seed queries.
+        coverage_targets = _products_lacking_listings(
+            adapter, pt["name"], lt["name"], fk_col, limit=40,
+        )
+        for prod in coverage_targets:
+            plan.append((prod.get("category_slug"), prod["query"]))
+        coverage_count = len(coverage_targets)
+        stats["coverage_targets"] = coverage_count
         for entry in seeds:
             cat = entry.get("category") or entry.get("category_slug")
             for q in (entry.get("queries") or []):
@@ -1190,7 +1298,14 @@ class EbayProductSyncAgent(AgentBase):
                 # Build the listings row, with fk to the product.
                 lrow = self._build_row_from_section(lt, item, hyd, site_constants={})
                 lrow[fk_col] = product_pk
-                # ensure listing has updated_at-style col if present in mapping
+                # Always track listing end-date so the site can hide expired
+                # listings without waiting on the freshness reaper. Browse
+                # API field is `itemEndDate` (ISO 8601); absent for
+                # fixed-price listings without an explicit end. Falls back
+                # to mapping value if the operator already wired it.
+                end_iso = item.get("itemEndDate")
+                if end_iso and "item_end_date" not in lrow:
+                    lrow["item_end_date"] = end_iso
                 listings_rows.append(lrow)
                 if len(stats["listing_samples"]) < 30:
                     stats["listing_samples"].append({
@@ -1216,6 +1331,7 @@ class EbayProductSyncAgent(AgentBase):
             time.sleep(0.05)
 
         if not dry_run:
+            _ensure_item_end_date_column(adapter, lt["name"])
             stale = _mark_stale_inactive(adapter, lt["name"], stale_hours)
             stats["stale_listings_inactive"] = stale
 

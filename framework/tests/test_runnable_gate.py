@@ -105,7 +105,7 @@ def test_register_propagates_runnable_modes_and_confirmation(monkeypatch, tmp_pa
 def test_chained_only_agent_with_seo_implementer_pattern(monkeypatch, tmp_path):
     _setup(monkeypatch, tmp_path)
     register_agent(AgentManifest(
-        id="seo-implementer-test", name="SEO Implementer", category="seo",
+        id="implementer-test", name="SEO Implementer", category="seo",
         runnable_modes=["chained"],
         confirmation_flow={
             "enabled": True, "kind": "upstream-gated",
@@ -116,6 +116,6 @@ def test_chained_only_agent_with_seo_implementer_pattern(monkeypatch, tmp_path):
     c = _client()
     listing = c.get("/api/agents").json()
     by = {a["id"]: a for a in listing}
-    assert by["seo-implementer-test"]["runnable_modes"] == ["chained"]
-    r = c.post("/api/agents/seo-implementer-test/trigger")
+    assert by["implementer-test"]["runnable_modes"] == ["chained"]
+    r = c.post("/api/agents/implementer-test/trigger")
     assert r.status_code == 409

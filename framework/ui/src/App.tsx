@@ -9,15 +9,17 @@ import AgentList from './pages/AgentList'
 import AgentDetail from './pages/AgentDetail'
 import Confirmations from './pages/Confirmations'
 import Events from './pages/Events'
+import ImplementerQueue from './pages/ImplementerQueue'
 import Providers from './pages/Providers'
 import Graph from './pages/Graph'
 
 const NAV = [
-  { to: '/',              label: 'Agents',        icon: '⚙' },
-  { to: '/graph',         label: 'Graph',         icon: '◇' },
-  { to: '/confirmations', label: 'Confirmations', icon: '✉' },
-  { to: '/providers',     label: 'AI Providers',  icon: '🧠' },
-  { to: '/events',        label: 'Events',        icon: '⏱' },
+  { to: '/',                   label: 'Agents',       icon: '⚙' },
+  { to: '/graph',              label: 'Graph',        icon: '◇' },
+  { to: '/confirmations',      label: 'Confirmations',icon: '✉' },
+  { to: '/implementer-queue',  label: 'Implementer',  icon: '⚒' },
+  { to: '/providers',          label: 'AI Providers', icon: '🧠' },
+  { to: '/events',             label: 'Events',       icon: '⏱' },
 ]
 
 export default function App() {
@@ -25,12 +27,13 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route element={<Layout />}>
-          <Route path="/"                element={<AgentList />} />
-          <Route path="/agents/:id"      element={<AgentDetail />} />
-          <Route path="/graph"           element={<Graph />} />
-          <Route path="/confirmations"   element={<Confirmations />} />
-          <Route path="/providers"       element={<Providers />} />
-          <Route path="/events"          element={<Events />} />
+          <Route path="/"                    element={<AgentList />} />
+          <Route path="/agents/:id"          element={<AgentDetail />} />
+          <Route path="/graph"               element={<Graph />} />
+          <Route path="/confirmations"       element={<Confirmations />} />
+          <Route path="/implementer-queue"   element={<ImplementerQueue />} />
+          <Route path="/providers"           element={<Providers />} />
+          <Route path="/events"              element={<Events />} />
         </Route>
       </Routes>
     </BrowserRouter>

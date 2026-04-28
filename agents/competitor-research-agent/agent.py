@@ -226,6 +226,7 @@ BODY: {body}
 
 class CompetitorResearchAgent(AgentBase):
     agent_id = AGENT_ID
+    send_run_summary_email = False  # already emails recommendations
     name = "Competitor Research Agent"
     description = (
         "Compares our site to competitors, recommends parity-gap and "

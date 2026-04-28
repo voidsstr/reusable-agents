@@ -28,16 +28,26 @@ def get_status(agent_id: str):
 def get_live_llm_output(agent_id: str, tail_kb: int = 256, since_offset: int = 0):
     """Live LLM input/output for the dashboard's Live LLM tab.
 
-    Two storage paths, in priority order:
+    Three storage paths, in priority order (each falls through to the
+    next on miss/error):
 
-      1. **Framework storage** (preferred — works for ALL providers,
-         survives across hosts, durable):
+      1. **Live tail blob** (fast-path — single pre-rendered Azure
+         blob read, sub-200ms typical):
+         agents/<agent_id>/live-llm-output.txt
+         Format: `__META__: {json}\\n` header line followed by the last
+         ~256KB of human-readable rendered output. Refreshed every ~3s
+         by the agent's `LiveLLMTail` writer. The dashboard polls this
+         every 1-2s; this is the hot path. is_active flips to false on
+         post_run() so the UI knows when a run ended.
+
+      2. **JSONL stream replay** (durable — works for ALL providers,
+         survives across hosts, structured records):
          agents/<agent_id>/runs/<latest_run_ts>/llm-output.jsonl
-         Each AIClient.chat() call appends request + response (or
-         streamed chunks for claude-cli) as JSONL records here.
-         since_offset enables incremental tailing.
+         Used when the live-tail blob is missing (older runs, or a
+         brand-new run before its first flush). Renders records on the
+         fly so the UI sees the same shape.
 
-      2. **Local /tmp dispatch log** (legacy — bash-script implementer
+      3. **Local /tmp dispatch log** (legacy — bash-script implementer
          scope output, only on the host that ran the dispatch):
          /tmp/reusable-agents-logs/dispatch-implementer-<site>-<ts>.log
          Used as fallback for the implementer scope itself, which writes
@@ -45,14 +55,49 @@ def get_live_llm_output(agent_id: str, tail_kb: int = 256, since_offset: int = 0
 
     Returns:
       {
-        agent_id, source: 'framework-storage'|'local-fs',
-        run_ts, log_path, content (rendered text),
-        records (only when source=framework-storage; structured),
-        tail_bytes, since_offset (next byte offset for incremental fetch),
+        agent_id,
+        source:      'azure-live-blob' | 'framework-storage' | 'local-fs' | 'none',
+        run_ts,      log_path,
+        content:     rendered text the UI's <pre> renders,
+        is_active:   bool — true while a run is in progress,
+        started_at,  updated_at,
+        records:     structured records (framework-storage path only),
+        tail_bytes,  since_offset (next byte offset for incremental fetch),
         mtime
       }
     """
-    # 1. Framework storage path — this is the durable, all-providers path.
+    # 1. Fast-path — pre-rendered live-tail blob.
+    try:
+        from framework.core import llm_stream
+        from framework.core.storage import get_storage
+        s = get_storage()
+        body = s.read_text(llm_stream.live_llm_tail_key(agent_id)) or ""
+        if body.startswith("__META__: "):
+            nl = body.find("\n")
+            meta_line = body[len("__META__: "):nl] if nl > 0 else body[len("__META__: "):]
+            content = body[nl + 1:] if nl > 0 else ""
+            try:
+                meta = json.loads(meta_line)
+            except Exception:
+                meta = {}
+            return {
+                "agent_id":   agent_id,
+                "source":     "azure-live-blob",
+                "run_ts":     meta.get("run_ts"),
+                "log_path":   llm_stream.live_llm_tail_key(agent_id),
+                "content":    content,
+                "is_active":  bool(meta.get("is_active", False)),
+                "started_at": meta.get("started_at"),
+                "updated_at": meta.get("updated_at"),
+                "tail_bytes": len(content.encode("utf-8")) if content else 0,
+                "since_offset": len(body),
+                "mtime":      meta.get("updated_at"),
+            }
+    except Exception:
+        # Fall through; we'll try the JSONL replay path next.
+        pass
+
+    # 2. JSONL replay — durable, all-providers path.
     try:
         from framework.core import llm_stream
         from framework.core.storage import get_storage
@@ -74,37 +119,31 @@ def get_live_llm_output(agent_id: str, tail_kb: int = 256, since_offset: int = 0
                         records.append(json.loads(line))
                     except Exception:
                         continue
-                # Render text view for backward compat with the old UI.
-                rendered_lines = []
-                for r in records:
-                    kind = r.get("kind")
-                    ts = r.get("ts", "")
-                    if kind == "request":
-                        rendered_lines.append(f"\n=== {ts} | REQUEST · {r.get('model','')} ({r.get('meta',{}).get('provider','')}) ===")
-                        if r.get("system"): rendered_lines.append(f"\n[SYSTEM]\n{r['system']}")
-                        if r.get("user"):   rendered_lines.append(f"\n[USER]\n{r['user']}\n")
-                    elif kind == "chunk":
-                        rendered_lines.append(r.get("text", ""))
-                    elif kind == "response":
-                        meta = r.get("meta") or {}
-                        rendered_lines.append(f"\n=== {ts} | RESPONSE · {meta.get('model','')} · {r.get('duration_s',0):.1f}s ===")
-                        rendered_lines.append(r.get("text", ""))
-                        rendered_lines.append("---\n")
-                    elif kind == "error":
-                        rendered_lines.append(f"\n=== {ts} | ERROR ===\n{r.get('msg','')}\n---\n")
-                content = "".join(rendered_lines)
+                content = llm_stream._render_records_for_tail(records)
+                # Best-effort is_active: read run progress.json — if
+                # ended_at is set, is_active=false.
+                is_active = True
+                try:
+                    progress = s.read_json(f"agents/{agent_id}/runs/{run_ts}/progress.json") or {}
+                    if progress.get("ended_at"):
+                        is_active = False
+                except Exception:
+                    pass
                 return {
                     "agent_id": agent_id,
                     "source": "framework-storage",
                     "run_ts": run_ts,
                     "log_path": key,
                     "content": content,
+                    "is_active": is_active,
+                    "started_at": (records[0].get("ts") if records else None),
+                    "updated_at": (records[-1].get("ts") if records else None),
                     "records": records,
                     "tail_bytes": len(effective),
                     "since_offset": len(text),  # next call passes this back
                     "mtime": (records[-1].get("ts") if records else None),
                 }
-    except Exception as e:
+    except Exception:
         # Fall through to local-FS on any framework-storage error.
         pass
 

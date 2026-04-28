@@ -11,7 +11,7 @@ Two layers stacked at query time:
      polls the inbox + routes replies back to the originating agent's
      response queue).
    - progressive-improvement-agent + competitor-research-agent
-     dispatch tier=auto recs to seo-implementer.
+     dispatch tier=auto recs to implementer.
 2. **Per-agent overrides** in `manifest.depends_on` — extra edges
    specific to a custom agent. Customer repos use this to wire their
    own agents into the graph without modifying framework code.
@@ -54,10 +54,10 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "seo-reporter", "to": "responder-agent",
      "kind": "sends-email-via",
      "description": "Reporter emails the recipient; responder polls the inbox for replies."},
-    {"from": "responder-agent", "to": "seo-implementer",
+    {"from": "responder-agent", "to": "implementer",
      "kind": "routes-replies-to",
      "description": "Responder parses 'implement rec-NNN' replies and dispatches to the implementer."},
-    {"from": "seo-implementer", "to": "seo-deployer",
+    {"from": "implementer", "to": "seo-deployer",
      "kind": "triggers",
      "description": "Implementer commits + tests; deployer ships if site config has a deployer block."},
 
@@ -77,7 +77,7 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "responder-agent", "to": "aisleprompt-progressive-improvement-agent",
      "kind": "routes-replies-to",
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "aisleprompt-progressive-improvement-agent", "to": "seo-implementer",
+    {"from": "aisleprompt-progressive-improvement-agent", "to": "implementer",
      "kind": "dispatches-to",
      "description": "Auto-tier recs (only when site config opts into auto_implement) dispatch to the implementer."},
 
@@ -87,7 +87,7 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "responder-agent", "to": "specpicks-progressive-improvement-agent",
      "kind": "routes-replies-to",
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "specpicks-progressive-improvement-agent", "to": "seo-implementer",
+    {"from": "specpicks-progressive-improvement-agent", "to": "implementer",
      "kind": "dispatches-to",
      "description": "Auto-tier recs dispatch to the implementer."},
 
@@ -98,7 +98,7 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "responder-agent", "to": "aisleprompt-competitor-research-agent",
      "kind": "routes-replies-to",
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "aisleprompt-competitor-research-agent", "to": "seo-implementer",
+    {"from": "aisleprompt-competitor-research-agent", "to": "implementer",
      "kind": "dispatches-to",
      "description": "Auto-tier recs dispatch to the implementer (rare for competitor recs by design)."},
 
@@ -108,7 +108,7 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "responder-agent", "to": "specpicks-competitor-research-agent",
      "kind": "routes-replies-to",
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "specpicks-competitor-research-agent", "to": "seo-implementer",
+    {"from": "specpicks-competitor-research-agent", "to": "implementer",
      "kind": "dispatches-to",
      "description": "Auto-tier recs dispatch to the implementer."},
 

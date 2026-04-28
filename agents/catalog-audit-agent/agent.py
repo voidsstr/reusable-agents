@@ -3,7 +3,7 @@
 
 Wraps an existing per-site audit script (typescript / shell) and converts
 its findings into the standard reusable-agents recommendations.json schema
-so the responder + seo-implementer flow can apply fixes via email reply.
+so the responder + implementer flow can apply fixes via email reply.
 
 Configuration (via env-pointed YAML):
   CATALOG_AUDIT_CONFIG=/path/to/site.yaml
@@ -31,7 +31,7 @@ Inherits all framework lessons from PI/CR work:
   - self.agent_id (per-site) for email subject + outbound metadata
   - send_via_msmtp uses Graph internally (msmtp is sandboxed by AppArmor)
   - Outbound metadata at agents/<agent_id>/outbound-emails/<request_id>.json
-  - Responder routes [<agent_id>:<request_id>] subject tags to seo-implementer
+  - Responder routes [<agent_id>:<request_id>] subject tags to implementer
 """
 from __future__ import annotations
 
@@ -220,6 +220,7 @@ def _latest_findings_specpicks_images(csv_glob: str) -> dict | None:
 
 class CatalogAuditAgent(AgentBase):
     agent_id = AGENT_ID
+    send_run_summary_email = False  # already sends its own report email
     name = "Catalog Audit Agent"
     description = (
         "Runs a per-site catalog quality audit (recipes, products, listings, "
@@ -330,6 +331,12 @@ class CatalogAuditAgent(AgentBase):
             "schema_version": "1",
             "site": cfg.site_id,
             "agent": self.agent_id,
+            # Duplicate as `agent_id` so the implementer dispatcher (which
+            # reads `agent_id` to pick the runbook) matches without a
+            # legacy-key fallback. PI/CR don't strictly need this because
+            # their dispatch is the default seo/AGENT.md path; catalog-audit
+            # needs the catalog-audit branch + CATALOG_AUDIT.md runbook.
+            "agent_id": self.agent_id,
             "run_ts": self.run_ts,
             "summary": (
                 f"Catalog audit on {cfg.label} found {len(recs)} actionable issue(s) "
