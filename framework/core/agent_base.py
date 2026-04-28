@@ -101,11 +101,22 @@ class AgentBase:
         triggered_by: str = "cron",
         mailer: Any = None,
     ):
-        self.agent_id = agent_id or self.__class__.agent_id
+        # Resolution order:
+        #   1. explicit constructor kwarg
+        #   2. AGENT_ID env var — set by systemd unit / agent_run_wrapper.sh
+        #      to the registered manifest id, which is per-site
+        #      (e.g. "specpicks-ebay-product-sync-agent") even when the
+        #      class-level agent_id is generic ("ebay-product-sync-agent").
+        #      Without this preference, status writes / heartbeat
+        #      end up under the wrong key and the dashboard's reaper
+        #      kills the run thinking it's stale.
+        #   3. class-level fallback
+        env_id = os.environ.get("AGENT_ID")
+        self.agent_id = agent_id or env_id or self.__class__.agent_id
         if not self.agent_id:
             raise ValueError(
                 f"{self.__class__.__name__}: agent_id must be set "
-                "(class attribute or constructor kwarg)"
+                "(class attribute, AGENT_ID env, or constructor kwarg)"
             )
         self.run_ts = run_ts or _new_run_ts()
         self.storage = storage or get_storage()
