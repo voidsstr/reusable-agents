@@ -33,7 +33,14 @@ from .storage import StorageBackend, get_storage
 logger = logging.getLogger("framework.ghost_reaper")
 
 
-STALE_RUN_GRACE_S = int(os.environ.get("AGENT_STALE_RUN_GRACE_S", "180"))
+# Long enough to cover a single claude --print web-search turn (which
+# can legitimately take 8-10 min while the host-worker heartbeat is
+# also blocked in Azure storage I/O — see benchmark-research run that
+# got false-positively reaped at 222s of stale heartbeat). The
+# secondary liveness signal below (live-LLM blob mtime) makes false
+# positives nearly impossible for LLM-using agents even at this
+# threshold.
+STALE_RUN_GRACE_S = int(os.environ.get("AGENT_STALE_RUN_GRACE_S", "900"))
 
 
 def _parse_iso(s: str) -> Optional[datetime]:
@@ -73,6 +80,38 @@ def reap_one(
     age = (datetime.now(timezone.utc) - updated_at).total_seconds()
     if age <= grace_s:
         return None
+
+    # Secondary liveness signal: even if status.json hasn't been
+    # touched in `grace_s`, the agent may still be actively streaming
+    # LLM output (long claude --print calls don't go through
+    # StatusReporter, and the host-worker bash heartbeat occasionally
+    # blocks in Azure storage retries). If the live-LLM tail blob has
+    # been updated within `grace_s`, treat the run as alive and skip
+    # reaping. Best-effort — any failure here falls through to reap.
+    try:
+        from . import llm_stream
+        tail_key = llm_stream.live_llm_tail_key(agent_id)
+        body = s.read_text(tail_key) or ""
+        if body.startswith("__META__: "):
+            import json as _json
+            nl = body.find("\n")
+            meta_line = body[len("__META__: "):nl] if nl > 0 else ""
+            try:
+                meta = _json.loads(meta_line)
+            except Exception:
+                meta = {}
+            tail_updated = _parse_iso(meta.get("updated_at") or "")
+            if tail_updated:
+                tail_age = (datetime.now(timezone.utc) - tail_updated).total_seconds()
+                if tail_age <= grace_s:
+                    logger.info(
+                        "[ghost-reaper] %s status stale %ds but live-LLM "
+                        "tail fresh %ds ago — keeping run alive",
+                        agent_id, int(age), int(tail_age),
+                    )
+                    return None
+    except Exception:
+        pass
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     msg = (
