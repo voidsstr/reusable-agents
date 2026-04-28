@@ -101,6 +101,34 @@ async def lifespan(app: FastAPI):
         logger.info(f"snapshot_updater started (interval={interval}s)")
     except Exception as e:
         logger.warning(f"snapshot_updater start failed: {e}")
+    # Startup ghost-run reap: any agent that was mid-run when the API last
+    # restarted (or whose host-worker died) gets flipped to failure here.
+    try:
+        from framework.core.ghost_reaper import reap_all
+        reaped = reap_all()
+        if reaped:
+            logger.warning(f"ghost-reaper: flipped {len(reaped)} stale runs to failure: {reaped}")
+        else:
+            logger.info("ghost-reaper: no stale runs at startup")
+    except Exception as e:
+        logger.warning(f"ghost-reaper startup sweep failed: {e}")
+    # Periodic ghost-run sweep — every 60s, catch agents whose host-worker
+    # died mid-run between API list calls.
+    try:
+        from framework.core import ghost_reaper as _gr
+        import threading
+        def _sweep_loop():
+            import time
+            while True:
+                time.sleep(60)
+                try:
+                    _gr.reap_all()
+                except Exception:
+                    pass
+        threading.Thread(target=_sweep_loop, daemon=True, name="ghost-reaper").start()
+        logger.info("ghost-reaper periodic sweep started (60s)")
+    except Exception as e:
+        logger.warning(f"ghost-reaper periodic sweep start failed: {e}")
     try:
         loop = asyncio.get_running_loop()
         _install_signal_handlers(loop)

@@ -305,6 +305,17 @@ def list_all():
     providers_cache, defaults_cache = _get_config_caches()
     manifests = list(registry.list_agents())
 
+    # Lazy ghost-run reap — costs O(reaped agents) writes, zero on the
+    # happy path. Anything stuck in running/starting with a stale
+    # heartbeat (>180s) gets flipped to failure so the dashboard stops
+    # showing a phantom "● tailing" badge and the next manual trigger
+    # is unblocked.
+    try:
+        from framework.core.ghost_reaper import reap_all
+        reap_all(storage=s)
+    except Exception:
+        pass
+
     # ------------------------------------------------------------------
     # Status fetch:
     #   1. Try the single-blob snapshot (registry/agent-snapshot.json),

@@ -127,6 +127,49 @@ process_one() {
     heartbeat_loop "$agent_id" "$run_id" &
     local hb_pid=$!
 
+    # Crash-safety: if THIS bash subshell dies (SIGTERM, SIGKILL not
+    # catchable, but EXIT covers normal termination + most signals), make
+    # sure we've written a terminal state so the dashboard doesn't show a
+    # phantom "running" forever. The API-side ghost-reaper is the
+    # belt-and-suspenders backup for SIGKILL cases.
+    cleanup_on_exit() {
+        local rc_local=$?
+        kill "$hb_pid" 2>/dev/null || true
+        # If status is still running/starting, flip it to failure with a
+        # crash note. Idempotent — agent's own terminal write wins if it
+        # already happened.
+        AGENT_ID="$agent_id" RC="$rc_local" \
+        PYTHONPATH="/home/voidsstr/development/reusable-agents" \
+        python3 - <<'PY' 2>/dev/null || true
+import os
+from datetime import datetime, timezone
+from framework.core.storage import get_storage
+s = get_storage()
+agent = os.environ["AGENT_ID"]
+sp_key = f"agents/{agent}/status.json"
+prev = s.read_json(sp_key) or {}
+if prev.get("state") in ("running", "starting"):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    prev.update({
+        "state": "failure",
+        "updated_at": now,
+        "progress": 1.0,
+        "current_action": "",
+        "message": f"host-worker bash exited rc={os.environ.get('RC','?')} before agent posted terminal state",
+    })
+    prev.setdefault("agent_id", agent)
+    prev.setdefault("schema_version", "1")
+    prev.setdefault("internal", {})["reaped_by"] = "host-worker-trap"
+    s.write_json(sp_key, prev)
+    s.append_jsonl("registry/events.jsonl", {
+        "ts": now, "agent_id": agent,
+        "state": "failure", "message": prev["message"],
+        "current_action": "host-worker-trap",
+    })
+PY
+    }
+    trap cleanup_on_exit EXIT
+
     # Stuck-process watchdog: kill the agent if it runs longer than the
     # configured wall-clock cap. Default 2h — most legitimate runs finish
     # well under this; anything beyond is almost certainly hung. Override
