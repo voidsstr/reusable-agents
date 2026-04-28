@@ -133,11 +133,53 @@ class AgentBase:
         # Lifecycle bookkeeping
         self._started_at = _now()
         self._ended_at: Optional[str] = None
+        self._heartbeat_thread = None
+        self._heartbeat_stop = None
 
     # ---- Lifecycle hooks ----
 
     def setup(self) -> None:
         """Override for one-time process init (load API keys, etc.)."""
+
+    def _start_heartbeat(self) -> None:
+        """Background thread that refreshes status.json's `updated_at`
+        every 30s while the agent is in running/starting state. Required
+        because systemd-timer-launched agents bypass host-worker.sh and
+        otherwise have no liveness signal once they stop calling
+        self.status() — long claude calls or DB queries can stall the
+        status update for tens of minutes and trip the ghost-reaper.
+
+        Idempotent: a second call does nothing while the first thread
+        is alive.
+        """
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+        import threading
+        self._heartbeat_stop = threading.Event()
+
+        def _beat():
+            from .status import status_key
+            while not self._heartbeat_stop.is_set():
+                try:
+                    cur = self.storage.read_json(status_key(self.agent_id)) or {}
+                    if cur.get("state") in ("running", "starting"):
+                        cur["updated_at"] = _now()
+                        self.storage.write_json(status_key(self.agent_id), cur)
+                except Exception:
+                    pass
+                # 30s — well under the 900s ghost-reaper grace, cheap on
+                # blob writes.
+                self._heartbeat_stop.wait(30.0)
+
+        self._heartbeat_thread = threading.Thread(
+            target=_beat, name=f"agent-heartbeat-{self.agent_id}", daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_stop is not None:
+            self._heartbeat_stop.set()
+        # Don't join — daemon thread, lets the process exit cleanly.
 
     def pre_run(self) -> None:
         """Framework-provided: load state, drain queues. Subclasses can
@@ -495,6 +537,7 @@ class AgentBase:
         """Top-level lifecycle invocation. Call this to do one full pass."""
         try:
             self.setup()
+            self._start_heartbeat()
             self.pre_run()
             try:
                 result = self.run()
@@ -533,6 +576,7 @@ class AgentBase:
             self.post_run(result)
             return result
         finally:
+            self._stop_heartbeat()
             try:
                 self.teardown()
             except Exception as e:
