@@ -27,7 +27,7 @@ protocol, confirmation gates).
 | "compare my site to competitors / find feature gaps" | `site-quality-recommender` | `competitor-research-agent` |
 | "one step in a pipeline (collect / analyze / report / ship)" | `pipeline-stage` | `seo-data-collector`, `seo-analyzer` |
 | "poll an inbox / route replies" | `inbox-poller` | `responder-agent` |
-| "apply approved recs as code edits" | `llm-code-editor` | `seo-implementer` |
+| "apply approved recs as code edits" | `llm-code-editor` | `implementer` |
 | "just run a script on a cron" | `scheduled-task` | most agents in `nsc-assistant/agents/` |
 
 Each blueprint's `BLUEPRINT.md` has anti-patterns + integration points.
@@ -201,6 +201,50 @@ UI: `framework/ui/src/`. React + Vite + Tailwind. Iframe-friendly.
 Templates: `_template/agent/` is what `create-agent.sh` clones from.
 
 Tests: `framework/tests/` — 20 pytest cases against LocalFilesystemStorage.
+
+## Deploying the agent dashboard to Azure — REQUIRED after every change
+
+**Every change to `framework/api/` or `framework/ui/` MUST be deployed to
+Azure as part of the same task.** Local docker compose updates only the
+dev box at http://localhost:8091; the production dashboard at the
+Container App FQDN keeps serving the previous build until you push.
+
+Deploy command (from the repo root):
+
+```bash
+cd /home/voidsstr/development/reusable-agents
+bash install/deploy-azure.sh
+```
+
+The script builds + pushes both images to `nscappsacr` ACR and updates
+the `agents` Container App in the `nsc-apps` resource group. Default
+tag is a UTC timestamp; pass an explicit tag if you need to roll back
+to a specific build (`bash install/deploy-azure.sh 20260428-1620`).
+
+When this is required:
+- `framework/api/**` (FastAPI routes, lifespan, host-worker, core/*)
+- `framework/ui/**` (React components, pages, styling)
+- `framework/core/**` (shared modules the API imports — agent_base,
+  status, ghost_reaper, llm_stream, storage, decision_log, etc.)
+
+When this is NOT required:
+- Agent code under `agents/<id>/` (host-worker re-execs each run from
+  the host filesystem, so a `git pull` on the host is enough)
+- Docs (`*.md`), tests, blueprints
+- `_template/`, `install/` (shell scripts run on the host)
+
+After deploying, verify the new build:
+
+```bash
+# FQDN comes from the script's final "Deploy complete" line, or:
+az containerapp show -g nsc-apps -n agents --query properties.configuration.ingress.fqdn -o tsv
+
+# Confirm it's serving the new tag
+curl -sI https://<fqdn>/ | head -3
+```
+
+If the user reports "the dashboard doesn't show my change," your first
+check should be: did this task include a deploy-azure.sh run?
 
 ## Hosting note
 
