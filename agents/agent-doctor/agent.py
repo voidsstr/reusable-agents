@@ -516,18 +516,19 @@ Output ONE single JSON object (no prose, no markdown fences) with this shape:
 {{
   "diagnosis": "1-2 sentences on what failed and why",
   "confidence": 0.0,
-  "fix_type": "wait" | "manifest-env-inline" | "manifest-cron-fix" | "runbook-tweak" | "code-edit" | "data-issue" | "external-blocker" | "escalate",
-  "fix_detail": "specific change to make. For manifest-env-inline: which var + what value. For others: brief description.",
+  "fix_type": "wait" | "manifest-env-inline" | "stale-service-unit" | "manifest-cron-fix" | "runbook-tweak" | "code-edit" | "data-issue" | "external-blocker" | "escalate",
+  "fix_detail": "specific change to make. For manifest-env-inline: 'VAR=literal-value'. For runbook-tweak: 1-line description of the change to make to the runbook so this won't recur. For others: brief description.",
   "auto_apply": true|false
 }}
 
 # Fix type guide
 
-- "wait"               — transient, next cron firing will succeed (set auto_apply=true)
-- "manifest-env-inline" — entry_command uses ${{VAR}} that systemd doesn't expand; tell us which var and what literal value to substitute (auto_apply=true if you're confident)
+- "wait"               — transient (network blip, momentary 5xx); next cron firing will succeed (auto_apply=true)
+- "manifest-env-inline" — entry_command uses ${{VAR}} that systemd doesn't expand; fix_detail must be 'VAR=literal-value' (auto_apply=true if confident)
+- "stale-service-unit" — manifest on disk looks right but running .service is stale (e.g. someone hand-edited the manifest without re-registering); doctor will POST to /api/agents/register (auto_apply=true)
 - "manifest-cron-fix"  — cron is wrong (auto_apply=false; needs human review of intent)
-- "runbook-tweak"      — claude/the agent needs different instructions; describe what (auto_apply=false)
-- "code-edit"          — bug in agent.py / a script (auto_apply=false; we'll email full context)
+- "runbook-tweak"      — agent's runbook (AGENT.md / ARTICLE_AUTHOR.md / etc.) is missing instructions that would have prevented this; fix_detail describes the change in 1 line (auto_apply=true — doctor will shell to claude to make the actual edit + commit + push). Use this when the failure is "claude misunderstood what to do" not "the code is broken"
+- "code-edit"          — bug in agent.py / a script (auto_apply=false; we'll email full context for human to apply)
 - "data-issue"         — bad input data (e.g. junk GSC query, malformed CSV); not a code/infra problem (auto_apply=true; agent should skip + move on)
 - "external-blocker"   — third-party API rate-limited/down/changed; nothing we can do (auto_apply=false)
 - "escalate"           — you can't tell from this evidence; ask human (auto_apply=false)
@@ -535,7 +536,8 @@ Output ONE single JSON object (no prose, no markdown fences) with this shape:
 Be DIRECT and SPECIFIC. Don't hedge. confidence ∈ [0, 1] reflects how
 sure you are about both diagnosis AND fix. Set auto_apply=true only when
 both confidence ≥ 0.8 AND fix_type is in the safe-to-auto set
-(wait, manifest-env-inline, data-issue).
+(wait, manifest-env-inline, stale-service-unit, runbook-tweak,
+data-issue).
 """
     try:
         # Use claude CLI via the pool. --print = one-shot, no session.
@@ -559,6 +561,135 @@ both confidence ≥ 0.8 AND fix_type is in the safe-to-auto set
         return {"error": f"non-JSON response: {e}", "raw": out[:500] if 'out' in dir() else ""}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _re_register_agent(target: str) -> tuple[bool, str]:
+    """POST the agent's manifest to /api/agents/register so the framework
+    re-reads it from disk and (re)writes its systemd unit. Used when the
+    on-disk manifest was edited (by us or by hand) but the running .service
+    is stale."""
+    api = (os.environ.get("FRAMEWORK_API_URL") or "http://localhost:8093").rstrip("/")
+    token = os.environ.get("FRAMEWORK_API_TOKEN", "")
+    # Find the manifest on disk
+    candidates = []
+    for base in [
+        "/home/voidsstr/development/nsc-assistant/agents",
+        "/home/voidsstr/development/specpicks/agents",
+        "/home/voidsstr/development/reusable-agents/agents",
+    ]:
+        candidates.append(Path(base) / target / "manifest.json")
+        parts = target.split("-")
+        if len(parts) > 2:
+            candidates.append(Path(base) / "-".join(parts[1:]) / "manifest.json")
+    manifest_path = None
+    for p in candidates:
+        if p.is_file():
+            try:
+                d = json.loads(p.read_text())
+                if d.get("id") == target:
+                    manifest_path = p
+                    break
+            except Exception:
+                pass
+    if not manifest_path:
+        return False, f"manifest.json not found for {target}"
+    try:
+        body = manifest_path.read_text().encode()
+        req = urllib.request.Request(
+            f"{api}/api/agents/register",
+            data=body, method="POST",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status < 400, f"re-registered via /api/agents/register (rc={resp.status})"
+    except Exception as e:
+        return False, f"re-register POST failed: {e}"
+
+
+def _apply_runbook_tweak(target: str, fix_detail: str, log_excerpt: str) -> tuple[bool, str]:
+    """Have claude edit the agent's runbook to incorporate the fix.
+
+    fix_detail describes what to change (1-line summary from the diagnostic
+    LLM). We shell to claude with: the runbook content + the failing log
+    excerpt + the fix_detail; ask it to produce the corrected runbook.
+    Then write the result back, git commit + push.
+    """
+    runbook_path = None
+    for base in [
+        "/home/voidsstr/development/reusable-agents/agents",
+        "/home/voidsstr/development/nsc-assistant/agents",
+        "/home/voidsstr/development/specpicks/agents",
+    ]:
+        for fname in ("AGENT.md", "ARTICLE_AUTHOR.md", "H2H.md", "CATALOG_AUDIT.md", "README.md"):
+            cand = Path(base) / target / fname
+            if cand.is_file():
+                runbook_path = cand
+                break
+            parts = target.split("-")
+            if len(parts) > 2:
+                cand = Path(base) / "-".join(parts[1:]) / fname
+                if cand.is_file():
+                    runbook_path = cand
+                    break
+        if runbook_path:
+            break
+    if not runbook_path:
+        return False, f"no runbook found for {target}"
+    original = runbook_path.read_text()
+    # Cap original at 16KB so the prompt stays bounded
+    if len(original) > 16000:
+        return False, f"runbook too large ({len(original)} chars) for safe auto-edit"
+
+    prompt = f"""Edit the runbook below so the failure described in the
+log excerpt won't recur. Return ONLY the corrected runbook in full
+markdown; no commentary, no fences. The fix to apply: {fix_detail}
+
+# Failure log excerpt (last ~1500 chars)
+{log_excerpt[-1500:]}
+
+# Current runbook ({runbook_path})
+{original}
+"""
+    try:
+        proc = subprocess.run(
+            ["claude", "--print", "--dangerously-skip-permissions",
+             "--max-turns", "1", "--output-format", "text"],
+            input=prompt, capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            return False, f"claude edit rc={proc.returncode}: {proc.stderr[-200:]}"
+        new_text = proc.stdout
+        # Strip any ``` markdown fences claude may have added despite the instruction
+        if new_text.startswith("```"):
+            new_text = re.sub(r"^```\w*\n", "", new_text)
+            new_text = re.sub(r"\n```$", "", new_text.rstrip())
+        # Sanity: the edit shouldn't shrink the file by >40% (suggests claude
+        # truncated something). And it must not be empty.
+        if len(new_text.strip()) < 100:
+            return False, "claude returned suspiciously short content; rejecting"
+        if len(new_text) < len(original) * 0.6:
+            return False, f"edit shrunk file from {len(original)} to {len(new_text)} (>40% drop); rejecting"
+        # Write + commit
+        runbook_path.write_text(new_text)
+        repo_root = subprocess.run(
+            ["git", "-C", str(runbook_path.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if not repo_root:
+            return False, "couldn't resolve git repo root"
+        commit_msg = f"agent-doctor: auto-fix runbook for {target}\n\nFix applied: {fix_detail[:200]}\n\nGenerated by agent-doctor recipe_llm_diagnose / runbook-tweak."
+        for cmd in (
+            ["git", "-C", repo_root, "add", str(runbook_path)],
+            ["git", "-C", repo_root, "commit", "-m", commit_msg],
+            ["git", "-C", repo_root, "push"],
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr).lower():
+                return False, f"git step {cmd[2:4]} failed: {r.stderr[-200:]}"
+        return True, f"runbook edited + committed: {runbook_path}"
+    except Exception as e:
+        return False, f"runbook tweak exception: {e}"
 
 
 def _apply_manifest_env_inline(target: str, var_name: str, var_value: str) -> tuple[bool, str]:
@@ -643,18 +774,30 @@ def recipe_llm_diagnose(target: str, ctx: dict) -> tuple[str, str]:
         var_name, var_value = m.group(1), m.group(2).strip().strip("'").strip('"')
         ok, det = _apply_manifest_env_inline(target, var_name, var_value)
         if ok:
-            # Also re-register so the new manifest takes effect on next cron tick
-            try:
-                api = (os.environ.get("FRAMEWORK_API_URL") or "http://localhost:8093").rstrip("/")
-                token = os.environ.get("FRAMEWORK_API_TOKEN", "")
-                # The framework re-loads manifest on register call, but we
-                # need to actually POST the new manifest. Skip for now —
-                # the manifest is on disk, and the next manual register-agents
-                # run picks it up. Or the operator can re-register.
-            except Exception:
-                pass
-            return ("fixed", f"LLM auto-fix: {det}. {notes_hdr}")
+            # Re-register so the new manifest's entry_command takes effect
+            # in the running .service file (framework writes systemd units
+            # off the registered manifest, not directly off disk).
+            ok2, det2 = _re_register_agent(target)
+            return ("fixed", f"LLM auto-fix: {det}; re-register={ok2} ({det2}). {notes_hdr}")
         return ("escalated", f"LLM proposed manifest-env-inline but apply failed: {det}. {notes_hdr}")
+
+    if fix_type == "runbook-tweak":
+        # Have claude edit the runbook to incorporate the fix. The doctor
+        # commits + pushes the change automatically. Constrained: file must
+        # be <16KB; resulting edit can't shrink the file >40%.
+        ok, det = _apply_runbook_tweak(target, fix_detail, excerpt)
+        if ok:
+            return ("fixed", f"LLM auto-fix runbook: {det}. {notes_hdr}")
+        return ("escalated", f"runbook-tweak attempt failed: {det}. {notes_hdr}")
+
+    if fix_type == "stale-service-unit":
+        # Manifest on disk is correct but the running .service file is stale
+        # (manual edit + no re-register). Pull the manifest into the framework
+        # registry, which rewrites the unit + restarts the timer.
+        ok, det = _re_register_agent(target)
+        if ok:
+            return ("fixed", f"LLM auto-fix: {det}. {notes_hdr}")
+        return ("escalated", f"re-register failed: {det}. {notes_hdr}")
 
     # Anything else with auto_apply=true is suspicious; escalate to be safe
     return ("escalated", f"LLM said auto_apply=true for fix_type={fix_type} (we don't auto-apply that): {notes_hdr}")
