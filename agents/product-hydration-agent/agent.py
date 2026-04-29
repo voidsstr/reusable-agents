@@ -159,28 +159,33 @@ def _select_candidates(conn, *, content_types: list[str],
     for ct in content_types:
         col, _, _ = CONTENT_SPEC[ct]
         cols.append(col)
-    null_clauses = " OR ".join([f"{c} IS NULL" for c in cols])
+    # All hydration columns live on `products` (alias `p`).
+    null_clauses = " OR ".join([f"p.{c} IS NULL" for c in cols]) or "FALSE"
     site_clause = ""
     params: list[Any] = []
     if site_id_filter:
-        site_clause = "AND site_id = %s"
+        site_clause = "AND p.site_id = %s"
         params.append(site_id_filter)
     params.append(stale_after_days)
     params.append(batch_size)
 
+    # `category_slug` was a denormalized column; the schema now keeps the
+    # slug on the categories table referenced via products.category_id.
+    # Join + alias so callers still see `category_slug` in the row dict.
     sql = f"""
-        SELECT id, site_id, asin, title, brand, price, rating, review_count,
-               features, description, category_slug,
-               pros_cons, faq, seo_meta, hydrated_at
-        FROM products
-        WHERE is_active = TRUE
+        SELECT p.id, p.site_id, p.asin, p.title, p.brand, p.price, p.rating, p.review_count,
+               p.features, p.description, c.slug AS category_slug,
+               p.pros_cons, p.faq, p.seo_meta, p.hydrated_at
+        FROM products p
+        LEFT JOIN categories c ON c.id = p.category_id
+        WHERE p.is_active = TRUE
           {site_clause}
           AND (
               {null_clauses}
-              OR hydrated_at IS NULL
-              OR hydrated_at < NOW() - (%s || ' days')::interval
+              OR p.hydrated_at IS NULL
+              OR p.hydrated_at < NOW() - (%s || ' days')::interval
           )
-        ORDER BY {priority_column} DESC NULLS LAST, id ASC
+        ORDER BY p.{priority_column} DESC NULLS LAST, p.id ASC
         LIMIT %s
     """
     with conn.cursor() as cur:

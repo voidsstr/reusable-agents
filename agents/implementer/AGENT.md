@@ -16,8 +16,45 @@ to the configured site repo.
 ## What you do
 
 1. **Read** `$RESPONDER_RUN_DIR/recommendations.json`. Keep only the recs in
-   `$RESPONDER_REC_IDS`. Bail with a no-op if any are already
-   `implemented: true`.
+   `$RESPONDER_REC_IDS`. **Skip recs already `implemented: true`** — they
+   were applied in a prior run; mention them in the run summary as
+   "already-implemented" but DO NOT recommit, DO NOT write a new
+   summary file, and DO NOT count them toward this batch's applied set.
+
+   **Pre-flight: check whether the rec is ALREADY satisfied in code.**
+   For each pending rec, before editing anything:
+   - Read the file(s) the rec targets (or `grep` for the SEO/HTML
+     anchors / JSON-LD types / FAQ patterns it mentions).
+   - If the change is already present (e.g. the FAQPage schema the rec
+     proposes is already on the page, or the internal link the rec
+     suggests already exists in the relevant block), MARK THE REC AS
+     ALREADY-IMPLEMENTED:
+     1. Update `recommendations.json` in place: set
+        `implemented: true`, `implemented_at: <ISO>`,
+        `implemented_run_ts: <this run>`,
+        `implemented_via: pre-existing` (so the framework can tell this
+        from a real apply), and a short `evidence:` note pointing at the
+        existing file/line that already satisfies the rec.
+     2. Write `changes/<rec-id>.summary.md` starting with
+        `ALREADY-IMPLEMENTED: <one-line evidence>` (e.g.
+        "ALREADY-IMPLEMENTED: FAQPage schema already present on
+        src/recipe-page.ts:1842, no edit needed").
+     3. **Do NOT make a code change.** **Do NOT make a git commit.** The
+        recommendation analyzer will see `implemented: true` next run
+        and stop re-proposing it.
+
+   This pre-flight check is REQUIRED — agents otherwise hallucinate
+   "fixes" for already-fixed code.
+
+   **Per-rec deep context** (when present): the producing agent may have
+   written supporting material at `$RESPONDER_RUN_DIR/rec-context/<rec-id>/`
+   — a `context.json` plus an `attachments/` directory of arbitrary files
+   (HTML excerpts, scraped competitor pages, related queries, sample DB
+   rows, etc.). Read these before applying the rec when they exist; they
+   give you everything the producing agent saw without you having to
+   re-fetch. Files are materialized to your real-FS run dir via the
+   responder's Azure→tempdir sync, so they're directly accessible. See
+   `framework/core/rec_context.py` for the schema.
 
 2. **Read the site config** for `implementer.repo_path`. Switch to that
    directory. Read CLAUDE.md / AGENTS.md / README.md for any project-specific
@@ -57,11 +94,55 @@ to the configured site repo.
 
 - **Read each file before editing** (diff against a clean read).
 - **Never `--no-verify` on git commit.** If hooks fail, fix them.
-- **One commit per implementer run** (covering all recs in this batch).
+- **You MUST `git commit` per recommendation. Not committing = the rec
+  did NOT happen.** This is enforced: the framework only counts a rec
+  as "applied" when it sees a NEW git SHA on the implementer repo
+  (compared to the pre-run SHA the wrapper captured). Writing files in
+  `changes/<rec-id>.{diff,summary.md}` is observability, NOT a substitute
+  for a commit.
+
+  **Per-rec commit flow** — for each rec you actually code:
+  1. Edit the file(s).
+  2. `git add <only-the-paths-you-edited>` — never broad globbing.
+  3. `git commit -m "<agent-id>: <rec-id>: <one-line title>"` with a
+     2–3 sentence body covering what + why.
+  4. Verify with `git show --stat HEAD` — if it includes paths you didn't
+     mean to stage, `git reset --soft HEAD~1` and recommit.
+  5. Then write `changes/<rec-id>.summary.md` and (optionally)
+     `changes/<rec-id>.diff` from `git show HEAD`.
+
+  Commit message format (subject + body):
+  ```
+  <agent-id>: <rec-id>: <one-line title>
+
+  <2-3 sentence what+why summary>
+  rec-context: <run-dir>/rec-context/<rec-id>/  (if present)
+  ```
+  Example:
+  ```
+  aisleprompt-seo-opportunity-agent: rec-007: Add FAQ schema to /recipes/carbonara
+
+  Adds an inline FAQPage JSON-LD block at the bottom of the recipe page
+  with 5 Q&A pairs targeting the top "people also ask" queries for
+  Roman carbonara. Captures SERP FAQ snippets and primes LLM citation.
+  ```
+
+  For recs you decide to **skip** (typo data, infeasible, requires human
+  judgment): write `changes/<rec-id>.summary.md` starting with
+  `DEFERRED:` or `SKIPPED:` and DO NOT commit. The framework will
+  surface these correctly in the completion email as "skipped".
+
+  The order matters: commit FIRST, write summary AFTER. If you write
+  summaries before committing and then bail, the framework sees the
+  artifacts but no commit and (correctly) reports the run as paused —
+  which is what just happened on the previous test run.
 - **Stay within the rec's outline.** If the rec says "modify simple-server.ts",
   don't refactor unrelated files.
 - **Don't add npm/pip dependencies** without approval — defer those.
 - **Don't run tests yourself** — that's deployer's job.
+- **Don't deploy.** The deployer runs only after every batch in this
+  chain finishes (see auto-chain logic in run.sh). Your job stops at
+  per-rec commits + writing each `changes/<rec-id>.summary.md`.
 
 ## Working-tree etiquette (CRITICAL — added after a 2026-04-27 false-positive revert)
 

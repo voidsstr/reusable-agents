@@ -352,15 +352,16 @@ function GraphInner() {
   const selectedOutgoing = useMemo(() => edges.filter(e => e.source === selectedId), [edges, selectedId])
 
   return (
-    <div className="h-[calc(100vh-65px)] w-full flex flex-col bg-surface-subtle text-ink-900 -m-4">
-      <div className="px-4 py-2 border-b border-surface-divider flex items-center gap-3 bg-surface-page">
-        <h1 className="text-sm font-semibold">Agent Dependency Graph</h1>
-        <span className="text-xs text-ink-500">{nodes.length} agents · {edges.length} dependencies</span>
-        <div className="ml-auto flex items-center gap-2 text-xs">
-          {savedAt && <span className="text-ink-500">saved {savedAt}</span>}
-          <button onClick={saveLayout} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">💾 save layout</button>
-          <button onClick={autoLayout} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⤴ auto layout</button>
-          <button onClick={() => { localStorage.removeItem(STORAGE_KEY); window.location.reload() }} className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⟲ reset</button>
+    <div className="h-[calc(100vh-180px)] md:h-[calc(100vh-65px)] w-full flex flex-col bg-surface-subtle text-ink-900 -mx-3 sm:-mx-5 -my-4 sm:-my-6">
+      <div className="px-3 sm:px-4 py-2 border-b border-surface-divider flex flex-wrap items-center gap-2 sm:gap-3 bg-surface-page">
+        <h1 className="text-sm font-semibold whitespace-nowrap">Agent Graph</h1>
+        <span className="text-xs text-ink-500 hidden sm:inline">{nodes.length} agents · {edges.length} dependencies</span>
+        <span className="text-xs text-ink-500 sm:hidden">{nodes.length}n / {edges.length}e</span>
+        <div className="ml-auto flex items-center gap-1 sm:gap-2 text-xs">
+          {savedAt && <span className="text-ink-500 hidden md:inline">saved {savedAt}</span>}
+          <button onClick={saveLayout} aria-label="Save layout" className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">💾<span className="hidden sm:inline ml-1">save</span></button>
+          <button onClick={autoLayout} aria-label="Auto layout" className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⤴<span className="hidden sm:inline ml-1">auto</span></button>
+          <button onClick={() => { localStorage.removeItem(STORAGE_KEY); window.location.reload() }} aria-label="Reset" className="px-2 py-1 bg-surface-subtle hover:bg-ink-200 rounded">⟲<span className="hidden sm:inline ml-1">reset</span></button>
         </div>
       </div>
 
@@ -411,9 +412,17 @@ function GraphInner() {
           </ReactFlow>
         </div>
 
-        {/* Side panel */}
+        {/* Side panel — full-width slide-up sheet on mobile, fixed sidebar on desktop */}
         {selectedNode && (
-          <aside className="w-80 border-l border-surface-divider bg-surface-page p-4 overflow-auto text-xs">
+          <aside className="
+            fixed md:static inset-x-0 bottom-0 md:inset-auto z-30
+            w-full md:w-80 max-h-[60vh] md:max-h-none
+            border-t md:border-t-0 md:border-l border-surface-divider
+            bg-surface-page p-4 overflow-auto text-xs
+            shadow-2xl md:shadow-none
+            rounded-t-xl md:rounded-none
+            animate-slide-up md:animate-none
+          ">
             <div className="flex items-start justify-between mb-3">
               <div>
                 <div className="text-sm font-semibold text-ink-900">{(selectedNode.data as any).name}</div>

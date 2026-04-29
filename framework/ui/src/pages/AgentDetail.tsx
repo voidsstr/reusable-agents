@@ -69,15 +69,18 @@ export default function AgentDetail() {
     return () => { ws?.close() }
   }, [id])
 
+  // Compute these BEFORE any early return — useRunDuration is a hook and must
+  // be called unconditionally on every render to satisfy the rules of hooks.
+  const liveState = liveStatus?.state ?? detail?.last_run_status ?? ''
+  const isActive = liveState === 'running' || liveState === 'starting'
+  const runDuration = useRunDuration(isActive ? liveStatus?.started_at : null)
+
   if (error) {
     return <div className="p-3 bg-status-failure-bg border border-status-failure-glow/40 rounded-lg text-status-failure-fg">{error}</div>
   }
   if (!detail) {
     return <div className="text-ink-500 py-12 text-center">Loading…</div>
   }
-  const liveState = liveStatus?.state ?? detail.last_run_status ?? ''
-  const isActive = liveState === 'running' || liveState === 'starting'
-  const runDuration = useRunDuration(isActive ? liveStatus?.started_at : null)
 
   return (
     <div className={`space-y-4 ${isActive ? 'agent-detail-active' : ''}`}>
@@ -86,20 +89,20 @@ export default function AgentDetail() {
       {isActive && liveStatus && (
         <div
           data-testid="live-action-banner"
-          className={`rounded-xl p-4 flex items-center gap-3 agent-active-banner border-2 shadow-card ${
+          className={`rounded-xl p-3 sm:p-4 flex flex-wrap sm:flex-nowrap items-center gap-3 agent-active-banner border-2 shadow-card ${
             liveState === 'starting'
               ? 'bg-gradient-to-r from-status-starting-bg to-status-starting-bg/30 border-status-starting-glow/60'
               : 'bg-gradient-to-r from-status-running-bg to-status-running-bg/30 border-status-running-glow/60'
           }`}
         >
-          <div className="text-3xl animate-spin" style={{ animationDuration: '2s' }}>⚙️</div>
+          <div className="text-2xl sm:text-3xl animate-spin shrink-0" style={{ animationDuration: '2s' }}>⚙️</div>
           <div className="flex-1 min-w-0">
-            <div className={`text-xs uppercase font-bold tracking-wide ${
+            <div className={`text-[10px] sm:text-xs uppercase font-bold tracking-wide ${
               liveState === 'starting' ? 'text-status-starting-fg' : 'text-status-running-fg'
             }`}>
               ● {liveState === 'starting' ? 'Starting up' : 'Working now'}
             </div>
-            <div className="text-base font-semibold text-ink-900 truncate">
+            <div className="text-sm sm:text-base font-semibold text-ink-900 truncate">
               {liveStatus.current_action || liveStatus.message || 'Running…'}
             </div>
             {liveStatus.message && liveStatus.current_action && liveStatus.message !== liveStatus.current_action && (
@@ -107,11 +110,11 @@ export default function AgentDetail() {
             )}
           </div>
           {liveStatus.progress > 0 && liveStatus.progress < 1 && (
-            <div className="flex flex-col items-end gap-1 min-w-[120px]">
+            <div className="flex flex-col items-end gap-1 min-w-[100px] sm:min-w-[120px] shrink-0">
               <div className="text-xs font-mono text-ink-700 font-semibold">
                 {(liveStatus.progress * 100).toFixed(0)}%
               </div>
-              <div className="w-32 h-2 bg-surface-divider rounded-full overflow-hidden">
+              <div className="w-24 sm:w-32 h-2 bg-surface-divider rounded-full overflow-hidden">
                 <div
                   className={`h-full transition-all rounded-full ${
                     liveState === 'starting' ? 'bg-status-starting-glow' : 'bg-status-running-glow'
@@ -123,9 +126,9 @@ export default function AgentDetail() {
             </div>
           )}
           {runDuration && (
-            <div className="flex flex-col items-end gap-0.5 ml-3 pl-3 border-l border-surface-divider">
-              <div className="text-[10px] uppercase tracking-wide text-ink-500 font-mono">running for</div>
-              <div className="text-base font-mono font-bold text-status-running-fg" title={`Started ${liveStatus.started_at}`}>
+            <div className="flex flex-col items-end gap-0.5 ml-0 sm:ml-3 pl-3 border-l border-surface-divider shrink-0">
+              <div className="text-[10px] uppercase tracking-wide text-ink-500 font-mono">running</div>
+              <div className="text-sm sm:text-base font-mono font-bold text-status-running-fg" title={`Started ${liveStatus.started_at}`}>
                 ⏱ {runDuration}
               </div>
             </div>
@@ -133,14 +136,14 @@ export default function AgentDetail() {
         </div>
       )}
 
-      <div className="flex items-start justify-between gap-4">
-        <div>
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
+        <div className="min-w-0 flex-1">
           <Link to="/" className="text-xs text-ink-500 hover:text-accent-600 transition-colors">← agents</Link>
-          <h1 className="text-2xl font-semibold tracking-tight text-ink-900 mt-1">{detail.name}</h1>
-          <div className="text-xs text-ink-500 font-mono mt-0.5">{detail.id}</div>
+          <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-ink-900 mt-1 break-words">{detail.name}</h1>
+          <div className="text-xs text-ink-500 font-mono mt-0.5 break-all">{detail.id}</div>
           {detail.description && <div className="text-sm text-ink-600 mt-2 max-w-2xl leading-relaxed">{detail.description}</div>}
         </div>
-        <div className="flex flex-col items-end gap-2">
+        <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 flex-wrap sm:flex-nowrap">
           <StatusBadge state={liveState} pulsing={liveState === 'running' || liveState === 'starting'} />
           <div className="flex gap-1.5">
             {(() => {
@@ -192,20 +195,28 @@ export default function AgentDetail() {
         />
       )}
 
-      <div className="border-b border-surface-divider flex gap-1 overflow-x-auto">
-        {TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`px-3 py-2 text-sm border-b-2 transition-colors whitespace-nowrap ${
-              tab === t.id
-                ? 'border-accent-600 text-accent-700 font-semibold'
-                : 'border-transparent text-ink-500 hover:text-ink-800 hover:bg-surface-subtle'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* Tabs — sticky horizontal scroller on mobile so the user always
+          sees which tab is active even after scrolling content.
+          Edge fade hints there's more to scroll. */}
+      <div className="tabs sticky top-14 z-10 -mx-3 sm:-mx-5 px-3 sm:px-5 bg-surface-page/95 backdrop-blur-sm border-b border-surface-divider">
+        <div
+          className="flex gap-1 overflow-x-auto -mb-px scrollbar-hide"
+          style={{ scrollbarWidth: 'none' }}
+        >
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-3 sm:px-3.5 py-2.5 text-sm border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                tab === t.id
+                  ? 'border-accent-600 text-accent-700 font-semibold'
+                  : 'border-transparent text-ink-500 hover:text-ink-800 hover:bg-surface-subtle active:bg-ink-100'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {tab === 'overview' && <OverviewTab detail={detail} liveStatus={liveStatus} />}
@@ -878,15 +889,37 @@ const KIND_META: Record<string, {
 // Goals
 // ---------------------------------------------------------------------------
 
+type TimeseriesGoal = {
+  goal_id: string
+  description: string
+  target_metric: string
+  baseline?: number | null
+  target?: number | null
+  from_rec?: string
+  is_top5_goal?: boolean
+  is_revenue_goal?: boolean
+  rationale?: string
+  check_by?: string
+  points: { ts: string; run_ts: string; current?: number | null; progress_pct?: number | null; status?: string }[]
+}
+type TimeseriesAnnotation = { ts: string; rec_id: string; title: string; goal_id: string; kind: 'shipped' | 'implemented' }
+
 function GoalsTab({ agentId }: { agentId: string }) {
   const [goals, setGoals] = useState<Goal[]>([])
   const [loading, setLoading] = useState(true)
+  const [tsGoals, setTsGoals] = useState<TimeseriesGoal[]>([])
+  const [annotations, setAnnotations] = useState<TimeseriesAnnotation[]>([])
+  const [tsLoading, setTsLoading] = useState(true)
 
   useEffect(() => {
     api.agentGoals(agentId)
       .then(d => setGoals(d.goals || []))
       .catch(console.error)
       .finally(() => setLoading(false))
+    api.goalsTimeseries(agentId, 60)
+      .then(d => { setTsGoals(d.goals || []); setAnnotations(d.annotations || []) })
+      .catch(console.error)
+      .finally(() => setTsLoading(false))
   }, [agentId])
 
   if (loading) return <div className="text-ink-500 italic py-8 text-center">Loading goals…</div>
@@ -919,6 +952,27 @@ function GoalsTab({ agentId }: { agentId: string }) {
         <span className="text-glow-success">{accomplished.length} accomplished</span>
       </div>
 
+      {/* Time-series trend section — built from per-run goal-progress.json */}
+      {!tsLoading && tsGoals.length > 0 && (
+        <div>
+          <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">
+            Trend over time ({tsGoals[0]?.points?.length ?? 0} measurements per goal)
+          </h2>
+          <p className="text-xs text-ink-500 mb-3">
+            Each line shows the goal's metric over recent runs. ⬆ markers = recs shipped that target this goal.
+          </p>
+          <div className="space-y-2">
+            {tsGoals.map(g => (
+              <GoalTimeseriesRow
+                key={g.goal_id}
+                goal={g}
+                annotations={annotations.filter(a => a.goal_id === g.goal_id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       {active.length > 0 && (
         <div>
           <h2 className="text-xs uppercase text-ink-500 font-semibold tracking-wide mb-2">Active goals</h2>
@@ -938,6 +992,116 @@ function GoalsTab({ agentId }: { agentId: string }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// Inline SVG sparkline + annotations for one goal's time-series.
+function GoalTimeseriesRow({
+  goal, annotations,
+}: { goal: TimeseriesGoal; annotations: TimeseriesAnnotation[] }) {
+  const points = (goal.points || []).filter(p => p.current != null && Number.isFinite(p.current as number))
+  if (points.length < 2) {
+    return (
+      <div className="bg-surface-card border border-surface-divider rounded p-3 text-xs">
+        <div className="font-semibold text-ink-700 truncate">{goal.description || goal.goal_id}</div>
+        <div className="text-ink-500 mt-1">
+          Not enough data yet ({points.length} measurement{points.length === 1 ? '' : 's'}). Need at least 2 runs to plot.
+        </div>
+      </div>
+    )
+  }
+  const W = 600, H = 60, PAD = 4
+  const xs = points.map((_, i) => i)
+  const ys = points.map(p => p.current as number)
+  const target = goal.target ?? null
+  const baseline = goal.baseline ?? null
+  const ymin = Math.min(...ys, target ?? Infinity, baseline ?? Infinity)
+  const ymax = Math.max(...ys, target ?? -Infinity, baseline ?? -Infinity)
+  const yspan = Math.max(0.01, ymax - ymin)
+  const fx = (i: number) => PAD + (xs[i] / Math.max(1, xs.length - 1)) * (W - PAD * 2)
+  const fy = (v: number) => PAD + (1 - (v - ymin) / yspan) * (H - PAD * 2)
+  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${fx(i).toFixed(1)},${fy(p.current as number).toFixed(1)}`).join(' ')
+  // Find x-position of each annotation (closest point by ts)
+  const annX = (annTs: string): number | null => {
+    if (!annTs) return null
+    let bestI = -1, bestDelta = Infinity
+    const at = Date.parse(annTs)
+    for (let i = 0; i < points.length; i++) {
+      const pt = Date.parse(points[i].ts)
+      const d = Math.abs(pt - at)
+      if (d < bestDelta) { bestDelta = d; bestI = i }
+    }
+    return bestI >= 0 ? fx(bestI) : null
+  }
+  const first = ys[0], last = ys[ys.length - 1]
+  const trend = last === first ? 'flat' : (last > first ? 'up' : 'down')
+  // Direction: if baseline > target → "decrease desired" (e.g. position 21→5 = lower=better)
+  const desiredDecrease = baseline != null && target != null && baseline > target
+  const isImproving = desiredDecrease ? (trend === 'down') : (trend === 'up')
+  const trendColor = trend === 'flat' ? 'text-ink-500' : (isImproving ? 'text-emerald-600' : 'text-amber-600')
+  const trendLabel = trend === 'flat' ? '— no movement' : (isImproving ? `↗ improving` : `↘ worsening`)
+  return (
+    <div className="bg-surface-card border border-surface-divider rounded p-3">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap mb-2">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-ink-800 truncate" title={goal.description}>
+            {goal.description || goal.goal_id}
+          </div>
+          <div className="text-[10px] text-ink-500 font-mono mt-0.5 truncate">
+            {goal.target_metric}
+          </div>
+        </div>
+        <div className="text-right text-xs whitespace-nowrap">
+          <div className={`font-mono font-semibold ${trendColor}`}>
+            {first.toFixed(2)} → {last.toFixed(2)}
+          </div>
+          <div className={`text-[10px] ${trendColor}`}>{trendLabel}</div>
+          {target != null && (
+            <div className="text-[10px] text-ink-500">target: <span className="font-mono">{target}</span></div>
+          )}
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-12 block" preserveAspectRatio="none">
+        {/* Target reference line */}
+        {target != null && Number.isFinite(target) && (
+          <line x1={PAD} x2={W - PAD}
+            y1={fy(target)} y2={fy(target)}
+            stroke="#10b981" strokeWidth={1} strokeDasharray="4 3" opacity={0.5} />
+        )}
+        {/* Baseline reference */}
+        {baseline != null && Number.isFinite(baseline) && (
+          <line x1={PAD} x2={W - PAD}
+            y1={fy(baseline)} y2={fy(baseline)}
+            stroke="#94a3b8" strokeWidth={1} strokeDasharray="2 2" opacity={0.4} />
+        )}
+        {/* Trend line */}
+        <path d={path} fill="none" stroke="#0ea5e9" strokeWidth={1.6} />
+        {/* Data points */}
+        {points.map((p, i) => (
+          <circle key={i} cx={fx(i)} cy={fy(p.current as number)} r={1.6} fill="#0ea5e9" />
+        ))}
+        {/* Shipped/implemented annotations */}
+        {annotations.map((a, i) => {
+          const x = annX(a.ts)
+          if (x == null) return null
+          const color = a.kind === 'shipped' ? '#2563eb' : '#10b981'
+          return (
+            <g key={`${a.rec_id}-${i}`}>
+              <line x1={x} x2={x} y1={PAD} y2={H - PAD} stroke={color} strokeWidth={0.8} opacity={0.45} />
+              <polygon points={`${x - 3},${PAD + 1} ${x + 3},${PAD + 1} ${x},${PAD + 5}`}
+                fill={color} opacity={0.85}>
+                <title>{`${a.kind} · ${a.rec_id}: ${a.title}`}</title>
+              </polygon>
+            </g>
+          )
+        })}
+      </svg>
+      <div className="flex justify-between text-[10px] text-ink-400 mt-1">
+        <span title={points[0].ts}>{points[0].ts.slice(5, 16).replace('T', ' ')}</span>
+        <span>{points.length} measurements{annotations.length > 0 ? ` · ${annotations.length} rec${annotations.length === 1 ? '' : 's'} shipped` : ''}</span>
+        <span title={points[points.length - 1].ts}>{points[points.length - 1].ts.slice(5, 16).replace('T', ' ')}</span>
+      </div>
     </div>
   )
 }

@@ -193,8 +193,34 @@ def write_systemd_units(
         escaped = exec_cmd.replace("'", "'\"'\"'")
         exec_cmd = f"/bin/sh -c '{escaped}'"
 
+    # Universal status-writing wrapper: every cron-fired agent writes a
+    # "starting" status before exec and a final "success"/"failure" status
+    # after exec, even if the agent's own entry script never calls
+    # framework.cli.status. Without this, the dashboard's Agents page goes
+    # stale because the host-worker only writes status for "Run now"
+    # triggers — cron-fired runs bypass it.
+    framework_root = str(Path(__file__).resolve().parent.parent)
+    wrapper = f"{framework_root}/agent_run_wrapper.sh"
+    if Path(wrapper).is_file():
+        # The wrapper takes <agent_id> <entry_command...> as args.
+        # Use bash -c so the inner exec_cmd can itself be a sh-c invocation.
+        # Quote agent_id; pass exec_cmd unquoted so its existing escaping
+        # (already sh -c '...' if needs_shell) survives.
+        exec_cmd = f"/bin/bash {wrapper} {agent_id} {exec_cmd}"
+
+    # systemd Environment= treats `;` as a separator between KEY=VAL pairs
+    # on the same line, AND treats `\n`, `"`, `\` specially. Wrap any value
+    # containing those (or whitespace) in double quotes and escape them.
+    # Connection strings with `;` separators (Azure storage) MUST be quoted.
+    def _systemd_env_line(key: str, val: str) -> str:
+        needs_quote = any(c in val for c in (';', ' ', '\t', '\n', '"', "'", '\\', '#'))
+        if needs_quote:
+            escaped = val.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+            return f'Environment="{key}={escaped}"'
+        return f"Environment={key}={val}"
+
     extra_env_block = "\n".join(
-        f"Environment={k}={v}" for k, v in (extra_env or {}).items()
+        _systemd_env_line(k, v) for k, v in (extra_env or {}).items()
     )
 
     service_content = SERVICE_TEMPLATE.format(

@@ -12,6 +12,15 @@ set -euo pipefail
 # interactive shell PATH.
 export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
 
+# Route claude through the pool (round-robin across Max accounts). The
+# pool writes a `claude` shim at $CLAUDE_POOL_ROOT/bin/ on init. CLAUDE_POOL=0
+# disables routing and falls back to the user's default claude account.
+CLAUDE_POOL_ROOT="${CLAUDE_POOL_ROOT:-$HOME/.reusable-agents/claude-pool}"
+if [ "${CLAUDE_POOL:-1}" != "0" ] && [ -x "$CLAUDE_POOL_ROOT/bin/claude" ]; then
+    export PATH="$CLAUDE_POOL_ROOT/bin:$PATH"
+    echo "[implementer] claude-pool routing active (root=$CLAUDE_POOL_ROOT)" >&2
+fi
+
 # Trace mode (debugging silent failures from systemd spawn).
 # Disable with IMPLEMENTER_TRACE=0 in env.
 if [ "${IMPLEMENTER_TRACE:-1}" != "0" ]; then
@@ -65,6 +74,65 @@ fi
 
 # Ensure changes/ dir exists
 mkdir -p "$RESPONDER_RUN_DIR/changes"
+
+# ── Materialize per-rec deep context (framework convention) ─────────────────
+# Producing agents may stash extra supporting material at
+# agents/<source>/runs/<run_ts>/rec-context/<rec-id>/. Pull every rec id in
+# this batch's $RESPONDER_REC_IDS down to the run dir so claude can read
+# attachments directly off disk. See framework/core/rec_context.py.
+if [ -n "${RESPONDER_REC_IDS:-}" ] && [ -n "${RESPONDER_AGENT_ID:-}" ] && [ -n "${RESPONDER_RUN_TS:-}" ]; then
+    PYTHONPATH="$REPO_ROOT" \
+    SOURCE_AGENT_ID="$RESPONDER_AGENT_ID" \
+    SOURCE_RUN_TS="$RESPONDER_RUN_TS" \
+    REC_IDS="$RESPONDER_REC_IDS" \
+    TARGET_DIR="$RESPONDER_RUN_DIR" \
+    python3 - <<'PY' 2>&1 | sed 's/^/[rec-context] /' || true
+import os, sys
+from framework.core.rec_context import materialize_rec_context_to_dir
+agent = os.environ["SOURCE_AGENT_ID"]
+ts = os.environ["SOURCE_RUN_TS"]
+target = os.environ["TARGET_DIR"]
+recs = [r.strip() for r in os.environ.get("REC_IDS","").split(",") if r.strip()]
+n = 0
+for rid in recs:
+    out = materialize_rec_context_to_dir(agent, ts, rid, target)
+    if out:
+        n += 1
+print(f"materialized {n}/{len(recs)} rec-context bundles → {target}/rec-context/", file=sys.stderr)
+PY
+fi
+
+# ── Pre-run git SHA capture ─────────────────────────────────────────────────
+# Used at end-of-run to verify a NEW commit happened — the only reliable
+# signal that claude actually shipped code (vs. bailing out asking for
+# clarification). Read repo_path from the site config; export so the
+# end-of-run logic can use it.
+GIT_SHA_BEFORE=""
+if [ -z "${IMPLEMENTER_REPO_PATH:-}" ] && [ -f "$SEO_AGENT_CONFIG" ]; then
+    IMPLEMENTER_REPO_PATH=$(python3 - "$SEO_AGENT_CONFIG" <<'PY' 2>/dev/null
+import sys
+try:
+    import yaml
+    cfg = yaml.safe_load(open(sys.argv[1]))
+    impl = (cfg or {}).get("implementer") or {}
+    print(impl.get("repo_path", ""))
+except Exception:
+    pass
+PY
+    )
+    [ -n "$IMPLEMENTER_REPO_PATH" ] && export IMPLEMENTER_REPO_PATH
+fi
+# Use `git rev-parse` which walks up to find .git — the customer-app dir
+# may itself not be a git root (e.g. "Customer Applications/aisleprompt/v1.0"
+# is a subdir of the nsc-assistant repo, no .git of its own). The earlier
+# `[ -d "$path/.git" ]` test missed this and produced false-paused status.
+if [ -n "${IMPLEMENTER_REPO_PATH:-}" ] && [ -d "$IMPLEMENTER_REPO_PATH" ] \
+        && git -C "$IMPLEMENTER_REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_SHA_BEFORE=$(git -C "$IMPLEMENTER_REPO_PATH" log -1 --format='%H' 2>/dev/null || echo "")
+    GIT_TOPLEVEL=$(git -C "$IMPLEMENTER_REPO_PATH" rev-parse --show-toplevel 2>/dev/null || echo "")
+    echo "[implementer] pre-run git_sha=${GIT_SHA_BEFORE:0:8} repo=$IMPLEMENTER_REPO_PATH (toplevel=$GIT_TOPLEVEL)"
+fi
+export GIT_SHA_BEFORE
 
 # When the responder materialized this run dir from Azure, the env carries
 # RESPONDER_AGENT_ID + RESPONDER_RUN_TS so we can sync recommendations.json
@@ -295,11 +363,44 @@ EOF
         ;;
 esac
 
-# Optional chain to seo-deployer. The deployer reads SEO_AGENT_CONFIG and
-# the run dir, runs tests + builds + deploys.
+# ── Deploy gating ───────────────────────────────────────────────────────────
+# The seo-deployer (build + tests + Azure push) runs ONLY when the entire
+# batch chain is finished — i.e. this is the last batch, AND every prior
+# batch terminated. Otherwise we'd deploy partial work after each batch,
+# which (a) wastes CI cycles, (b) can ship code that the next batch will
+# rewrite, and (c) makes test failures unattributable.
+#
+# A run that's NOT batched (no dispatch-batches.json) is implicitly the
+# whole chain — deploy as before.
 DEPLOYER_SCRIPT="$REPO_ROOT/seo-deployer/run.sh"
-# H2H dispatches don't ship code — they upsert DB rows. Skip the
-# deployer entirely so we don't trigger an unintended site rebuild.
+
+_is_last_batch_in_chain() {
+    local mf="$RESPONDER_RUN_DIR/dispatch-batches.json"
+    [ -f "$mf" ] || return 0  # no manifest → not batched → "last" by definition
+    PYTHONPATH="$REPO_ROOT" \
+    RESPONDER_RUN_DIR="$RESPONDER_RUN_DIR" \
+    RESPONDER_BATCH_INDEX="${RESPONDER_BATCH_INDEX:-0}" \
+    python3 - <<'PY' 2>/dev/null
+import json, os, sys
+from pathlib import Path
+mf = Path(os.environ["RESPONDER_RUN_DIR"]) / "dispatch-batches.json"
+m = json.loads(mf.read_text())
+cur_idx = int(os.environ.get("RESPONDER_BATCH_INDEX", "0") or "0")
+batches = m.get("batches", [])
+# Mark current as completed in-memory so the "any pending/running" check
+# correctly considers it done (the chain logic later writes the manifest).
+for b in batches:
+    if b.get("index") == cur_idx and b.get("status") in ("pending", "running"):
+        b["status"] = "completed"
+        break
+# Any other batch still incomplete?
+for b in batches:
+    if b.get("status") in ("pending", "running"):
+        sys.exit(1)
+sys.exit(0)
+PY
+}
+
 if [ "$DISPATCH_KIND" = "h2h" ]; then
     echo "[implementer] H2H dispatch — skipping deployer chain"
 elif [ "$DISPATCH_KIND" = "article-author" ]; then
@@ -307,24 +408,144 @@ elif [ "$DISPATCH_KIND" = "article-author" ]; then
 elif [ "$DISPATCH_KIND" = "catalog-audit" ]; then
     echo "[implementer] catalog-audit dispatch — skipping deployer chain (DB-only fixes, no build)"
 elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
-    echo "[implementer] chaining to seo-deployer"
-    SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
-        bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
-            rc=$?
-            echo "[implementer] deployer failed rc=$rc" >&2
-            exit $rc
-        }
+    if _is_last_batch_in_chain; then
+        echo "[implementer] last batch in chain — chaining to seo-deployer"
+        SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
+            bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
+                rc=$?
+                echo "[implementer] deployer failed rc=$rc" >&2
+                exit $rc
+            }
+    else
+        echo "[implementer] more batches pending — deferring deployer until chain end" >&2
+    fi
 fi
 
 
-# ── Send completion-confirmation email to the user ───────────────────────────
-# The user originally got a recs email; now that we've shipped the recs they
-# selected, email them back so they know it's done. This delegates to the
-# framework's completion_email module so the same template/lookup flow is
-# reused by every implementer-style agent.
+# ── Did claude actually apply anything? ─────────────────────────────────────
+# Truth-source for "this run shipped work" is conservative: we MUST have a
+# verifiable artifact. Otherwise the email lies and the user can't tell
+# apart a real ship from claude bailing out.
+#
+# Three valid signals (any of them = real work):
+#   1. NEW git commit on the implementer repo (SHA differs from pre-run)
+#      → SEO code-editing path
+#   2. <run_dir>/applied-recs.json with non-empty rec_ids list, written by
+#      claude when it patches DB rows
+#      → catalog-audit / h2h / article-author paths
+#   3. <run_dir>/changes/<rec>.* artifacts that match the input rec_ids
+#      → fallback for SEO recs that produced files but no commit yet
+#         (uncommon; usually means deployer hasn't run)
+#
+# If NONE of these, status=paused and the email subject says so.
+
+# Signal 1: git commit. Use `git rev-parse --is-inside-work-tree` so we
+# correctly handle subdirs whose .git lives in an ancestor (e.g. the
+# customer-app subdir of nsc-assistant). The earlier `[ -d "$IMPL_REPO/.git" ]`
+# check missed this and produced false-paused status.
 GIT_SHA=""
 IMPL_REPO="${IMPLEMENTER_REPO_PATH:-}"
-[ -d "$IMPL_REPO/.git" ] && GIT_SHA=$(git -C "$IMPL_REPO" log -1 --format='%H' 2>/dev/null || echo "")
+if [ -n "$IMPL_REPO" ] && [ -d "$IMPL_REPO" ] \
+        && git -C "$IMPL_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_SHA_AFTER=$(git -C "$IMPL_REPO" log -1 --format='%H' 2>/dev/null || echo "")
+    if [ -n "$GIT_SHA_AFTER" ] && [ "$GIT_SHA_AFTER" != "${GIT_SHA_BEFORE:-}" ]; then
+        GIT_SHA="$GIT_SHA_AFTER"
+    fi
+fi
+
+# Signal 2: applied-recs.json (DB-write convention)
+APPLIED_RECS_JSON="$RESPONDER_RUN_DIR/applied-recs.json"
+APPLIED_REC_IDS=""
+if [ -f "$APPLIED_RECS_JSON" ]; then
+    APPLIED_REC_IDS=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$APPLIED_RECS_JSON'))
+    ids = d.get('applied_rec_ids') or d.get('rec_ids') or []
+    if isinstance(ids, list):
+        print(','.join(str(x) for x in ids if x))
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+# Signal 2b: recommendations.json scan — count recs marked as
+# already-implemented in this run (implemented: true + implemented_run_ts ==
+# THIS run). These don't need a commit because there was nothing to change,
+# but they ARE a successful outcome (claude verified the rec is already
+# satisfied in code).
+ALREADY_IMPLEMENTED_REC_IDS=""
+RECS_JSON="$RESPONDER_RUN_DIR/recommendations.json"
+if [ -f "$RECS_JSON" ]; then
+    ALREADY_IMPLEMENTED_REC_IDS=$(python3 -c "
+import json, os
+try:
+    d = json.load(open('$RECS_JSON'))
+    this_run = '${RESPONDER_RUN_TS:-}'
+    requested = set(s.strip() for s in '${RESPONDER_REC_IDS:-}'.split(',') if s.strip())
+    out = []
+    for r in d.get('recommendations', []):
+        rid = r.get('id')
+        if rid in requested and r.get('implemented') is True \
+                and (r.get('implemented_run_ts') == this_run
+                     or r.get('implemented_via') == 'pre-existing'):
+            out.append(rid)
+    print(','.join(out))
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+
+# Signal 3 was previously "changes/ has files" — REMOVED, because claude
+# routinely writes `<rec>.summary.md` files to document DEFERRALS and SKIPS
+# (e.g. "DEFERRED: target query is 'celery25678' — malformed GSC data, no
+# code change made"). Counting those as "applied" produces false "Shipped"
+# emails. Real applies must show up as a git commit OR an explicit
+# applied-recs.json entry from the agent.
+
+# Decide status. Default = paused (safer to under-claim than over-claim).
+# A run is "completed" if any of the following:
+#   - a NEW git commit was made (real code change)
+#   - applied-recs.json names rec_ids (DB-write evidence)
+#   - recommendations.json marks recs as already-implemented in THIS run
+#     (claude verified the change already exists in code — valid success)
+COMPLETION_STATUS="paused"
+COMPLETION_REASON=""
+if [ -n "$GIT_SHA" ]; then
+    COMPLETION_STATUS="completed"
+    COMPLETION_REASON="commit ${GIT_SHA:0:8}"
+elif [ -n "$APPLIED_REC_IDS" ]; then
+    COMPLETION_STATUS="completed"
+    COMPLETION_REASON="applied-recs.json: ${APPLIED_REC_IDS//,/, }"
+elif [ -n "$ALREADY_IMPLEMENTED_REC_IDS" ]; then
+    COMPLETION_STATUS="completed"
+    COMPLETION_REASON="already-implemented: ${ALREADY_IMPLEMENTED_REC_IDS//,/, }"
+fi
+# Useful diagnostic: even when paused, surface that claude DID write
+# deferral-summary files so the user knows the LLM at least ran.
+CHANGES_COUNT=0
+if [ -d "$RESPONDER_RUN_DIR/changes" ]; then
+    CHANGES_COUNT=$(find "$RESPONDER_RUN_DIR/changes" -type f 2>/dev/null | wc -l)
+fi
+if [ "$COMPLETION_STATUS" = "paused" ] && [ "$CHANGES_COUNT" != "0" ]; then
+    COMPLETION_REASON="claude wrote $CHANGES_COUNT artifact(s) to changes/ but did NOT commit (likely deferral notes)"
+elif [ "$COMPLETION_STATUS" = "paused" ]; then
+    COMPLETION_REASON="no commit + no applied-recs.json + empty changes/ — claude exited without acting"
+fi
+echo "[implementer] status=$COMPLETION_STATUS reason=$COMPLETION_REASON" >&2
+
+# Email rec_ids: when paused, list the INPUT recs so the user knows which
+# ones DIDN'T get applied. When completed, prefer the precise applied set
+# (applied-recs.json or already-implemented) if we have it, else fall
+# back to the input list.
+EMAIL_REC_IDS="$RESPONDER_REC_IDS"
+if [ "$COMPLETION_STATUS" = "completed" ]; then
+    if [ -n "$APPLIED_REC_IDS" ]; then
+        EMAIL_REC_IDS="$APPLIED_REC_IDS"
+    elif [ -n "$ALREADY_IMPLEMENTED_REC_IDS" ]; then
+        EMAIL_REC_IDS="$ALREADY_IMPLEMENTED_REC_IDS"
+    fi
+fi
 
 # Walk the run dir's recommendations.json to extract titles for nicer email body
 REC_TITLES_JSON=""
@@ -355,7 +576,8 @@ COMPLETION_AGENT_ID="${COMPLETION_EMAIL_FROM_AGENT:-responder-agent}"
 
 PYTHONPATH="$REPO_ROOT" python3 -m framework.core.completion_email \
     --agent-id "$COMPLETION_AGENT_ID" \
-    --rec-ids "$RESPONDER_REC_IDS" \
+    --rec-ids "$EMAIL_REC_IDS" \
+    --requested-rec-ids "$RESPONDER_REC_IDS" \
     --site "${RESPONDER_SITE:-}" \
     --source-agent "$SOURCE_AGENT" \
     --request-id "${RESPONDER_REQUEST_ID:-${RESPONDER_RUN_TS:-}}" \
@@ -363,6 +585,8 @@ PYTHONPATH="$REPO_ROOT" python3 -m framework.core.completion_email \
     --commit-sha "$GIT_SHA" \
     --mode "${IMPLEMENTER_LLM:-claude}" \
     --site-config "${SEO_AGENT_CONFIG:-}" \
+    --status "$COMPLETION_STATUS" \
+    --status-reason "$COMPLETION_REASON" \
     ${REC_TITLES_JSON:+--rec-titles-json "$REC_TITLES_JSON"} \
     --to "${IMPLEMENTER_NOTIFY_EMAIL:-}" \
     --sender "${IMPLEMENTER_FROM:-automation@northernsoftwareconsulting.com}" \
@@ -438,3 +662,198 @@ except Exception as e:
 PY
 
 echo "[implementer] done"
+
+
+# ── Propagate lifecycle markers to source agent's recommendations.json ──────
+# Claude writes implemented:true / implemented_via:pre-existing into the
+# dispatch-dir copy of recommendations.json. The dashboard API reads from
+# the SOURCE agent's run dir copy, so the markers never surface. Copy
+# them back. Also auto-flip shipped:true for already-implemented (those
+# are by definition already in production code — no deploy needed).
+PYTHONPATH="$REPO_ROOT" \
+SOURCE_AGENT="$SOURCE_AGENT" \
+SOURCE_RUN_TS="${RESPONDER_RUN_TS:-}" \
+DISPATCH_RUN_DIR="${RESPONDER_RUN_DIR:-}" \
+GIT_SHA="$GIT_SHA" \
+python3 - <<'PY' 2>&1 | sed 's/^/[propagate] /' || true
+import json, os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+from framework.core.storage import get_storage
+
+source_agent = os.environ.get("SOURCE_AGENT", "")
+source_run_ts = os.environ.get("SOURCE_RUN_TS", "")
+dispatch_dir = os.environ.get("DISPATCH_RUN_DIR", "")
+git_sha = os.environ.get("GIT_SHA", "") or ""
+if not (source_agent and source_run_ts and dispatch_dir):
+    print(f"missing inputs (agent={source_agent} run_ts={source_run_ts} dir={dispatch_dir}); skip")
+    sys.exit(0)
+
+dispatch_recs_path = Path(dispatch_dir) / "recommendations.json"
+if not dispatch_recs_path.is_file():
+    print(f"no recommendations.json in dispatch dir; skip")
+    sys.exit(0)
+
+dr = json.loads(dispatch_recs_path.read_text())
+dispatch_by_id = {r.get("id"): r for r in dr.get("recommendations", []) if r.get("id")}
+
+s = get_storage()
+src_path = f"agents/{source_agent}/runs/{source_run_ts}/recommendations.json"
+try:
+    sd = s.read_json(src_path) or {}
+except Exception as e:
+    print(f"could not read {src_path}: {e}; skip")
+    sys.exit(0)
+
+now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+copy_fields = ("implemented", "implemented_at", "implemented_run_ts",
+               "implemented_via", "implemented_commit",
+               "shipped", "shipped_at", "shipped_tag", "shipped_image")
+n_impl = n_ship = 0
+for r in sd.get("recommendations", []):
+    rid = r.get("id")
+    src_rec = dispatch_by_id.get(rid)
+    if not src_rec:
+        continue
+    # Copy any lifecycle fields claude wrote into dispatch copy
+    for f in copy_fields:
+        if f in src_rec and src_rec[f] is not None:
+            r[f] = src_rec[f]
+    # If marked implemented in this run but no implemented_at, stamp it
+    if r.get("implemented") is True and not r.get("implemented_at"):
+        r["implemented_at"] = now_iso
+        r["implemented_run_ts"] = source_run_ts
+        n_impl += 1
+    # If git_sha was produced this run + this rec was implemented + no commit recorded
+    if r.get("implemented") is True and git_sha and not r.get("implemented_commit"):
+        r["implemented_commit"] = git_sha
+    # Auto-ship: implemented_via=pre-existing means code already lives
+    # in prod, mark shipped now (no deployer chain will run for these)
+    if r.get("implemented") is True and r.get("implemented_via") == "pre-existing" and not r.get("shipped"):
+        r["shipped"] = True
+        r["shipped_at"] = now_iso
+        r["shipped_via"] = "pre-existing"
+        n_ship += 1
+
+s.write_json(src_path, sd)
+# Also update the LOCAL dispatch-dir copy with the same lifecycle markers
+# (shipped:true etc.) — otherwise sync-back will overwrite our auto-ship
+# flips with the unflipped tempdir copy on EXIT.
+try:
+    dispatch_dr = json.loads(dispatch_recs_path.read_text())
+    src_by_id = {r.get("id"): r for r in sd.get("recommendations", [])}
+    for r in dispatch_dr.get("recommendations", []):
+        rid = r.get("id")
+        sr = src_by_id.get(rid)
+        if not sr:
+            continue
+        for f in copy_fields:
+            if f in sr and sr[f] is not None:
+                r[f] = sr[f]
+    dispatch_recs_path.write_text(json.dumps(dispatch_dr, indent=2))
+except Exception as e:
+    print(f"local dispatch-dir update failed: {e}")
+print(f"propagated to {src_path}: implemented={n_impl} auto-shipped={n_ship}")
+PY
+
+
+# ── Auto-chain to next batch ────────────────────────────────────────────────
+# When the responder split a large reply (e.g. "implement all" → 123 recs)
+# into smaller batches, it dropped a `dispatch-batches.json` manifest in the
+# run dir and dispatched batch 1. Each batch is a separate implementer run;
+# we need to mark this batch as done in the manifest, then spawn the next
+# pending batch as a fresh systemd-run scope so it survives our exit.
+if [ -f "$RESPONDER_RUN_DIR/dispatch-batches.json" ]; then
+    NEXT_BATCH_INFO=$(
+        RESPONDER_RUN_DIR="$RESPONDER_RUN_DIR" \
+        RESPONDER_BATCH_INDEX="${RESPONDER_BATCH_INDEX:-0}" \
+        COMPLETION_STATUS="$COMPLETION_STATUS" \
+        DISPATCH_LOG_PATH="${DISPATCH_LOG_PATH:-}" \
+        python3 - <<'PY' 2>/dev/null
+import json, os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+run_dir = Path(os.environ["RESPONDER_RUN_DIR"])
+manifest_path = run_dir / "dispatch-batches.json"
+if not manifest_path.is_file():
+    sys.exit(0)
+m = json.loads(manifest_path.read_text())
+cur_idx = int(os.environ.get("RESPONDER_BATCH_INDEX", "0") or "0")
+status = os.environ.get("COMPLETION_STATUS", "completed")
+log_path = os.environ.get("DISPATCH_LOG_PATH", "")
+ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+next_batch = None
+for b in m.get("batches", []):
+    # Mark current batch as completed/paused. Accept either 'pending'
+    # (never-flipped — possible if a manual dispatch skipped the
+    # "running" handoff) or 'running' (the normal case once the
+    # previous batch's chain code flipped it).
+    if b.get("index") == cur_idx and b.get("status") in ("pending", "running"):
+        b["status"] = status
+        b["completed_at"] = ts
+        b["completion_status"] = status
+        if log_path and not b.get("dispatch_log"):
+            b["dispatch_log"] = log_path
+for b in m.get("batches", []):
+    if b.get("status") == "pending":
+        next_batch = b
+        break
+
+# Stop chaining if too many consecutive pauses (claude keeps refusing —
+# something structural is wrong, don't waste LLM time on the rest).
+recent = m.get("batches", [])[: cur_idx]
+recent_paused = [b for b in recent if b.get("completion_status") == "paused"]
+if len(recent_paused) >= 3:
+    print("[chain] 3+ consecutive paused batches — stopping auto-chain", file=sys.stderr)
+    next_batch = None
+
+manifest_path.write_text(json.dumps(m, indent=2))
+if next_batch:
+    next_batch["started_at"] = ts
+    next_batch["status"] = "running"
+    manifest_path.write_text(json.dumps(m, indent=2))
+    # Stdout: <index>\t<comma-separated rec_ids>
+    print(f"{next_batch['index']}\t{','.join(next_batch['rec_ids'])}")
+PY
+)
+    if [ -n "$NEXT_BATCH_INFO" ]; then
+        NEXT_IDX=$(echo "$NEXT_BATCH_INFO" | cut -f1)
+        NEXT_RECS=$(echo "$NEXT_BATCH_INFO" | cut -f2)
+        echo "[implementer] auto-chain → batch $NEXT_IDX ($(echo "$NEXT_RECS" | tr ',' '\n' | wc -l) recs)"
+
+        # Read total batch count for the env
+        BATCH_TOTAL=$(python3 -c "import json; print(len(json.load(open('$RESPONDER_RUN_DIR/dispatch-batches.json'))['batches']))" 2>/dev/null || echo "0")
+
+        # Dispatch the next batch in its own systemd-run scope so it
+        # survives our exit. Inherit all current env (storage creds,
+        # site config, etc.) and override the rec ids + batch index.
+        NEW_LOG="/tmp/reusable-agents-logs/dispatch-implementer-${RESPONDER_SITE}-$(date -u +%Y%m%dT%H%M%SZ).log"
+        UNIT_NAME="agent-dispatch-implementer-${RESPONDER_SITE}-batch${NEXT_IDX}-$(date -u +%Y%m%dT%H%M%SZ)"
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemd-run --user --scope --collect \
+                --unit="$UNIT_NAME" \
+                --property=KillMode=process \
+                --property=TimeoutStopSec=0 \
+                --setenv=RESPONDER_REC_IDS="$NEXT_RECS" \
+                --setenv=RESPONDER_BATCH_INDEX="$NEXT_IDX" \
+                --setenv=RESPONDER_BATCH_TOTAL="$BATCH_TOTAL" \
+                --setenv=DISPATCH_LOG_PATH="$NEW_LOG" \
+                bash "$0" </dev/null >"$NEW_LOG" 2>&1 &
+            disown $! 2>/dev/null || true
+            echo "[implementer] auto-chain spawned batch $NEXT_IDX log=$NEW_LOG"
+        else
+            # No systemd-run available: best-effort nohup chain.
+            RESPONDER_REC_IDS="$NEXT_RECS" \
+            RESPONDER_BATCH_INDEX="$NEXT_IDX" \
+            RESPONDER_BATCH_TOTAL="$BATCH_TOTAL" \
+            DISPATCH_LOG_PATH="$NEW_LOG" \
+            nohup bash "$0" </dev/null >"$NEW_LOG" 2>&1 &
+            disown $! 2>/dev/null || true
+            echo "[implementer] auto-chain spawned batch $NEXT_IDX (nohup) log=$NEW_LOG"
+        fi
+    else
+        echo "[implementer] no further batches — chain complete"
+    fi
+fi

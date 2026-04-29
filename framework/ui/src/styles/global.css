@@ -131,3 +131,24 @@
 .agent-detail-active h1 {
   text-shadow: 0 0 18px rgb(59 130 246 / 0.35);
 }
+
+/* Hide scrollbar in horizontal scrollers (tab strips, log lines) */
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Touch tap-highlight: subtle brand-tinted, not iOS default ugly grey */
+@media (pointer: coarse) {
+  a, button, [role="button"] {
+    -webkit-tap-highlight-color: rgb(59 130 246 / 0.10);
+  }
+}
+
+/* Mobile: never let absolutely-long agent IDs blow out the layout */
+@media (max-width: 640px) {
+  .font-mono { word-break: break-word; overflow-wrap: anywhere; }
+}
+
+/* Bottom-tab-bar safe area padding when iframed at mobile width */
+@supports (padding: max(0px)) {
+  .pb-safe { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+}

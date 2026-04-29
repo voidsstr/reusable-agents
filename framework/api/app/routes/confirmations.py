@@ -78,6 +78,60 @@ def get_pending_email_recs():
     return out
 
 
+@router.get("/confirmations/responded-emails")
+def get_responded_email_recs(limit: int = 100):
+    """Mirror of /pending-emails but for replies the responder has
+    already processed. Drives the dashboard's "Responded" section so
+    the user can see WHAT they said per request_id (which recs got
+    `implement` vs `skip` vs `merge`).
+
+    Reads `agents/<agent_id>/responses-archive/<request-id>.json` —
+    written by responder.py when it processes a reply.
+    """
+    from framework.core.storage import get_storage
+    from framework.core.registry import list_agents
+    s = get_storage()
+    out = []
+    for m in list_agents(storage=s):
+        archive_prefix = f"agents/{m.id}/responses-archive/"
+        outbound_prefix = f"agents/{m.id}/outbound-emails/"
+        # Cache outbound metadata to enrich (subject, sent_at, rec_count)
+        outbound_meta: dict[str, dict] = {}
+        for ok in s.list_prefix(outbound_prefix):
+            d = s.read_json(ok)
+            if isinstance(d, dict) and d.get("request_id"):
+                outbound_meta[d["request_id"]] = d
+        for ak in s.list_prefix(archive_prefix):
+            d = s.read_json(ak)
+            if not isinstance(d, dict):
+                continue
+            req_id = d.get("request_id", "")
+            outbound = outbound_meta.get(req_id, {})
+            # Skip the manual-clear placeholders we wrote earlier
+            if d.get("manually_cleared") and not d.get("actions"):
+                continue
+            out.append({
+                "agent_id": m.id,
+                "agent_name": m.name,
+                "request_id": req_id,
+                "subject": d.get("subject") or d.get("outbound_subject") or outbound.get("subject", ""),
+                "outbound_subject": d.get("outbound_subject") or outbound.get("subject", ""),
+                "site": d.get("site") or outbound.get("site", ""),
+                "run_ts": d.get("run_ts") or outbound.get("run_ts", ""),
+                "outbound_sent_at": d.get("outbound_sent_at") or outbound.get("sent_at", ""),
+                "responded_at": d.get("responded_at", ""),
+                "from_address": d.get("from_address", ""),
+                "actions_recorded": d.get("actions_recorded", 0),
+                "actions": d.get("actions", []),
+                "rec_ids_by_action": d.get("rec_ids_by_action", {}),
+                "rec_count_outbound": d.get("rec_count_outbound") or outbound.get("rec_count", 0),
+                "schema_version": d.get("schema_version", "1"),
+            })
+    # Most-recent first
+    out.sort(key=lambda x: x.get("responded_at", ""), reverse=True)
+    return out[:limit]
+
+
 @router.get("/confirmations/{agent_id}/{confirmation_id}")
 def get_one(agent_id: str, confirmation_id: str):
     rec = confirmations.get_confirmation(agent_id, confirmation_id)

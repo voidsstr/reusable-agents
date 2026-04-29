@@ -2,16 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0f172a" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f8fafc" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>reusable-agents</title>
     <style>
       html, body, #root {
         height: 100%;
         margin: 0;
-        background: #0f172a;
+        background: #f8fafc;
       }
-      body { color-scheme: dark; }
+      body {
+        color-scheme: light;
+        -webkit-font-smoothing: antialiased;
+        touch-action: manipulation;
+        overscroll-behavior-y: contain;
+      }
+      /* Tap-target accessibility: 44px min on touch devices */
+      @media (pointer: coarse) {
+        button, [role="button"] {
+          min-height: 44px;
+        }
+        .status-pill, .filter-pill, .link-chip, .inline-link,
+        nav a, .tabs a, .tabs button {
+          min-height: 0;
+        }
+      }
     </style>
   </head>
   <body>

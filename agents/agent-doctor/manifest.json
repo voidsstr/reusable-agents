@@ -1,0 +1,25 @@
+{
+  "id": "agent-doctor",
+  "name": "Agent Doctor (self-healer)",
+  "description": "Continuous self-healing agent. Polls the framework API every 5 min, detects failed or stuck agents, classifies the error signature, applies known auto-fix recipes (token refresh, stale-lock cleanup, transient-network no-op), and escalates anything else by email with full context. Writes durable per-attempt entries to fixes-log.jsonl so future runs avoid retrying the same bad signature.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "*/5 * * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/agent-doctor/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/agent-doctor",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/agent-doctor"
+  },
+  "runnable_modes": ["cron", "manual"],
+  "confirmation_flow": {
+    "enabled": false
+  }
+}

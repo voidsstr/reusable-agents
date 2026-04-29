@@ -114,6 +114,117 @@ class GoalChangePost(BaseModel):
     user_feedback: Optional[str] = None
 
 
+@router.get("/{agent_id}/goals/timeseries")
+def get_goal_timeseries(agent_id: str, limit_runs: int = 60):
+    """Aggregate goal-progress.json across the last N runs into a
+    time-series per goal_id. Each goal returns a list of measurements
+    (ts, run_ts, current, baseline, target, progress_pct, status).
+
+    The dashboard's Goals tab uses this to plot trend lines and overlay
+    rec-shipped dates so you can see what each shipped change moved.
+    """
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    s = get_storage()
+    runs_prefix = f"agents/{agent_id}/runs/"
+    # List all run dir basenames; sort desc by name (run-ts is sortable)
+    seen_runs: set[str] = set()
+    try:
+        for k in s.list_prefix(runs_prefix):
+            tail = k[len(runs_prefix):]
+            if "/" not in tail:
+                continue
+            run_id = tail.split("/", 1)[0]
+            seen_runs.add(run_id)
+    except Exception:
+        pass
+    sorted_runs = sorted(seen_runs, reverse=True)[:limit_runs]
+    # Per-goal time series: goal_id → list of measurement dicts
+    series: dict[str, dict[str, Any]] = {}  # goal_id → {goal_meta, points: [...]}
+    for run_id in sorted_runs:
+        gp_key = f"{runs_prefix}{run_id}/goal-progress.json"
+        try:
+            gp = s.read_json(gp_key)
+        except Exception:
+            continue
+        if not isinstance(gp, dict):
+            continue
+        measured_at = gp.get("measured_at") or run_id
+        for g in gp.get("goals", []):
+            gid = g.get("id")
+            if not gid:
+                continue
+            entry = series.setdefault(gid, {
+                "goal_id": gid,
+                "description": g.get("description", ""),
+                "target_metric": g.get("target_metric", ""),
+                "baseline": g.get("baseline"),
+                "target": g.get("target"),
+                "from_rec": g.get("from_rec", ""),
+                "is_top5_goal": g.get("is_top5_goal", False),
+                "is_revenue_goal": g.get("is_revenue_goal", False),
+                "rationale": g.get("rationale", ""),
+                "check_by": g.get("check_by", ""),
+                "points": [],
+            })
+            # Always overwrite description/target as the latest run is canonical
+            entry["description"] = g.get("description", entry["description"])
+            entry["target"] = g.get("target", entry["target"])
+            entry["points"].append({
+                "ts": measured_at,
+                "run_ts": run_id,
+                "current": g.get("current"),
+                "progress_pct": g.get("progress_pct"),
+                "status": g.get("status", ""),
+            })
+    # Sort points ascending by ts (oldest first) for chart rendering
+    for entry in series.values():
+        entry["points"].sort(key=lambda p: p.get("ts") or "")
+
+    # Annotations: recs that have been shipped (per source recommendations.json
+    # across runs). Each annotation: {ts, rec_id, title, goal_id, kind}.
+    annotations: list[dict[str, Any]] = []
+    for run_id in sorted_runs:
+        rk = f"{runs_prefix}{run_id}/recommendations.json"
+        try:
+            rd = s.read_json(rk)
+        except Exception:
+            continue
+        if not isinstance(rd, dict):
+            continue
+        for r in rd.get("recommendations", []):
+            if not r.get("shipped") and not r.get("implemented"):
+                continue
+            rid = r.get("id")
+            # Map rec → goal via from_rec field already in series
+            gids = [gid for gid, ent in series.items() if ent.get("from_rec") == rid]
+            for gid in gids:
+                annotations.append({
+                    "ts": r.get("shipped_at") or r.get("implemented_at") or "",
+                    "rec_id": rid,
+                    "title": r.get("title", "")[:120],
+                    "goal_id": gid,
+                    "kind": "shipped" if r.get("shipped") else "implemented",
+                })
+    # Dedupe annotations
+    seen_ann: set[tuple[str, str, str]] = set()
+    deduped = []
+    for a in annotations:
+        key = (a["ts"], a["rec_id"], a["goal_id"])
+        if key in seen_ann:
+            continue
+        seen_ann.add(key)
+        deduped.append(a)
+    deduped.sort(key=lambda a: a["ts"])
+    return {
+        "agent_id": agent_id,
+        "runs_scanned": len(sorted_runs),
+        "goal_count": len(series),
+        "goals": list(series.values()),
+        "annotations": deduped,
+    }
+
+
 @router.post("/{agent_id}/goals/changes")
 def post_goal_change(agent_id: str, body: GoalChangePost):
     """Record a new change. The responder calls this when it dispatches

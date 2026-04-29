@@ -622,8 +622,137 @@ def _match_route_for_email(cfg: dict, *, x_agent: Optional[str] = None,
     return None
 
 
+# ---------------------------------------------------------------------------
+# Batching: when the user asks to apply more recs than the site allows in
+# one run, split into chunks sorted high-priority-first. Each chunk is one
+# implementer dispatch; the implementer auto-chains to the next chunk on
+# completion (see agents/implementer/run.sh — _chain_next_batch).
+# ---------------------------------------------------------------------------
+
+_PRIORITY_ORDER = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4,
+    # tier values (PI/CR)
+    "must": 0, "should": 1, "could": 2, "wont": 5,
+}
+
+
+def _rec_priority_rank(rec: dict) -> int:
+    """Lower = higher priority. Used to sort batches so high-impact recs
+    land in batch 1."""
+    for field in ("priority", "severity", "tier"):
+        v = (rec.get(field) or "").lower()
+        if v in _PRIORITY_ORDER:
+            return _PRIORITY_ORDER[v]
+    return 9
+
+
+def _site_max_recs_per_run(site_cfg: dict) -> int:
+    """Read the site config's batch ceiling. Falls back to 12 (a typical
+    aisleprompt/specpicks default). Set to 0/None to disable batching.
+
+    Searches several conventional locations:
+      analyzer.max_recs_per_run   — most SEO sites declare it here
+      implementer.max_recs_per_run — explicit override for implementer batch
+      site.max_recs_per_run       — top-level under `site:` block
+      max_recs_per_run            — bare top-level
+    """
+    if not site_cfg:
+        return 12
+    for path in (
+        ("analyzer", "max_recs_per_run"),
+        ("implementer", "max_recs_per_run"),
+        ("site", "max_recs_per_run"),
+        ("max_recs_per_run",),
+    ):
+        cur = site_cfg
+        ok = True
+        for k in path:
+            if isinstance(cur, dict) and k in cur:
+                cur = cur[k]
+            else:
+                ok = False
+                break
+        if ok:
+            try:
+                return int(cur)
+            except (TypeError, ValueError):
+                continue
+    return 12
+
+
+def _load_site_config(run_dir: Path, site: str) -> dict:
+    """Load the site config yaml that was used to produce this run, if
+    available. Falls back to examples/sites/<site>.yaml. Returns {} on
+    failure (treated as "no batching limit configured")."""
+    candidates = [
+        run_dir / "site-config.yaml",
+        run_dir / ".." / "site.yaml",
+        Path(__file__).resolve().parent.parent.parent / "examples" / "sites" / f"{site}.yaml",
+    ]
+    for p in candidates:
+        try:
+            if p.is_file():
+                return yaml.safe_load(p.read_text()) or {}
+        except Exception:
+            continue
+    return {}
+
+
+def _build_batches(rec_ids: list[str], rec_by_id: dict, batch_size: int) -> list[list[str]]:
+    """Sort by priority desc + stable rec id, then chunk into batch_size groups."""
+    if batch_size <= 0 or len(rec_ids) <= batch_size:
+        return [rec_ids]
+    sorted_ids = sorted(
+        rec_ids,
+        key=lambda rid: (_rec_priority_rank(rec_by_id.get(rid, {})), rid),
+    )
+    return [sorted_ids[i:i + batch_size] for i in range(0, len(sorted_ids), batch_size)]
+
+
+def _write_batch_manifest(run_dir: Path, batches: list[list[str]],
+                          rec_by_id: dict, batch_size: int,
+                          source_run_ts: str) -> None:
+    """Persist the batch plan inside the run dir. The implementer reads this
+    on EXIT to find the next pending batch and self-dispatch."""
+    def _summary(rec_ids: list[str]) -> str:
+        cnt: dict[str, int] = {}
+        for rid in rec_ids:
+            r = rec_by_id.get(rid, {})
+            for f in ("priority", "severity", "tier"):
+                v = (r.get(f) or "").lower()
+                if v:
+                    cnt[v] = cnt.get(v, 0) + 1
+                    break
+        return " ".join(f"{k}:{v}" for k, v in sorted(cnt.items())) or "—"
+
+    manifest = {
+        "schema_version": "1",
+        "source_run_ts": source_run_ts,
+        "batch_size": batch_size,
+        "total_recs": sum(len(b) for b in batches),
+        "batches": [
+            {
+                "index": i + 1,
+                "rec_ids": b,
+                "rec_count": len(b),
+                "priority_summary": _summary(b),
+                "status": "pending",
+                "started_at": "",
+                "completed_at": "",
+                "completion_status": "",  # set on chain: "completed"|"paused"
+                "dispatch_log": "",       # set when dispatched
+            }
+            for i, b in enumerate(batches)
+        ],
+    }
+    manifest_path = run_dir / "dispatch-batches.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
 def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
-                       run_ts: str, run_dir: Path) -> None:
+                       run_ts: str, run_dir: Path,
+                       batch_index: int = 0,
+                       batch_total: int = 0) -> None:
     """Call the configured downstream agent (or just log + exit if --no-dispatch)."""
     dispatcher = route.get("dispatcher", {})
     typ = dispatcher.get("type", "")
@@ -637,6 +766,12 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
     env["RESPONDER_SITE"] = site
     env["RESPONDER_RUN_TS"] = run_ts
     env["RESPONDER_RUN_DIR"] = str(run_dir)
+    # Batching context: set when this dispatch is one chunk of a multi-batch
+    # plan (see dispatch-batches.json in the run dir). batch_total=0 means
+    # "not batched — single dispatch covers everything".
+    if batch_total:
+        env["RESPONDER_BATCH_INDEX"] = str(batch_index)
+        env["RESPONDER_BATCH_TOTAL"] = str(batch_total)
     # Derive source agent from run_dir path. Three sources, in priority order:
     #   1. tempdir prefix (Azure-materialized): "rundir-<source_agent>-<run_ts>-..."
     #   2. local FS layout: <fw_storage>/agents/<source_agent>/runs/<run_ts>/
@@ -955,14 +1090,252 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
                 if match.get("fallback") and agent_hint:
                     matched_route = route; break
             if matched_route:
-                trigger_dispatcher(matched_route, action_obj["action"],
-                                   action_obj["rec_ids"], site, run_ts, run_dir)
+                # Decide if this should be split into batches. The site
+                # config's max_recs_per_run is the source of truth (defaults
+                # to 12). When batched: write a manifest that the implementer
+                # uses to auto-chain; only dispatch batch 1 here.
+                site_cfg = _load_site_config(run_dir, site)
+                batch_size = _site_max_recs_per_run(site_cfg)
+                all_recs = action_obj["rec_ids"]
+                batches = _build_batches(all_recs, rec_by_id, batch_size)
+                # Always write the manifest — even for single-batch
+                # dispatches — so the dashboard's Implementer Queue page
+                # shows a consistent drill-down view (Worked on / Running
+                # / Queue) regardless of size.
+                _write_batch_manifest(
+                    run_dir, batches, rec_by_id, batch_size,
+                    source_run_ts=run_ts,
+                )
+                if len(batches) > 1:
+                    print(f"  [batch] split {len(all_recs)} recs into {len(batches)} batches "
+                          f"of up to {batch_size} (sorted by priority desc); "
+                          f"dispatching batch 1 — implementer auto-chains the rest",
+                          file=sys.stderr)
+                else:
+                    print(f"  [batch] {len(all_recs)} recs fit in one batch "
+                          f"(≤ {batch_size}); single dispatch",
+                          file=sys.stderr)
+                trigger_dispatcher(
+                    matched_route, action_obj["action"],
+                    batches[0], site, run_ts, run_dir,
+                    batch_index=1, batch_total=len(batches),
+                )
             else:
                 print(f"  [no-route] no dispatcher matched (x_agent={x_agent!r}, "
                       f"subject_agent={agent_hint!r}, prefix_agent={action_obj.get('prefix_agent')!r})",
                       file=sys.stderr)
 
+    # ── Archive: mark this email as "responded to" so the dashboard's
+    #            Confirmations page stops listing it as pending. We write
+    #            one entry per matched outbound-email request_id. The
+    #            archive key is what GET /confirmations/pending-emails
+    #            checks against. See routes/confirmations.py.
+    if recorded > 0:
+        try:
+            from framework.core.storage import get_storage
+            archive_storage = get_storage()
+            ts_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            # Find every outbound-email record this reply corresponds to.
+            # Match strategies: (a) explicit request_id from subject tag,
+            # (b) candidate_source_agent + run_ts from action_obj.
+            archived_request_ids: set[str] = set()
+            for action_obj in actions:
+                site_a = action_obj.get("prefix_site") or site_hint or ""
+                run_ts_a = action_obj.get("run_ts") or run_ts_hint or ""
+                # Try multiple agent ids the responder might have routed to
+                src_candidates = []
+                ah = (agent_hint or "").lower()
+                if ah and re.match(r"^[a-z0-9-]+-(progressive-improvement|competitor-research|seo-opportunity|catalog-audit|head-to-head|article-author)-agent$", ah):
+                    src_candidates.append(ah)
+                if ah == "seo" and site_a:
+                    src_candidates.append(f"{site_a}-seo-opportunity-agent")
+                if ah == "h2h" and site_a:
+                    src_candidates.append(f"{site_a}-head-to-head-agent")
+                if ah == "article" and site_a:
+                    src_candidates.append(f"{site_a}-article-author-agent")
+                # Walk each candidate's outbound-emails and find matching ones
+                for src_agent in src_candidates:
+                    prefix = f"agents/{src_agent}/outbound-emails/"
+                    try:
+                        for k in archive_storage.list_prefix(prefix):
+                            d = archive_storage.read_json(k)
+                            if not isinstance(d, dict):
+                                continue
+                            if not d.get("expects_response"):
+                                continue
+                            d_run_ts = d.get("run_ts", "")
+                            if run_ts_a and d_run_ts and d_run_ts != run_ts_a:
+                                continue
+                            req_id = d.get("request_id", "")
+                            if not req_id or req_id in archived_request_ids:
+                                continue
+                            # Write the archive marker. Include the parsed
+                            # action breakdown so the dashboard's "responded"
+                            # view can show WHAT the user said (not just THAT
+                            # they responded). One entry per action with the
+                            # rec_ids it expanded to.
+                            archived_actions = []
+                            for ao in actions:
+                                # Only include actions that match this run's
+                                # outbound email (or all when run_ts unknown)
+                                ao_run_ts = ao.get("run_ts") or run_ts_hint or ""
+                                if d_run_ts and ao_run_ts and ao_run_ts != d_run_ts:
+                                    continue
+                                archived_actions.append({
+                                    "action": ao.get("action", ""),
+                                    "rec_ids": list(ao.get("rec_ids") or []),
+                                    "filters": list(ao.get("filters") or []),
+                                    "raw_line": ao.get("raw_line", "")[:300],
+                                })
+                            arch_key = f"agents/{src_agent}/responses-archive/{req_id}.json"
+                            archive_storage.write_json(arch_key, {
+                                "schema_version": "2",
+                                "request_id": req_id,
+                                "responded_at": ts_now,
+                                "responder_message_id": msg_id,
+                                "in_reply_to": in_reply_to,
+                                "from_address": sender,
+                                "subject": subject,
+                                "actions_recorded": recorded,
+                                "actions": archived_actions,
+                                # Roll up the rec ids by action for easy
+                                # rendering in the UI.
+                                "rec_ids_by_action": {
+                                    a: [rid for ao in archived_actions
+                                        if ao["action"] == a
+                                        for rid in ao["rec_ids"]]
+                                    for a in {ao["action"] for ao in archived_actions}
+                                },
+                                "agent_id": src_agent,
+                                "site": d.get("site", ""),
+                                "run_ts": d_run_ts,
+                                "outbound_subject": d.get("subject", ""),
+                                "outbound_sent_at": d.get("sent_at", ""),
+                                "rec_count_outbound": d.get("rec_count", 0),
+                            })
+                            archived_request_ids.add(req_id)
+                            print(f"  [archive] marked {src_agent} request {req_id} as responded",
+                                  file=sys.stderr)
+                    except Exception as e:
+                        print(f"  [archive] warn: failed to scan {prefix}: {e}",
+                              file=sys.stderr)
+        except Exception as e:
+            print(f"  [archive] warn: archive step failed: {e}", file=sys.stderr)
+
     return recorded
+
+
+def drain_auto_queue(cfg: dict) -> int:
+    """Process any auto-queue trigger files dropped by the reporter.
+
+    Reporter writes agents/responder-agent/auto-queue/<request-id>.json with
+    {source_agent, site, run_ts, rec_ids, action} — this fans out the same
+    dispatch flow as a real "implement all" email reply. After dispatching,
+    the file is moved to agents/responder-agent/auto-queue-processed/."""
+    try:
+        from framework.core.storage import get_storage
+        from framework.core.run_dir import RunDir
+    except Exception as e:
+        print(f"[responder] auto-queue: framework imports failed: {e}", file=sys.stderr)
+        return 0
+    s = get_storage()
+    prefix = "agents/responder-agent/auto-queue/"
+    try:
+        keys = list(s.list_prefix(prefix))
+    except Exception as e:
+        print(f"[responder] auto-queue list failed: {e}", file=sys.stderr)
+        return 0
+    if not keys:
+        return 0
+    print(f"[responder] auto-queue: {len(keys)} pending trigger(s)", file=sys.stderr)
+    routes = cfg.get("routes", [])
+    processed = 0
+    for key in keys:
+        try:
+            payload = s.read_json(key)
+            if not isinstance(payload, dict):
+                continue
+            site = payload.get("site", "")
+            run_ts = payload.get("run_ts", "")
+            source_agent = payload.get("source_agent", "")
+            rec_ids = payload.get("rec_ids") or []
+            action = payload.get("action") or "implement"
+            request_id = payload.get("request_id") or ""
+            if not (site and run_ts and source_agent and rec_ids):
+                print(f"[responder] auto-queue {key}: missing fields, skipping", file=sys.stderr)
+                continue
+
+            # Find a route — auto-queue routes through the implementer like
+            # SEO replies. Pick the first route with a usable implementer
+            # script. Most simple match: agent_subject_tag=seo.
+            matched_route = None
+            for route in routes:
+                m = route.get("match", {})
+                if m.get("agent_subject_tag") == "seo":
+                    matched_route = route
+                    break
+            if not matched_route:
+                # Fallback: any route with implementer dispatcher
+                for route in routes:
+                    if route.get("dispatcher", {}).get("type") == "implementer":
+                        matched_route = route
+                        break
+            if not matched_route:
+                print(f"[responder] auto-queue {key}: no implementer route", file=sys.stderr)
+                continue
+
+            # Materialize the source run dir from Azure into a PERSISTENT
+            # tempdir (NOT auto-cleaned). trigger_dispatcher spawns the
+            # implementer in a background systemd-run scope that outlives
+            # this tick — if we used `with rd.tempdir():` the tempdir
+            # would get rmtree'd before the implementer could read it.
+            # Same pattern as find_run_dir_for_site() in the IMAP path.
+            import tempfile as _tempfile
+            rd = RunDir(source_agent, run_ts, site=site)
+            td = Path(_tempfile.mkdtemp(prefix=f"rundir-{source_agent}-{run_ts}-"))
+            try:
+                rd.materialize(td)
+            except Exception as e:
+                print(f"[responder] auto-queue materialize failed for {key}: {e}", file=sys.stderr)
+                continue
+
+            # Build batches + write manifest
+            recs_doc_path = td / "recommendations.json"
+            rec_by_id = {}
+            if recs_doc_path.is_file():
+                try:
+                    rec_by_id = {r.get("id"): r for r in
+                                 json.loads(recs_doc_path.read_text()).get("recommendations", [])}
+                except Exception:
+                    rec_by_id = {}
+            site_cfg = _load_site_config(td, site)
+            batch_size = _site_max_recs_per_run(site_cfg)
+            batches = _build_batches(rec_ids, rec_by_id, batch_size)
+            _write_batch_manifest(td, batches, rec_by_id, batch_size,
+                                  source_run_ts=run_ts)
+            if len(batches) > 1:
+                print(f"[responder] auto-queue {request_id}: {len(rec_ids)} recs → "
+                      f"{len(batches)} batches of ≤{batch_size}; dispatching batch 1",
+                      file=sys.stderr)
+            else:
+                print(f"[responder] auto-queue {request_id}: {len(rec_ids)} recs in 1 batch",
+                      file=sys.stderr)
+            trigger_dispatcher(
+                matched_route, action, batches[0], site, run_ts, td,
+                batch_index=1, batch_total=len(batches),
+            )
+            # Mark processed: copy to auto-queue-processed/, delete original
+            done_key = key.replace("/auto-queue/", "/auto-queue-processed/", 1)
+            try:
+                payload["dispatched_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                s.write_json(done_key, payload)
+                s.delete(key)
+            except Exception as e:
+                print(f"[responder] auto-queue archive failed for {key}: {e}", file=sys.stderr)
+            processed += 1
+        except Exception as e:
+            print(f"[responder] auto-queue error processing {key}: {e}", file=sys.stderr)
+    return processed
 
 
 def tick(cfg: dict, state: dict) -> dict:
@@ -972,6 +1345,13 @@ def tick(cfg: dict, state: dict) -> dict:
     network blips, SSL renegotiation, server hiccups). After exhausting
     retries, emails the operator and bails — the next timer firing will
     try again. Per-message processing failures don't block other messages."""
+    # Drain reporter-written auto-queue triggers BEFORE IMAP. These are
+    # synthetic "implement all" actions queued without an email reply.
+    try:
+        drain_auto_queue(cfg)
+    except Exception as e:
+        print(f"[responder] auto-queue drain failed (non-fatal): {e}", file=sys.stderr)
+
     # Lazy import to avoid pulling resilience into anything that imports
     # this module just for parse_actions / regex helpers.
     try:

@@ -94,23 +94,25 @@ def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, 
     reply_to = cfg.get("reporter", {}).get("email", {}).get("from", "")
     reply_help = (
         "<div style='color:#475569;font-size:13px;line-height:1.6;margin-top:8px;"
-        "padding:14px;background:#f8fafc;border-radius:6px;border:1px solid #e2e8f0'>"
-        "<b>Reply to ship recommendations.</b> Subject must stay <code>Re: …</code>.<br><br>"
-        "<b>By rec id (precise):</b><br>"
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement rec-001 rec-003</code> "
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>skip rec-002</code> "
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>merge rec-004 rec-005</code>"
-        "<br><br>"
-        "<b>Bulk by tier or severity:</b><br>"
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement all</code> "
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement high</code> "
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>implement critical and high</code> "
-        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>skip experimental</code>"
+        "padding:14px;background:#ecfdf5;border-radius:6px;border:1px solid #6ee7b7'>"
+        "<b>✅ All recommendations have been auto-queued for implementation.</b><br>"
+        "<span style='color:#047857;font-size:12px'>"
+        "The implementer is processing them in priority order — no reply needed. "
+        "Track progress in the dashboard.</span><br><br>"
+        "<b>To override the auto-queue, reply with:</b><br>"
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>defer rec-002</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>skip rec-005</code> "
+        "<code style='background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px'>revert rec-007</code>"
         "<br><span style='color:#64748b;font-size:12px'>"
-        "Bulk filters: <code>all</code>, severity (<code>critical</code>/<code>high</code>/<code>medium</code>/<code>low</code>), "
-        "tier (<code>auto</code>/<code>review</code>/<code>experimental</code>). Combine with <code>and</code> / <code>+</code> / commas."
+        "Subject must stay <code>Re: …</code>. Defer/skip removes a rec from the queue if not yet started; "
+        "revert rolls back a shipped rec by reverting its commit."
         "</span></div>"
     )
+
+    # Tracking id — same shape as in record_outbound_email so the responder
+    # can correlate replies. Stamped prominently in the email body so the
+    # user can see it without expanding headers.
+    request_id = f"r-{run_ts}-seo-{cfg.site_id}"
 
     parts = [
         f"<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#0f172a;line-height:1.5;max-width:780px;margin:0 auto;padding:24px'>",
@@ -118,14 +120,24 @@ def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, 
         f"SEO agent — {label} <span style='color:#64748b;font-weight:normal;font-size:14px'>({site})</span></h1>",
         f"<p><b>Mode:</b> <code style='background:{('#fef3c7' if mode=='recommend' else '#dcfce7')};padding:2px 8px;border-radius:3px'>{mode}</code> &nbsp;",
         f"<b>Run:</b> {run_ts} &nbsp; <b>Domain:</b> {domain}</p>",
+        # Tracking id box — visible in body so the user can quote-cite it
+        f"<div style='display:inline-block;font-size:11px;color:#64748b;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:4px 10px;margin-bottom:12px'>"
+        f"<b>Request id:</b> <code style='color:#0f172a'>{request_id}</code>"
+        f"</div>",
         f"<p style='color:#475569'>{summary}</p>",
     ]
 
     if mode == "recommend":
-        parts.append(f"<div style='background:#fef3c7;border-left:3px solid #ca8a04;padding:12px;margin:12px 0;font-size:13px'>"
-                     f"This site is in <b>recommend</b> mode — nothing was shipped. The recommendations below are "
-                     f"awaiting your selection.</div>")
-        parts.append(reply_help)
+        if recs:
+            parts.append(f"<div style='background:#fef3c7;border-left:3px solid #ca8a04;padding:12px;margin:12px 0;font-size:13px'>"
+                         f"This site is in <b>recommend</b> mode — nothing was shipped. The recommendations below "
+                         f"have been auto-queued for the implementer; reply only to override.</div>")
+            parts.append(reply_help)
+        else:
+            parts.append(f"<div style='background:#f1f5f9;border-left:3px solid #94a3b8;padding:12px;margin:12px 0;font-size:13px'>"
+                         f"<b>Nothing to do this run.</b> The analyzer found no actionable recommendations — "
+                         f"no auto-queue, no email reply needed. This is the expected state when the site has "
+                         f"no current SEO opportunities matching the analyzer's heuristics.</div>")
 
     # Recommendations
     parts.append("<h2 style='margin-top:24px'>Recommendations</h2>")
@@ -568,8 +580,58 @@ def _run_reporter(cfg, run_dir, args, run_ts: Optional[str] = None) -> None:
         # Confirmations page can surface it as a pending recommendation.
         if sent:
             _record_outbound_email(cfg, run_dir, subject, html, run_ts=run_ts)
+            # Auto-queue every rec for implementation. The responder picks
+            # this file up on its next tick and dispatches batches to the
+            # implementer — same path as if the user had emailed back
+            # "implement all", but no reply needed.
+            _write_auto_queue(cfg, run_dir, run_ts=run_ts)
     if not args.no_dashboard:
         post_to_dashboard(cfg, run_dir, subject)
+
+
+def _write_auto_queue(cfg, run_dir: Path, run_ts: Optional[str] = None) -> None:
+    """Drop an auto-queue trigger file at agents/responder-agent/auto-queue/
+    so the responder dispatches every rec on its next tick. Same dispatch
+    path as a real "implement all" email reply, no IMAP round-trip needed."""
+    try:
+        agent_id = cfg.get("reporter", {}).get("dashboard", {}).get("agent_id") \
+            or f"{cfg.site_id}-seo-opportunity-agent"
+        if not run_ts:
+            run_ts = run_dir.name
+        recs_doc = _load(run_dir / "recommendations.json")
+        recs = recs_doc.get("recommendations", [])
+        if not recs:
+            return
+        request_id = f"r-{run_ts}-seo-{cfg.site_id}"
+        import os
+        if not os.environ.get("STORAGE_BACKEND"):
+            if os.environ.get("AZURE_STORAGE_CONNECTION_STRING"):
+                os.environ["STORAGE_BACKEND"] = "azure"
+            else:
+                os.environ["STORAGE_BACKEND"] = "local"
+        os.environ.setdefault(
+            "AGENT_STORAGE_LOCAL_PATH",
+            os.path.expanduser("~/.reusable-agents/data"),
+        )
+        from framework.core.storage import get_storage
+        s = get_storage()
+        payload = {
+            "schema_version": "1",
+            "request_id": request_id,
+            "source_agent": agent_id,
+            "site": cfg.site_id,
+            "run_ts": run_ts,
+            "rec_ids": [r["id"] for r in recs],
+            "action": "implement",
+            "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": "auto-queue-from-reporter",
+        }
+        s.write_json(f"agents/responder-agent/auto-queue/{request_id}.json", payload)
+        print(f"[reporter] auto-queued {len(recs)} recs for implementation "
+              f"(agents/responder-agent/auto-queue/{request_id}.json)",
+              file=sys.stderr)
+    except Exception as e:
+        print(f"[reporter] could not write auto-queue: {e}", file=sys.stderr)
 
 
 def _record_outbound_email(cfg, run_dir: Path, subject: str, body_html: str,

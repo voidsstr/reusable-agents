@@ -167,18 +167,18 @@ export default function AgentList() {
   return (
     <div className="space-y-5">
       {/* Header — page title + summary metrics + global actions */}
-      <div className="flex items-end justify-between gap-4 flex-wrap">
+      <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 sm:gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-ink-900 tracking-tight">Agents</h1>
-          <div className="text-sm text-ink-500 mt-0.5">
-            <span className="font-medium text-ink-700">{agents.length}</span> registered
-            <span className="mx-2 text-ink-300">·</span>
-            <span className="font-medium text-ink-700">{agents.filter(a => a.enabled).length}</span> enabled
-            <span className="mx-2 text-ink-300">·</span>
-            <span className="font-medium text-status-running-fg">
-              <span className="status-dot inline-block mr-1" style={{ ['--glow-color' as string]: '59 130 246' }} />
-              {runningAgents.length}
-            </span> running now
+          <h1 className="text-xl sm:text-2xl font-semibold text-ink-900 tracking-tight">Agents</h1>
+          <div className="text-xs sm:text-sm text-ink-500 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            <span><span className="font-medium text-ink-700">{agents.length}</span> registered</span>
+            <span className="text-ink-300">·</span>
+            <span><span className="font-medium text-ink-700">{agents.filter(a => a.enabled).length}</span> enabled</span>
+            <span className="text-ink-300">·</span>
+            <span className="font-medium text-status-running-fg inline-flex items-center gap-1">
+              <span className="status-dot inline-block" style={{ ['--glow-color' as string]: '59 130 246' }} />
+              {runningAgents.length} running
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -186,12 +186,12 @@ export default function AgentList() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search agents…"
-            className="px-3 py-1.5 bg-surface-card border border-surface-divider rounded-lg text-sm w-56 placeholder:text-ink-400 focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/20"
+            className="px-3 py-2 bg-surface-card border border-surface-divider rounded-lg text-sm w-full sm:w-56 placeholder:text-ink-400 focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/20"
           />
           <select
             value={refreshKey}
             onChange={(e) => setRefreshKey(e.target.value as keyof typeof REFRESH_INTERVALS_MS)}
-            className="px-3 py-1.5 bg-surface-card border border-surface-divider rounded-lg text-sm text-ink-700 focus:outline-none focus:border-accent-500"
+            className="px-3 py-2 bg-surface-card border border-surface-divider rounded-lg text-sm text-ink-700 focus:outline-none focus:border-accent-500"
           >
             {Object.keys(REFRESH_INTERVALS_MS).map(k => (
               <option key={k} value={k}>refresh {k}</option>
@@ -201,6 +201,7 @@ export default function AgentList() {
             onClick={refresh}
             className="btn-secondary"
             title="Refresh now"
+            aria-label="Refresh"
           >↻</button>
         </div>
       </div>

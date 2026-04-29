@@ -80,6 +80,9 @@ export default {
         'glow-blocked':  'glow-pulse-light 3s ease-in-out infinite',
         'glow-starting': 'glow-pulse-light 1.6s ease-in-out infinite',
         'subtle-spin':   'spin 1.6s linear infinite',
+        'fade-in':       'fade-in 160ms ease-out',
+        'slide-in-left': 'slide-in-left 220ms cubic-bezier(0.32, 0.72, 0, 1)',
+        'slide-up':      'slide-up 220ms cubic-bezier(0.32, 0.72, 0, 1)',
       },
       keyframes: {
         // Light-theme glow: bright color halo + colored border that
@@ -98,6 +101,24 @@ export default {
               '0 6px 18px -2px rgb(var(--glow-color) / 0.30)',
           },
         },
+        'fade-in': {
+          '0%': { opacity: '0' },
+          '100%': { opacity: '1' },
+        },
+        'slide-in-left': {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(0)' },
+        },
+        'slide-up': {
+          '0%': { transform: 'translateY(8px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+      },
+      screens: {
+        // Default Tailwind breakpoints already cover sm/md/lg/xl/2xl.
+        // Add `xs` for very narrow phones (iPhone SE etc.) so we can
+        // bump font-size up specifically on them.
+        'xs': '380px',
       },
       fontFamily: {
         sans: [

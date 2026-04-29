@@ -109,6 +109,18 @@ export const api = {
     subject: string; to: string[]; rec_count: number; rec_ids: string[];
     site: string; run_ts: string; sent_at: string; kind: string;
   }[]>('/api/confirmations/pending-emails'),
+  respondedEmailRecs:      (limit = 100) => http<{
+    agent_id: string; agent_name: string; request_id: string;
+    subject: string; outbound_subject: string;
+    site: string; run_ts: string;
+    outbound_sent_at: string; responded_at: string;
+    from_address: string;
+    actions_recorded: number;
+    actions: { action: string; rec_ids: string[]; filters: string[]; raw_line: string }[];
+    rec_ids_by_action: Record<string, string[]>;
+    rec_count_outbound: number;
+    schema_version: string;
+  }[]>(`/api/confirmations/responded-emails?limit=${limit}`),
   approveConfirmation:     (agentId: string, confirmationId: string, body: { approver?: string; notes?: string } = {}) =>
                              http<ConfirmationRecord>(`/api/confirmations/${encodeURIComponent(agentId)}/${encodeURIComponent(confirmationId)}/approve`, { method: 'POST', body: JSON.stringify(body) }),
   rejectConfirmation:      (agentId: string, confirmationId: string, body: { approver?: string; notes?: string } = {}) =>
@@ -126,6 +138,25 @@ export const api = {
   putAgentGoals:     (id: string, goals: Goal[]) => http<{ schema_version: string; goals: Goal[] }>(`/api/agents/${encodeURIComponent(id)}/goals`, { method: 'PUT', body: JSON.stringify({ goals }) }),
   postGoalProgress:  (id: string, goalId: string, body: { value: number; run_ts?: string; note?: string; accomplished?: boolean }) => http<unknown>(`/api/agents/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/progress`, { method: 'POST', body: JSON.stringify(body) }),
   goalsAccomplished: (id: string) => http<{ entries: { ts: string; goal_id: string; title: string; value: number }[] }>(`/api/agents/${encodeURIComponent(id)}/goals/accomplished`),
+  goalsTimeseries: (id: string, limitRuns = 60) => http<{
+    agent_id: string
+    runs_scanned: number
+    goal_count: number
+    goals: {
+      goal_id: string
+      description: string
+      target_metric: string
+      baseline?: number | null
+      target?: number | null
+      from_rec?: string
+      is_top5_goal?: boolean
+      is_revenue_goal?: boolean
+      rationale?: string
+      check_by?: string
+      points: { ts: string; run_ts: string; current?: number | null; progress_pct?: number | null; status?: string }[]
+    }[]
+    annotations: { ts: string; rec_id: string; title: string; goal_id: string; kind: 'shipped' | 'implemented' }[]
+  }>(`/api/agents/${encodeURIComponent(id)}/goals/timeseries?limit_runs=${limitRuns}`),
 
   // implementer dispatch queue
   implementerQueue: (limit = 20) => http<{
@@ -134,6 +165,66 @@ export const api = {
   }>(`/api/implementer/queue?limit=${limit}`),
   implementerDispatches: (limit = 20) => http<DispatchEntry[]>(`/api/implementer/dispatches?limit=${limit}`),
   getDispatchLog: (dispatchId: string, tailBytes = 32768) => http<DispatchEntry & { content: string }>(`/api/implementer/dispatches/${encodeURIComponent(dispatchId)}/log?tail_bytes=${tailBytes}`),
+  // Batched dispatch chains (one per "implement all"-style reply that
+  // got split into chunks of size max_recs_per_run)
+  implementerBatches: (limit = 20) => http<{
+    chains: {
+      run_dir_basename: string
+      dispatch_run_ts: string
+      source_run_ts: string
+      source_agent: string
+      site: string
+      batch_size: number
+      total_recs: number
+      chain_status: string  // 'running' | 'queued' | 'paused' | 'completed'
+      mtime_iso: string
+      batches: {
+        index: number
+        status: string  // 'pending' | 'running' | 'completed' | 'paused'
+        rec_count: number
+        priority_summary: string
+        started_at: string
+        completed_at: string
+        dispatch_log: string
+        rec_items: {
+          rec_id: string
+          title: string
+          kind: string
+          summary_first_line?: string
+          summary_chars?: number
+          deferred?: boolean
+          applied?: boolean
+          implemented?: boolean
+          implemented_at?: string
+          implemented_via?: string
+          shipped?: boolean
+          shipped_at?: string
+          shipped_tag?: string
+          shipped_via?: string
+        }[]
+      }[]
+    }[]
+  }>(`/api/implementer/batches?limit=${limit}`),
+  getBatchRecDetail: (runDirBasename: string, recId: string) =>
+    http<{
+      rec_id: string
+      rec: Record<string, unknown>
+      summary_md: string
+      summary_key?: string
+      source_agent?: string
+      source_run_ts?: string
+      rec_context?: {
+        rec_id: string
+        kind: string
+        summary: string
+        fields: Record<string, unknown>
+        attachments: string[]
+        agent_id: string
+        run_ts: string
+      } | null
+    }>(`/api/implementer/batches/${encodeURIComponent(runDirBasename)}/rec/${encodeURIComponent(recId)}`),
+  recContextAttachmentUrl: (runDirBasename: string, recId: string, name: string) =>
+    `${API_BASE}/api/implementer/batches/${encodeURIComponent(runDirBasename)}/rec/${encodeURIComponent(recId)}/attachment/${encodeURIComponent(name)}`,
 
   // dependencies / graph
   dependencyGraph:   (includeBlueprints = false) => http<{

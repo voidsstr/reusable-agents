@@ -193,6 +193,34 @@ def main() -> None:
         _save()
         print(f"[deployer] deployed {image}:{tag}", file=sys.stderr)
 
+        # ── Mark recs as shipped ────────────────────────────────────────
+        # The implementer earlier marked recs `implemented: true` when it
+        # committed/applied them. We now know those changes are live in
+        # the deployed container — flip `shipped: true`. The dashboard
+        # surfaces shipped vs implemented-but-not-shipped per rec.
+        recs_path = run_dir / "recommendations.json"
+        if recs_path.is_file():
+            try:
+                rd = json.loads(recs_path.read_text())
+                shipped_at = _now_iso()
+                shipped_n = 0
+                for r in rd.get("recommendations", []):
+                    if r.get("implemented") is True and not r.get("shipped"):
+                        r["shipped"] = True
+                        r["shipped_at"] = shipped_at
+                        r["shipped_tag"] = tag
+                        r["shipped_image"] = image
+                        shipped_n += 1
+                if shipped_n:
+                    recs_path.write_text(json.dumps(rd, indent=2))
+                    print(f"[deployer] marked {shipped_n} rec(s) as shipped tag={tag}",
+                          file=sys.stderr)
+                deploy_meta["shipped_rec_count"] = shipped_n
+                _save()
+            except Exception as e:
+                print(f"[deployer] warn: shipped-marker write failed: {e}",
+                      file=sys.stderr)
+
     except subprocess.TimeoutExpired:
         deploy_meta["status"] = "failure"
         deploy_meta["error"] = "step timed out"

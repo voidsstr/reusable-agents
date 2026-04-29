@@ -74,25 +74,117 @@ def _resolve_recipient(*, request_id: Optional[str], source_agent: Optional[str]
 def _build_html(*, agent_id: str, source_agent: str, site: str, request_id: str,
                 rec_ids: list[str], rec_titles: dict[str, str],
                 run_dir: str, commit_sha: str, mode: str,
-                dashboard_base: str) -> str:
+                dashboard_base: str, status: str = "completed",
+                status_reason: str = "",
+                requested_rec_ids: Optional[list[str]] = None) -> str:
+    requested = requested_rec_ids or rec_ids
+    applied_set = set(rec_ids) if status == "completed" else set()
+    skipped = [rid for rid in requested if rid not in applied_set]
+
+    # Applied rows (the actually-shipped recs)
     rec_rows = "".join(
         f'<tr><td style="padding:4px 8px 4px 0;color:#64748b">{rid}</td>'
         f'<td>{(rec_titles.get(rid) or "—")[:140]}</td></tr>'
         for rid in rec_ids
-    ) or '<tr><td colspan=2 style="color:#94a3b8">(no rec ids)</td></tr>'
+    ) or '<tr><td colspan=2 style="color:#94a3b8">(none — implementer paused)</td></tr>'
+
+    # Skipped rows (when partial apply)
+    skipped_rows = "".join(
+        f'<tr><td style="padding:4px 8px 4px 0;color:#64748b">{rid}</td>'
+        f'<td>{(rec_titles.get(rid) or "—")[:140]}</td></tr>'
+        for rid in skipped
+    )
+
+    if status == "paused":
+        header = (
+            f'<h2 style="margin:0 0 8px 0;color:#b45309">'
+            f'⏸ Paused — 0 of {len(requested)} rec(s) applied'
+            f'</h2>'
+        )
+        body_intro = (
+            f'<div style="color:#475569;font-size:14px;margin-bottom:16px">'
+            f'The implementer (<code>{agent_id}</code>) read your reply but did NOT '
+            f'commit or apply any of the {len(requested)} recommendations you asked for. '
+            f'Most likely reasons: the batch was too large for one shot, individual '
+            f'recs needed clarification (e.g. investigations vs code edits), or recs '
+            f'targeted noise/typo data. See the dashboard for the full LLM transcript '
+            f'and either reply with a smaller scope (e.g. '
+            f'<code>implement rec-001 rec-002 rec-005</code>) or a focused filter '
+            f'(e.g. <code>implement high</code>).'
+            f'</div>'
+        )
+    elif skipped:
+        header = (
+            f'<h2 style="margin:0 0 8px 0;color:#0f172a">'
+            f'✓ Shipped {len(rec_ids)} of {len(requested)} rec(s) — '
+            f'<span style="color:#b45309">{len(skipped)} skipped</span>'
+            f'</h2>'
+        )
+        body_intro = (
+            '<div style="color:#475569;font-size:14px;margin-bottom:16px">'
+            f'<code>{agent_id}</code> applied the listed recs but skipped {len(skipped)} '
+            f'(see "Skipped" table below). Reply with the skipped ids if you want them '
+            f'retried with more context, or a filter like <code>implement high</code>.'
+            '</div>'
+        )
+    else:
+        header = f'<h2 style="margin:0 0 8px 0;color:#0f172a">✓ Shipped — {len(rec_ids)} rec(s) applied</h2>'
+        body_intro = (
+            '<div style="color:#475569;font-size:14px;margin-bottom:16px">'
+            f'The recommendations you approved by reply have been implemented by '
+            f'<code>{agent_id}</code>.'
+            '</div>'
+        )
+
+    # Optional reason line — shows the verifying signal (commit sha, applied-recs.json, etc.)
+    reason_block = ""
+    if status_reason:
+        # Escape HTML
+        import html as _html
+        reason_safe = _html.escape(status_reason)
+        reason_block = (
+            f'<div style="color:#64748b;font-size:12px;margin-bottom:12px;'
+            f'font-family:monospace;background:#f1f5f9;padding:6px 10px;border-radius:4px">'
+            f'<b>verified:</b> {reason_safe}'
+            f'</div>'
+        )
+    applied_heading = (
+        "Recommendations applied"
+        if status == "completed"
+        else "Recommendations NOT applied"
+    )
+    skipped_section = ""
+    if status == "completed" and skipped:
+        skipped_section = f"""
+<h3 style="margin-top:18px;font-size:14px;color:#b45309;border-bottom:1px solid #fed7aa;padding-bottom:4px">Skipped — not applied</h3>
+<table style="font-size:13px;border-collapse:collapse;margin-top:6px;width:100%">
+{skipped_rows}
+</table>
+"""
+    # Tracking id chip — visible in body so the user can correlate the
+    # email to the dashboard's outbound-emails record without digging
+    # through subject/headers.
+    import html as _html_mod
+    rid_chip = (
+        f'<div style="display:inline-block;font-size:11px;color:#64748b;'
+        f'background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;'
+        f'padding:4px 10px;margin-bottom:12px">'
+        f'<b>Request id:</b> <code style="color:#0f172a">{_html_mod.escape(request_id or "—")}</code>'
+        f'</div>'
+    ) if request_id else ""
     return f"""<!doctype html>
 <html><body style="font-family:-apple-system,sans-serif;color:#0f172a;line-height:1.5">
 <div style="max-width:720px;margin:0 auto;padding:20px;border:1px solid #e2e8f0;border-radius:6px">
-<h2 style="margin:0 0 8px 0;color:#0f172a">✓ Shipped — {len(rec_ids)} rec(s) applied</h2>
-<div style="color:#475569;font-size:14px;margin-bottom:16px">
-The recommendations you approved by reply have been implemented by
-<code>{agent_id}</code>.
-</div>
+{header}
+{body_intro}
+{rid_chip}
+{reason_block}
 
-<h3 style="margin-top:18px;font-size:14px;color:#475569;border-bottom:1px solid #e2e8f0;padding-bottom:4px">Recommendations applied</h3>
+<h3 style="margin-top:18px;font-size:14px;color:#475569;border-bottom:1px solid #e2e8f0;padding-bottom:4px">{applied_heading}</h3>
 <table style="font-size:13px;border-collapse:collapse;margin-top:6px;width:100%">
-{rec_rows}
+{rec_rows if status == "completed" else "".join(f'<tr><td style=padding:4px_8px_4px_0;color:#64748b>{rid}</td><td>{(rec_titles.get(rid) or "—")[:140]}</td></tr>' for rid in requested) or '<tr><td colspan=2 style="color:#94a3b8">(none)</td></tr>'}
 </table>
+{skipped_section}
 
 <h3 style="margin-top:18px;font-size:14px;color:#475569;border-bottom:1px solid #e2e8f0;padding-bottom:4px">Run details</h3>
 <table style="margin-top:6px;font-size:13px;border-collapse:collapse">
@@ -100,8 +192,9 @@ The recommendations you approved by reply have been implemented by
 <tr><td style="padding:4px 12px 4px 0;color:#64748b">Site</td><td>{site or '—'}</td></tr>
 <tr><td style="padding:4px 12px 4px 0;color:#64748b">Request id</td><td><code>{request_id}</code></td></tr>
 <tr><td style="padding:4px 12px 4px 0;color:#64748b">Run dir</td><td><code>{run_dir or '—'}</code></td></tr>
-<tr><td style="padding:4px 12px 4px 0;color:#64748b">Commit</td><td><code>{commit_sha or 'pending'}</code></td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Commit</td><td><code>{commit_sha or 'no commit'}</code></td></tr>
 <tr><td style="padding:4px 12px 4px 0;color:#64748b">Mode</td><td>{mode or 'claude'}</td></tr>
+<tr><td style="padding:4px 12px 4px 0;color:#64748b">Status</td><td>{status}</td></tr>
 </table>
 
 <div style="color:#64748b;font-size:12px;margin-top:18px">
@@ -196,6 +289,9 @@ def send_completion_email(
     dashboard_base: str = "",
     oauth_file: str = "",
     storage: Optional[StorageBackend] = None,
+    status: str = "completed",  # "completed" or "paused" — paused = claude refused / no work done
+    status_reason: str = "",
+    requested_rec_ids: Optional[list[str]] = None,
 ) -> tuple[bool, str]:
     """Send a per-rec confirmation email after an implementer ships changes.
 
@@ -251,14 +347,34 @@ def send_completion_email(
     # the rec count + the agent id as the routing tag. The agent_id used
     # here is responder-agent (since this email is the responder reporting
     # back), not the implementer that did the actual code work.
-    subject = (
-        f"[{agent_id}:{request_id or 'done'}] {label} — Shipped {len(rec_ids)} rec(s)"
-    )
+    requested = requested_rec_ids or rec_ids
+    requested_count = len(requested)
+    applied_count = len(rec_ids) if status == "completed" else 0
+    skipped_count = max(0, requested_count - applied_count)
+
+    if status == "paused":
+        subject = (
+            f"[{agent_id}:{request_id or 'done'}] {label} — "
+            f"PAUSED: implementer needs guidance ({requested_count} rec(s) NOT applied)"
+        )
+    elif skipped_count > 0:
+        # Partial — claude shipped some but not all
+        subject = (
+            f"[{agent_id}:{request_id or 'done'}] {label} — "
+            f"Shipped {applied_count}/{requested_count} rec(s) "
+            f"({skipped_count} skipped)"
+        )
+    else:
+        subject = (
+            f"[{agent_id}:{request_id or 'done'}] {label} — Shipped {applied_count} rec(s)"
+        )
     body_html = _build_html(
         agent_id=agent_id, source_agent=source_agent, site=site,
         request_id=request_id, rec_ids=rec_ids, rec_titles=rec_titles,
         run_dir=run_dir, commit_sha=commit_sha, mode=mode,
-        dashboard_base=dashboard_base,
+        dashboard_base=dashboard_base, status=status,
+        status_reason=status_reason,
+        requested_rec_ids=requested,
     )
 
     track_key = (
@@ -353,6 +469,16 @@ def main() -> int:
     p.add_argument("--sender", default="")
     p.add_argument("--msmtp-account", default="automation")
     p.add_argument("--dashboard-base", default="")
+    p.add_argument("--status", default="completed",
+                   choices=("completed", "paused"),
+                   help="completed = recs applied; paused = claude bailed without applying")
+    p.add_argument("--status-reason", default="",
+                   help="optional human-readable reason explaining the status "
+                        "(e.g. commit sha, applied-recs.json contents, or why paused)")
+    p.add_argument("--requested-rec-ids", default="",
+                   help="comma-separated rec ids the user originally asked for. "
+                        "When --rec-ids is a strict subset (partial apply), the email "
+                        "explicitly lists which were applied vs which were skipped.")
     args = p.parse_args()
 
     rec_ids = [r.strip() for r in args.rec_ids.split(",") if r.strip()]
@@ -363,6 +489,10 @@ def main() -> int:
         except Exception:
             pass
 
+    requested_rec_ids = [
+        r.strip() for r in (args.requested_rec_ids or "").split(",") if r.strip()
+    ] or rec_ids
+
     ok, detail = send_completion_email(
         agent_id=args.agent_id, rec_ids=rec_ids, site=args.site,
         source_agent=args.source_agent, request_id=args.request_id,
@@ -372,6 +502,9 @@ def main() -> int:
         site_config_path=args.site_config,
         site_label=args.site_label,
         dashboard_base=args.dashboard_base,
+        status=args.status,
+        status_reason=args.status_reason,
+        requested_rec_ids=requested_rec_ids,
     )
     print(f"[completion-email] {'sent' if ok else 'skipped/failed'}: {detail}",
           file=sys.stderr)
