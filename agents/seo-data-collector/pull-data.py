@@ -56,11 +56,43 @@ def get_access_token(oauth_file: Path) -> str:
     return out
 
 
-def http_post(url: str, body: dict, headers: dict) -> dict:
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode())
+def http_post(url: str, body: dict, headers: dict, *,
+              retries: int = 3, base_delay: float = 2.0) -> dict:
+    """POST with auto-retry on transient failures. Google's GSC + GA4 APIs
+    occasionally return 5xx or hang the SSL handshake — without retries
+    every cron run that hits the slow window 100% fails. Exponential
+    backoff: 2s, 4s, 8s.
+
+    Retries on:
+      - HTTP 5xx (server errors)
+      - HTTP 429 (rate limit)
+      - SSL handshake timeouts
+      - URLError / OSError (DNS / connect / read timeout)
+
+    Re-raises immediately on 4xx (not 429) since those are caller errors
+    that won't fix themselves with a retry.
+    """
+    import time as _time
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            data = json.dumps(body).encode()
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            # 4xx (other than 429) is caller's fault — don't retry
+            if 400 <= e.code < 500 and e.code != 429:
+                raise
+            err(f"  http_post {e.code} on attempt {attempt + 1}/{retries + 1}; retrying...")
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            last_exc = e
+            err(f"  http_post {type(e).__name__} on attempt {attempt + 1}/{retries + 1}: {str(e)[:120]}; retrying...")
+        if attempt < retries:
+            _time.sleep(base_delay * (2 ** attempt))
+    # Exhausted retries — re-raise the last exception so the caller sees it
+    raise last_exc if last_exc else RuntimeError("http_post: unreachable")
 
 
 def gsc_query(token: str, site_url: str, body: dict) -> dict:
