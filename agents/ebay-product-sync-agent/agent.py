@@ -583,10 +583,14 @@ def _ensure_item_end_date_column(adapter: DbAdapter, table: str) -> None:
 
 def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
     """eBay listings expire (auctions end, items get sold). Mark any
-    `source='ebay'` row inactive if EITHER:
+    row in the listings table inactive if EITHER:
       - `item_end_date` is in the past, OR
       - `updated_at` hasn't been touched in the last `hours`.
     Returns the count of newly-marked-inactive rows.
+
+    No `source` filter — the two-table architecture dedicates this
+    table to eBay listings exclusively, so the predicate would be
+    redundant (and broke on schemas that omitted the column entirely).
     """
     if hours <= 0:
         return 0
@@ -594,7 +598,7 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
         cur = adapter.conn.cursor()
         cur.execute(f"""
             UPDATE {table} SET is_active = false
-             WHERE source = 'ebay' AND is_active = true
+             WHERE is_active = true
                AND (
                  (item_end_date IS NOT NULL AND item_end_date < NOW())
                  OR updated_at < NOW() - INTERVAL '{int(hours)} hours'
@@ -608,7 +612,7 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
         cur = adapter.conn.cursor()
         cur.execute(f"""
             UPDATE {table} SET is_active = 0
-             WHERE source = 'ebay' AND is_active = 1
+             WHERE is_active = 1
                AND (
                  (item_end_date IS NOT NULL AND item_end_date < SYSUTCDATETIME())
                  OR updated_at < DATEADD(hour, -?, SYSUTCDATETIME())
