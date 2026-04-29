@@ -87,6 +87,31 @@
         }
       }
     },
+    "articles": {
+      "type": "object",
+      "description": "Optional: site-articles inventory. The collector pulls every published article slug from the configured DB sources, joins with GSC pages-90d data, and writes data/articles-inventory.json. The analyzer surfaces SEO-boost recs (snippet-rewrite, title-fix, orphan-boost) per published article. Unconfigured sites skip the inventory step cleanly.",
+      "additionalProperties": false,
+      "required": ["domain", "sources"],
+      "properties": {
+        "domain": { "type": "string", "description": "Public domain for the URL templates (e.g. 'specpicks.com')." },
+        "dsn_env": { "type": "string", "description": "Name of the env var holding the Postgres DSN. Either dsn_env OR dsn must be set." },
+        "dsn": { "type": "string", "description": "Literal Postgres DSN. Prefer dsn_env in committed configs to avoid leaking credentials." },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "query", "url_template"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "description": "Logical source name (e.g. 'editorial_articles', 'buying_guides')." },
+              "query": { "type": "string", "description": "SELECT statement; result must include at least slug + title columns." },
+              "url_template": { "type": "string", "description": "URL pattern like 'https://{domain}/reviews/{slug}' — {domain} and {slug} are substituted at collect time." }
+            }
+          }
+        }
+      }
+    },
     "sitemap_url": {
       "type": "string",
       "description": "Optional: override sitemap URL. Defaults to https://<site.domain>/sitemap.xml. Index sitemaps are auto-followed."

@@ -1089,6 +1089,11 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
     # 4b. LLM-driven adaptive audit pass — flags evolving SEO opportunities
     # the deterministic pass can't see (CWV, schema, EEAT, AI search,
     # mobile-first specifics). Disabled with SEO_DISABLE_LLM_AUDIT=1.
+    # NOTE: max_recs is local to build_recommendations() — re-load here
+    # for the LLM-audit branch's own dedupe + budget logic. Without this,
+    # the audit fails with "name 'max_recs' is not defined" mid-run and
+    # produces 0 final recs.
+    max_recs = int(cfg.get("analyzer", {}).get("max_recs_per_run", 12))
     if os.environ.get("SEO_DISABLE_LLM_AUDIT") != "1":
         try:
             from llm_audit import (
