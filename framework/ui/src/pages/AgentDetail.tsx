@@ -53,6 +53,11 @@ export default function AgentDetail() {
   const [liveStatus, setLiveStatus] = useState<AgentLiveStatus | null>(null)
   const [tab, setTab] = useState<TabId>('overview')
   const [error, setError] = useState('')
+  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
+  const showToast = (kind: 'ok' | 'err', msg: string) => {
+    setToast({ kind, msg })
+    setTimeout(() => setToast(null), 4500)
+  }
 
   const refresh = async () => {
     try {
@@ -84,6 +89,17 @@ export default function AgentDetail() {
 
   return (
     <div className={`space-y-4 ${isActive ? 'agent-detail-active' : ''}`}>
+      {toast && (
+        <div
+          className={`fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium max-w-[92vw] sm:max-w-md text-center ${
+            toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+          }`}
+          role="status"
+          onClick={() => setToast(null)}
+        >
+          {toast.msg}
+        </div>
+      )}
       {/* Prominent "what the agent is doing right now" banner.
           Only when state is running/starting — quietly disappears otherwise. */}
       {isActive && liveStatus && (
@@ -161,12 +177,17 @@ export default function AgentDetail() {
               return (
                 <button
                   data-testid="run-now"
-                  onClick={async () => {
+                  type="button"
+                  onClick={async (e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
                     try {
-                      await api.triggerAgent(id)
+                      const r = await api.triggerAgent(id)
+                      showToast('ok', `▶ Triggered ${id} (run ${(r?.run_id || '').slice(0, 16)})`)
                       setTimeout(refresh, 1500)
-                    } catch (e: any) {
-                      alert(`Trigger failed: ${e?.message || e}`)
+                    } catch (err: unknown) {
+                      const msg = String((err as Error)?.message || err)
+                      showToast('err', `Trigger failed: ${msg}`)
                     }
                   }}
                   className="btn-primary"

@@ -176,7 +176,16 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
           }
           return (
             <button
-              onClick={(e) => { e.stopPropagation(); onTrigger?.(agent.id) }}
+              type="button"
+              onClick={(e) => {
+                // CRITICAL on mobile: stopPropagation alone isn't enough —
+                // the parent <Link> still follows its href on click. Without
+                // preventDefault the page navigates mid-request, aborting
+                // the trigger fetch and showing an error toast.
+                e.preventDefault()
+                e.stopPropagation()
+                onTrigger?.(agent.id)
+              }}
               className="btn-primary !py-1 !px-2.5 !text-[11px]"
               disabled={isActive}
               title={isActive ? 'A run is already in progress' : 'Trigger a run now'}
@@ -186,7 +195,12 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
           )
         })()}
         <button
-          onClick={(e) => { e.stopPropagation(); onToggleEnabled?.(agent) }}
+          type="button"
+          onClick={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            onToggleEnabled?.(agent)
+          }}
           className="btn-secondary !py-1 !px-2.5 !text-[11px]"
         >
           {agent.enabled ? '⏸ pause' : '▶ enable'}

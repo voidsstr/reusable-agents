@@ -145,12 +145,20 @@ export default function AgentList() {
     [agents, statuses],
   )
 
+  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
+  const showToast = (kind: 'ok' | 'err', msg: string) => {
+    setToast({ kind, msg })
+    setTimeout(() => setToast(null), 4500)
+  }
+
   const triggerOne = async (id: string) => {
     try {
-      await api.triggerAgent(id)
+      const r = await api.triggerAgent(id)
+      showToast('ok', `▶ ${id} triggered (run ${(r?.run_id || '').slice(0, 16)})`)
       setTimeout(refresh, 1500)
-    } catch (e) {
-      alert(`Trigger failed: ${e}`)
+    } catch (e: unknown) {
+      const msg = String((e as Error)?.message || e)
+      showToast('err', `Trigger failed: ${msg}`)
     }
   }
 
@@ -158,14 +166,30 @@ export default function AgentList() {
     try {
       if (a.enabled) await api.disableAgent(a.id)
       else await api.enableAgent(a.id)
+      showToast('ok', `${a.id} ${a.enabled ? 'paused' : 'enabled'}`)
       await refresh()
-    } catch (e) {
-      alert(`Toggle failed: ${e}`)
+    } catch (e: unknown) {
+      const msg = String((e as Error)?.message || e)
+      showToast('err', `Toggle failed: ${msg}`)
     }
   }
 
   return (
     <div className="space-y-5">
+      {/* Toast — replaces alert() so mobile users get readable feedback */}
+      {toast && (
+        <div
+          className={`fixed bottom-20 md:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium max-w-[92vw] sm:max-w-md text-center ${
+            toast.kind === 'ok'
+              ? 'bg-emerald-600 text-white'
+              : 'bg-amber-600 text-white'
+          }`}
+          role="status"
+          onClick={() => setToast(null)}
+        >
+          {toast.msg}
+        </div>
+      )}
       {/* Header — page title + summary metrics + global actions */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 sm:gap-4">
         <div>
