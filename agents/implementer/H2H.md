@@ -107,6 +107,57 @@ SELECT model_name, quantization, tokens_per_sec_gen, source_name
 Format as the same `## <name>` markdown block the legacy script used
 (see `generate-comparison-commentary.ts:58-74` — keep parity).
 
+#### 3a-bench. Benchmark coverage check + research proposal
+
+After fetching the benchmarks above for BOTH sides, count what you got:
+each side should have ≥3 gaming, ≥3 synthetic, ≥1 AI benchmark to
+write a credible H2H. If either side falls short, the comparison page
+will look thin — the user expects numbers, not vibes.
+
+For each missing benchmark category on each side:
+
+1. **Try harder lookup first** — query `gaming_benchmarks` /
+   `synthetic_benchmarks` / `ai_benchmarks` with looser predicates:
+   match by `hardware_id` OR by hardware name in `source_name`,
+   accept lower-quality scores (`source_name LIKE 'manufacturer%%'`),
+   etc. The strict-tier query above filters aggressively; second-pass
+   loosens that.
+
+2. **Propose new benchmark targets** when the looser query still
+   returns 0 rows. Write to `benchmark_research_targets` so the
+   benchmark-research-agent picks them up on its next run:
+
+   ```sql
+   INSERT INTO benchmark_research_targets (
+       hardware_slug, hardware_id, category, priority,
+       reason, requested_by, requested_at, status
+   ) VALUES (
+       $1, $2, 'gaming' | 'synthetic' | 'ai',
+       'high',  -- H2H needs it for a public page
+       'H2H pair art-NNN missing <category> bench for <name>',
+       'specpicks-head-to-head-agent',
+       now(), 'pending'
+   ) ON CONFLICT (hardware_slug, category) DO UPDATE SET
+       priority = 'high',
+       requested_at = now(),
+       status = 'pending'
+   RETURNING id;
+   ```
+
+3. **Use third-party benchmarks inline** as a fallback. Hit
+   techpowerup.com, anandtech.com, tomshardware.com via curl + parse
+   for the relevant numbers IF the proposed-benchmark gap is critical
+   for this pair (e.g. you literally can't write the verdict without
+   it). Cite the source explicitly in the commentary.
+
+4. **NEVER fabricate**. If after 1+2+3 you still don't have numbers,
+   write the section as "Insufficient benchmark coverage — see
+   pending research target #<id>" and DEFER the rec rather than
+   ship a thin commentary.
+
+The implementer's eventual output should ALWAYS include real numeric
+data for both sides — that's the whole point of the H2H page format.
+
 For `kind == "product"`:
 
 ```sql
