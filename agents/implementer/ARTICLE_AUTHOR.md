@@ -80,7 +80,11 @@ expect substantive content for that signal.
 | `trending-ai`, `maker`, `retro-build`, `gaming` | `editorial_articles` | The default editorial layout |
 
 For `buying_guides`, columns differ slightly:
-- `body_md` is the same
+- **CRITICAL**: populate BOTH `slug` AND `new_slug` to the same value
+  (the public route reads from `slug`; legacy code reads `new_slug`).
+  A row with `slug=NULL` is invisible on the site even though
+  `status='published'`.
+- `body_md` is the same as editorial_articles
 - `picks` is `jsonb` — populate as `[{"product_slug":"...","verdict":"...","why":"..."}, ...]` with 3-7 picks
 - `target_audience` is a one-liner (`"Budget builders running 1080p"` etc.)
 - `target_year` = current year as int

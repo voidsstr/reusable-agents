@@ -294,74 +294,71 @@ def _maybe_send_weekly_digest(s, stats: dict) -> bool:
               f"escalations={escalations})", file=sys.stderr)
         return False
 
-    # Build digest
-    sigs_sorted = sorted(stats.get("signatures", {}).items(),
-                         key=lambda kv: -kv[1])
-    targets_sorted = sorted(stats.get("targets", {}).items(),
-                            key=lambda kv: -kv[1])
-    outcomes_sorted = sorted(stats.get("outcomes", {}).items(),
-                             key=lambda kv: -kv[1])
-    week_end = _now_iso()
-    rows_sigs = "".join(
-        f"<tr><td style='padding:6px;border:1px solid #e2e8f0'>{k}</td>"
-        f"<td style='padding:6px;border:1px solid #e2e8f0;text-align:right'>{v}</td></tr>"
-        for k, v in sigs_sorted
-    ) or "<tr><td colspan='2' style='padding:6px;color:#64748b'>(none)</td></tr>"
-    rows_targets = "".join(
-        f"<tr><td style='padding:6px;border:1px solid #e2e8f0;font-family:monospace'>{k}</td>"
-        f"<td style='padding:6px;border:1px solid #e2e8f0;text-align:right'>{v}</td></tr>"
-        for k, v in targets_sorted
-    ) or "<tr><td colspan='2' style='padding:6px;color:#64748b'>(none)</td></tr>"
-    rows_outcomes = "".join(
-        f"<tr><td style='padding:6px;border:1px solid #e2e8f0'>{k}</td>"
-        f"<td style='padding:6px;border:1px solid #e2e8f0;text-align:right'>{v}</td></tr>"
-        for k, v in outcomes_sorted
-    ) or "<tr><td colspan='2' style='padding:6px;color:#64748b'>(none)</td></tr>"
+    # Build digest using the shared framework email primitives.
+    try:
+        sys.path.insert(0, str(_REPO_ROOT))
+        from framework.core import email_templates as et
+    except Exception as e:
+        sys.stderr.write(f"[agent-doctor] email_templates import failed, skipping digest: {e}\n")
+        return False
 
-    body = (
-        "<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;"
-        "color:#0f172a;line-height:1.5;max-width:780px;margin:0 auto;padding:24px'>"
-        f"<h1 style='border-bottom:1px solid #e2e8f0;padding-bottom:12px'>"
-        f"agent-doctor — weekly summary</h1>"
-        f"<p style='color:#475569'>Window: <code>{stats.get('week_start','')[:19]}</code> → "
-        f"<code>{week_end[:19]}</code></p>"
-        f"<table style='border-collapse:collapse;font-size:14px;margin:12px 0'>"
-        f"<tr><td style='padding:8px;border:1px solid #e2e8f0'>Wakeups (5-min ticks)</td>"
-        f"<td style='padding:8px;border:1px solid #e2e8f0;text-align:right;font-family:monospace'>"
-        f"{stats.get('ticks',0)}</td></tr>"
-        f"<tr><td style='padding:8px;border:1px solid #e2e8f0'>Agents checked total</td>"
-        f"<td style='padding:8px;border:1px solid #e2e8f0;text-align:right;font-family:monospace'>"
-        f"{stats.get('agents_checked_total',0)}</td></tr>"
-        f"<tr><td style='padding:8px;border:1px solid #e2e8f0'>Investigations</td>"
-        f"<td style='padding:8px;border:1px solid #e2e8f0;text-align:right;font-family:monospace'>"
-        f"{stats.get('investigations',0)}</td></tr>"
-        f"<tr><td style='padding:8px;border:1px solid #e2e8f0'>Fixes succeeded</td>"
-        f"<td style='padding:8px;border:1px solid #e2e8f0;text-align:right;font-family:monospace;color:#059669'>"
-        f"{stats.get('fixes_succeeded',0)}</td></tr>"
-        f"<tr><td style='padding:8px;border:1px solid #e2e8f0'>Escalations sent</td>"
-        f"<td style='padding:8px;border:1px solid #e2e8f0;text-align:right;font-family:monospace;color:#dc2626'>"
-        f"{stats.get('escalations',0)}</td></tr>"
-        f"</table>"
-        f"<h2 style='margin-top:18px;font-size:16px'>By outcome</h2>"
-        f"<table style='border-collapse:collapse;width:100%;font-size:13px'>"
-        f"<tr style='background:#f8fafc'><th style='text-align:left;padding:6px;border:1px solid #e2e8f0'>Outcome</th>"
-        f"<th style='text-align:right;padding:6px;border:1px solid #e2e8f0'>Count</th></tr>"
-        f"{rows_outcomes}</table>"
-        f"<h2 style='margin-top:18px;font-size:16px'>By error signature</h2>"
-        f"<table style='border-collapse:collapse;width:100%;font-size:13px'>"
-        f"<tr style='background:#f8fafc'><th style='text-align:left;padding:6px;border:1px solid #e2e8f0'>Signature</th>"
-        f"<th style='text-align:right;padding:6px;border:1px solid #e2e8f0'>Count</th></tr>"
-        f"{rows_sigs}</table>"
-        f"<h2 style='margin-top:18px;font-size:16px'>By target agent</h2>"
-        f"<table style='border-collapse:collapse;width:100%;font-size:13px'>"
-        f"<tr style='background:#f8fafc'><th style='text-align:left;padding:6px;border:1px solid #e2e8f0'>Agent</th>"
-        f"<th style='text-align:right;padding:6px;border:1px solid #e2e8f0'>Count</th></tr>"
-        f"{rows_targets}</table>"
-        f"<p style='color:#94a3b8;font-size:12px;margin-top:24px'>"
-        f"Per-tick alerts only fire when an investigation escalates and needs your attention. "
-        f"This is the periodic activity summary."
-        f"</p>"
-        f"</body></html>"
+    week_end = _now_iso()
+    sigs_sorted = sorted(stats.get("signatures", {}).items(), key=lambda kv: -kv[1])
+    targets_sorted = sorted(stats.get("targets", {}).items(), key=lambda kv: -kv[1])
+    outcomes_sorted = sorted(stats.get("outcomes", {}).items(), key=lambda kv: -kv[1])
+
+    summary_table = et.table(
+        ["Metric", "Count"],
+        [
+            ["Wakeups (5-min ticks)", str(stats.get("ticks", 0))],
+            ["Agents checked total", str(stats.get("agents_checked_total", 0))],
+            ["Investigations", str(stats.get("investigations", 0))],
+            [f"<span style='color:{et.SUCCESS_FG}'>Fixes succeeded</span>",
+             f"<span style='color:{et.SUCCESS_FG}'>{stats.get('fixes_succeeded', 0)}</span>"],
+            [f"<span style='color:{et.ERROR_FG}'>Escalations sent</span>",
+             f"<span style='color:{et.ERROR_FG}'>{stats.get('escalations', 0)}</span>"],
+        ],
+        zebra=True,
+    )
+    by_outcome = et.table(
+        ["Outcome", "Count"],
+        [[k, str(v)] for k, v in outcomes_sorted] or [["(none)", ""]],
+    )
+    by_signature = et.table(
+        ["Signature", "Count"],
+        [[k, str(v)] for k, v in sigs_sorted] or [["(none)", ""]],
+    )
+    by_target = et.table(
+        ["Agent", "Count"],
+        [[k, str(v)] for k, v in targets_sorted] or [["(none)", ""]],
+        monospace_first=True,
+    )
+
+    body = et.page(
+        title="agent-doctor — weekly summary",
+        body_parts=[
+            et.header_bar(
+                "agent-doctor",
+                sublabel="weekly activity summary",
+                run_id=f"{stats.get('week_start','')[:10]} → {week_end[:10]}",
+            ),
+            et.callout(
+                "info",
+                f"{stats.get('investigations', 0)} investigations this week",
+                f"Per-tick alerts only fire when an investigation needs your "
+                f"attention; this digest is the periodic activity summary. "
+                f"<b>{stats.get('fixes_succeeded', 0)}</b> auto-fixes applied · "
+                f"<b>{stats.get('escalations', 0)}</b> escalations emailed.",
+            ),
+            et.section_h2("Totals"),
+            summary_table,
+            et.section_h2("By outcome"),
+            by_outcome,
+            et.section_h2("By error signature"),
+            by_signature,
+            et.section_h2("By target agent"),
+            by_target,
+        ],
     )
 
     # Send via shared sender
