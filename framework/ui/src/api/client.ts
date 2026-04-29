@@ -205,6 +205,33 @@ export const api = {
       }[]
     }[]
   }>(`/api/implementer/batches?limit=${limit}`),
+  getRecVerificationScript: (runDirBasename: string, recId: string) =>
+    http<{
+      rec_id: string
+      rec_type?: string
+      generated_at: string
+      generated_by: string
+      explanation: string
+      script_js: string
+    }>(`/api/implementer/batches/${encodeURIComponent(runDirBasename)}/rec/${encodeURIComponent(recId)}/verification`),
+  proxyFetch: (url: string, opts?: { method?: string; timeoutS?: number; maxBytes?: number }) =>
+    http<{
+      ok: boolean
+      url: string
+      status: number
+      headers: Record<string, string>
+      body: string
+      truncated: boolean
+      error?: string
+    }>(`/api/implementer/proxy/fetch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        url,
+        method: opts?.method ?? 'GET',
+        timeout_s: opts?.timeoutS ?? 12,
+        max_bytes: opts?.maxBytes ?? 200000,
+      }),
+    }),
   getBatchRecDetail: (runDirBasename: string, recId: string) =>
     http<{
       rec_id: string

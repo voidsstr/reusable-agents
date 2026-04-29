@@ -110,6 +110,59 @@ to the configured site repo.
      mean to stage, `git reset --soft HEAD~1` and recommit.
   5. Then write `changes/<rec-id>.summary.md` and (optionally)
      `changes/<rec-id>.diff` from `git show HEAD`.
+  6. **Write a verification script** to
+     `<run-dir>/verifications/<rec-id>.json` — see "Per-rec verification
+     scripts" section below. Required for every rec marked shipped, so
+     the operator can click "Verify in production" on the dashboard
+     and prove the change is live.
+
+  ## Per-rec verification scripts
+
+  Every shipped rec MUST have a verification script at
+  `<run-dir>/verifications/<rec-id>.json`. This is what powers the
+  dashboard's "Verify in production" button — the JS runs client-side
+  and proves the specific change you made is rendering on the live
+  site.
+
+  Doc shape:
+  ```json
+  {
+    "rec_id": "rec-007",
+    "rec_type": "ctr-fix",
+    "generated_at": "2026-04-29T22:30:15+00:00",
+    "generated_by": "implementer",
+    "explanation": "1-2 sentences in plain English explaining what's checked",
+    "script_js": "async function verify({ proxyFetch }) { ... }"
+  }
+  ```
+
+  Rules for `script_js`:
+  - Function literal `async function verify({ proxyFetch })` — exact shape
+  - Returns `{ ok: boolean, evidence: <any> }`
+  - Use `proxyFetch(url)` (provided helper) — NOT browser fetch (CORS)
+  - Test the SPECIFIC change you made, not just HTTP 200
+  - Catch errors gracefully, return ok=false + evidence
+
+  Example for a ctr-fix that overrode a SERP `<title>`:
+  ```js
+  async function verify({ proxyFetch }) {
+    const url = "https://aisleprompt.com/recipes/traditional-mexican-tacos-al-pastor-2397";
+    const r = await proxyFetch(url);
+    if (!r.ok) return { ok: false, evidence: { http: r.status } };
+    const m = r.body.match(/<title>([^<]+)/);
+    const title = m ? m[1] : "";
+    const has_override = title.includes("Authentic Tacos al Pastor");
+    return {
+      ok: has_override,
+      evidence: { http: r.status, title, override_active: has_override },
+    };
+  }
+  ```
+
+  If a rec is hard to verify (e.g. it's a research note, a goal-tracking
+  entry, or affects a value that's only in GSC data), set
+  `script_js: ""` and put the manual steps in `explanation`. The
+  dashboard shows "manual verification only" instead of a click-to-run.
 
   Commit message format (subject + body):
   ```

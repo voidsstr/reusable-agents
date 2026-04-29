@@ -180,6 +180,63 @@ Do NOT use:
 - `/buying-guides/<slug>` — that's category-driven auto-pages, not
   editorial buying-guides
 
+### MANDATORY: write a per-rec verification script
+
+After every successful INSERT (and before writing the SHIPPED summary),
+write a verification doc to:
+
+  `<run-dir>/verifications/<rec_id>.json`
+
+Shape:
+```json
+{
+  "rec_id": "art-001",
+  "rec_type": "article-author-proposal",
+  "generated_at": "<iso8601>",
+  "generated_by": "implementer",
+  "explanation": "1-2 sentence plain-English description of what's being verified",
+  "script_js": "async function verify({ proxyFetch }) { /* ... */ }"
+}
+```
+
+The dashboard's shipped tab has a "Verify in production" button per rec
+that runs `script_js` client-side and shows the result + explanation in
+a popup. The script must:
+
+- Be the function literal `async function verify({ proxyFetch })`
+- Return `{ ok: boolean, evidence: <any> }`
+- Use the provided `proxyFetch(url)` helper (NOT browser `fetch`) — it
+  goes through the framework API's allow-listed proxy and bypasses CORS
+- Be specific: don't just check 200; check that the SPECIFIC content
+  this rec produced is in the page
+
+Example for an article-author rec:
+
+```js
+async function verify({ proxyFetch }) {
+  const slug = "deepseek-v4-pro-local-inference-hardware-2026";
+  const r = await proxyFetch(`https://specpicks.com/api/testbench/articles/${slug}`);
+  if (!r.ok) return { ok: false, evidence: { http_status: r.status } };
+  const obj = JSON.parse(r.body || "{}");
+  const has_body = (obj.body_md || "").length > 1000;
+  const has_slug = obj.slug === slug;
+  return {
+    ok: has_body && has_slug,
+    evidence: {
+      api_status: r.status,
+      body_md_length: (obj.body_md || "").length,
+      slug_match: has_slug,
+      title: obj.title,
+    },
+  };
+}
+```
+
+**Don't write the SHIPPED summary if you can't write a verification
+script.** If the rec is hard to verify automatically, set
+`script_js: ""` and put the manual verification steps in `explanation`.
+Mark the rec implemented but NOT shipped — operator decides.
+
 ### MANDATORY verification step before marking shipped
 
 After INSERT, BEFORE writing the SHIPPED summary, hit the API and

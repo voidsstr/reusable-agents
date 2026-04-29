@@ -9,7 +9,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from framework.core.storage import get_storage
 
@@ -397,6 +398,230 @@ def get_batch_rec_detail(run_dir_basename: str, rec_id: str):
     }
 
 
+@router.get("/batches/{run_dir_basename}/rec/{rec_id}/verification")
+def get_rec_verification_script(run_dir_basename: str, rec_id: str):
+    """Return the verification script for a shipped rec.
+
+    The implementer (or a one-shot backfill) writes a per-rec verification
+    JSON at ship time to:
+      agents/<source_agent>/runs/<source_run_ts>/verifications/<rec_id>.json
+
+    Document shape:
+      {
+        "rec_id": "...",
+        "generated_at": "iso8601",
+        "generated_by": "implementer" | "backfill",
+        "explanation": "1-2 sentence plain-English description of what's being verified",
+        "script_js": "async function verify({ proxyFetch }) { ... return { ok: bool, evidence: <any> }; }"
+      }
+
+    The dashboard's frontend fetches this doc + runs script_js in a
+    Function() sandbox, passing in a proxyFetch helper that goes through
+    POST /api/proxy/fetch (server-side fetch — bypasses CORS and lets the
+    client inspect any production URL's response body).
+
+    Returns 404 with explanation if no verification has been generated yet.
+    """
+    if "/" in run_dir_basename or ".." in run_dir_basename:
+        raise HTTPException(status_code=400, detail="invalid run_dir")
+    # Parse <agent>-<run_ts>
+    m = re.match(r"^(?:rundir-)?(?P<agent>.+?)-(?P<ts>\d{8}T\d{6}Z)", run_dir_basename)
+    if not m:
+        raise HTTPException(status_code=400, detail="couldn't parse run_dir basename")
+    source_agent = m.group("agent")
+    source_run_ts = m.group("ts")
+    s = get_storage()
+    key = f"agents/{source_agent}/runs/{source_run_ts}/verifications/{rec_id}.json"
+    try:
+        doc = s.read_json(key)
+    except Exception:
+        doc = None
+    if not doc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "no verification script for this rec yet",
+                "key_checked": key,
+                "hint": "future implementer runs write verification.json automatically; "
+                        "existing recs need a one-shot backfill (see scripts/backfill-verification.py)",
+            },
+        )
+    return doc
+
+
+@router.get("/batches/{run_dir_basename}/rec/{rec_id}/__legacy_verify_disabled__")
+def _legacy_verify_disabled(run_dir_basename: str, rec_id: str):
+    """Disabled — replaced by /verification + the proxy_fetch endpoint.
+    Kept as a stub to make sure no client still calls the old path."""
+    return {"ok": False, "explanation": "deprecated; use /verification + /api/proxy/fetch from the dashboard"}
+
+
+def _legacy_disabled_unused(run_dir_basename: str, rec_id: str):
+    """Old per-rec-type recipe verification — replaced by stored
+    verification scripts. Kept commented for reference."""
+    if "/" in run_dir_basename or ".." in run_dir_basename:
+        return {"ok": False, "explanation": "invalid run_dir"}
+    m = re.match(r"^(?:rundir-)?(?P<agent>.+?)-(?P<ts>\d{8}T\d{6}Z)", run_dir_basename)
+    if not m:
+        return {"ok": False, "explanation": "couldn't parse run_dir"}
+    source_agent = m.group("agent")
+    source_run_ts = m.group("ts")
+    s = get_storage()
+    try:
+        rd = s.read_json(f"agents/{source_agent}/runs/{source_run_ts}/recommendations.json") or {}
+    except Exception as e:
+        return {"ok": False, "explanation": f"couldn't load run: {e}"}
+    rec = next((r for r in rd.get("recommendations", []) if r.get("id") == rec_id), None)
+    if not rec:
+        return {"ok": False, "explanation": f"rec {rec_id} not found in run"}
+
+    import urllib.request
+    typ = rec.get("type", "")
+    title = rec.get("title", "")
+    explanation_lines: list[str] = []
+    cmd: str = ""
+    output: str = ""
+    ok = False
+
+    def _http_get(url: str, timeout: float = 12.0) -> tuple[int, str]:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "verify/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            return e.code, ""
+        except Exception as e:
+            return 0, str(e)
+
+    # ── Article-author ────────────────────────────────────────────────
+    if typ == "article-author-proposal":
+        ap = rec.get("article_proposal") or {}
+        slug = ap.get("slug") or rec.get("slug", "")
+        if not slug:
+            return {"ok": False, "command": "", "output": "",
+                    "explanation": "rec has no slug — can't verify"}
+        api_url = f"https://specpicks.com/api/testbench/articles/{slug}"
+        public_url = f"https://specpicks.com/reviews/{slug}"
+        cmd = f"curl -s {api_url} | head -c 500"
+        code, body = _http_get(api_url)
+        if code != 200:
+            output = f"HTTP {code} from {api_url}"
+            explanation_lines.append(f"❌ API returned HTTP {code} — article not served. The DB row may exist but the public site can't find it.")
+        else:
+            has_body = '"body_md"' in body
+            has_slug = slug in body
+            output = body[:500] + ("..." if len(body) > 500 else "")
+            ok = has_body and has_slug
+            explanation_lines.append(f"GET {api_url} → 200")
+            explanation_lines.append(f"contains body_md: {has_body}")
+            explanation_lines.append(f"contains slug: {has_slug}")
+            if ok:
+                explanation_lines.append(f"✅ Live at {public_url}")
+
+    # ── SEO top5-target-page ──────────────────────────────────────────
+    elif typ == "top5-target-page":
+        m_q = re.search(r'for "([^"]+)"', title)
+        query = m_q.group(1) if m_q else ""
+        slug = re.sub(r'[^a-z0-9]+', '-', query.lower()).strip('-')
+        # aisleprompt path; could expand for other sites later
+        url = f"https://aisleprompt.com/recipes/q/{slug}"
+        cmd = f"curl -s {url} | grep -oE '<title>[^<]+'"
+        code, body = _http_get(url)
+        if code != 200:
+            output = f"HTTP {code}"
+            explanation_lines.append(f"❌ HTTP {code} at {url} — target page is missing.")
+        else:
+            tm = re.search(r"<title>([^<]+)", body)
+            page_title = tm.group(1) if tm else ""
+            title_has_query = query.lower() in page_title.lower()
+            has_faq = '"@type":"FAQPage"' in body or 'FAQPage' in body
+            intro_has_query = query.lower() in body.lower()[:6000]
+            output = f"<title>: {page_title[:120]}\nfaq_schema: {has_faq}\nintro_mentions_query: {intro_has_query}"
+            ok = title_has_query and has_faq and intro_has_query
+            explanation_lines.append(f"GET {url} → 200")
+            explanation_lines.append(f"<title> contains \"{query}\": {title_has_query}")
+            explanation_lines.append(f"FAQPage schema present: {has_faq}")
+            explanation_lines.append(f"intro mentions query: {intro_has_query}")
+            if ok:
+                explanation_lines.append(f"✅ Keyword page is live and properly structured.")
+
+    # ── SEO ctr-fix ───────────────────────────────────────────────────
+    elif typ == "ctr-fix":
+        m_url = re.search(r'on (https?://\S+?)(?:["\s]|$)', title)
+        if not m_url:
+            return {"ok": False, "command": "", "output": "",
+                    "explanation": "rec title doesn't contain a target URL"}
+        url = m_url.group(1).rstrip('"., ')
+        cmd = f"curl -s {url} | grep -oE '<title>[^<]+'"
+        code, body = _http_get(url)
+        if code != 200:
+            output = f"HTTP {code}"
+            explanation_lines.append(f"❌ HTTP {code} at {url}.")
+        else:
+            tm = re.search(r"<title>([^<]+)", body)
+            page_title = tm.group(1) if tm else ""
+            # The recipe SHOULD have a non-generic, query-specific title
+            # (the override should have replaced the stock recipe title)
+            generic = ("AI-Powered Grocery" in page_title) or page_title.strip() == ""
+            ok = (not generic) and len(page_title) < 70
+            output = f"<title>: {page_title}"
+            explanation_lines.append(f"GET {url} → 200")
+            explanation_lines.append(f"<title>: {page_title}")
+            explanation_lines.append(f"override-active (non-generic + <70 chars): {ok}")
+            if ok:
+                explanation_lines.append("✅ SERP snippet override is rendering on the live page.")
+
+    # ── SEO internal-link ─────────────────────────────────────────────
+    elif typ == "internal-link":
+        m_q = re.search(r'"([^"]+)"', title)
+        query = m_q.group(1) if m_q else ""
+        slug = re.sub(r'[^a-z0-9]+', '-', query.lower()).strip('-')
+        target_path = f"/best/best-{slug}"
+        target_url = f"https://aisleprompt.com{target_path}"
+        cmd = f"curl -s https://aisleprompt.com/ | grep -oE '{target_path}' && curl -s {target_url} -o /dev/null -w '%{{http_code}}'"
+        # Check 1: homepage links to it
+        code_hp, body_hp = _http_get("https://aisleprompt.com/")
+        homepage_links = (target_path in body_hp) if code_hp == 200 else False
+        # Check 2: target page exists
+        code_t, body_t = _http_get(target_url)
+        target_ok = (code_t == 200 and query.lower() in body_t.lower())
+        output = f"homepage_has_link={homepage_links}\ntarget_page_status={code_t}\ntarget_contains_query={query.lower() in body_t.lower() if body_t else False}"
+        ok = homepage_links and target_ok
+        explanation_lines.append(f"homepage links to {target_path}: {homepage_links}")
+        explanation_lines.append(f"target {target_url} → {code_t}")
+        explanation_lines.append(f"target body mentions \"{query}\": {query.lower() in body_t.lower() if body_t else False}")
+        if ok:
+            explanation_lines.append("✅ Internal link is on the homepage and the target page is live.")
+
+    # ── SEO article-snippet-rewrite / article-title-fix ───────────────
+    elif typ in ("article-snippet-rewrite", "article-title-fix"):
+        url = rec.get("url", "")
+        if not url:
+            return {"ok": False, "command": "", "output": "",
+                    "explanation": "rec has no url field"}
+        cmd = f"curl -s {url} | grep -oE '<title>[^<]+'"
+        code, body = _http_get(url)
+        ok = code == 200 and ("body_md" in body or len(body) > 1000)
+        tm = re.search(r"<title>([^<]+)", body or "")
+        page_title = tm.group(1) if tm else ""
+        output = f"HTTP {code}\n<title>: {page_title[:120]}"
+        explanation_lines.append(f"GET {url} → {code}")
+        explanation_lines.append(f"page has content: {ok}")
+
+    else:
+        return {"ok": False, "command": "", "output": "",
+                "explanation": f"no verification recipe for rec type={typ!r}"}
+
+    return {
+        "ok": bool(ok),
+        "rec_id": rec_id,
+        "rec_type": typ,
+        "command": cmd,
+        "output": output[:2000],
+        "explanation": "\n".join(explanation_lines),
+    }
+
+
 @router.get("/batches/{run_dir_basename}/rec/{rec_id}/attachment/{name}")
 def get_rec_context_attachment(run_dir_basename: str, rec_id: str, name: str):
     """Stream a single rec-context attachment back to the dashboard.
@@ -470,3 +695,87 @@ def get_dispatch_log(dispatch_id: str, tail_bytes: int = Query(32768, le=262144)
                 **parsed,
             }
     return {"content": "", "size_bytes": 0, "status": "not_found", "id": dispatch_id}
+
+
+# ── Proxy fetch — lets verification scripts in the dashboard inspect
+#                  production URLs without browser CORS blocking. The
+#                  client passes a target URL; the server fetches it and
+#                  returns the response. Token-gated like every other
+#                  API endpoint. Hard cap on URL allow-list for safety.
+
+class _ProxyFetchRequest(BaseModel):
+    url: str
+    method: str = "GET"
+    timeout_s: float = 12.0
+    max_bytes: int = 200_000
+
+
+# Allow-list of hostnames the proxy will fetch. Keeps this from being
+# turned into an open SSRF gateway. Add new hosts as new sites come online.
+_PROXY_ALLOWED_HOSTS = {
+    "specpicks.com", "www.specpicks.com",
+    "aisleprompt.com", "www.aisleprompt.com",
+    # Add others (e.g. aislepromptstaging.com) as they're set up.
+}
+
+
+@router.post("/proxy/fetch")
+def proxy_fetch(body: _ProxyFetchRequest):
+    """Server-side fetch on behalf of dashboard JS so verification
+    scripts can inspect production HTML/JSON without browser CORS.
+
+    Constrained:
+      - URL host must be on the allow-list (no open SSRF)
+      - Method must be GET / HEAD (no writes)
+      - Body capped at max_bytes (default 200KB)
+      - Timeout capped at 30s
+    """
+    from urllib.parse import urlparse
+    import urllib.request, urllib.error
+
+    parsed = urlparse(body.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail=f"unsupported scheme: {parsed.scheme}")
+    if parsed.hostname not in _PROXY_ALLOWED_HOSTS:
+        raise HTTPException(status_code=400,
+            detail=f"host not on proxy allow-list: {parsed.hostname}")
+    if body.method.upper() not in ("GET", "HEAD"):
+        raise HTTPException(status_code=400, detail="only GET/HEAD allowed")
+    timeout = max(1.0, min(30.0, float(body.timeout_s)))
+    max_bytes = max(1024, min(2_000_000, int(body.max_bytes)))
+
+    try:
+        req = urllib.request.Request(
+            body.url, method=body.method.upper(),
+            headers={"User-Agent": "reusable-agents/verify-proxy/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read(max_bytes).decode("utf-8", errors="replace")
+            return {
+                "ok": True,
+                "url": body.url,
+                "status": resp.status,
+                "headers": {k: v for k, v in resp.getheaders()[:30]},
+                "body": content,
+                "truncated": len(content) >= max_bytes,
+            }
+    except urllib.error.HTTPError as e:
+        try:
+            content = e.read(max_bytes).decode("utf-8", errors="replace")
+        except Exception:
+            content = ""
+        return {
+            "ok": False,
+            "url": body.url,
+            "status": e.code,
+            "headers": {},
+            "body": content,
+            "truncated": False,
+            "error": str(e),
+        }
+    except Exception as e:
+        return {
+            "ok": False, "url": body.url, "status": 0,
+            "headers": {}, "body": "", "truncated": False,
+            "error": str(e)[:200],
+        }

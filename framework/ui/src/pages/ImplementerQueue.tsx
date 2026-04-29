@@ -524,6 +524,126 @@ function ChainCard({
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Per-rec verification (shipped tab "Verify in production" button)
+
+type VerifyResult = {
+  ok: boolean
+  evidence?: unknown
+  error?: string
+  explanation?: string
+  script_js?: string
+}
+
+async function runVerification(runDirBasename: string, recId: string): Promise<VerifyResult> {
+  // Fetch the verification script the implementer (or backfill) wrote
+  let doc: Awaited<ReturnType<typeof api.getRecVerificationScript>>
+  try {
+    doc = await api.getRecVerificationScript(runDirBasename, recId)
+  } catch (e: unknown) {
+    return { ok: false, error: String((e as Error)?.message || e), explanation: 'No verification script generated for this rec yet.' }
+  }
+  if (!doc.script_js) {
+    return { ok: false, explanation: doc.explanation || 'No automatic verification — manual check needed.' }
+  }
+  // Build a sandbox: the script gets `proxyFetch` (server-side fetch via API).
+  const proxyFetch = (url: string) => api.proxyFetch(url)
+  try {
+    // The script is a function literal — wrap in `(<script>)({...})` to invoke
+    // Evaluation note: this trusts the doc's JS. Only reading the doc behind
+    // the same auth token as the rest of the API; not user-submitted code.
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+    const fn = new Function('helpers', `"use strict"; return (${doc.script_js})(helpers);`)
+    const result = await Promise.race([
+      fn({ proxyFetch }),
+      new Promise<VerifyResult>((_, reject) => setTimeout(() => reject(new Error('verification timed out (30s)')), 30000)),
+    ])
+    return { ...result, explanation: doc.explanation, script_js: doc.script_js }
+  } catch (e: unknown) {
+    return { ok: false, error: String((e as Error)?.message || e), explanation: doc.explanation, script_js: doc.script_js }
+  }
+}
+
+function VerificationModal({
+  runDirBasename, recId, onClose,
+}: { runDirBasename: string; recId: string; onClose: () => void }) {
+  const [result, setResult] = useState<VerifyResult | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    runVerification(runDirBasename, recId)
+      .then(r => { if (!cancelled) setResult(r) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [runDirBasename, recId])
+
+  return (
+    <div
+      className="fixed inset-0 bg-ink-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface-card border border-surface-divider rounded-lg shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="px-5 py-4 border-b border-surface-divider flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-ink-900">Verify in production</h2>
+            <p className="text-xs text-ink-500 mt-0.5 font-mono">{recId}</p>
+          </div>
+          <button onClick={onClose} className="text-ink-500 hover:text-ink-800 text-xl leading-none">×</button>
+        </header>
+        <div className="p-5 space-y-4 text-sm">
+          {loading && (
+            <div className="text-ink-500 italic flex items-center gap-2">
+              <span className="inline-block w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
+              Running verification…
+            </div>
+          )}
+          {result && (
+            <>
+              <div className={`px-4 py-3 rounded-md ${result.ok
+                ? 'bg-emerald-50 border-l-4 border-emerald-500 text-emerald-900'
+                : 'bg-amber-50 border-l-4 border-amber-500 text-amber-900'}`}>
+                <div className="font-semibold flex items-center gap-2">
+                  {result.ok ? '✅ Live in production' : '⚠ Verification failed'}
+                </div>
+                {result.error && (
+                  <div className="text-xs mt-1 font-mono">{result.error}</div>
+                )}
+              </div>
+              {result.explanation && (
+                <section>
+                  <h3 className="text-xs uppercase tracking-wide text-ink-500 font-semibold mb-1">What was checked</h3>
+                  <p className="text-ink-700 whitespace-pre-wrap">{result.explanation}</p>
+                </section>
+              )}
+              {result.evidence !== undefined && (
+                <section>
+                  <h3 className="text-xs uppercase tracking-wide text-ink-500 font-semibold mb-1">Evidence</h3>
+                  <pre className="text-xs bg-surface-subtle p-3 rounded border border-surface-divider overflow-auto whitespace-pre-wrap break-words">
+                    {JSON.stringify(result.evidence, null, 2)}
+                  </pre>
+                </section>
+              )}
+              {result.script_js && (
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-ink-500 hover:text-ink-700">show script</summary>
+                  <pre className="mt-2 bg-surface-subtle p-3 rounded border border-surface-divider overflow-auto whitespace-pre-wrap break-words font-mono">
+                    {result.script_js}
+                  </pre>
+                </details>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────
 // Filtered rec list — shown when a stat card is clicked
 
 type CategoryFilter = 'shipped' | 'implemented' | 'queued' | 'running' | 'deferred' | null
@@ -571,6 +691,7 @@ function FilteredRecList({
   onPickRec: (runDirBasename: string, recId: string) => void
 }) {
   const meta = CATEGORY_LABELS[category]
+  const [verifying, setVerifying] = useState<{ runDirBasename: string; recId: string } | null>(null)
   return (
     <section className="card-surface p-3 sm:p-4 space-y-3 ring-1 ring-accent-200/60">
       <header className="flex items-start justify-between gap-3 flex-wrap">
@@ -583,15 +704,23 @@ function FilteredRecList({
         </div>
         <button onClick={onClear} className="btn-secondary !text-xs">✕ clear filter</button>
       </header>
+      {verifying && (
+        <VerificationModal
+          runDirBasename={verifying.runDirBasename}
+          recId={verifying.recId}
+          onClose={() => setVerifying(null)}
+        />
+      )}
       {recs.length === 0 ? (
         <p className="text-sm text-ink-500 italic">No recs in this bucket.</p>
       ) : (
         <ul className="divide-y divide-surface-divider rounded-md border border-surface-divider overflow-hidden">
           {recs.map(({ chain, batch, rec }) => (
-            <li key={`${chain.run_dir_basename}/${rec.rec_id}`}>
+            <li key={`${chain.run_dir_basename}/${rec.rec_id}`} className="hover:bg-surface-subtle transition-colors">
+              <div className="flex items-stretch">
               <button
                 onClick={() => onPickRec(chain.run_dir_basename, rec.rec_id)}
-                className="w-full text-left px-3 py-2.5 hover:bg-surface-subtle transition-colors flex flex-col gap-1"
+                className="flex-1 text-left px-3 py-2.5 flex flex-col gap-1"
               >
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-mono text-[11px] text-ink-500 shrink-0">{rec.rec_id}</span>
@@ -621,6 +750,20 @@ function FilteredRecList({
                   )}
                 </div>
               </button>
+              {(category === 'shipped' || category === 'implemented') && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setVerifying({ runDirBasename: chain.run_dir_basename, recId: rec.rec_id })
+                  }}
+                  className="px-3 self-stretch text-[11px] text-blue-700 hover:bg-blue-50 hover:text-blue-900 border-l border-surface-divider whitespace-nowrap flex items-center gap-1"
+                  title="Run a quick check that proves this change is live in production"
+                >
+                  <span>🔍</span>
+                  <span>verify</span>
+                </button>
+              )}
+              </div>
             </li>
           ))}
         </ul>
