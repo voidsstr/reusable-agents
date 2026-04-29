@@ -39,11 +39,12 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -201,19 +202,55 @@ def cmd_status(args) -> None:
     if not state:
         print("No profiles configured. Run: claude-pool init --count N")
         return
-    print(f"{'PROFILE':<12}  {'AUTH':<5} {'IN_USE':<7} {'TOTAL':<6} {'LAST_USED':<22}  LABEL")
-    print("-" * 80)
+    print(f"{'PROFILE':<12}  {'AUTH':<5} {'STATE':<14} {'IN_USE':<7} {'TOTAL':<6} {'LAST_USED':<22}  LABEL / NOTES")
+    print("-" * 100)
     for k in sorted(state.keys()):
         p = state[k]
         auth = "✓" if p.get("authenticated") else "—"
         last = p.get("last_used_at") or "-"
-        print(f"{p['id']:<12}  {auth:<5} {p.get('in_use',0):<7} {p.get('total_uses',0):<6} {last:<22}  {p.get('label','')}")
+        if not p.get("authenticated"):
+            state_str = "no-auth"
+        elif _is_rate_limited_now(p):
+            state_str = f"rate-limited"
+            resets_at = p.get("limit_resets_at", "")[:19]
+            label_extra = f" — resets {resets_at}"
+        else:
+            state_str = "ready"
+            label_extra = ""
+        if state_str != "rate-limited":
+            label_extra = ""
+        print(f"{p['id']:<12}  {auth:<5} {state_str:<14} {p.get('in_use',0):<7} {p.get('total_uses',0):<6} {last:<22}  {p.get('label','')}{label_extra}")
 
 
-def _pick_profile(state: dict) -> dict | None:
+def _is_rate_limited_now(p: dict) -> bool:
+    """Check if a profile's stored `limit_resets_at` is still in the future."""
+    rs = p.get("limit_resets_at") or ""
+    if not rs:
+        return False
+    try:
+        when = datetime.fromisoformat(rs.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) < when
+    except Exception:
+        return False
+
+
+def _pick_profile(state: dict, exclude_ids: set | None = None) -> dict | None:
+    """Return the next profile to dispatch to, or None if nothing eligible.
+
+    Eligibility (in order):
+      1. authenticated (cred file on disk)
+      2. NOT currently rate-limited (limit_resets_at in the future)
+      3. not in exclude_ids (used by failover loop to avoid re-picking
+         the same just-failed profile in this same call)
+
+    Pick policy: lowest in_use, then oldest last_used_at, then id.
+    """
+    excl = exclude_ids or set()
     eligible = [
         p for p in state.values()
         if _is_authenticated(p.get("home", ""))
+        and not _is_rate_limited_now(p)
+        and p.get("id") not in excl
     ]
     if not eligible:
         return None
@@ -223,50 +260,218 @@ def _pick_profile(state: dict) -> dict | None:
     return eligible[0]
 
 
-def cmd_exec(args) -> None:
-    """Pick a profile, exec claude under its HOME, decrement in_use on exit."""
+# Patterns that indicate the picked account is rate-limited and we should
+# fail over to a different one. Captured from claude's actual error message:
+#   "You've hit your limit · resets 10pm (America/Detroit)"
+#   "5-hour usage limit reached" / similar variants from API quotas.
+_RATE_LIMIT_PATTERNS = [
+    re.compile(r"hit your limit", re.I),
+    re.compile(r"usage limit reached", re.I),
+    re.compile(r"rate limit", re.I),
+    re.compile(r"quota exceeded", re.I),
+    re.compile(r"too many requests", re.I),
+]
+# Capture the human reset hint so we can store an approximate resets_at.
+_RESET_HINT_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?", re.I)
+
+
+def _parse_reset_at(text: str) -> str | None:
+    """Best-effort parse of "resets 10pm (America/Detroit)" → next 10pm in
+    that timezone, expressed as a UTC ISO timestamp. If parsing fails,
+    return None and the caller falls back to a fixed-offset default."""
+    m = _RESET_HINT_RE.search(text or "")
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    tzname = (m.group(4) or "").strip()
+    if ampm == "pm" and hour < 12:
+        hour += 12
+    if ampm == "am" and hour == 12:
+        hour = 0
+    try:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tzname) if tzname else timezone.utc
+        except Exception:
+            tz = timezone.utc
+        now_local = datetime.now(tz)
+        reset = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if reset <= now_local:
+            reset = reset + timedelta(days=1)
+        return reset.astimezone(timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        return None
+
+
+def _mark_rate_limited(profile_id: str, captured_text: str) -> None:
+    """Record limit_resets_at on the profile so subsequent picks skip it."""
+    parsed = _parse_reset_at(captured_text)
+    fallback = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat(timespec="seconds")
+    resets_at = parsed or fallback
     fd = _open_state_locked()
     try:
         state = _read_state(fd)
-        picked = _pick_profile(state)
-        if picked is None:
-            sys.stderr.write(
-                "[claude-pool] No authenticated profiles. Run:\n"
-                "  claude-pool init --count <N>\n"
-                "Then follow the printed login instructions.\n"
-            )
-            sys.exit(70)
-        picked["in_use"] = picked.get("in_use", 0) + 1
-        picked["last_used_at"] = _now_iso()
-        picked["total_uses"] = picked.get("total_uses", 0) + 1
-        state[picked["id"]] = picked
-        _write_state(fd, state)
-        picked_id = picked["id"]
-        picked_home = picked["home"]
+        if profile_id in state:
+            state[profile_id]["limit_resets_at"] = resets_at
+            state[profile_id]["limit_last_seen_at"] = _now_iso()
+            state[profile_id]["limit_last_message"] = captured_text[:300]
+            _write_state(fd, state)
+    finally:
+        _close_state(fd)
+    sys.stderr.write(
+        f"[claude-pool] {profile_id} marked rate-limited until {resets_at} "
+        f"(parsed={'yes' if parsed else 'fallback-+5h'})\n"
+    )
+
+
+def _run_one_dispatch(picked_id: str, picked_home: str,
+                      claude_args: list[str]) -> tuple[int, str]:
+    """Exec claude under HOME=picked_home. Tee its stdout+stderr through
+    our parent streams (so users still see live output) AND capture into
+    a buffer so we can scan for rate-limit patterns afterwards.
+
+    Returns (rc, captured_text).
+    """
+    env = dict(os.environ)
+    env["HOME"] = picked_home
+    parts = [d for d in (env.get("PATH") or "").split(":")
+             if d and Path(d).resolve() != SHIM_DIR.resolve()]
+    env["PATH"] = ":".join(parts)
+    real = _resolve_real_claude()
+
+    captured_lines: list[str] = []
+    proc = subprocess.Popen(
+        [real] + (claude_args or []),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+        text=True,
+    )
+
+    import threading
+    def _pump(src, dst, label):
+        try:
+            for line in iter(src.readline, ""):
+                if not line:
+                    break
+                dst.write(line)
+                dst.flush()
+                # Cap captured at ~64KB to avoid pathological RAM use
+                if sum(len(x) for x in captured_lines) < 65536:
+                    captured_lines.append(line)
+        except Exception:
+            pass
+    t_out = threading.Thread(target=_pump, args=(proc.stdout, sys.stdout, "out"), daemon=True)
+    t_err = threading.Thread(target=_pump, args=(proc.stderr, sys.stderr, "err"), daemon=True)
+    t_out.start(); t_err.start()
+    rc = proc.wait()
+    t_out.join(timeout=2); t_err.join(timeout=2)
+    return rc, "".join(captured_lines)
+
+
+def _looks_rate_limited(text: str) -> bool:
+    return any(p.search(text or "") for p in _RATE_LIMIT_PATTERNS)
+
+
+def _claim_profile(picked: dict) -> None:
+    """Mark a picked profile as in-use under lock."""
+    fd = _open_state_locked()
+    try:
+        state = _read_state(fd)
+        if picked["id"] in state:
+            entry = state[picked["id"]]
+            entry["in_use"] = entry.get("in_use", 0) + 1
+            entry["last_used_at"] = _now_iso()
+            entry["total_uses"] = entry.get("total_uses", 0) + 1
+            _write_state(fd, state)
     finally:
         _close_state(fd)
 
-    sys.stderr.write(f"[claude-pool] → {picked_id} (home={picked_home})\n")
-    env = dict(os.environ)
-    env["HOME"] = picked_home
-    # Don't let the shim recurse — strip our bin/ from PATH for the child
-    parts = [d for d in (env.get("PATH") or "").split(":") if d and Path(d).resolve() != SHIM_DIR.resolve()]
-    env["PATH"] = ":".join(parts)
-    real = _resolve_real_claude()
-    rc = 1
+
+def _release_profile(profile_id: str) -> None:
+    fd = _open_state_locked()
     try:
-        rc = subprocess.call([real] + (args.claude_args or []), env=env)
+        state = _read_state(fd)
+        if profile_id in state:
+            state[profile_id]["in_use"] = max(0, state[profile_id].get("in_use", 1) - 1)
+            _write_state(fd, state)
     finally:
-        # Decrement in_use under lock
+        _close_state(fd)
+
+
+# Max number of profiles we'll try in one exec call before giving up.
+# Defaults to 4 — covers up to 4 distinct accounts; raise via env if needed.
+MAX_FAILOVERS = int(os.environ.get("CLAUDE_POOL_MAX_FAILOVERS", "4"))
+
+
+def cmd_exec(args) -> None:
+    """Pick a profile, exec claude. On rate-limit, mark the profile and
+    fail over to a different profile (up to MAX_FAILOVERS times). Returns
+    the final claude exit code."""
+    tried: set[str] = set()
+    last_rc = 1
+    last_captured = ""
+
+    for attempt in range(MAX_FAILOVERS):
+        # Pick under lock
         fd = _open_state_locked()
         try:
             state = _read_state(fd)
-            if picked_id in state:
-                state[picked_id]["in_use"] = max(0, state[picked_id].get("in_use", 1) - 1)
-                _write_state(fd, state)
+            picked = _pick_profile(state, exclude_ids=tried)
         finally:
             _close_state(fd)
-    sys.exit(rc)
+
+        if picked is None:
+            if attempt == 0:
+                # No profile EVER picked — none authenticated or all rate-limited
+                sys.stderr.write(
+                    "[claude-pool] No usable profiles. Either none are authenticated "
+                    "yet (run `claude-pool init --count N` and follow the login prompts), "
+                    "OR every profile is currently rate-limited (run `claude-pool status` "
+                    "to see when each resets).\n"
+                )
+                sys.exit(70)
+            # Exhausted all profiles via failover; surface last result
+            sys.stderr.write(
+                f"[claude-pool] all {len(tried)} authed profile(s) hit rate limit "
+                f"this call; surfacing rc={last_rc} from last attempt\n"
+            )
+            sys.exit(last_rc)
+
+        _claim_profile(picked)
+        picked_id = picked["id"]
+        tried.add(picked_id)
+        sys.stderr.write(
+            f"[claude-pool] → {picked_id} (home={picked['home']})"
+            f"{' [failover attempt ' + str(attempt + 1) + ']' if attempt else ''}\n"
+        )
+        try:
+            rc, captured = _run_one_dispatch(picked_id, picked["home"], args.claude_args or [])
+        finally:
+            _release_profile(picked_id)
+        last_rc = rc
+        last_captured = captured
+
+        # Success → return; we're done
+        if rc == 0:
+            sys.exit(0)
+
+        # Non-zero exit — check if it's a rate-limit signal we can fail over from
+        if _looks_rate_limited(captured):
+            _mark_rate_limited(picked_id, captured)
+            sys.stderr.write(
+                f"[claude-pool] {picked_id} hit rate limit; failing over to next profile\n"
+            )
+            continue
+        # Non-rate-limit failure — surface as-is, no failover (e.g. user
+        # cancelled, prompt error, etc.).
+        sys.exit(rc)
+
+    # Shouldn't reach here, but propagate the last code
+    sys.exit(last_rc)
 
 
 def cmd_login_help(args) -> None:
