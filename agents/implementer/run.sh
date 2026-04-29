@@ -265,6 +265,24 @@ except Exception:
 fi
 echo "[implementer] dispatch_kind=$DISPATCH_KIND source_agent_from_recs=$SOURCE_AGENT_ID_FROM_RECS"
 
+# DB access for dispatches that write rows directly (article-author writes
+# to editorial_articles / buying_guides; h2h writes to comparison_commentary;
+# catalog-audit writes to product flag tables). The responder's process env
+# doesn't carry DATABASE_URL, so resolve it per-site here. The connection
+# string is a known constant per app — match the manifest's entry_command.
+if [ -z "${DATABASE_URL:-}" ]; then
+    case "${RESPONDER_SITE:-}" in
+        specpicks)
+            export DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require'
+            echo "[implementer] resolved DATABASE_URL for specpicks" >&2
+            ;;
+        aisleprompt)
+            export DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require'
+            echo "[implementer] resolved DATABASE_URL for aisleprompt" >&2
+            ;;
+    esac
+fi
+
 case "$IMPLEMENTER_LLM" in
     claude)
         # Claude Code CLI — feeds AGENT.md (or H2H.md) as the prompt
@@ -274,9 +292,10 @@ case "$IMPLEMENTER_LLM" in
         fi
         # Pick the runbook based on dispatch kind
         case "$DISPATCH_KIND" in
-            h2h)            RUNBOOK="$SCRIPT_DIR/H2H.md" ;;
-            catalog-audit)  RUNBOOK="$SCRIPT_DIR/CATALOG_AUDIT.md" ;;
-            *)              RUNBOOK="$SCRIPT_DIR/AGENT.md" ;;
+            h2h)             RUNBOOK="$SCRIPT_DIR/H2H.md" ;;
+            catalog-audit)   RUNBOOK="$SCRIPT_DIR/CATALOG_AUDIT.md" ;;
+            article-author)  RUNBOOK="$SCRIPT_DIR/ARTICLE_AUTHOR.md" ;;
+            *)               RUNBOOK="$SCRIPT_DIR/AGENT.md" ;;
         esac
         if [ ! -f "$RUNBOOK" ]; then
             echo "ERROR: runbook $RUNBOOK not found" >&2
