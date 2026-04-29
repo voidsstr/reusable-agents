@@ -511,10 +511,13 @@ def _products_lacking_listings(
     try:
         if adapter.kind == "postgres":
             cur = adapter.conn.cursor()
+            # products has `title` (not `name`); category_slug doesn't exist
+            # — categories live in a sibling table joined via category_id FK.
+            # Fall through cleanly on errors so the upsert path still works.
             cur.execute(f"""
-                SELECT p.id, p.name,
-                       COALESCE(p.category_slug, '') AS category_slug
+                SELECT p.id, p.title, COALESCE(c.slug, '') AS category_slug
                   FROM {products_table} p
+                  LEFT JOIN categories c ON c.id = p.category_id
                  WHERE NOT EXISTS (
                      SELECT 1 FROM {listings_table} l
                       WHERE l.{fk_col} = p.id
@@ -533,9 +536,9 @@ def _products_lacking_listings(
         elif adapter.kind == "azure-sql":
             cur = adapter.conn.cursor()
             cur.execute(f"""
-                SELECT TOP (?) p.id, p.name,
-                       COALESCE(p.category_slug, '') AS category_slug
+                SELECT TOP (?) p.id, p.title, COALESCE(c.slug, '') AS category_slug
                   FROM {products_table} p
+                  LEFT JOIN categories c ON c.id = p.category_id
                  WHERE NOT EXISTS (
                      SELECT 1 FROM {listings_table} l
                       WHERE l.{fk_col} = p.id
@@ -552,6 +555,14 @@ def _products_lacking_listings(
                 out.append({"query": name, "category_slug": r[2] or None})
     except Exception as e:
         log.warning("coverage probe failed (%s) — falling back to seeds only", e)
+        # Critical: rollback so subsequent statements on this connection don't
+        # all fail with "current transaction is aborted". This was the root
+        # cause of all-products-upsert-failed in the 04-29 run.
+        if adapter.kind == "postgres":
+            try:
+                adapter.conn.rollback()
+            except Exception:
+                pass
     return out
 
 
@@ -1148,6 +1159,14 @@ class EbayProductSyncAgent(AgentBase):
                 return r[0] if r else None
         except Exception as e:
             log.warning("product upsert failed: %s", e)
+            # Roll back so the next upsert in the loop doesn't fail with
+            # "current transaction is aborted, commands ignored until end
+            # of transaction block." Each rec gets a fresh transaction.
+            if adapter.kind == "postgres":
+                try:
+                    adapter.conn.rollback()
+                except Exception:
+                    pass
             return None
         return None
 
