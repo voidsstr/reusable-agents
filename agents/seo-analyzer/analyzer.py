@@ -662,6 +662,111 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
                     "implemented": False,
                 })
 
+    # ---- Article SEO boost (when articles-inventory.json exists) ----
+    # The collector's pull_site_articles step joins every published article's
+    # URL with GSC pages-90d and tags each one with boost_signals. Surface
+    # the most actionable ones as recs. Capped at 5 per run so they don't
+    # crowd out keyword + CTR work.
+    inv = _load(data / "articles-inventory.json")
+    if inv and inv.get("articles"):
+        articles = inv["articles"]
+        # Bucket by signal, sort each bucket by impact heuristic
+        snippet_candidates = sorted(
+            [a for a in articles if "high-impressions-low-ctr" in (a.get("boost_signals") or [])],
+            key=lambda a: -a["gsc"]["impressions"],
+        )
+        title_fix_candidates = sorted(
+            [a for a in articles if "high-position-zero-clicks" in (a.get("boost_signals") or [])],
+            key=lambda a: a["gsc"]["position"],
+        )
+        orphan_candidates = sorted(
+            [a for a in articles if "orphan-no-gsc-data" in (a.get("boost_signals") or [])],
+            key=lambda a: a["title"],
+        )
+        article_recs_added = 0
+        ARTICLE_RECS_MAX = 5
+
+        for a in snippet_candidates[:2]:
+            if article_recs_added >= ARTICLE_RECS_MAX:
+                break
+            rid = next_id()
+            recs.append({
+                "id": rid,
+                "type": "article-snippet-rewrite",
+                "priority": "high",
+                "title": f"Rewrite SERP snippet for \"{a['title'][:60]}\" — {a['gsc']['impressions']} impr, CTR {a['gsc']['ctr']*100:.2f}%",
+                "rationale": (
+                    f"Article at {a['url']} gets {a['gsc']['impressions']} impressions/90d at "
+                    f"avg position {a['gsc']['position']:.1f} but only {a['gsc']['clicks']} clicks "
+                    f"(CTR {a['gsc']['ctr']*100:.2f}%). The page is being shown but not clicked — "
+                    f"the SERP title and meta-description aren't earning the click. Rewrite both "
+                    f"with a more compelling hook + benefit framing."
+                ),
+                "expected_impact": {
+                    "metric": f"gsc.url_ctr.{a['url']}",
+                    "baseline": float(a["gsc"]["ctr"]),
+                    "target": 0.04, "horizon_weeks": 4,
+                },
+                "data_refs": ["data/articles-inventory.json", "data/gsc-pages-90d.json"],
+                "url": a["url"],
+                "slug": a["slug"],
+                "implemented": False,
+            })
+            article_recs_added += 1
+
+        for a in title_fix_candidates[:2]:
+            if article_recs_added >= ARTICLE_RECS_MAX:
+                break
+            rid = next_id()
+            recs.append({
+                "id": rid,
+                "type": "article-title-fix",
+                "priority": "high",
+                "title": f"Fix title for \"{a['title'][:60]}\" — pos {a['gsc']['position']:.1f}, 0 clicks",
+                "rationale": (
+                    f"Article at {a['url']} ranks at avg position {a['gsc']['position']:.1f} "
+                    f"with {a['gsc']['impressions']} impressions but ZERO clicks. Top-10 "
+                    f"placement should produce SOME traffic — the title is failing to match "
+                    f"intent. Audit the title vs the queries it's appearing for and rewrite."
+                ),
+                "expected_impact": {
+                    "metric": f"gsc.url_clicks.{a['url']}",
+                    "baseline": 0, "target": 5, "horizon_weeks": 4,
+                },
+                "data_refs": ["data/articles-inventory.json", "data/gsc-pages-90d.json"],
+                "url": a["url"],
+                "slug": a["slug"],
+                "implemented": False,
+            })
+            article_recs_added += 1
+
+        # 1 orphan rec — articles with no GSC data at all need internal-link boost
+        if orphan_candidates and article_recs_added < ARTICLE_RECS_MAX:
+            sample = orphan_candidates[:5]
+            rid = next_id()
+            recs.append({
+                "id": rid,
+                "type": "article-orphan-boost",
+                "priority": "medium",
+                "title": f"Boost {len(orphan_candidates)} orphan article(s) with internal links + sitemap",
+                "rationale": (
+                    f"{len(orphan_candidates)} published articles have no GSC data — Google "
+                    f"likely hasn't indexed them, or they have ZERO impressions. Most common "
+                    f"cause: no internal links pointing in + missing from sitemap.xml. "
+                    f"Sample slugs: " + ", ".join(s["slug"] for s in sample[:5])
+                ),
+                "expected_impact": {
+                    "metric": "articles_with_gsc_impressions",
+                    "baseline": len(articles) - len(orphan_candidates),
+                    "target": len(articles),
+                    "horizon_weeks": 8,
+                },
+                "data_refs": ["data/articles-inventory.json"],
+                "orphan_urls": [s["url"] for s in sample[:10]],
+                "implemented": False,
+            })
+            article_recs_added += 1
+
     return recs[:max_recs], goals
 
 

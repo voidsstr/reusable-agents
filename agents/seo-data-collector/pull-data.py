@@ -699,6 +699,149 @@ def _fetch_sitemap_urls(sitemap_url: str, depth: int = 0) -> list[str]:
     return urls
 
 
+def pull_site_articles(articles_cfg: dict, out_dir: Path) -> None:
+    """Pull every article slug from each configured source (e.g.
+    editorial_articles, buying_guides) and join with this run's GSC
+    pages-90d data. Writes articles-inventory.json with per-article
+    URL + GSC stats (impressions/clicks/CTR/avg position) + a
+    boost_signal field so the analyzer can emit targeted recs.
+
+    Config shape (in site.yaml):
+
+        articles:
+          domain: "specpicks.com"
+          dsn_env: DATABASE_URL
+          sources:
+            - name: editorial_articles
+              query: "SELECT slug, title FROM editorial_articles WHERE site_id='specpicks' AND status='published'"
+              url_template: "https://{domain}/reviews/{slug}"
+            - name: buying_guides
+              query: "SELECT slug, title FROM buying_guides WHERE status='published'"
+              url_template: "https://{domain}/buying-guides/{slug}"
+
+    Boost signals (any combination):
+      - "high-impressions-low-ctr"     impressions ≥ 100 and CTR < 1.5%
+      - "high-position-zero-clicks"    avg position ≤ 10 and clicks == 0
+      - "orphan-no-gsc-data"           no GSC entry for this URL
+      - "low-position"                 avg position > 30 (needs link boosting)
+      - "ranking-well"                 (no boost needed; informational)
+    """
+    domain = articles_cfg.get("domain", "")
+    if not domain:
+        err("  articles: domain missing, skipping")
+        return
+    sources = articles_cfg.get("sources") or []
+    if not sources:
+        err("  articles: no sources configured, skipping")
+        return
+    dsn = articles_cfg.get("dsn") or os.environ.get(articles_cfg.get("dsn_env", ""), "")
+    if not dsn:
+        err("  articles: DSN missing (set dsn or dsn_env), skipping")
+        return
+    try:
+        import psycopg2
+    except ImportError:
+        err("  articles: psycopg2 not installed, skipping")
+        return
+
+    # Load GSC URL stats for cross-ref
+    gsc_pages_path = out_dir / "gsc-pages-90d.json"
+    gsc_by_url: dict[str, dict] = {}
+    if gsc_pages_path.is_file():
+        try:
+            for r in json.loads(gsc_pages_path.read_text()).get("rows", []):
+                keys = r.get("keys") or []
+                if keys:
+                    gsc_by_url[keys[0]] = {
+                        "impressions": r.get("impressions", 0),
+                        "clicks": r.get("clicks", 0),
+                        "ctr": r.get("ctr", 0.0),
+                        "position": r.get("position", 0.0),
+                    }
+        except Exception as e:
+            err(f"  articles: GSC pages parse failed: {e}")
+
+    inventory: list[dict] = []
+    counts_by_signal: dict[str, int] = {}
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as e:
+        err(f"  articles: DB connect failed: {e}")
+        return
+
+    for src in sources:
+        name = src.get("name", "(unnamed)")
+        query = src.get("query")
+        url_tpl = src.get("url_template", "")
+        if not query or not url_tpl:
+            err(f"  articles: source {name!r} missing query/url_template, skipping")
+            continue
+        try:
+            cur = conn.cursor()
+            cur.execute(query)
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+            cur.close()
+        except Exception as e:
+            err(f"  articles: source {name!r} query failed: {e}")
+            try: conn.rollback()
+            except Exception: pass
+            continue
+        slug_idx = cols.index("slug") if "slug" in cols else 0
+        title_idx = cols.index("title") if "title" in cols else (1 if len(cols) > 1 else 0)
+        for r in rows:
+            slug = r[slug_idx]
+            title = r[title_idx] if title_idx < len(r) else ""
+            url = url_tpl.format(domain=domain, slug=slug)
+            gsc = gsc_by_url.get(url, {})
+            impr = gsc.get("impressions", 0) or 0
+            clicks = gsc.get("clicks", 0) or 0
+            ctr = gsc.get("ctr", 0.0) or 0.0
+            pos = gsc.get("position", 0.0) or 0.0
+            # Derive boost signal
+            signals = []
+            if not gsc:
+                signals.append("orphan-no-gsc-data")
+            else:
+                if impr >= 100 and ctr < 0.015:
+                    signals.append("high-impressions-low-ctr")
+                if pos > 0 and pos <= 10 and clicks == 0:
+                    signals.append("high-position-zero-clicks")
+                if pos > 30:
+                    signals.append("low-position")
+                if not signals:
+                    signals.append("ranking-well")
+            for s in signals:
+                counts_by_signal[s] = counts_by_signal.get(s, 0) + 1
+            inventory.append({
+                "source": name,
+                "slug": slug,
+                "title": title,
+                "url": url,
+                "gsc": {
+                    "impressions": impr,
+                    "clicks": clicks,
+                    "ctr": ctr,
+                    "position": pos,
+                    "in_gsc": bool(gsc),
+                },
+                "boost_signals": signals,
+            })
+
+    try: conn.close()
+    except Exception: pass
+
+    out = {
+        "schema_version": "1",
+        "domain": domain,
+        "total_articles": len(inventory),
+        "by_signal": counts_by_signal,
+        "articles": inventory,
+    }
+    (out_dir / "articles-inventory.json").write_text(json.dumps(out, indent=2))
+    err(f"  articles: wrote {len(inventory)} entries; signals={counts_by_signal}")
+
+
 def _gsc_impressions_by_url(out_dir: Path) -> dict[str, int]:
     """Load this run's gsc-pages-90d.json and return {url: impressions}."""
     p = out_dir / "gsc-pages-90d.json"
@@ -1149,6 +1292,17 @@ def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path) -> None:
         scan_repo(cfg, data_dir)
     except Exception as e:
         err(f"  repo-scan: unhandled error {e}")
+
+    # Optional: site articles inventory (config-driven). Lets the analyzer
+    # cross-ref every article we publish with GSC traffic data and surface
+    # SEO-boost recs (snippet rewrite, title fix, orphan article, etc.).
+    if cfg.get("articles"):
+        try:
+            pull_site_articles(cfg.get("articles"), data_dir)
+        except Exception as e:
+            err(f"  articles: unhandled error {e}")
+    else:
+        err("  articles: not configured, skipping")
 
     write_run_summary(cfg.site_id, run_dir)
 
