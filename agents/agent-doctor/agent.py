@@ -144,6 +144,28 @@ def _read_log(agent_id: str) -> str:
         return ""
 
 
+def _has_llm_attempt_for(s, agent_id: str, signature: str) -> bool:
+    """Has agent-doctor ever LLM-diagnosed this (agent, signature) pair?
+    Used to decide whether to bypass the pattern-classifier retry cap
+    when 'unknown' has been retried but the LLM hasn't been tried yet."""
+    try:
+        entries = list(s.read_jsonl(f"agents/{AGENT_ID}/fixes-log.jsonl") or [])
+    except Exception:
+        return False
+    for e in entries:
+        if e.get("target_agent") != agent_id:
+            continue
+        if e.get("error_signature") != signature:
+            continue
+        notes = (e.get("notes") or "")
+        # Markers that indicate the LLM diagnose path ran (vs the static
+        # pattern-recipe path). Both branches log to fixes-log; we
+        # differentiate via notes prefix and recipe_applied value.
+        if "LLM" in notes or "diag=" in notes:
+            return True
+    return False
+
+
 def _has_fixes_log_entry_for(s, agent_id: str, last_run_at: str) -> bool:
     """Return True iff fixes-log.jsonl has at least one entry for this
     (target_agent, last_run_at) tuple. Used to validate that seen.json's
@@ -1072,11 +1094,16 @@ class AgentDoctor(AgentBase):
                 status_obj = {}
             signature, excerpt = _classify_error(log_text, status_obj)
 
-            # Loop-prevention: too many failed attempts at this signature
+            # Loop-prevention: too many failed attempts at this signature.
+            # Exception: if no LLM diagnosis has been tried yet for this
+            # (agent, signature) — the pattern classifier kept giving
+            # 'unknown' and exhausted retries, but the LLM might see
+            # something the pattern matcher couldn't. Give it one shot.
             attempt_count = _signature_attempt_count(s, aid, signature)
-            if attempt_count >= MAX_RETRIES_PER_SIGNATURE:
+            llm_already_tried = _has_llm_attempt_for(s, aid, signature)
+            if attempt_count >= MAX_RETRIES_PER_SIGNATURE and llm_already_tried:
                 outcome, notes = ("escalated",
-                                  f"signature attempted {attempt_count}× — escalating to operator")
+                                  f"signature attempted {attempt_count}× incl. LLM — escalating to operator")
                 _email_operator(aid, signature, excerpt, a, recipe="loop-broken")
                 escalated += 1
             else:
