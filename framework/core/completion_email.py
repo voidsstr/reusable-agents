@@ -71,15 +71,26 @@ def _resolve_recipient(*, request_id: Optional[str], source_agent: Optional[str]
     return ""
 
 
-def _published_article_urls(run_dir: str, site: str, applied_rec_ids: list[str]) -> list[dict]:
-    """When the source agent is an article-author, the implementer wrote
-    rows to editorial_articles / buying_guides with slugs from each rec's
-    article_proposal.slug. Pull the slugs for applied recs from the run
-    dir's recommendations.json and construct live URLs.
+def _published_urls_for_shipped_recs(run_dir: str, site: str,
+                                       applied_rec_ids: list[str]) -> list[dict]:
+    """Walk the run dir's recommendations.json and emit a URL row for each
+    applied rec that produced/updated a public page. Handles every rec
+    type the implementer can ship:
 
-    Returns a list of {rec_id, title, url, format}. Empty if recs.json is
-    missing or has no article_proposal blocks. Handles both /articles/<slug>
-    and /buying-guides/<slug> URL patterns based on the proposal's bucket.
+    Returns a list of {rec_id, title, url, label}. `label` is a short
+    human-readable category for the email's URL list ("article",
+    "keyword page", "snippet override", "internal link", etc.).
+
+    Recipe per rec type:
+      - article-author-proposal → /reviews/<slug>     (specpicks)
+      - top5-target-page         → /recipes/q/<slug>   (aisleprompt)
+      - ctr-fix                  → URL embedded in title (page where
+                                    the SERP <title>/<meta> override applies)
+      - internal-link            → /best/best-<query-slug>  (aisleprompt)
+      - article-snippet-rewrite  → rec.url (set by SEO analyzer)
+      - article-title-fix        → rec.url (same)
+      - article-orphan-boost     → rec.orphan_urls (multiple URLs)
+      - any other type with a `url` field → that URL
     """
     if not run_dir or not site:
         return []
@@ -93,26 +104,124 @@ def _published_article_urls(run_dir: str, site: str, applied_rec_ids: list[str])
     applied = set(applied_rec_ids or [])
     out: list[dict] = []
     base = f"https://{site}.com" if "." not in site else f"https://{site}"
+    site_label = site.split(".", 1)[0]
+
+    import re as _re
+    def _slug_of(text: str) -> str:
+        return _re.sub(r'[^a-z0-9]+', '-', (text or "").lower()).strip('-')
+
     for r in d.get("recommendations", []):
         rid = r.get("id")
         if applied and rid not in applied:
             continue
-        ap = r.get("article_proposal") or {}
-        slug = ap.get("slug") or r.get("slug")
-        if not slug:
+        typ = r.get("type", "")
+        title = r.get("title", "") or ""
+
+        # Article-author articles → /reviews/<slug>
+        if typ == "article-author-proposal":
+            ap = r.get("article_proposal") or {}
+            slug = ap.get("slug") or r.get("slug")
+            if not slug:
+                continue
+            out.append({
+                "rec_id": rid,
+                "title": ap.get("title") or title or slug,
+                "url": f"{base}/reviews/{slug}",
+                "label": "article",
+            })
             continue
-        # SpecPicks: ALL article-author output goes to editorial_articles
-        # which renders at /reviews/<slug>. The legacy buying_guides table
-        # has no public API endpoint — we no longer write to it.
-        url_path = f"/reviews/{slug}"
-        out.append({
-            "rec_id": rid,
-            "title": ap.get("title") or r.get("title") or "",
-            "url": f"{base}{url_path}",
-            "format": ap.get("format", ""),
-            "bucket": bucket,
-        })
-    return out
+
+        # SEO top5 keyword pages — site-specific URL pattern. Aisleprompt
+        # uses /recipes/q/<slug>; specpicks doesn't have an equivalent
+        # auto-generated keyword landing yet.
+        if typ == "top5-target-page":
+            m = _re.search(r'for "([^"]+)"', title)
+            query = m.group(1) if m else ""
+            if not query:
+                continue
+            slug = _slug_of(query)
+            if site_label == "aisleprompt":
+                out.append({
+                    "rec_id": rid,
+                    "title": f'Keyword page: "{query}"',
+                    "url": f"https://aisleprompt.com/recipes/q/{slug}",
+                    "label": "keyword page",
+                })
+            continue
+
+        # SEO ctr-fix — extract the page URL from the rec title
+        if typ == "ctr-fix":
+            m = _re.search(r'on (https?://[^\s",]+)', title)
+            if m:
+                out.append({
+                    "rec_id": rid,
+                    "title": title[:80],
+                    "url": m.group(1).rstrip('".,'),
+                    "label": "snippet override",
+                })
+            continue
+
+        # SEO internal-link — homepage now links to /best/best-<query-slug>
+        if typ == "internal-link":
+            m = _re.search(r'"([^"]+)"', title)
+            query = m.group(1) if m else ""
+            slug = _slug_of(query)
+            if slug and site_label == "aisleprompt":
+                out.append({
+                    "rec_id": rid,
+                    "title": f'Internal link target: "{query}"',
+                    "url": f"https://aisleprompt.com/best/best-{slug}",
+                    "label": "internal link",
+                })
+            continue
+
+        # SEO article-snippet-rewrite / article-title-fix — analyzer set rec.url
+        if typ in ("article-snippet-rewrite", "article-title-fix"):
+            url = r.get("url", "")
+            if url:
+                out.append({
+                    "rec_id": rid,
+                    "title": title[:80],
+                    "url": url,
+                    "label": "article boost" if typ == "article-snippet-rewrite" else "title fix",
+                })
+            continue
+
+        # SEO article-orphan-boost — emit one row per orphan URL the rec
+        # promised to fix
+        if typ == "article-orphan-boost":
+            for url in (r.get("orphan_urls") or [])[:10]:
+                out.append({
+                    "rec_id": rid,
+                    "title": f"Orphan article boost",
+                    "url": url,
+                    "label": "orphan fix",
+                })
+            continue
+
+        # Generic catch-all for any other type that carries a url field
+        url = r.get("url", "")
+        if url:
+            out.append({
+                "rec_id": rid,
+                "title": title[:80] or url,
+                "url": url,
+                "label": typ or "page",
+            })
+
+    # Dedupe by URL (in case a rec produces overlapping fixes)
+    seen_urls: set[str] = set()
+    deduped: list[dict] = []
+    for entry in out:
+        if entry["url"] in seen_urls:
+            continue
+        seen_urls.add(entry["url"])
+        deduped.append(entry)
+    return deduped
+
+
+# Back-compat alias — older code paths still call the old name.
+_published_article_urls = _published_urls_for_shipped_recs
 
 
 def _build_html(*, agent_id: str, source_agent: str, site: str, request_id: str,
@@ -206,36 +315,35 @@ def _build_html(*, agent_id: str, source_agent: str, site: str, request_id: str,
 </table>
 """
 
-    # Article-author special section: when the source agent is an
-    # article-author, surface the live URLs of every published article so
-    # the operator can click through and verify. Only fires when the
-    # implementer actually wrote articles (status=completed).
+    # 🌐 Pages updated/created — surface the live URL of every shipped rec
+    # that produced or updated a public page. Fires for ALL source agents
+    # (article-author, SEO, PI, catalog-audit, etc.) — the
+    # _published_urls_for_shipped_recs helper handles each rec type
+    # individually.
     published_section = ""
-    if (status == "completed"
-            and source_agent
-            and source_agent.endswith("-article-author-agent")):
-        published = _published_article_urls(run_dir, site, rec_ids)
+    if status == "completed" and rec_ids:
+        published = _published_urls_for_shipped_recs(run_dir, site, rec_ids)
         if published:
             rows = "".join(
                 f'<tr>'
-                f'<td style="padding:6px 10px 6px 0;color:#64748b;font-family:monospace;font-size:12px">{p["rec_id"]}</td>'
-                f'<td style="padding:6px 10px 6px 0">'
+                f'<td style="padding:6px 10px 6px 0;color:#64748b;font-family:monospace;font-size:12px;white-space:nowrap;vertical-align:top">{p["rec_id"]}</td>'
+                f'<td style="padding:6px 10px 6px 0;vertical-align:top">'
                 f'<a href="{p["url"]}" style="color:#2563eb;text-decoration:none;font-weight:500">{p["title"][:140]}</a>'
                 f'<div style="color:#64748b;font-size:11px;margin-top:2px">'
-                f'{p["bucket"]}{(" · " + p["format"]) if p["format"] else ""}'
+                f'{p.get("label","")}'
                 f'</div>'
-                f'<div style="color:#94a3b8;font-size:11px;font-family:monospace;margin-top:1px">{p["url"]}</div>'
+                f'<div style="color:#94a3b8;font-size:11px;font-family:monospace;margin-top:1px;word-break:break-all">{p["url"]}</div>'
                 f'</td></tr>'
                 for p in published
             )
             published_section = f"""
-<h3 style="margin-top:18px;font-size:14px;color:#059669;border-bottom:1px solid #a7f3d0;padding-bottom:4px">🌐 Now live on {site}.com</h3>
+<h3 style="margin-top:18px;font-size:14px;color:#059669;border-bottom:1px solid #a7f3d0;padding-bottom:4px">🌐 Pages updated/created on {site}.com ({len(published)})</h3>
 <table style="font-size:13px;border-collapse:collapse;margin-top:6px;width:100%">
 {rows}
 </table>
 <div style="font-size:11px;color:#64748b;margin-top:6px">
-  Articles were generated by the implementer and written to <code>editorial_articles</code> / <code>buying_guides</code>.
-  They render at the URLs above as soon as the next scheduled deploy or page revalidation runs.
+  Click any URL to view the live page. Each shipped rec's "Verify in production"
+  button on the dashboard runs the implementer-generated check against these URLs.
 </div>
 """
     # Tracking id chip — visible in body so the user can correlate the
@@ -443,12 +551,21 @@ def send_completion_email(
             f"({skipped_count} skipped)"
         )
     else:
-        # Article-author dispatches: emphasize "live" since articles render
-        # at user-visible URLs as soon as the DB row is written.
-        if source_agent and source_agent.endswith("-article-author-agent") and applied_count > 0:
+        # If the rec batch produced public-facing URLs (most agents do —
+        # article-author, SEO, PI, catalog-audit), peek at the URL count
+        # so the subject can promote "N pages live" over the generic
+        # "Shipped N rec(s)" — the operator's inbox UX is much better
+        # when subjects describe what's actually visible.
+        url_count = 0
+        if status == "completed" and applied_count > 0:
+            try:
+                url_count = len(_published_urls_for_shipped_recs(run_dir, site, rec_ids))
+            except Exception:
+                url_count = 0
+        if url_count > 0:
             subject = (
                 f"[{agent_id}:{request_id or 'done'}] {label} — "
-                f"🌐 {applied_count} article(s) live"
+                f"🌐 {applied_count} rec(s) shipped · {url_count} page(s) live"
             )
         else:
             subject = (

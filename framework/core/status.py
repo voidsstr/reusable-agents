@@ -167,16 +167,63 @@ def read_status(agent_id: str, storage: Optional[StorageBackend] = None) -> Opti
     return (storage or get_storage()).read_json(status_key(agent_id))
 
 
+# 5s TTL cache for the events log. Blobs are append-only and the
+# dashboard polls /api/events frequently; reading 1MB+ from Azure on
+# every request was 10s p50. Cache hit drops to <5ms.
+_EVENTS_CACHE: dict = {"data": None, "expires_at": 0.0}
+_EVENTS_CACHE_TTL_S = 5.0
+
+
 def read_recent_events(
     since_ts: Optional[str] = None,
     limit: int = 100,
     storage: Optional[StorageBackend] = None,
 ) -> list[dict]:
     """Read most recent events from the global event log.
-    Inefficient for very large logs; revisit with a tail-window strategy
-    if events.jsonl grows beyond a few MB."""
+
+    Strategy: fetch the last ~256KB of the events.jsonl blob (via byte
+    range), parse the trailing complete lines, return the last `limit`.
+    Avoids pulling the full multi-MB log on every request.
+
+    Cached in-process for 5s — the events log is append-only so a stale
+    read is fine for that window; subsequent polls hit the cache.
+    """
+    import time as _time
+    now = _time.monotonic()
+    if (since_ts is None
+            and _EVENTS_CACHE["data"] is not None
+            and now < _EVENTS_CACHE["expires_at"]):
+        return list(_EVENTS_CACHE["data"][-limit:])
+
     s = storage or get_storage()
-    events = s.read_jsonl(_events_key())
-    if since_ts:
-        events = [e for e in events if e.get("ts", "") > since_ts]
-    return events[-limit:]
+    events: list[dict] = []
+    # Try a tail-window byte read first
+    try:
+        if hasattr(s, "read_bytes_range"):
+            tail_bytes = s.read_bytes_range(_events_key(), -262144)  # last 256KB
+            if tail_bytes:
+                txt = tail_bytes.decode("utf-8", errors="replace")
+                # First line is likely truncated mid-record — skip it
+                lines = txt.split("\n")[1:]
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        import json as _json
+                        events.append(_json.loads(line))
+                    except Exception:
+                        pass
+    except Exception:
+        events = []
+    # Fallback to full read if tail-window unavailable / failed
+    if not events:
+        events = s.read_jsonl(_events_key())
+
+    if since_ts is None:
+        _EVENTS_CACHE["data"] = events
+        _EVENTS_CACHE["expires_at"] = now + _EVENTS_CACHE_TTL_S
+        return list(events[-limit:])
+
+    filtered = [e for e in events if e.get("ts", "") > since_ts]
+    return filtered[-limit:]

@@ -123,7 +123,39 @@ function GoalsFleetList() {
         </div>
       )}
 
-      {loading && <div className="text-ink-500 italic py-8 text-center">Loading goals across the fleet…</div>}
+      {loading && (
+        <div className="space-y-4">
+          {/* Fleet stats skeleton */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="card-surface p-3 text-center animate-pulse" style={{ animationDelay: `${i * 50}ms` }}>
+                <div className="h-6 bg-surface-subtle rounded w-12 mx-auto" />
+                <div className="h-3 bg-surface-subtle rounded w-20 mx-auto mt-2" />
+              </div>
+            ))}
+          </div>
+          {/* 6 agent-card skeletons */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="card-surface p-4 space-y-3 animate-pulse" style={{ animationDelay: `${(i + 5) * 60}ms` }}>
+                <div className="flex justify-between gap-2">
+                  <div className="space-y-2 flex-1 min-w-0">
+                    <div className="h-3 bg-surface-subtle rounded w-2/3" />
+                    <div className="h-2 bg-surface-subtle rounded w-1/3" />
+                  </div>
+                  <div className="h-5 bg-surface-subtle rounded w-12" />
+                </div>
+                <div className="flex gap-2">
+                  <div className="h-5 bg-surface-subtle rounded w-16" />
+                  <div className="h-5 bg-surface-subtle rounded w-20" />
+                </div>
+                {/* Mini sparkline placeholder */}
+                <div className="h-8 bg-surface-subtle rounded w-full" />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {!loading && summaries && summaries.length === 0 && (
         <div className="card-surface p-8 text-center">

@@ -159,9 +159,14 @@ export default function AgentDetail() {
           <div className="text-xs text-ink-500 font-mono mt-0.5 break-all">{detail.id}</div>
           {detail.description && <div className="text-sm text-ink-600 mt-2 max-w-2xl leading-relaxed">{detail.description}</div>}
         </div>
-        <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 flex-wrap sm:flex-nowrap">
-          <StatusBadge state={liveState} pulsing={liveState === 'running' || liveState === 'starting'} />
-          <div className="flex gap-1.5">
+        {/* Status + actions — on mobile this stretches across the row
+            below the title with the buttons split flex-1/flex-1 (~44pt
+            tappable). On desktop ≥sm it stacks at the right edge. */}
+        <div className="flex flex-col sm:items-end gap-2 sm:shrink-0">
+          <div className="self-start sm:self-end">
+            <StatusBadge state={liveState} pulsing={liveState === 'running' || liveState === 'starting'} />
+          </div>
+          <div className="flex items-stretch gap-2 w-full sm:w-auto">
             {(() => {
               const modes = detail.runnable_modes || ['cron', 'manual']
               const manualOk = modes.includes('manual')
@@ -169,9 +174,9 @@ export default function AgentDetail() {
                 return (
                   <button
                     disabled
-                    className="text-xs px-3 py-1.5 bg-surface-subtle text-ink-500 rounded-lg cursor-not-allowed font-medium"
+                    className="flex-1 sm:flex-none text-xs px-3 py-2 sm:py-1.5 bg-surface-subtle text-ink-500 rounded-lg cursor-not-allowed font-medium min-h-[40px] sm:min-h-0"
                     title={`runnable_modes=${JSON.stringify(modes)} — queue-driven, dispatched by upstream agent.`}
-                  >🔒 queue-driven (no manual)</button>
+                  >🔒 queue-driven</button>
                 )
               }
               return (
@@ -190,18 +195,27 @@ export default function AgentDetail() {
                       showToast('err', `Trigger failed: ${msg}`)
                     }
                   }}
-                  className="btn-primary"
+                  className="btn-primary flex-1 sm:flex-none !min-h-[40px] sm:!min-h-0"
                   disabled={liveState === 'running'}
                 >▶ Run now</button>
               )
             })()}
             <button
-              onClick={async () => {
-                if (detail.enabled) await api.disableAgent(id)
-                else await api.enableAgent(id)
-                await refresh()
+              type="button"
+              onClick={async (e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                try {
+                  if (detail.enabled) await api.disableAgent(id)
+                  else await api.enableAgent(id)
+                  showToast('ok', `${detail.enabled ? 'Paused' : 'Enabled'} ${id}`)
+                  await refresh()
+                } catch (err: unknown) {
+                  const msg = String((err as Error)?.message || err)
+                  showToast('err', `Toggle failed: ${msg}`)
+                }
               }}
-              className="btn-secondary"
+              className="btn-secondary flex-1 sm:flex-none !min-h-[40px] sm:!min-h-0"
             >{detail.enabled ? '⏸ disable' : '▶ enable'}</button>
           </div>
         </div>

@@ -189,6 +189,29 @@ class AzureBlobStorage(StorageBackend):
             logger.warning(f"azure read_bytes {key}: {e}")
             return None
 
+    def read_bytes_range(self, key: str, offset: int, length: Optional[int] = None) -> Optional[bytes]:
+        """Read a byte range. Negative offset is interpreted as "last N bytes"
+        (Python slice convention). Used for tail-window reads of growing
+        append-only logs (events.jsonl, fixes-log.jsonl, etc.) so we don't
+        pull megabytes when we only need the most recent records."""
+        try:
+            blob = self._blob(key)
+            # Get blob size first if we need to convert negative offset
+            if offset < 0 or length is None:
+                props = blob.get_blob_properties()
+                total = props.size
+                if offset < 0:
+                    offset = max(0, total + offset)
+                if length is None:
+                    length = total - offset
+            stream = blob.download_blob(offset=offset, length=length)
+            return stream.readall()
+        except Exception as e:
+            if "ResourceNotFound" in type(e).__name__ or "BlobNotFound" in str(e):
+                return None
+            logger.warning(f"azure read_bytes_range {key}@{offset}+{length}: {e}")
+            return None
+
     def write_bytes(self, key: str, data: bytes,
                     cache_control: Optional[str] = None) -> None:
         cs_kwargs = {"content_type": _guess_content_type(key)}

@@ -205,28 +205,34 @@ export default function AgentList() {
             </span>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        {/* Search + refresh controls — full-width search on mobile, the
+            interval selector + refresh button share the second row.
+            Each control hits the 40pt mobile tap minimum. */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto">
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search agents…"
-            className="px-3 py-2 bg-surface-card border border-surface-divider rounded-lg text-sm w-full sm:w-56 placeholder:text-ink-400 focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/20"
+            className="px-3 py-2.5 sm:py-2 bg-surface-card border border-surface-divider rounded-lg text-sm w-full sm:w-56 placeholder:text-ink-400 focus:outline-none focus:border-accent-500 focus:ring-2 focus:ring-accent-500/20"
           />
-          <select
-            value={refreshKey}
-            onChange={(e) => setRefreshKey(e.target.value as keyof typeof REFRESH_INTERVALS_MS)}
-            className="px-3 py-2 bg-surface-card border border-surface-divider rounded-lg text-sm text-ink-700 focus:outline-none focus:border-accent-500"
-          >
-            {Object.keys(REFRESH_INTERVALS_MS).map(k => (
-              <option key={k} value={k}>refresh {k}</option>
-            ))}
-          </select>
-          <button
-            onClick={refresh}
-            className="btn-secondary"
-            title="Refresh now"
-            aria-label="Refresh"
-          >↻</button>
+          <div className="flex items-center gap-2">
+            <select
+              value={refreshKey}
+              onChange={(e) => setRefreshKey(e.target.value as keyof typeof REFRESH_INTERVALS_MS)}
+              className="flex-1 sm:flex-none px-3 py-2.5 sm:py-2 bg-surface-card border border-surface-divider rounded-lg text-sm text-ink-700 focus:outline-none focus:border-accent-500"
+            >
+              {Object.keys(REFRESH_INTERVALS_MS).map(k => (
+                <option key={k} value={k}>refresh {k}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={refresh}
+              className="btn-secondary !py-2.5 sm:!py-1.5 !min-h-[40px] sm:!min-h-0 !min-w-[40px] sm:!min-w-0"
+              title="Refresh now"
+              aria-label="Refresh"
+            >↻</button>
+          </div>
         </div>
       </div>
 
@@ -286,7 +292,32 @@ export default function AgentList() {
 
       {/* Main grid */}
       {loading ? (
-        <div className="text-center py-12 text-ink-400">Loading…</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <div
+              key={i}
+              className="card-surface p-4 space-y-3 animate-pulse"
+              style={{ animationDelay: `${i * 60}ms` }}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-lg bg-surface-subtle shrink-0" />
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="h-3 bg-surface-subtle rounded w-3/4" />
+                  <div className="h-2 bg-surface-subtle rounded w-1/2" />
+                </div>
+              </div>
+              <div className="h-2 bg-surface-subtle rounded w-full" />
+              <div className="flex gap-2">
+                <div className="h-5 bg-surface-subtle rounded w-16" />
+                <div className="h-5 bg-surface-subtle rounded w-12" />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <div className="h-7 bg-surface-subtle rounded w-14" />
+                <div className="h-7 bg-surface-subtle rounded w-16" />
+              </div>
+            </div>
+          ))}
+        </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-12 text-ink-400">
           No agents{search ? ` matching "${search}"` : ''}.

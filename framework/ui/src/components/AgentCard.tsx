@@ -156,9 +156,11 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
         </div>
       )}
 
-      {/* Actions */}
+      {/* Actions — mobile gets larger tappable targets (44pt min); the
+          flex-1 split makes the two buttons share the row evenly with
+          consistent left/right alignment. */}
       <div
-        className="flex gap-1.5 mt-3 pt-2.5 pl-2 border-t border-surface-divider"
+        className="flex items-stretch gap-2 mt-3 pt-3 border-t border-surface-divider"
         onClick={(e) => e.preventDefault()}
       >
         {(() => {
@@ -167,7 +169,7 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
             return (
               <button
                 disabled
-                className="text-[11px] px-2.5 py-1 bg-surface-subtle text-ink-400 rounded-md cursor-not-allowed"
+                className="flex-1 text-[12px] sm:text-[11px] px-3 py-2 sm:py-1.5 bg-surface-subtle text-ink-400 rounded-md cursor-not-allowed text-center font-medium"
                 title={`Queue-driven agent (runnable_modes=${JSON.stringify(agent.runnable_modes)}). Triggered by upstream agent.`}
               >
                 🔒 queue-driven
@@ -186,7 +188,7 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
                 e.stopPropagation()
                 onTrigger?.(agent.id)
               }}
-              className="btn-primary !py-1 !px-2.5 !text-[11px]"
+              className="btn-primary flex-1 !py-2 sm:!py-1.5 !px-3 !text-[12px] sm:!text-[11px] !min-h-[36px]"
               disabled={isActive}
               title={isActive ? 'A run is already in progress' : 'Trigger a run now'}
             >
@@ -201,7 +203,7 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
             e.stopPropagation()
             onToggleEnabled?.(agent)
           }}
-          className="btn-secondary !py-1 !px-2.5 !text-[11px]"
+          className="btn-secondary flex-1 !py-2 sm:!py-1.5 !px-3 !text-[12px] sm:!text-[11px] !min-h-[36px]"
         >
           {agent.enabled ? '⏸ pause' : '▶ enable'}
         </button>

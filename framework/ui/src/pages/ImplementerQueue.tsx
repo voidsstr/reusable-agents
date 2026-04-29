@@ -930,6 +930,35 @@ export default function ImplementerQueue() {
         />
       )}
 
+      {/* Skeleton loading state */}
+      {chains === null && !error && (
+        <div className="space-y-3">
+          {/* 5 stat-card skeletons */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="card-surface p-3 sm:p-4 text-center animate-pulse" style={{ animationDelay: `${i * 50}ms` }}>
+                <div className="h-7 bg-surface-subtle rounded w-12 mx-auto" />
+                <div className="h-3 bg-surface-subtle rounded w-16 mx-auto mt-2" />
+              </div>
+            ))}
+          </div>
+          {/* 3 chain-card skeletons */}
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="card-surface p-4 space-y-3 animate-pulse" style={{ animationDelay: `${(i + 5) * 50}ms` }}>
+              <div className="flex items-center gap-2">
+                <div className="h-4 bg-surface-subtle rounded w-1/3" />
+                <div className="h-3 bg-surface-subtle rounded w-20 ml-auto" />
+              </div>
+              <div className="h-3 bg-surface-subtle rounded w-full" />
+              <div className="flex gap-2">
+                <div className="h-6 bg-surface-subtle rounded w-16" />
+                <div className="h-6 bg-surface-subtle rounded w-20" />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Empty state */}
       {chains !== null && chains.length === 0 && (
         <div className="card-surface p-8 text-center">
