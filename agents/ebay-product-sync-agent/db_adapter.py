@@ -79,6 +79,33 @@ class PostgresAdapter(DbAdapter):
         self.conn = psycopg2.connect(dsn)
         self.conn.autocommit = False
 
+    def ensure_open(self) -> None:
+        """Reconnect if Postgres dropped the connection (idle timeout, server
+        restart, etc). Long-running agents that intersperse heavy non-DB
+        work (LLM calls) with DB writes hit Azure Postgres' default idle
+        timeout (~5min) and the conn dies silently — every subsequent
+        statement raises 'connection already closed'.
+
+        Call this before each batch of writes."""
+        try:
+            if getattr(self.conn, "closed", 0):
+                self.conn = self._psycopg2.connect(self.dsn)
+                self.conn.autocommit = False
+                return
+            # Cheap probe — `SELECT 1` round-trips fast on a healthy conn,
+            # raises on a half-closed one (Azure server-side close that
+            # python hasn't noticed yet).
+            cur = self.conn.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            cur.close()
+        except Exception:
+            # Force a fresh connection on any probe failure.
+            try: self.conn.close()
+            except Exception: pass
+            self.conn = self._psycopg2.connect(self.dsn)
+            self.conn.autocommit = False
+
     def introspect_table(self, table: str) -> list[ColumnInfo]:
         # Allow schema-qualified table names ("public.products")
         schema = "public"

@@ -166,6 +166,40 @@ def _has_llm_attempt_for(s, agent_id: str, signature: str) -> bool:
     return False
 
 
+# Verdicts the LLM can hand down that mean "no further escalation needed
+# even if the issue keeps recurring." If we see ANY of these in fixes-log
+# for this (agent, signature), suppress the loop-broken email — the
+# operator already knows the situation is fundamentally not-actionable
+# from earlier emails.
+_NON_ACTIONABLE_LLM_VERDICTS = (
+    "fix=data-issue",
+    "fix=external-blocker",
+    "fix=wait",
+)
+
+
+def _llm_says_non_actionable(s, agent_id: str, signature: str) -> tuple[bool, str]:
+    """If a prior LLM diagnosis classified this issue as non-actionable
+    (data-issue / external-blocker / wait), return (True, latest_note).
+    The operator already got that diagnosis emailed; sending the same
+    "loop-broken" escalation every cycle is just noise."""
+    try:
+        entries = list(s.read_jsonl(f"agents/{AGENT_ID}/fixes-log.jsonl") or [])
+    except Exception:
+        return False, ""
+    # Walk newest first
+    for e in reversed(entries):
+        if e.get("target_agent") != agent_id:
+            continue
+        if e.get("error_signature") != signature:
+            continue
+        notes = (e.get("notes") or "")
+        for marker in _NON_ACTIONABLE_LLM_VERDICTS:
+            if marker in notes:
+                return True, notes[:200]
+    return False, ""
+
+
 def _has_fixes_log_entry_for(s, agent_id: str, last_run_at: str) -> bool:
     """Return True iff fixes-log.jsonl has at least one entry for this
     (target_agent, last_run_at) tuple. Used to validate that seen.json's
@@ -1095,13 +1129,31 @@ class AgentDoctor(AgentBase):
             signature, excerpt = _classify_error(log_text, status_obj)
 
             # Loop-prevention: too many failed attempts at this signature.
-            # Exception: if no LLM diagnosis has been tried yet for this
-            # (agent, signature) — the pattern classifier kept giving
-            # 'unknown' and exhausted retries, but the LLM might see
-            # something the pattern matcher couldn't. Give it one shot.
+            # Three exit conditions to consider:
+            #
+            # 1. LLM has previously classified this as non-actionable
+            #    (data-issue / external-blocker / wait). The operator
+            #    already got that diagnosis email. Don't keep re-emailing
+            #    the same conclusion every 5 min — silently accept the
+            #    state and move on.
+            #
+            # 2. Retry cap hit AND LLM has been tried at least once →
+            #    escalate as "loop-broken" so a human can intervene.
+            #
+            # 3. Otherwise → run the recipe (LLM if pattern unknown).
             attempt_count = _signature_attempt_count(s, aid, signature)
             llm_already_tried = _has_llm_attempt_for(s, aid, signature)
-            if attempt_count >= MAX_RETRIES_PER_SIGNATURE and llm_already_tried:
+            non_actionable, prior_diag = _llm_says_non_actionable(s, aid, signature)
+
+            if non_actionable:
+                outcome = "skipped"
+                notes = (
+                    f"LLM previously classified as non-actionable "
+                    f"({prior_diag[:120]}); silently accepting state."
+                )
+                # Log to fixes-log but DO NOT email — operator already
+                # got the diagnosis from the first LLM run.
+            elif attempt_count >= MAX_RETRIES_PER_SIGNATURE and llm_already_tried:
                 outcome, notes = ("escalated",
                                   f"signature attempted {attempt_count}× incl. LLM — escalating to operator")
                 _email_operator(aid, signature, excerpt, a, recipe="loop-broken")

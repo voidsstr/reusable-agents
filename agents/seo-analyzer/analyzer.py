@@ -202,6 +202,109 @@ def build_snapshot(cfg, run_dir: Path) -> dict:
 # Comparison (vs prior snapshot)
 # ---------------------------------------------------------------------------
 
+def _canonical_rec_key(rec: dict) -> Optional[str]:
+    """Stable identity for a rec across runs — used by the dedupe filter
+    so the analyzer doesn't keep re-proposing the same change every cron
+    cycle. Must match the same shape between the rec we're considering
+    NOW and the recs the implementer already shipped/skipped previously.
+
+    Returns None for rec types we can't safely dedupe (defensive default —
+    we'd rather re-propose than silently lose a fresh signal)."""
+    typ = rec.get("type", "")
+    if typ == "top5-target-page":
+        target = rec.get("target") or {}
+        query = target.get("query") or ""
+        if not query:
+            # Fall back to the rec title's quoted query if present
+            import re as _re
+            m = _re.search(r'for "([^"]+)"', rec.get("title") or "")
+            query = m.group(1) if m else ""
+        return f"top5:{query.lower().strip()}" if query else None
+    if typ == "ctr-fix":
+        # The URL of the page whose snippet we're rewriting is the natural key.
+        url = rec.get("url", "")
+        if not url:
+            import re as _re
+            m = _re.search(r'on (https?://\S+?)["\s,]', (rec.get("title") or "") + " ")
+            url = m.group(1).rstrip('"., ') if m else ""
+        return f"ctr-fix:{url}" if url else None
+    if typ == "internal-link":
+        import re as _re
+        m = _re.search(r'"([^"]+)"', rec.get("title") or "")
+        query = (m.group(1) if m else "").lower().strip()
+        return f"internal-link:{query}" if query else None
+    if typ in ("article-snippet-rewrite", "article-title-fix"):
+        url = rec.get("url", "")
+        return f"{typ}:{url}" if url else None
+    if typ == "article-orphan-boost":
+        # Multi-URL — use the sorted-tuple as the key so it's stable
+        urls = rec.get("orphan_urls") or []
+        return f"article-orphan-boost:{','.join(sorted(urls)[:5])}" if urls else None
+    return None
+
+
+def _load_handled_rec_keys(cfg, current_run_ts: str,
+                            scan_runs: int = 30) -> set[str]:
+    """Walk prior runs' recommendations.json + responses-archive to find
+    every rec the implementer already shipped/implemented OR the user
+    explicitly skipped/deferred. Returns a set of canonical keys to
+    EXCLUDE from this run's proposals.
+
+    Without this, the analyzer keeps proposing the same "build a page for
+    cube steak recipes" rec every 3 hours even after it's been shipped —
+    the operator's inbox fills with recommendations that say
+    "ALREADY-IMPLEMENTED" when the implementer runs them.
+    """
+    handled: set[str] = set()
+    try:
+        from framework.core.storage import get_storage
+        s = get_storage()
+    except Exception:
+        return handled
+    # Map cfg.site_id (e.g. "aisleprompt") → likely source agent id
+    site_id = cfg.site_id if hasattr(cfg, "site_id") else cfg.get("site", {}).get("id", "")
+    candidate_agents = [
+        f"{site_id}-seo-opportunity-agent",
+    ]
+    for agent_id in candidate_agents:
+        try:
+            keys = list(s.list_prefix(f"agents/{agent_id}/runs/"))
+        except Exception:
+            continue
+        # Build set of run_ts (excluding the rundir-... dispatch dirs)
+        run_tss: set[str] = set()
+        for k in keys:
+            tail = k.split(f"agents/{agent_id}/runs/", 1)[1] if "agents/" in k else ""
+            if not tail or "rundir-" in tail:
+                continue
+            run_ts = tail.split("/", 1)[0]
+            if run_ts and run_ts != current_run_ts:
+                run_tss.add(run_ts)
+        # Walk newest N runs
+        for run_ts in sorted(run_tss, reverse=True)[:scan_runs]:
+            try:
+                d = s.read_json(f"agents/{agent_id}/runs/{run_ts}/recommendations.json")
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            for r in d.get("recommendations", []):
+                # Skip recs that aren't actually "handled" — those are
+                # still legitimately re-proposable
+                handled_via_implement = (
+                    r.get("shipped") or r.get("implemented")
+                    or r.get("implemented_via") == "pre-existing"
+                    or r.get("applied")
+                )
+                handled_via_skip = bool(r.get("deferred"))
+                if not (handled_via_implement or handled_via_skip):
+                    continue
+                key = _canonical_rec_key(r)
+                if key:
+                    handled.add(key)
+    return handled
+
+
 def find_prior_snapshot(cfg, latest_run_ts: str) -> Optional[Path]:
     runs_dir = cfg.site_runs_dir
     if not runs_dir.is_dir():
@@ -363,8 +466,25 @@ def _match_files_by_type(routes: list[dict], page_type: str) -> list[str]:
     return out[:3]
 
 
-def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], list[dict]]:
-    """Return (recommendations, declared_goals)."""
+def build_recommendations(cfg, run_dir: Path, snap: dict,
+                            handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict]]:
+    """Return (recommendations, declared_goals).
+
+    handled_keys: optional set of canonical rec keys (per _canonical_rec_key)
+    that have already been shipped or skipped in prior runs. Recs whose
+    key is in this set are dropped before being added to the output.
+    Caller usually loads it via _load_handled_rec_keys; pass None to
+    disable the dedupe filter (e.g. for testing).
+    """
+    handled_keys = handled_keys or set()
+    skipped_already_handled = 0
+    def _keep(rec: dict) -> bool:
+        nonlocal skipped_already_handled
+        key = _canonical_rec_key(rec)
+        if key and key in handled_keys:
+            skipped_already_handled += 1
+            return False
+        return True
     data = run_dir / "data"
     recs: list[dict] = []
     goals: list[dict] = []
@@ -767,6 +887,21 @@ def build_recommendations(cfg, run_dir: Path, snap: dict) -> tuple[list[dict], l
             })
             article_recs_added += 1
 
+    # Filter out any rec whose canonical key matches a previously
+    # shipped/skipped rec. This prevents the analyzer from re-proposing
+    # the same recommendations every cron cycle (every 3h) — without it,
+    # the implementer keeps seeing "build keyword page for cube steak
+    # recipes" even after the first run shipped it; claude correctly
+    # marks it implemented_via=pre-existing but the operator's inbox
+    # fills with stale-feeling proposals.
+    if handled_keys:
+        before = len(recs)
+        recs = [r for r in recs if _canonical_rec_key(r) not in handled_keys]
+        skipped_already_handled = before - len(recs)
+        if skipped_already_handled:
+            print(f"  ✓ filtered out {skipped_already_handled} rec(s) already handled "
+                  f"in prior runs (shipped/implemented/skipped)", file=sys.stderr)
+
     return recs[:max_recs], goals
 
 
@@ -934,7 +1069,20 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
             print(f"  ✓ goal-progress.json ({len(scored['goals'])} goals scored)", file=sys.stderr)
 
     # 4. Build recommendations + declare new goals
-    recs, declared_goals = build_recommendations(cfg, run_dir, snap)
+    # Load handled-rec keys from prior runs so we don't re-propose recs
+    # that have already been shipped, implemented, or explicitly skipped
+    # by the operator. Disable with SEO_DISABLE_HANDLED_DEDUPE=1.
+    handled_keys: set = set()
+    if os.environ.get("SEO_DISABLE_HANDLED_DEDUPE") != "1":
+        try:
+            handled_keys = _load_handled_rec_keys(cfg, run_ts)
+            if handled_keys:
+                print(f"  ✓ loaded {len(handled_keys)} handled-rec keys from prior runs",
+                      file=sys.stderr)
+        except Exception as e:
+            print(f"  [warn] handled-rec dedupe load failed: {e}", file=sys.stderr)
+    recs, declared_goals = build_recommendations(cfg, run_dir, snap,
+                                                  handled_keys=handled_keys)
     # Repo routes are useful in the LLM-audit post-processing below too
     repo_routes = _load_repo_routes(run_dir)
 

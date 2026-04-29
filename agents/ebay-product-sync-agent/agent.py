@@ -1084,18 +1084,99 @@ class EbayProductSyncAgent(AgentBase):
         return cr
 
     # ───────────────────────────────────────────────────────────────
+    def _hydrate_from_ebay_fields(self, item: dict, cat_hint: Optional[str]) -> Optional[dict]:
+        """Build a canonical-product record DIRECTLY from the eBay Browse
+        API's structured fields, skipping Claude entirely.
+
+        eBay returns brand + mpn + title + categories on every Browse search
+        result. When brand AND (mpn OR a recognizable model in the title) are
+        present, we can synthesize a canonical record without an LLM call.
+        Returns None when fields are insufficient — caller falls back to
+        Claude hydration."""
+        title = (item.get("title") or "").strip()
+        brand = (item.get("brand") or "").strip()
+        mpn = (item.get("mpn") or "").strip()
+        if not title:
+            return None
+        # We need at least a brand + (mpn or distinct title) to skip claude
+        if not brand:
+            return None
+        # Build name: prefer "Brand Title" format (dedupes seller noise via fingerprint)
+        title_lower = title.lower()
+        # If brand isn't already in the title, prepend it
+        name = title if brand.lower() in title_lower else f"{brand} {title}"
+        name = name[:140]  # cap
+        # Slug-fingerprint: lowercase, strip non-alnum, drop common seller-noise tokens
+        import re as _re
+        sw = {"new", "used", "tested", "working", "vintage", "pulled", "open",
+              "box", "lot", "of", "for", "parts", "oem", "the", "and", "with",
+              "from", "in", "fast", "ship", "free", "shipping", "rare", "free"}
+        words = [w for w in _re.findall(r'[a-z0-9]+', name.lower()) if w not in sw]
+        title_fingerprint = "-".join(words)[:120]
+        if not title_fingerprint:
+            return None
+        return {
+            "name": name,
+            "manufacturer": brand,
+            "family": None,
+            "model_number": mpn or None,
+            "release_year": None,
+            "form_factor": None,
+            "key_specs": {},
+            "category_slug": cat_hint or "",
+            "title_fingerprint": title_fingerprint,
+            # Lower confidence than Claude when MPN is missing — flags
+            # that we'd want claude validation for these later if reviews
+            # prove inaccurate. With brand+mpn+title we trust 0.85.
+            "confidence": 0.85 if mpn else 0.65,
+            "_source": "ebay-fields",
+        }
+
     def _hydrate_canonical_products(self, items: list[dict], cat_hint: Optional[str]) -> list[dict]:
-        """Batch-canonicalize listings → canonical product fingerprints
-        via Claude. Returns parallel list of {name, manufacturer, family,
-        title_fingerprint, key_specs, category_slug, confidence, ...} or
-        None for entries that should be skipped (low confidence / lots)."""
-        if not items: return []
+        """Batch-canonicalize listings → canonical product fingerprints.
+        Two-pass strategy:
+
+        1. **Field-extraction pass (free, fast)**: try to build the canonical
+           record from eBay's structured fields (brand, mpn, title). Works
+           cleanly for branded items with MPNs — most modern hardware listings.
+
+        2. **Claude pass (expensive)**: ONLY for items that field extraction
+           couldn't handle (no brand, vague titles, multi-item lots, retro
+           hardware where MPNs are absent). Same prompt as before.
+
+        Returns parallel list — entries are dicts on success (with `_source`
+        identifying which path produced them), None to skip."""
+        if not items:
+            return []
+
+        # Pass 1: field extraction
+        out: list[Optional[dict]] = []
+        claude_indexes: list[int] = []
+        claude_items: list[dict] = []
+        for idx, item in enumerate(items):
+            rec = self._hydrate_from_ebay_fields(item, cat_hint)
+            if rec is not None:
+                out.append(rec)
+            else:
+                out.append(None)  # placeholder; filled by claude pass
+                claude_indexes.append(idx)
+                claude_items.append(item)
+        if claude_items:
+            log.info("hydration: %d/%d items handled by ebay-fields; "
+                     "%d still need claude", len(items) - len(claude_items),
+                     len(items), len(claude_items))
+        else:
+            log.info("hydration: all %d items handled by ebay-fields (no claude)",
+                     len(items))
+            return out
+
+        # Pass 2: claude — only for items field-extraction couldn't handle
         ai = ai_client_for(self.agent_id)
         # Batch listings to amortize Claude calls — 8 per call works well.
-        out: list[dict] = []
         BATCH = 8
-        for i in range(0, len(items), BATCH):
-            chunk = items[i:i + BATCH]
+        claude_results: list[Optional[dict]] = []
+        for i in range(0, len(claude_items), BATCH):
+            chunk = claude_items[i:i + BATCH]
             user_prompt = "Canonicalize each listing. Return a JSON array of objects (one per listing, in order):\n\n"
             for j, it in enumerate(chunk):
                 hint = f" (category hint: {cat_hint})" if cat_hint else ""
@@ -1118,16 +1199,24 @@ class EbayProductSyncAgent(AgentBase):
                 ja = s.rfind("]")
                 if ia < 0 or ja <= ia:
                     log.warning("hydration: non-array response, skipping batch")
-                    out.extend([None] * len(chunk))
+                    claude_results.extend([None] * len(chunk))
                     continue
                 arr = json.loads(s[ia:ja+1])
                 if not isinstance(arr, list) or len(arr) != len(chunk):
                     log.warning("hydration: array length mismatch (%d vs %d)", len(arr) if isinstance(arr, list) else 0, len(chunk))
                     arr = (arr if isinstance(arr, list) else []) + [None] * (len(chunk) - (len(arr) if isinstance(arr, list) else 0))
-                out.extend(arr)
+                claude_results.extend(arr)
             except Exception as e:
                 log.warning("hydration batch failed: %s", e)
-                out.extend([None] * len(chunk))
+                claude_results.extend([None] * len(chunk))
+        # Tag claude-pass results so downstream stats can split by source
+        for r in claude_results:
+            if isinstance(r, dict):
+                r.setdefault("_source", "claude")
+        # Splice claude results back into `out` at the original indexes
+        for k, idx in enumerate(claude_indexes):
+            if k < len(claude_results):
+                out[idx] = claude_results[k]
         return out
 
     def _upsert_canonical_product(
@@ -1291,7 +1380,18 @@ class EbayProductSyncAgent(AgentBase):
             cat_id = self._resolve_category_id(adapter, cat) if cat else None
 
             # Phase A: canonicalize the whole batch in one or two LLM calls.
+            # This can take 30s-5min depending on Claude pool state, easily
+            # outliving Azure Postgres' 5min idle timeout. We pre-emptively
+            # ensure the conn is alive AFTER hydration before the upsert
+            # phase so a closed conn doesn't cascade into "product upsert
+            # failed: connection already closed" for every row.
             hyd_list = self._hydrate_canonical_products(items, cat)
+
+            if not dry_run and hasattr(adapter, "ensure_open"):
+                try:
+                    adapter.ensure_open()
+                except Exception as e:
+                    log.warning("DB conn refresh failed before upsert phase: %s", e)
 
             listings_rows = []
             for item, hyd in zip(items, hyd_list):
