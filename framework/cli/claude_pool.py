@@ -402,76 +402,279 @@ def _release_profile(profile_id: str) -> None:
         _close_state(fd)
 
 
-# Max number of profiles we'll try in one exec call before giving up.
-# Defaults to 4 — covers up to 4 distinct accounts; raise via env if needed.
-MAX_FAILOVERS = int(os.environ.get("CLAUDE_POOL_MAX_FAILOVERS", "4"))
+# Max number of profiles we'll try in one round before declaring "all
+# rate-limited" and entering wait-mode. Defaults to 8 — covers most
+# realistic account counts; raise via env if you have more.
+MAX_FAILOVERS = int(os.environ.get("CLAUDE_POOL_MAX_FAILOVERS", "8"))
+
+# When all profiles are rate-limited, sleep this many seconds between
+# re-pick attempts. The user-stated default is 2 minutes — long enough
+# to not spin, short enough to pick up the moment any profile resets.
+RETRY_INTERVAL_S = int(os.environ.get("CLAUDE_POOL_RETRY_INTERVAL_S", "120"))
+
+# Maximum total time (across all retries) the pool will wait for a
+# usable profile before giving up + propagating failure. Default 8h —
+# long enough to cover a typical Claude Max daily reset cycle. Set to
+# 0 to disable the cap (literally wait forever).
+MAX_WAIT_S = int(os.environ.get("CLAUDE_POOL_MAX_WAIT_S", "28800"))
+
+
+def _discover_profiles_from_disk() -> int:
+    """Scan ROOT for profile-* dirs that aren't yet in state.json and add
+    them. Idempotent. Run on every cmd_exec entry so a freshly-created
+    profile (manual `claude-pool init` or `mkdir profile-3`) gets picked
+    up without the pool needing to be restarted.
+
+    Returns the number of new profiles discovered this call.
+    """
+    if not ROOT.is_dir():
+        return 0
+    found = 0
+    fd = _open_state_locked()
+    try:
+        state = _read_state(fd)
+        existing_ids = set(state.keys())
+        for child in sorted(ROOT.iterdir()):
+            if not child.is_dir():
+                continue
+            name = child.name
+            if not name.startswith("profile-"):
+                continue
+            if name in existing_ids:
+                continue
+            # New on-disk profile — register it. Inherit user-level
+            # configs the same way _ensure_profile_dir does.
+            _ensure_profile_dir(int(name.split("-", 1)[1]) if name.split("-", 1)[1].isdigit() else 0)
+            state[name] = {
+                "id": name,
+                "home": str(child),
+                "in_use": 0,
+                "last_used_at": "",
+                "total_uses": 0,
+                "label": "",
+                "authenticated": _is_authenticated(str(child)),
+                "discovered_at": _now_iso(),
+            }
+            found += 1
+            sys.stderr.write(f"[claude-pool] auto-discovered new profile {name}\n")
+        if found:
+            _write_state(fd, state)
+    finally:
+        _close_state(fd)
+    return found
+
+
+def _all_rate_limited(state: dict) -> tuple[bool, list[str]]:
+    """True iff every authenticated profile is currently rate-limited.
+    Returns (bool, list of resets_at strings sorted ascending) — the
+    earliest reset is the soonest we'd recover."""
+    authed = [p for p in state.values() if _is_authenticated(p.get("home", ""))]
+    if not authed:
+        return False, []
+    if not all(_is_rate_limited_now(p) for p in authed):
+        return False, []
+    resets = sorted(p.get("limit_resets_at", "") for p in authed if p.get("limit_resets_at"))
+    return True, resets
+
+
+def _emit_outage_event(state: dict, resets: list[str]) -> None:
+    """Email the operator + write an outage marker. Debounced — won't
+    re-email more than once per OUTAGE_COOLDOWN_S seconds (default 1h)."""
+    cooldown_s = int(os.environ.get("CLAUDE_POOL_OUTAGE_COOLDOWN_S", "3600"))
+    fd = _open_state_locked()
+    try:
+        st = _read_state(fd)
+        outage = st.setdefault("__outage__", {})
+        last = outage.get("last_email_at", "")
+        if last:
+            try:
+                last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                if (datetime.now(timezone.utc) - last_dt).total_seconds() < cooldown_s:
+                    sys.stderr.write(f"[claude-pool] outage email suppressed (cooldown)\n")
+                    return
+            except Exception:
+                pass
+        outage["last_email_at"] = _now_iso()
+        outage["last_resets_at"] = resets
+        _write_state(fd, st)
+    finally:
+        _close_state(fd)
+    # Build the email body
+    profile_lines = []
+    for k in sorted(state.keys()):
+        p = state[k]
+        if not _is_authenticated(p.get("home", "")):
+            continue
+        rs = p.get("limit_resets_at", "—")
+        msg = (p.get("limit_last_message", "") or "").splitlines()[-1][:140] if p.get("limit_last_message") else ""
+        profile_lines.append(f"  • {p['id']:<14} resets {rs[:19]}  {msg}")
+    soonest = resets[0][:19] if resets else "(unknown)"
+    body_md = (
+        "All authenticated Claude Max profiles in the pool are currently "
+        "rate-limited. Agents that call claude are sleeping and will retry "
+        "automatically every "
+        f"{RETRY_INTERVAL_S}s. Soonest expected reset: {soonest}.\n\n"
+        f"Profiles:\n" + "\n".join(profile_lines) + "\n\n"
+        "If this is unexpected (e.g. you have unused accounts), add another "
+        "profile with:\n"
+        "  claude-pool init --count <N+1>\n"
+        "  HOME=~/.reusable-agents/claude-pool/profile-<N+1> claude /login\n\n"
+        "The pool auto-discovers new profiles within 2 minutes — no agent "
+        "restart needed."
+    )
+    try:
+        sys.path.insert(0, str(_REPO_ROOT))
+        from framework.core.resilience import notify_operator
+        class _ClaudePoolOutage(Exception):
+            pass
+        notify_operator(
+            agent_id="claude-pool",
+            error=_ClaudePoolOutage("All Claude Max profiles rate-limited"),
+            context={
+                "phase": "rate-limit-outage",
+                "soonest_reset_utc": soonest,
+                "profile_count": len(profile_lines),
+                "details_md": body_md,
+            },
+            severity="medium",
+            cooldown_s=cooldown_s,
+        )
+        sys.stderr.write(f"[claude-pool] outage notification emailed (soonest reset {soonest})\n")
+    except Exception as e:
+        sys.stderr.write(f"[claude-pool] outage email failed (best-effort): {e}\n")
+
+
+def _emit_recovery(profile_id: str) -> None:
+    """Mark the outage cleared when ANY profile becomes ready again."""
+    fd = _open_state_locked()
+    try:
+        st = _read_state(fd)
+        outage = st.get("__outage__", {})
+        if outage.get("last_email_at"):
+            outage["recovered_at"] = _now_iso()
+            outage["recovered_via"] = profile_id
+            outage["last_email_at"] = ""  # clear so a future outage re-notifies
+            st["__outage__"] = outage
+            _write_state(fd, st)
+            sys.stderr.write(f"[claude-pool] outage cleared via {profile_id}\n")
+    finally:
+        _close_state(fd)
 
 
 def cmd_exec(args) -> None:
-    """Pick a profile, exec claude. On rate-limit, mark the profile and
-    fail over to a different profile (up to MAX_FAILOVERS times). Returns
-    the final claude exit code."""
-    tried: set[str] = set()
-    last_rc = 1
-    last_captured = ""
+    """Pick a profile, exec claude. On rate-limit, fail over to another
+    profile. If ALL profiles are rate-limited, sleep RETRY_INTERVAL_S
+    and re-pick (re-scanning for newly-authenticated profiles each
+    round). Email the operator on first detection of total outage.
 
-    for attempt in range(MAX_FAILOVERS):
-        # Pick under lock
+    Behavior tunables (env):
+      CLAUDE_POOL_MAX_FAILOVERS    — failovers per round before sleeping
+      CLAUDE_POOL_RETRY_INTERVAL_S — sleep between rounds when all limited
+      CLAUDE_POOL_MAX_WAIT_S       — max total wait (0 = forever)
+      CLAUDE_POOL_OUTAGE_COOLDOWN_S — email debounce window
+    """
+    started = time.time()
+    last_rc = 1
+    outage_emailed = False
+
+    while True:
+        # Auto-pickup of any new profile dirs / freshly-authenticated profiles
+        _discover_profiles_from_disk()
+
+        tried: set[str] = set()
+
+        # Inner loop: try every authenticated, not-rate-limited profile
+        # in order until one succeeds or all fail with rate-limit signals.
+        for attempt in range(MAX_FAILOVERS):
+            fd = _open_state_locked()
+            try:
+                state = _read_state(fd)
+                picked = _pick_profile(state, exclude_ids=tried)
+            finally:
+                _close_state(fd)
+
+            if picked is None:
+                break  # all eligible profiles tried this round
+
+            _claim_profile(picked)
+            picked_id = picked["id"]
+            tried.add(picked_id)
+            sys.stderr.write(
+                f"[claude-pool] → {picked_id} (home={picked['home']})"
+                f"{' [failover ' + str(attempt + 1) + ']' if attempt else ''}\n"
+            )
+            try:
+                rc, captured = _run_one_dispatch(picked_id, picked["home"], args.claude_args or [])
+            finally:
+                _release_profile(picked_id)
+            last_rc = rc
+
+            if rc == 0:
+                # Success — clear any outage email gate so next outage re-notifies
+                _emit_recovery(picked_id)
+                sys.exit(0)
+
+            if _looks_rate_limited(captured):
+                _mark_rate_limited(picked_id, captured)
+                sys.stderr.write(f"[claude-pool] {picked_id} hit rate limit; trying next\n")
+                continue
+
+            # Non-rate-limit failure — surface as-is. The user's prompt
+            # was malformed, claude crashed, etc. Don't loop on these.
+            sys.exit(rc)
+
+        # All eligible profiles tried this round (or none were eligible).
+        # Check whether we should sleep and retry, or give up.
         fd = _open_state_locked()
         try:
             state = _read_state(fd)
-            picked = _pick_profile(state, exclude_ids=tried)
+            authed_count = sum(1 for p in state.values()
+                                if isinstance(p, dict) and _is_authenticated(p.get("home", "")))
+            limited, resets = _all_rate_limited(state)
         finally:
             _close_state(fd)
 
-        if picked is None:
-            if attempt == 0:
-                # No profile EVER picked — none authenticated or all rate-limited
-                sys.stderr.write(
-                    "[claude-pool] No usable profiles. Either none are authenticated "
-                    "yet (run `claude-pool init --count N` and follow the login prompts), "
-                    "OR every profile is currently rate-limited (run `claude-pool status` "
-                    "to see when each resets).\n"
-                )
-                sys.exit(70)
-            # Exhausted all profiles via failover; surface last result
+        if authed_count == 0:
             sys.stderr.write(
-                f"[claude-pool] all {len(tried)} authed profile(s) hit rate limit "
-                f"this call; surfacing rc={last_rc} from last attempt\n"
+                "[claude-pool] No authenticated profiles. Run:\n"
+                "  claude-pool init --count <N>\n"
+                "Then follow the printed login instructions for each profile.\n"
+            )
+            sys.exit(70)
+
+        if not limited:
+            # No profile was rate-limited but pick still returned None? That
+            # can happen when all profiles are excluded by `tried` after
+            # successive non-rate-limit failures. Treat as terminal.
+            sys.stderr.write(
+                f"[claude-pool] {len(tried)} profile(s) tried this round, "
+                f"none succeeded and the failures were not rate-limit; surfacing rc={last_rc}\n"
             )
             sys.exit(last_rc)
 
-        _claim_profile(picked)
-        picked_id = picked["id"]
-        tried.add(picked_id)
-        sys.stderr.write(
-            f"[claude-pool] → {picked_id} (home={picked['home']})"
-            f"{' [failover attempt ' + str(attempt + 1) + ']' if attempt else ''}\n"
-        )
-        try:
-            rc, captured = _run_one_dispatch(picked_id, picked["home"], args.claude_args or [])
-        finally:
-            _release_profile(picked_id)
-        last_rc = rc
-        last_captured = captured
+        # All authenticated profiles are rate-limited. Email once, then
+        # sleep + re-pick. The user's spec: "essentially just wait until
+        # it can find an account that works."
+        if not outage_emailed:
+            _emit_outage_event(state, resets)
+            outage_emailed = True
 
-        # Success → return; we're done
-        if rc == 0:
-            sys.exit(0)
-
-        # Non-zero exit — check if it's a rate-limit signal we can fail over from
-        if _looks_rate_limited(captured):
-            _mark_rate_limited(picked_id, captured)
+        elapsed = time.time() - started
+        if MAX_WAIT_S > 0 and elapsed >= MAX_WAIT_S:
             sys.stderr.write(
-                f"[claude-pool] {picked_id} hit rate limit; failing over to next profile\n"
+                f"[claude-pool] still all-rate-limited after {int(elapsed)}s; "
+                f"giving up (max-wait={MAX_WAIT_S}s). Surfacing rc={last_rc}.\n"
             )
-            continue
-        # Non-rate-limit failure — surface as-is, no failover (e.g. user
-        # cancelled, prompt error, etc.).
-        sys.exit(rc)
+            sys.exit(last_rc)
 
-    # Shouldn't reach here, but propagate the last code
-    sys.exit(last_rc)
+        soonest = resets[0][:19] if resets else "(unknown)"
+        sys.stderr.write(
+            f"[claude-pool] all {authed_count} profile(s) rate-limited; "
+            f"sleeping {RETRY_INTERVAL_S}s then re-checking "
+            f"(soonest reset {soonest}, total waited {int(elapsed)}s)\n"
+        )
+        time.sleep(RETRY_INTERVAL_S)
+        # Loop back: discover, re-pick, etc.
 
 
 def cmd_login_help(args) -> None:
