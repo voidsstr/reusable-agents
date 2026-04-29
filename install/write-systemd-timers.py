@@ -137,16 +137,35 @@ def main() -> None:
         for f in failed:
             print(f"  - {f}")
 
-    # Reload + enable
+    # Reload + enable. Also STOP timers for disabled agents — without
+    # this step, an agent that was previously enabled keeps running its
+    # systemd timer indefinitely after the dashboard toggles it off.
+    # (Found in flight: aisleprompt-kitchen-scraper had enabled=false
+    # in the manifest but kept firing every 30 min for hours.)
+    stopped = 0
     if scheduler.systemctl_reload():
         for a in agents:
             if args.agent_id and a["id"] != args.agent_id:
                 continue
-            if not a.get("cron_expr") or not a.get("enabled", True):
+            if not a.get("cron_expr"):
                 continue
-            if scheduler.systemctl_enable_and_start(a["id"]):
-                enabled += 1
-        print(f"Enabled + started {enabled} timers")
+            if a.get("enabled", True):
+                if scheduler.systemctl_enable_and_start(a["id"]):
+                    enabled += 1
+            else:
+                # Stop + disable any running timer for this agent
+                import subprocess as _sp
+                unit = f"agent-{a['id']}.timer"
+                try:
+                    _sp.run(["systemctl", "--user", "stop", unit],
+                            capture_output=True, timeout=10)
+                    r = _sp.run(["systemctl", "--user", "disable", unit],
+                                capture_output=True, timeout=10)
+                    if r.returncode == 0:
+                        stopped += 1
+                except Exception:
+                    pass
+        print(f"Enabled + started {enabled} timers · stopped {stopped} disabled-agent timers")
 
 
 if __name__ == "__main__":

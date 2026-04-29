@@ -123,7 +123,19 @@ def _classify_error(log_text: str, status_obj: dict) -> tuple[str, str]:
 
 def _read_log(agent_id: str) -> str:
     """Read the most recent agent log from /tmp/reusable-agents-logs.
-    Logs are written by agent_run_wrapper.sh + dispatch flows."""
+
+    Strategy: prefer error-context over chronological tail. Long-running
+    agents (kitchen-scraper, market-research-pipeline) generate megabytes
+    of routine HTTP-200 log lines that drown out the actual failure when
+    the tail captures only the last 32KB. So we:
+
+      1. Scan the WHOLE file for error patterns (Traceback, ERROR, FAIL,
+         exited rc=, OperationalError, etc.).
+      2. For each match, extract a 1KB window around it.
+      3. If we found >0 matches, return concatenated windows (capped 32KB).
+      4. Otherwise fall back to the last 32KB tail (preserves the old
+         behavior for agents that fail without a clear error pattern).
+    """
     if not HOST_LOGS_DIR.is_dir():
         return ""
     candidates = sorted(
@@ -139,9 +151,53 @@ def _read_log(agent_id: str) -> str:
     if not candidates:
         return ""
     try:
-        return candidates[0].read_text(errors="replace")[-32000:]  # last 32KB
+        text = candidates[0].read_text(errors="replace")
     except Exception:
         return ""
+
+    # Find all error-pattern matches across the WHOLE file
+    error_patterns = [
+        r"^Traceback \(most recent call last\):",
+        r"\b(ERROR|CRITICAL)\b",
+        r"\bOperationalError\b",
+        r"\bInterfaceError\b",
+        r"\bTimeoutError\b",
+        r"\bConnectionError\b",
+        r"\bAuthenticationError\b",
+        r"exited rc=[1-9]",
+        r"FAILURE",
+        r"unrecoverable error",
+        r"\bkilled by signal\b",
+        r"Permission denied",
+        r"\b5\d\d (Server Error|Internal Server Error)",
+    ]
+    pat = re.compile("|".join(error_patterns), re.MULTILINE)
+    windows: list[tuple[int, str]] = []
+    seen_offsets: set[int] = set()
+    for m in pat.finditer(text):
+        # Snap to a 1KB context window around each match
+        start = max(0, m.start() - 400)
+        end = min(len(text), m.end() + 600)
+        # Dedupe overlapping windows
+        if any(abs(start - o) < 200 for o in seen_offsets):
+            continue
+        seen_offsets.add(start)
+        windows.append((start, text[start:end]))
+        if len(windows) >= 12:
+            break
+
+    if windows:
+        # Sort by file-position so chronological order is preserved
+        windows.sort(key=lambda w: w[0])
+        body = "\n=== ... ===\n".join(w[1] for w in windows)
+        # Always include the LAST 4KB too so the wrapper's exit summary
+        # (rc=N, etc.) is visible regardless of where the error patterns
+        # landed
+        body = body + "\n=== TAIL ===\n" + text[-4000:]
+        return body[:32000]
+
+    # No error pattern match — fall back to chronological tail
+    return text[-32000:]
 
 
 def _has_llm_attempt_for(s, agent_id: str, signature: str) -> bool:
@@ -176,6 +232,72 @@ _NON_ACTIONABLE_LLM_VERDICTS = (
     "fix=external-blocker",
     "fix=wait",
 )
+
+
+def _recent_escalation_with_same_diagnosis(s, agent_id: str, signature: str,
+                                              current_excerpt: str,
+                                              within_hours: int = 24) -> bool:
+    """Return True if we already escalated this (agent, signature) with a
+    similar log excerpt within the last `within_hours`. Prevents the
+    "loop-broken" email from re-firing every 5 min when the underlying
+    issue hasn't changed.
+
+    "Similar" = the first 500 chars of the excerpt overlap by >70%
+    (cheap shingle-style approximation; doesn't need exact match because
+    timestamps and pid numbers in logs vary cycle-to-cycle).
+    """
+    try:
+        entries = list(s.read_jsonl(f"agents/{AGENT_ID}/fixes-log.jsonl") or [])
+    except Exception:
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=within_hours)
+    cur_norm = _normalize_excerpt_for_dedup(current_excerpt)
+    for e in reversed(entries):
+        if e.get("target_agent") != agent_id or e.get("error_signature") != signature:
+            continue
+        if e.get("outcome") != "escalated":
+            continue
+        try:
+            ts = datetime.fromisoformat(e.get("ts", "").replace("Z", "+00:00"))
+            if ts < cutoff:
+                break  # entries are append-only & ordered; no point scanning further
+        except Exception:
+            continue
+        prior_norm = _normalize_excerpt_for_dedup(e.get("log_excerpt", ""))
+        if _excerpts_similar(cur_norm, prior_norm):
+            return True
+    return False
+
+
+def _normalize_excerpt_for_dedup(text: str) -> str:
+    """Strip volatile bits (timestamps, pids, ephemeral run-ts) so two log
+    samples from different cycles of the same failure compare as equal."""
+    if not text:
+        return ""
+    import re as _re
+    t = text[:1500]
+    # ISO timestamps (2026-04-29T22:50:04, 2026-04-29 22:50:04,123)
+    t = _re.sub(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?", "", t)
+    # systemd PIDs / process ids
+    t = _re.sub(r"\bpid[=\s]+\d+\b", "pid=N", t, flags=_re.I)
+    t = _re.sub(r"\b\d{5,7}\b", "N", t)
+    # run-ts strings (20260429T123045Z)
+    t = _re.sub(r"\d{8}T\d{6}Z", "RUNTS", t)
+    # Lowercase + collapse whitespace
+    return _re.sub(r"\s+", " ", t.lower()).strip()
+
+
+def _excerpts_similar(a: str, b: str, threshold: float = 0.70) -> bool:
+    """Cheap Jaccard-like similarity on word shingles."""
+    if not a or not b:
+        return False
+    aw = set(a.split())
+    bw = set(b.split())
+    if not aw or not bw:
+        return False
+    inter = len(aw & bw)
+    union = len(aw | bw)
+    return (inter / union) >= threshold if union else False
 
 
 def _llm_says_non_actionable(s, agent_id: str, signature: str) -> tuple[bool, str]:
@@ -1154,10 +1276,20 @@ class AgentDoctor(AgentBase):
                 # Log to fixes-log but DO NOT email — operator already
                 # got the diagnosis from the first LLM run.
             elif attempt_count >= MAX_RETRIES_PER_SIGNATURE and llm_already_tried:
-                outcome, notes = ("escalated",
-                                  f"signature attempted {attempt_count}× incl. LLM — escalating to operator")
-                _email_operator(aid, signature, excerpt, a, recipe="loop-broken")
-                escalated += 1
+                # Suppress the email when we've ALREADY escalated this
+                # exact signature+log within the last 24h. The operator
+                # got the diagnosis once; sending the same loop-broken
+                # email every 5 minutes is just noise. Still log to
+                # fixes-log so the audit trail is intact.
+                if _recent_escalation_with_same_diagnosis(s, aid, signature, excerpt):
+                    outcome = "skipped"
+                    notes = (f"signature attempted {attempt_count}× incl. LLM; "
+                             f"identical log already escalated within 24h — suppressing duplicate email")
+                else:
+                    outcome, notes = ("escalated",
+                                      f"signature attempted {attempt_count}× incl. LLM — escalating to operator")
+                    _email_operator(aid, signature, excerpt, a, recipe="loop-broken")
+                    escalated += 1
             else:
                 # Apply recipe if known (supports wildcard prefix match)
                 recipe = _resolve_recipe(signature)
