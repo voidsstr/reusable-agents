@@ -892,8 +892,13 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
 
     # If the message is not from a recognized X- header AND the subject doesn't look
     # like one of our reports, skip it (avoid acting on unrelated mail).
-    if not (x_agent or run_ts_hint):
-        print("  [skip] not a recognized agent reply (no X-header, no run-ts in subject)",
+    # Also accept when we have a known [<agent>:<site>] tag (e.g. [H2H:specpicks])
+    # even without an explicit run_ts in the subject — find_run_dir_for_site
+    # will fall back to the latest run for that agent. This was the gap that
+    # silently dropped H2H replies whose subjects ship as
+    # "[H2H:specpicks] 15 head-to-head proposals — 2026-04-29" (date, not run_ts).
+    if not (x_agent or run_ts_hint or (agent_hint and site_hint)):
+        print("  [skip] not a recognized agent reply (no X-header, no run-ts, no agent tag)",
               file=sys.stderr)
         return 0
 

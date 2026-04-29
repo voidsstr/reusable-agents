@@ -24,10 +24,27 @@ not in the list.
 ## What to write
 
 For each approved proposal, generate the article body as **markdown**
-(no HTML). Hit the proposal's `expected_word_count` ±15%. Structure
-must follow the `outline` array verbatim — each entry is a section
-heading. Open with a 30-80 word direct-answer paragraph that answers
-`target_query` literally, then continue with the rest of the outline.
+(no HTML). Structure must follow the `outline` array verbatim — each
+entry is a section heading. Open with a 30-80 word direct-answer
+paragraph that answers `target_query` literally, then continue with
+the rest of the outline.
+
+### Length floor: 2000 words minimum (~3 pages rendered)
+
+Hit `max(expected_word_count, 2000)`. **Articles under 2000 words MUST
+be expanded** — they look thin in the SERP, lose to longer competitors,
+and read as filler. If your draft is short, add:
+- A "Real-world numbers" or "Benchmark table" section with concrete
+  measurements (FPS, watts, $, tokens/sec, RPS, etc.)
+- A "Common pitfalls" or "Gotchas" section with 3-5 specific failure
+  modes you've seen for this hardware/topic
+- A "When NOT to" section with a clear no-fit case
+- Comparison tables (markdown tables; render fine on the site)
+- 2-3 worked examples / mini-case-studies
+
+A 2000-word article is ~3 pages at typical reading speed (220 wpm =
+~9 min read). The site shows estimated_read_time prominently — readers
+expect substantive content for that signal.
 
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial
