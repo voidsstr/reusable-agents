@@ -337,11 +337,17 @@ def render_recs_email(
     recs: list[dict],
     summary: str = "",
     extra_intro_html: str = "",
+    auto_queued: bool = False,
 ) -> tuple[str, str]:
     """Return (subject, html_body) for an email summarizing recommendations.
 
     Subject is prefixed with [<agent-id>:<request-id>] so the responder can
     route replies back. Body includes rec-id reply syntax instructions.
+
+    auto_queued=True swaps the "Reply to ship" block for an "auto-queued"
+    confirmation block. Used by agents (PI, SEO) that drop a trigger file
+    in agents/responder-agent/auto-queue/ at the same time they send the
+    email — recipient replies only to override (defer/skip/revert).
     """
     site = cfg.site_id
     label = cfg.label
@@ -409,7 +415,25 @@ def render_recs_email(
     if extra_intro_html:
         header += extra_intro_html
 
-    reply_help = f"""
+    if auto_queued:
+        reply_help = f"""
+        <div style="padding:16px 20px;background:#ecfdf5;color:#065f46;font-size:13px;line-height:1.6;border-left:3px solid #10b981">
+          <b>✅ All recommendations have been auto-queued for implementation.</b>
+          <span style="color:#047857;font-size:12px">
+            The implementer will pick them up on the responder's next tick (~60s)
+            and process in priority order. Track progress in the dashboard.
+          </span>
+          <br><br>
+          <b>Reply only to override:</b><br>
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">defer rec-002</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">skip rec-005</code> &nbsp;
+          <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">revert rec-007</code>
+          <br>
+          <span style="color:#64748b;font-size:12px">Subject must stay <code>Re: …</code>. Defer/skip removes a not-yet-started rec from the queue; revert rolls back a shipped rec by reverting its commit.</span>
+        </div>
+    """
+    else:
+        reply_help = f"""
         <div style="padding:16px 20px;background:#f1f5f9;color:#334155;font-size:13px;line-height:1.6">
           <b>Reply to ship recommendations.</b> Subject must stay <code>Re: …</code>.
           <br><br>

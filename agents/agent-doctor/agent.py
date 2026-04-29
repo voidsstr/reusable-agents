@@ -144,6 +144,22 @@ def _read_log(agent_id: str) -> str:
         return ""
 
 
+def _has_fixes_log_entry_for(s, agent_id: str, last_run_at: str) -> bool:
+    """Return True iff fixes-log.jsonl has at least one entry for this
+    (target_agent, last_run_at) tuple. Used to validate that seen.json's
+    dedup is backed by actual investigation history."""
+    if not last_run_at:
+        return False
+    try:
+        entries = list(s.read_jsonl(f"agents/{AGENT_ID}/fixes-log.jsonl") or [])
+    except Exception:
+        return False
+    for e in entries:
+        if e.get("target_agent") == agent_id and e.get("last_run_at") == last_run_at:
+            return True
+    return False
+
+
 def _signature_attempt_count(s, agent_id: str, signature: str) -> int:
     """How many times have we tried this signature for this agent and
     NOT succeeded? Used to escalate after MAX_RETRIES_PER_SIGNATURE."""
@@ -428,6 +444,55 @@ def recipe_timeout(target: str, ctx: dict) -> tuple[str, str]:
     return ("escalated", "systemd timeout — manual review needed for cron interval / agent runtime")
 
 
+def recipe_missing_env(target: str, ctx: dict) -> tuple[str, str]:
+    """When the agent's process env is missing a required var (e.g.
+    `DATABASE_URL must be set`), check if the registered manifest's
+    entry_command USES shell-syntax `${VAR}` substitution that systemd
+    can't expand. If so, escalate with a clear pointer — operator must
+    inline the value. Otherwise re-register the agent in case the .service
+    file is stale."""
+    excerpt = ctx.get("excerpt", "")
+    # Extract the missing var name
+    m = re.search(r"(\w+)\s+(?:is required|must be set|not in env)", excerpt)
+    if not m:
+        return ("escalated", "missing-env detected but couldn't parse var name")
+    var = m.group(1)
+    # Pull the manifest via API
+    api = (os.environ.get("FRAMEWORK_API_URL") or "http://localhost:8093").rstrip("/")
+    try:
+        agents_list = _api_get(f"{api}/api/agents",
+                                os.environ.get("FRAMEWORK_API_TOKEN", ""))
+    except Exception as e:
+        return ("escalated", f"could not fetch /api/agents: {e}")
+    found = None
+    for a in (agents_list or []):
+        if a.get("id") == target:
+            found = a
+            break
+    if not found:
+        return ("escalated", f"agent {target} not found in registry")
+    cmd = found.get("entry_command") or ""
+    if not cmd:
+        # Need to fetch the full agent detail (not in the list response)
+        try:
+            detail = _api_get(f"{api}/api/agents/{target}",
+                               os.environ.get("FRAMEWORK_API_TOKEN", ""))
+            cmd = (detail or {}).get("entry_command", "")
+        except Exception:
+            pass
+    # If the entry command uses ${VAR} syntax that systemd doesn't expand,
+    # that's the bug — escalate with the diagnosis.
+    if f"${{{var}}}" in cmd or f"${var}" in cmd.replace("${", "$"):
+        return ("escalated",
+                f"manifest entry_command uses shell-syntax ${{{var}}} that "
+                f"systemd Environment= does not expand. Inline the literal "
+                f"value in the manifest's entry_command and re-register.")
+    # Otherwise the manifest looks fine — service file may be stale.
+    return ("escalated",
+            f"agent process didn't see {var}; manifest looks correct so "
+            f"check if the systemd service file is stale (re-register the agent)")
+
+
 # Recipe lookup table
 RECIPES: dict[str, callable] = {
     "oauth-token-expired": recipe_oauth_token_expired,
@@ -435,6 +500,15 @@ RECIPES: dict[str, callable] = {
     "stale-lock": recipe_stale_lock,
     "timeout": recipe_timeout,
 }
+# Wildcard prefix matching: any signature starting with `missing-env-` uses
+# the same recipe. We register them dynamically in the run loop via a
+# fallback lookup.
+def _resolve_recipe(signature: str):
+    if signature in RECIPES:
+        return RECIPES[signature]
+    if signature.startswith("missing-env-"):
+        return recipe_missing_env
+    return None
 
 
 # ── Stuck-queue detection ─────────────────────────────────────────────────
@@ -610,11 +684,18 @@ class AgentDoctor(AgentBase):
             if last_status != "failure" and not is_stuck:
                 continue
 
-            # Dedupe — same last_run_at + status combo as we already saw → skip
+            # Dedupe — but ONLY if we have a fixes-log entry for this exact
+            # (agent, last_at) tuple. seen.json alone isn't enough: a prior
+            # tick may have populated `seen` without writing fixes-log
+            # (e.g. a transient framework bug or empty-log skip). When that
+            # happens, the agent gets stuck "permanently dedupe'd" and is
+            # never investigated. Verify the fixes-log has actual evidence.
             seen_key = f"{last_status}@{last_at}"
             if seen.get(aid) == seen_key:
-                skipped_seen += 1
-                continue
+                if _has_fixes_log_entry_for(s, aid, last_at):
+                    skipped_seen += 1
+                    continue
+                # else: seen but no log entry — fall through and re-investigate
 
             self.status(f"investigating {aid} ({last_status})",
                         current_action=f"target={aid}")
@@ -634,8 +715,8 @@ class AgentDoctor(AgentBase):
                 _email_operator(aid, signature, excerpt, a, recipe="loop-broken")
                 escalated += 1
             else:
-                # Apply recipe if known
-                recipe = RECIPES.get(signature)
+                # Apply recipe if known (supports wildcard prefix match)
+                recipe = _resolve_recipe(signature)
                 if recipe:
                     try:
                         outcome, notes = recipe(aid, {"agent": a, "excerpt": excerpt})
@@ -659,7 +740,8 @@ class AgentDoctor(AgentBase):
                 "trigger": "stuck" if is_stuck else "failure",
                 "last_run_at": last_at,
                 "error_signature": signature,
-                "recipe_applied": signature if signature in RECIPES else "none",
+                "recipe_applied": (signature if signature in RECIPES
+                                    else ("missing-env-*" if signature.startswith("missing-env-") else "none")),
                 "outcome": outcome,
                 "notes": notes,
                 "log_excerpt": excerpt[:600],

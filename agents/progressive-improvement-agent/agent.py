@@ -388,6 +388,7 @@ class ProgressiveImprovementAgent(AgentBase):
         subject, html = render_recs_email(
             cfg=cfg, agent_id=self.agent_id, request_id=request_id,
             recs=recs, summary=recs_doc["summary"],
+            auto_queued=bool(recs),
         )
         self._save_artifact("email-rendered.html", html)
 
@@ -421,6 +422,13 @@ class ProgressiveImprovementAgent(AgentBase):
                         "ok": True,
                     },
                 )
+                # ── Auto-queue every rec for implementation ─────────────
+                # Same pattern as seo-reporter: drop a trigger file the
+                # responder picks up on its next tick (every 60s) and
+                # fans out to the implementer. Email becomes informational
+                # — reply with `defer rec-NNN` to override.
+                if recs:
+                    self._write_auto_queue(request_id=request_id, recs=recs)
             else:
                 self.decide("error", f"email send failed: {detail}")
         else:
@@ -516,6 +524,33 @@ class ProgressiveImprovementAgent(AgentBase):
             _goals_mod.write_goals_doc(self.agent_id, active, storage=self.storage)
             self.decide("observation",
                         f"goal metrics updated: {metric_now}")
+
+    def _write_auto_queue(self, *, request_id: str, recs: list[dict]) -> None:
+        """Drop a trigger at agents/responder-agent/auto-queue/<request-id>.json
+        so the responder dispatches every rec to the implementer on its
+        next tick. Mirrors seo-reporter's _write_auto_queue. The email
+        body becomes informational — recipient replies only to override."""
+        try:
+            payload = {
+                "schema_version": "1",
+                "request_id": request_id,
+                "source_agent": self.agent_id,
+                "site": self.cfg.site_id,
+                "run_ts": self.run_ts,
+                "rec_ids": [r["id"] for r in recs if r.get("id")],
+                "action": "implement",
+                "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "source": "auto-queue-from-progressive-improvement-agent",
+            }
+            self.storage.write_json(
+                f"agents/responder-agent/auto-queue/{request_id}.json",
+                payload,
+            )
+            self.decide("action",
+                        f"auto-queued {len(payload['rec_ids'])} rec(s) for implementer "
+                        f"(request_id={request_id})")
+        except Exception as e:
+            self.decide("error", f"auto-queue write failed: {e}")
 
     def _save_artifact(self, name: str, content) -> None:
         """Write an artifact to BOTH local disk (for human inspection) AND
