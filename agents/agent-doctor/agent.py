@@ -444,6 +444,225 @@ def recipe_timeout(target: str, ctx: dict) -> tuple[str, str]:
     return ("escalated", "systemd timeout — manual review needed for cron interval / agent runtime")
 
 
+def _read_agent_runbook(agent_id: str) -> str:
+    """Try to find the agent's runbook (AGENT.md or readme) by scanning
+    known repo locations. Best-effort — returns empty if not found."""
+    candidates = [
+        Path("/home/voidsstr/development/reusable-agents/agents") / agent_id / "AGENT.md",
+        Path("/home/voidsstr/development/reusable-agents/agents") / agent_id / "README.md",
+        Path("/home/voidsstr/development/nsc-assistant/agents") / agent_id / "AGENT.md",
+        Path("/home/voidsstr/development/nsc-assistant/agents") / agent_id / "README.md",
+        Path("/home/voidsstr/development/specpicks/agents") / agent_id / "AGENT.md",
+        Path("/home/voidsstr/development/specpicks/agents") / agent_id / "README.md",
+    ]
+    # Also try stripping site prefix: aisleprompt-progressive-improvement-agent → progressive-improvement-agent
+    parts = agent_id.split("-")
+    if len(parts) > 2:
+        stem = "-".join(parts[1:])
+        candidates += [
+            Path("/home/voidsstr/development/reusable-agents/agents") / stem / "AGENT.md",
+            Path("/home/voidsstr/development/reusable-agents/agents") / stem / "README.md",
+        ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                return p.read_text()[:8000]  # cap context
+            except Exception:
+                pass
+    return ""
+
+
+def _read_agent_manifest_dict(agent_id: str) -> dict:
+    """Pull the agent's manifest from the framework API."""
+    try:
+        api = (os.environ.get("FRAMEWORK_API_URL") or "http://localhost:8093").rstrip("/")
+        token = os.environ.get("FRAMEWORK_API_TOKEN", "")
+        if not token:
+            env = _REPO_ROOT / ".env"
+            if env.is_file():
+                for L in env.read_text().splitlines():
+                    if L.startswith("FRAMEWORK_API_TOKEN="):
+                        token = L.split("=", 1)[1].strip().strip('"').strip("'")
+        return _api_get(f"{api}/api/agents/{agent_id}", token) or {}
+    except Exception:
+        return {}
+
+
+def _invoke_claude_diagnose(target: str, signature: str, log_excerpt: str,
+                             manifest: dict, runbook: str) -> dict:
+    """Shell to claude with structured prompt; expect JSON back. Returns
+    the parsed dict, or {} on any error. The claude call routes through
+    the pool automatically (PATH-resolved `claude` is the pool shim)."""
+    import subprocess
+    prompt = f"""You are the operations diagnostician for the reusable-agents framework.
+An agent has failed and the pattern-classifier returned signature={signature!r}
+because no known pattern matched. Your job: diagnose the root cause and
+propose ONE fix from the structured set below.
+
+# Failed agent
+id: {target}
+manifest cron: {manifest.get('cron_expr', '?')}
+manifest entry_command (truncated):
+  {(manifest.get('entry_command', '') or '')[:600]}
+last_run_status: {manifest.get('last_run_status', '?')} at {manifest.get('last_run_at', '?')}
+
+# Runbook (first 8KB)
+{runbook[:8000] if runbook else '(no runbook found)'}
+
+# Last log excerpt (most recent ~1KB of stderr/stdout)
+{log_excerpt[-1500:]}
+
+# Your task
+
+Output ONE single JSON object (no prose, no markdown fences) with this shape:
+
+{{
+  "diagnosis": "1-2 sentences on what failed and why",
+  "confidence": 0.0,
+  "fix_type": "wait" | "manifest-env-inline" | "manifest-cron-fix" | "runbook-tweak" | "code-edit" | "data-issue" | "external-blocker" | "escalate",
+  "fix_detail": "specific change to make. For manifest-env-inline: which var + what value. For others: brief description.",
+  "auto_apply": true|false
+}}
+
+# Fix type guide
+
+- "wait"               — transient, next cron firing will succeed (set auto_apply=true)
+- "manifest-env-inline" — entry_command uses ${{VAR}} that systemd doesn't expand; tell us which var and what literal value to substitute (auto_apply=true if you're confident)
+- "manifest-cron-fix"  — cron is wrong (auto_apply=false; needs human review of intent)
+- "runbook-tweak"      — claude/the agent needs different instructions; describe what (auto_apply=false)
+- "code-edit"          — bug in agent.py / a script (auto_apply=false; we'll email full context)
+- "data-issue"         — bad input data (e.g. junk GSC query, malformed CSV); not a code/infra problem (auto_apply=true; agent should skip + move on)
+- "external-blocker"   — third-party API rate-limited/down/changed; nothing we can do (auto_apply=false)
+- "escalate"           — you can't tell from this evidence; ask human (auto_apply=false)
+
+Be DIRECT and SPECIFIC. Don't hedge. confidence ∈ [0, 1] reflects how
+sure you are about both diagnosis AND fix. Set auto_apply=true only when
+both confidence ≥ 0.8 AND fix_type is in the safe-to-auto set
+(wait, manifest-env-inline, data-issue).
+"""
+    try:
+        # Use claude CLI via the pool. --print = one-shot, no session.
+        # Short max-turns since we want a single JSON response.
+        proc = subprocess.run(
+            ["claude", "--print", "--dangerously-skip-permissions",
+             "--max-turns", "1", "--output-format", "text"],
+            input=prompt, capture_output=True, text=True, timeout=180,
+        )
+        if proc.returncode != 0:
+            return {"error": f"claude rc={proc.returncode}",
+                    "stderr": proc.stderr[-300:]}
+        out = proc.stdout.strip()
+        # Strip optional markdown fences just in case
+        if out.startswith("```"):
+            out = out.strip("`")
+            out = re.sub(r"^json\s*\n", "", out, flags=re.I)
+            out = out.rstrip("`").strip()
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        return {"error": f"non-JSON response: {e}", "raw": out[:500] if 'out' in dir() else ""}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _apply_manifest_env_inline(target: str, var_name: str, var_value: str) -> tuple[bool, str]:
+    """Replace ${VAR} in the agent's manifest entry_command with a literal
+    value. Walks all known agent dirs to find the manifest.json. Returns
+    (success, detail)."""
+    candidates = []
+    for base in [
+        "/home/voidsstr/development/nsc-assistant/agents",
+        "/home/voidsstr/development/specpicks/agents",
+        "/home/voidsstr/development/reusable-agents/agents",
+    ]:
+        # Direct id match
+        candidates.append(Path(base) / target / "manifest.json")
+        # Stripped site prefix
+        parts = target.split("-")
+        if len(parts) > 2:
+            candidates.append(Path(base) / "-".join(parts[1:]) / "manifest.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            d = json.loads(path.read_text())
+            if d.get("id") != target:
+                continue
+            cmd = d.get("entry_command", "")
+            placeholder_a = "${" + var_name + "}"
+            placeholder_b = "$" + var_name
+            if placeholder_a in cmd:
+                d["entry_command"] = cmd.replace(placeholder_a, var_value)
+            elif placeholder_b in cmd and not (placeholder_b + "_") in cmd:
+                d["entry_command"] = cmd.replace(placeholder_b, var_value)
+            else:
+                return False, f"entry_command doesn't contain {placeholder_a} or {placeholder_b}"
+            path.write_text(json.dumps(d, indent=2) + "\n")
+            return True, f"inlined {var_name} into {path}"
+        except Exception as e:
+            return False, f"manifest write failed at {path}: {e}"
+    return False, f"manifest.json not found for {target} in known locations"
+
+
+def recipe_llm_diagnose(target: str, ctx: dict) -> tuple[str, str]:
+    """LLM-powered fallback for unknown signatures. Asks claude to read the
+    failed agent's manifest, runbook, and recent log; returns a structured
+    diagnosis. Auto-applies safe fix types (wait, manifest-env-inline with
+    high confidence, data-issue); escalates everything else with the
+    diagnosis attached so the operator gets actionable context instead of
+    an opaque "unknown" escalation."""
+    excerpt = ctx.get("excerpt", "")
+    manifest = _read_agent_manifest_dict(target)
+    runbook = _read_agent_runbook(target)
+    print(f"[agent-doctor] LLM-investigating {target} "
+          f"(runbook_chars={len(runbook)}, manifest={'yes' if manifest else 'no'})",
+          file=sys.stderr)
+    diag = _invoke_claude_diagnose(target, "unknown", excerpt, manifest, runbook)
+    if diag.get("error"):
+        return ("escalated",
+                f"LLM diagnosis failed ({diag.get('error')}); falling back to opaque escalation")
+    fix_type = diag.get("fix_type", "escalate")
+    confidence = float(diag.get("confidence", 0.0))
+    diagnosis = (diag.get("diagnosis", "") or "")[:400]
+    fix_detail = (diag.get("fix_detail", "") or "")[:400]
+    auto_apply = bool(diag.get("auto_apply", False))
+    notes_hdr = f"diag={diagnosis} | fix={fix_type} (conf={confidence:.2f}): {fix_detail}"
+
+    # Safe-to-auto-apply fix types
+    if not auto_apply:
+        return ("escalated", f"LLM (no auto-apply): {notes_hdr}")
+
+    if fix_type == "wait":
+        return ("no-op", f"LLM:wait → next cron retries. {notes_hdr}")
+
+    if fix_type == "data-issue":
+        return ("no-op", f"LLM:data-issue → bad input, agent should skip + recover. {notes_hdr}")
+
+    if fix_type == "manifest-env-inline":
+        # fix_detail should be like "DATABASE_URL=postgresql://..."
+        m = re.match(r"^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$", fix_detail.strip())
+        if not m:
+            return ("escalated",
+                    f"LLM said manifest-env-inline but fix_detail wasn't 'VAR=value' shape: {notes_hdr}")
+        var_name, var_value = m.group(1), m.group(2).strip().strip("'").strip('"')
+        ok, det = _apply_manifest_env_inline(target, var_name, var_value)
+        if ok:
+            # Also re-register so the new manifest takes effect on next cron tick
+            try:
+                api = (os.environ.get("FRAMEWORK_API_URL") or "http://localhost:8093").rstrip("/")
+                token = os.environ.get("FRAMEWORK_API_TOKEN", "")
+                # The framework re-loads manifest on register call, but we
+                # need to actually POST the new manifest. Skip for now —
+                # the manifest is on disk, and the next manual register-agents
+                # run picks it up. Or the operator can re-register.
+            except Exception:
+                pass
+            return ("fixed", f"LLM auto-fix: {det}. {notes_hdr}")
+        return ("escalated", f"LLM proposed manifest-env-inline but apply failed: {det}. {notes_hdr}")
+
+    # Anything else with auto_apply=true is suspicious; escalate to be safe
+    return ("escalated", f"LLM said auto_apply=true for fix_type={fix_type} (we don't auto-apply that): {notes_hdr}")
+
+
 def recipe_missing_env(target: str, ctx: dict) -> tuple[str, str]:
     """When the agent's process env is missing a required var (e.g.
     `DATABASE_URL must be set`), check if the registered manifest's
@@ -508,6 +727,12 @@ def _resolve_recipe(signature: str):
         return RECIPES[signature]
     if signature.startswith("missing-env-"):
         return recipe_missing_env
+    # LLM-powered fallback for anything our pattern classifier didn't
+    # recognize. Disable by setting AGENT_DOCTOR_USE_LLM=0 (e.g. when
+    # claude-pool is fully rate-limited and you don't want investigations
+    # to add load).
+    if os.environ.get("AGENT_DOCTOR_USE_LLM", "1") != "0":
+        return recipe_llm_diagnose
     return None
 
 
@@ -728,7 +953,14 @@ class AgentDoctor(AgentBase):
                 if outcome == "fixed":
                     fixed += 1
                 elif outcome == "escalated":
-                    _email_operator(aid, signature, excerpt, a,
+                    # Prefix the email log_excerpt with the recipe's notes
+                    # (especially the LLM diagnosis) so the operator sees
+                    # actionable context — not just the raw stderr tail.
+                    enriched = (
+                        f"=== AGENT-DOCTOR ANALYSIS ===\n{notes[:1000]}\n\n"
+                        f"=== RAW LOG EXCERPT ===\n{excerpt}"
+                    ) if notes else excerpt
+                    _email_operator(aid, signature, enriched, a,
                                      recipe=signature if recipe else "(none)")
                     escalated += 1
 
