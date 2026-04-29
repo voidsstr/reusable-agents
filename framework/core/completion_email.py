@@ -101,21 +101,10 @@ def _published_article_urls(run_dir: str, site: str, applied_rec_ids: list[str])
         slug = ap.get("slug") or r.get("slug")
         if not slug:
             continue
-        bucket = ap.get("bucket") or r.get("category") or ""
-        fmt = ap.get("format") or ""
-        # SpecPicks routes:
-        #   editorial_articles rows render at /reviews/<slug> via the
-        #     TestbenchArticlePage (api: /api/testbench/articles/<slug>)
-        #   buying_guides rows render at /buying-guides/<slug>
-        #   /articles/<slug> serves a DIFFERENT 'articles' table (legacy
-        #     manually-curated content; we don't write to it)
-        # Match the bucket/format to the correct public URL.
-        if bucket == "buying-guide" or fmt == "buying-guide":
-            url_path = f"/buying-guides/{slug}"
-        else:
-            # All other proposals (testbench/trending-ai/maker/retro-build/
-            # gaming) get written to editorial_articles → /reviews/<slug>
-            url_path = f"/reviews/{slug}"
+        # SpecPicks: ALL article-author output goes to editorial_articles
+        # which renders at /reviews/<slug>. The legacy buying_guides table
+        # has no public API endpoint — we no longer write to it.
+        url_path = f"/reviews/{slug}"
         out.append({
             "rec_id": rid,
             "title": ap.get("title") or r.get("title") or "",

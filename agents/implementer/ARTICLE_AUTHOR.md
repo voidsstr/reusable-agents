@@ -74,22 +74,36 @@ expect substantive content for that signal.
 
 ## Routing — which table
 
-| `bucket` | Table | Notes |
-|---|---|---|
-| `buying-guide` | `buying_guides` | Use the buying_guides schema (different cols — see below) |
-| `trending-ai`, `maker`, `retro-build`, `gaming` | `editorial_articles` | The default editorial layout |
+**ALL article types go to `editorial_articles`.** The public site
+serves `editorial_articles` rows at `/reviews/<slug>` via
+`/api/testbench/articles/<slug>`. The `buying_guides` table exists
+but has NO public API endpoint — writing there produces orphaned
+rows that 404 on the live site even with `status='published'`.
 
-For `buying_guides`, columns differ slightly:
-- **CRITICAL**: populate BOTH `slug` AND `new_slug` to the same value
-  (the public route reads from `slug`; legacy code reads `new_slug`).
-  A row with `slug=NULL` is invisible on the site even though
-  `status='published'`.
-- `body_md` is the same as editorial_articles
-- `picks` is `jsonb` — populate as `[{"product_slug":"...","verdict":"...","why":"..."}, ...]` with 3-7 picks
-- `target_audience` is a one-liner (`"Budget builders running 1080p"` etc.)
-- `target_year` = current year as int
-- `seo_title` / `seo_description` — short, ≤60 / ≤155 chars
-- No `subtitle` / `excerpt` / `tags` / `difficulty` / `estimated_read_time`
+| `bucket` / `format` | Table | URL |
+|---|---|---|
+| Any (testbench, trending-ai, maker, retro-build, gaming, **buying-guide**) | `editorial_articles` | `https://specpicks.com/reviews/<slug>` |
+
+For buying-guide bucket articles: write to `editorial_articles` with
+`category='buying-guide'`. Append the picks list to body_md as a
+`## Top picks` section so the buying-guide format survives:
+
+```markdown
+## Top picks
+
+### #1: NVIDIA RTX 5090
+**Verdict:** Best for 32B models with full BF16, $1999, 32GB VRAM
+
+This is the only consumer card with enough VRAM to load BF16 weights of
+27B-32B models without offload. Power-hungry (575W TGP) but worth it
+for production-grade local inference.
+
+### #2: ...
+```
+
+Then INSERT into editorial_articles like any other article — populate
+all the standard editorial columns, and set `category='buying-guide'`
+so the dashboard / SEO analyzer can distinguish them.
 
 ## How to write to the DB
 
@@ -156,34 +170,30 @@ Live verification: <HTTP code> from <URL>, content match=<yes/no>.
 Outline followed: <yes/no — brief if "no">
 ```
 
-### Public URL pattern (CRITICAL — get this right)
+### Public URL pattern
 
-The SpecPicks site has TWO article tables for legacy reasons. The
-public URL depends on which table the rec lands in:
+ALL articles render at `https://specpicks.com/reviews/<slug>`. The
+public API is `https://specpicks.com/api/testbench/articles/<slug>`.
 
-| Bucket / format | Table | Public URL |
-|---|---|---|
-| `bucket=buying-guide` OR `format=buying-guide` | `buying_guides` | `https://specpicks.com/buying-guides/<slug>` |
-| Everything else (`testbench`, `trending-ai`, `maker`, `retro-build`, `gaming`) | `editorial_articles` | `https://specpicks.com/reviews/<slug>` |
-
-**Do NOT use `/articles/<slug>` — that route serves a different,
-legacy `articles` table that we don't write to. Marking an
-editorial_articles row as "shipped at /articles/<slug>" produces a
-404 on the live site even though the DB row exists.**
+Do NOT use:
+- `/articles/<slug>` — that's a legacy `articles` table we don't write to
+- `/buying-guides/<slug>` — that's category-driven auto-pages, not
+  editorial buying-guides
 
 ### MANDATORY verification step before marking shipped
 
-After INSERT, BEFORE writing the SHIPPED summary, do:
+After INSERT, BEFORE writing the SHIPPED summary, hit the API and
+confirm the article actually serves:
 
 ```python
 import urllib.request
-url = f"https://specpicks.com/reviews/{slug}"  # or /buying-guides/<slug>
-api_url = f"https://specpicks.com/api/testbench/articles/{slug}"  # or /api/buying-guides/<slug>
+api_url = f"https://specpicks.com/api/testbench/articles/{slug}"
 try:
     with urllib.request.urlopen(api_url, timeout=15) as resp:
         body = resp.read().decode()
-        # Must contain content, not a "not found" error
-        assert "body_md" in body or len(body) > 1000, "API returned empty body"
+        # Must contain real content, not a generic "not found" page
+        assert "body_md" in body and len(body) > 1000, \
+               f"API responded but body is empty/wrong shape: {body[:200]}"
 except Exception as e:
     print(f"verification FAILED for {slug}: {e}")
     # DO NOT mark shipped. Write DEFERRED with the verification failure.
@@ -192,8 +202,8 @@ except Exception as e:
 
 If verification fails, write `DEFERRED: <reason>` instead of `SHIPPED:`
 and DO NOT set `shipped: true`. The DB row exists but the public site
-isn't serving it — likely a caching / replication / route-mismatch
-issue that needs operator inspection.
+isn't serving it — likely a slug typo, status≠'published', or a CDN
+cache that needs to expire.
 
 Example successful summary:
 ```
