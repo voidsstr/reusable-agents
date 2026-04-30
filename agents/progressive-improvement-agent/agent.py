@@ -25,6 +25,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # Make framework + shared importable regardless of cwd. After the
 # agents/ consolidation, the repo root is two levels up.
@@ -144,6 +145,77 @@ _CATEGORY_GOAL_MAP: dict[str, list[str]] = {
 
 def _category_to_goal_ids(category: str) -> list[str]:
     return _CATEGORY_GOAL_MAP.get(category, [])
+
+
+# ---------------------------------------------------------------------------
+# Run-to-run dedupe — once a rec is shipped/skipped, future PI runs should
+# not re-detect the same issue and re-queue it. Without this, a fix that
+# lands in production (e.g. "trash can miscategorized as AI accelerator")
+# keeps re-appearing on every PI run as a different rec-NNN, even though
+# the underlying data is corrected. The canonical key is content-based
+# (category + page URL + first 60 chars of normalized title), so a re-run
+# that finds the same issue on the same page collapses to the same key.
+# Mirrors seo-analyzer._canonical_rec_key (analyzer.py:205).
+
+import re as _re_pi
+
+
+def _canonical_rec_key(rec: dict) -> Optional[str]:
+    """Stable hash-key for de-duping PI recs across runs. Returns None if
+    we can't compute a reliable key (rec gets re-proposed in that case)."""
+    cat = (rec.get("category") or "").strip().lower()
+    title = (rec.get("title") or "").strip().lower()
+    if not cat or not title:
+        return None
+    # Pull first URL out of evidence[].url if present
+    evid = rec.get("evidence") or []
+    url = ""
+    if isinstance(evid, list) and evid:
+        url = (evid[0].get("url") or "") if isinstance(evid[0], dict) else ""
+    # Strip query + fragment for stable matching
+    if url:
+        url = url.split("#", 1)[0].split("?", 1)[0]
+    # Normalize title: lowercase, collapse whitespace, drop trailing punctuation
+    norm_title = _re_pi.sub(r'\s+', ' ', _re_pi.sub(r'[^a-z0-9 ]+', '', title))[:60]
+    return f"{cat}|{url}|{norm_title}"
+
+
+def _load_handled_rec_keys(
+    agent_id: str, current_run_ts: str, storage,
+    horizon_runs: int = 30,
+) -> set[str]:
+    """Walk the most recent N prior runs' recommendations.json and collect
+    canonical keys for recs that were shipped/implemented OR explicitly
+    skipped. Future runs won't re-propose those same issues."""
+    runs_prefix = f"agents/{agent_id}/runs/"
+    seen_runs: set[str] = set()
+    try:
+        for k in storage.list_prefix(runs_prefix):
+            tail = k[len(runs_prefix):]
+            if "/" not in tail:
+                continue
+            run_id = tail.split("/", 1)[0]
+            if run_id == current_run_ts:
+                continue
+            seen_runs.add(run_id)
+    except Exception:
+        return set()
+    sorted_runs = sorted(seen_runs, reverse=True)[:horizon_runs]
+    handled: set[str] = set()
+    for run_id in sorted_runs:
+        try:
+            doc = storage.read_json(f"{runs_prefix}{run_id}/recommendations.json")
+        except Exception:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for r in doc.get("recommendations", []) or []:
+            if not (r.get("shipped") or r.get("implemented") or r.get("skipped")):
+                continue
+            key = _canonical_rec_key(r)
+            if key:
+                handled.add(key)
+    return handled
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +388,24 @@ class ProgressiveImprovementAgent(AgentBase):
         # ── 4. Score, tier, cap ─────────────────────────────────────────────
         threshold = float(analyzer_cfg.get("auto_implement_threshold", 0.95))
         max_recs = int(analyzer_cfg.get("max_recs_per_run", 15))
+
+        # Dedupe against shipped/implemented/skipped recs from prior runs so
+        # the agent stops re-detecting the same issue on every cycle.
+        # Disable with PI_DISABLE_HANDLED_DEDUPE=1.
+        handled_keys: set[str] = set()
+        if os.environ.get("PI_DISABLE_HANDLED_DEDUPE") != "1":
+            try:
+                handled_keys = _load_handled_rec_keys(
+                    self.agent_id, self.run_ts, self.storage,
+                )
+                if handled_keys:
+                    self.decide("observation",
+                                f"loaded {len(handled_keys)} handled-rec keys from prior runs")
+            except Exception as e:
+                self.decide("observation", f"handled-rec dedupe load failed: {e}")
+
         recs: list[dict] = []
+        skipped_dupe = 0
         for issue in raw_issues:
             try:
                 conf = float(issue.get("confidence", 0))
@@ -331,6 +420,15 @@ class ProgressiveImprovementAgent(AgentBase):
                     "snippet": (issue.get("evidence_snippet") or "")[:300],
                 })
             cat = issue.get("category", "other")
+            # Probe canonical key BEFORE building the full rec so we can skip
+            # cheaply. Build a stub with the fields _canonical_rec_key reads.
+            stub = {"category": cat,
+                    "title": issue.get("title", ""),
+                    "evidence": evidence}
+            ckey = _canonical_rec_key(stub)
+            if ckey and ckey in handled_keys:
+                skipped_dupe += 1
+                continue
             recs.append({
                 "category": cat,
                 "severity": sev,
@@ -348,6 +446,10 @@ class ProgressiveImprovementAgent(AgentBase):
                 # which feeds adaptive_context_block on the next analyzer pass.
                 "goal_ids": _category_to_goal_ids(cat),
             })
+
+        if skipped_dupe:
+            self.decide("observation",
+                        f"deduped {skipped_dupe} rec(s) already shipped/skipped in prior runs")
 
         # Sort: severity (critical→low), then confidence desc, then tier (auto first)
         sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}

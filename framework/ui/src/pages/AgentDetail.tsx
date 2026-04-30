@@ -227,6 +227,7 @@ export default function AgentDetail() {
           kind={detail.confirmation_flow.kind || ''}
           description={detail.confirmation_flow.description || ''}
           ownerEmail={detail.confirmation_flow.owner_email || detail.owner}
+          status={detail.confirmation_status}
         />
       )}
 
@@ -1211,11 +1212,30 @@ function GoalCard({ goal, compact }: { goal: Goal; compact?: boolean }) {
 // Confirmation flow banner
 // ---------------------------------------------------------------------------
 
-function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: string; description: string; ownerEmail: string }) {
-  const meta = KIND_META[kind] || {
+function ConfirmationFlowBanner({
+  kind, description, ownerEmail, status,
+}: {
+  kind: string
+  description: string
+  ownerEmail: string
+  status?: { approved?: boolean | null; approved_at?: string; approved_by?: string }
+}) {
+  const baseMeta = KIND_META[kind] || {
     emoji: '🛡', label: kind || 'Confirmation gate',
     bg: '#d1fae5', fg: '#065f46', border: '#10b981', subFg: '#047857',
   }
+  // For schema-mapping-approval, swap palette + label based on actual
+  // approval state. The static description is the "first run emails
+  // proposal" text — once approval lands, that text is misleading.
+  const isApproved = status?.approved === true
+  const isPending = status?.approved === false
+  const meta = isApproved
+    ? { ...baseMeta, emoji: '✓', label: 'Schema mapping approved',
+        bg: '#ecfdf5', fg: '#065f46', border: '#10b981', subFg: '#047857' }
+    : isPending
+    ? { ...baseMeta, emoji: '⏳', label: 'Schema mapping awaiting approval',
+        bg: '#fef3c7', fg: '#78350f', border: '#f59e0b', subFg: '#b45309' }
+    : baseMeta
   return (
     <div
       data-testid="confirmation-flow-banner"
@@ -1225,10 +1245,17 @@ function ConfirmationFlowBanner({ kind, description, ownerEmail }: { kind: strin
       <div className="text-2xl leading-none" aria-hidden>{meta.emoji}</div>
       <div className="flex-1 min-w-0">
         <div className="font-semibold" style={{ color: meta.fg }}>{meta.label}</div>
-        {description && (
+        {isApproved ? (
           <div className="text-[13px] mt-1 leading-relaxed" style={{ color: meta.subFg }}>
-            {description}
+            Approved {status?.approved_at ? `at ${new Date(status.approved_at).toLocaleString()}` : ''}
+            {status?.approved_by ? ` by ${status.approved_by}` : ''}. Runs ingest directly — no further approval needed unless you re-run with <code>--force-remap</code>.
           </div>
+        ) : (
+          description && (
+            <div className="text-[13px] mt-1 leading-relaxed" style={{ color: meta.subFg }}>
+              {description}
+            </div>
+          )
         )}
         {ownerEmail && (
           <div className="text-[11px] mt-2 font-mono" style={{ color: meta.subFg, opacity: 0.85 }}>

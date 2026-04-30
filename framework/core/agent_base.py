@@ -303,6 +303,120 @@ class AgentBase:
         except Exception as e:
             logger.warning(f"[{self.agent_id}] run-index update failed: {e}")
 
+        # Verification scripts — for any rec marked shipped (or implemented
+        # without a deployer step), auto-generate a per-rec verification
+        # doc at agents/<id>/runs/<run_ts>/verifications/<rec_id>.json.
+        # The dashboard's "🔍 verify" button reads this. Framework-
+        # provided so agents don't each invent their own format.
+        try:
+            from . import verifications as _verifs
+            recs_doc = self.storage.read_json(run_dir_prefix + "recommendations.json") or {}
+            site_hint = ""
+            for prefix in ("specpicks-", "aisleprompt-", "reusable-agents-"):
+                if self.agent_id.startswith(prefix):
+                    site_hint = prefix.rstrip("-")
+                    break
+            for r in recs_doc.get("recommendations", []) or []:
+                if not (r.get("shipped") or r.get("implemented")):
+                    continue
+                try:
+                    _verifs.generate_and_persist(
+                        source_agent=self.agent_id,
+                        source_run_ts=self.run_ts,
+                        rec=r, site=site_hint,
+                        generated_by="post-run-auto",
+                        storage=self.storage,
+                        overwrite=False,
+                    )
+                except Exception as _e:
+                    logger.warning(f"[{self.agent_id}] verify-script gen({r.get('id')}) failed: {_e}")
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] verify-script auto-gen failed: {e}")
+
+        # Goal-progress mirror — two layers:
+        #   (a) explicit: agent wrote runs/<ts>/goal-progress.json (SEO
+        #       analyzer does this with its own scoring logic)
+        #   (b) implicit: agent declared goals with target_metric AND
+        #       result.metrics has the matching key — auto-record. This
+        #       means any AgentBase agent that emits RunResult(metrics=...)
+        #       gets its declared goals tracked daily for free, no per-
+        #       agent code needed.
+        try:
+            from . import goals as _goals_mod
+            # Layer (a): explicit per-run scoring file
+            gp_key = run_dir_prefix + "goal-progress.json"
+            gp = self.storage.read_json(gp_key)
+            scored_ids: set[str] = set()
+            if isinstance(gp, dict):
+                for sg in gp.get("goals", []) or []:
+                    cur = sg.get("current")
+                    gid = sg.get("id")
+                    if gid is None or cur is None:
+                        continue
+                    scored_ids.add(gid)
+                    try:
+                        _goals_mod.record_goal_progress(
+                            self.agent_id, gid, float(cur),
+                            run_ts=self.run_ts,
+                            note=f"scored ({sg.get('status', '')})",
+                            storage=self.storage,
+                        )
+                    except ValueError:
+                        pass
+                    except Exception as _e:
+                        logger.warning(f"[{self.agent_id}] goal-progress sync({gid}) failed: {_e}")
+            # Layer (b): implicit auto-track from RunResult.metrics. Walks
+            # the agent's declared active goals, looks up `target_metric`
+            # in `result.metrics`, and records progress. Skips goals
+            # already covered by layer (a) so explicit scoring wins.
+            try:
+                active = _goals_mod.read_active_goals(self.agent_id, storage=self.storage)
+            except Exception:
+                active = []
+            metrics = result.metrics or {}
+            implicit_gp_goals = []
+            for g in active:
+                gid = g.get("id")
+                tm = g.get("target_metric") or ""
+                if not gid or gid in scored_ids or not tm or tm not in metrics:
+                    continue
+                try:
+                    val = float(metrics[tm])
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    _goals_mod.record_goal_progress(
+                        self.agent_id, gid, val,
+                        run_ts=self.run_ts,
+                        note=f"auto-tracked from RunResult.metrics[{tm!r}]",
+                        storage=self.storage,
+                    )
+                    implicit_gp_goals.append({
+                        "id": gid, "current": val,
+                        "target_metric": tm,
+                        "baseline": (g.get("metric") or {}).get("baseline"),
+                        "target": (g.get("metric") or {}).get("target"),
+                        "status": "active",
+                    })
+                except ValueError:
+                    pass
+                except Exception as _e:
+                    logger.warning(f"[{self.agent_id}] auto-track({gid}) failed: {_e}")
+            # If we tracked any goals via layer (b) AND no explicit goal-progress
+            # file was written, write one so the dashboard time-series picks
+            # up these measurements (it reads runs/<ts>/goal-progress.json).
+            if implicit_gp_goals and not isinstance(gp, dict):
+                try:
+                    self.storage.write_json(gp_key, {
+                        "measured_at": self.run_ts,
+                        "goals": implicit_gp_goals,
+                        "auto_tracked": True,
+                    })
+                except Exception as _e:
+                    logger.warning(f"[{self.agent_id}] auto goal-progress write failed: {_e}")
+        except Exception as e:
+            logger.warning(f"[{self.agent_id}] goal-progress mirror failed: {e}")
+
         # Decision summary as Markdown narrative
         summary_md = result.summary_md or ""
         if not summary_md:

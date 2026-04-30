@@ -231,10 +231,35 @@ function RecDetailModal({
     return () => { alive = false }
   }, [runDirBasename, recId])
 
+  // Same click-through guard as VerificationModal — without the 50ms arming
+  // delay, the click that opens the modal bubbles to the backdrop and
+  // immediately closes it ("flash" symptom on mobile + fast clicks).
+  const [armed, setArmed] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setArmed(true), 50)
+    return () => clearTimeout(t)
+  }, [])
+  const handleBackdropClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!armed) return
+    if (e.target !== e.currentTarget) return
+    onClose()
+  }
+  // Lock body scroll + close on Esc
+  useEffect(() => {
+    const orig = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.body.style.overflow = orig
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [onClose])
+
   return (
     <div
       className="fixed inset-0 z-40 bg-ink-900/40 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in"
-      onClick={onClose}
+      onClick={handleBackdropClick}
     >
       <div
         className="bg-surface-card rounded-t-xl sm:rounded-xl shadow-2xl w-full sm:max-w-3xl max-h-[90vh] overflow-y-auto animate-slide-up"
@@ -571,47 +596,85 @@ function VerificationModal({
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
+    setResult(null)
     runVerification(runDirBasename, recId)
-      .then(r => { if (!cancelled) setResult(r) })
-      .finally(() => { if (!cancelled) setLoading(false) })
+      .then(r => { if (!cancelled) { setResult(r); setLoading(false) } })
+      .catch(e => {
+        if (!cancelled) {
+          setResult({ ok: false, error: String((e as Error)?.message || e) })
+          setLoading(false)
+        }
+      })
     return () => { cancelled = true }
   }, [runDirBasename, recId])
 
+  // Close on Esc only (no backdrop click). Body scroll is NOT locked —
+  // the popup is a fixed centered card that doesn't need to be a true
+  // modal; user can keep scrolling the page underneath if they want.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // Viewport-centered fixed popup — NO backdrop overlay. fixed inset-0 +
+  // flex items-center centers on the visible viewport regardless of how
+  // far the user has scrolled. pointer-events:none on the wrapper lets
+  // clicks fall through to the page; pointer-events:auto on the card.
   return (
     <div
-      className="fixed inset-0 bg-ink-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center px-4 pointer-events-none"
+      role="dialog"
+      aria-modal="false"
+      aria-label="Verify in production"
     >
       <div
-        className="bg-surface-card border border-surface-divider rounded-lg shadow-2xl max-w-2xl w-full max-h-[80vh] overflow-auto"
-        onClick={(e) => e.stopPropagation()}
+        className="pointer-events-auto bg-surface-card border-2 border-surface-divider rounded-xl shadow-2xl max-w-2xl w-full max-h-[75vh] overflow-auto animate-fade-in"
       >
-        <header className="px-5 py-4 border-b border-surface-divider flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-ink-900">Verify in production</h2>
-            <p className="text-xs text-ink-500 mt-0.5 font-mono">{recId}</p>
+        <header className="px-5 py-4 border-b border-surface-divider flex items-start justify-between gap-3 sticky top-0 bg-surface-card rounded-t-xl">
+          <div className="flex items-center gap-3">
+            {loading ? (
+              <span
+                className="w-4 h-4 inline-block border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin"
+                aria-hidden
+              />
+            ) : result?.ok ? (
+              <span className="text-emerald-500 text-xl leading-none" aria-hidden>✓</span>
+            ) : (
+              <span className="text-amber-500 text-xl leading-none" aria-hidden>⚠</span>
+            )}
+            <div>
+              <h2 className="text-base font-semibold text-ink-900">
+                {loading
+                  ? 'Verifying…'
+                  : result?.ok
+                    ? 'Verified — live in production'
+                    : 'Verification failed'}
+              </h2>
+              <p className="text-xs text-ink-500 mt-0.5 font-mono">{recId}</p>
+            </div>
           </div>
-          <button onClick={onClose} className="text-ink-500 hover:text-ink-800 text-xl leading-none">×</button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-ink-500 hover:text-ink-800 text-2xl leading-none w-8 h-8 flex items-center justify-center rounded hover:bg-surface-subtle"
+            aria-label="Close"
+          >×</button>
         </header>
         <div className="p-5 space-y-4 text-sm">
           {loading && (
-            <div className="text-ink-500 italic flex items-center gap-2">
-              <span className="inline-block w-3 h-3 rounded-full bg-blue-500 animate-pulse" />
-              Running verification…
-            </div>
+            <p className="text-ink-500 italic">
+              Running the implementer-written verification script against production…
+            </p>
           )}
-          {result && (
+          {!loading && result && (
             <>
-              <div className={`px-4 py-3 rounded-md ${result.ok
-                ? 'bg-emerald-50 border-l-4 border-emerald-500 text-emerald-900'
-                : 'bg-amber-50 border-l-4 border-amber-500 text-amber-900'}`}>
-                <div className="font-semibold flex items-center gap-2">
-                  {result.ok ? '✅ Live in production' : '⚠ Verification failed'}
+              {result.error && (
+                <div className="px-3 py-2 rounded bg-amber-50 border-l-4 border-amber-500 text-amber-900 text-xs font-mono">
+                  {result.error}
                 </div>
-                {result.error && (
-                  <div className="text-xs mt-1 font-mono">{result.error}</div>
-                )}
-              </div>
+              )}
               {result.explanation && (
                 <section>
                   <h3 className="text-xs uppercase tracking-wide text-ink-500 font-semibold mb-1">What was checked</h3>
@@ -692,13 +755,49 @@ function FilteredRecList({
 }) {
   const meta = CATEGORY_LABELS[category]
   const [verifying, setVerifying] = useState<{ runDirBasename: string; recId: string } | null>(null)
+
+  // Group by source_agent so the user can drill into "what each agent
+  // has shipped/implemented/queued/running/deferred" instead of scanning
+  // a flat heterogeneous list. Sub-sort agents by recent activity (most
+  // recent rec timestamp first); within an agent, recs sort by rec_id desc.
+  type Group = {
+    agent: string; site: string; items: typeof recs;
+    latestTs: string; runs: Set<string>;
+  }
+  const groups: Group[] = useMemo(() => {
+    const map = new Map<string, Group>()
+    for (const item of recs) {
+      const ag = item.chain.source_agent || '(unknown agent)'
+      let g = map.get(ag)
+      if (!g) {
+        g = { agent: ag, site: item.chain.site || '', items: [], latestTs: '', runs: new Set() }
+        map.set(ag, g)
+      }
+      g.items.push(item)
+      g.runs.add(item.chain.source_run_ts)
+      const ts = item.rec.shipped_at || item.rec.implemented_at || item.chain.source_run_ts || ''
+      if (ts > g.latestTs) g.latestTs = ts
+    }
+    // Sort: most-recent activity first
+    return Array.from(map.values()).sort((a, b) => (b.latestTs || '').localeCompare(a.latestTs || ''))
+  }, [recs])
+
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const toggle = (agent: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(agent)) next.delete(agent); else next.add(agent)
+      return next
+    })
+  }
+
   return (
     <section className="card-surface p-3 sm:p-4 space-y-3 ring-1 ring-accent-200/60">
       <header className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-sm font-semibold text-ink-900 flex items-center gap-2">
             {meta.title}
-            <span className="text-[11px] font-normal text-ink-500">({recs.length} of {total})</span>
+            <span className="text-[11px] font-normal text-ink-500">({recs.length} of {total} · {groups.length} agent{groups.length === 1 ? '' : 's'})</span>
           </h2>
           <p className="text-xs text-ink-500 mt-0.5">{meta.help}</p>
         </div>
@@ -714,59 +813,92 @@ function FilteredRecList({
       {recs.length === 0 ? (
         <p className="text-sm text-ink-500 italic">No recs in this bucket.</p>
       ) : (
-        <ul className="divide-y divide-surface-divider rounded-md border border-surface-divider overflow-hidden">
-          {recs.map(({ chain, batch, rec }) => (
-            <li key={`${chain.run_dir_basename}/${rec.rec_id}`} className="hover:bg-surface-subtle transition-colors">
-              <div className="flex items-stretch">
-              <button
-                onClick={() => onPickRec(chain.run_dir_basename, rec.rec_id)}
-                className="flex-1 text-left px-3 py-2.5 flex flex-col gap-1"
-              >
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-[11px] text-ink-500 shrink-0">{rec.rec_id}</span>
-                  {rec.kind && (
-                    <span className={`status-pill text-[10px] ${priorityClass(rec.kind)} shrink-0`}>{rec.kind}</span>
-                  )}
-                  <span className={`status-pill text-[10px] ring-1 ${meta.chip} shrink-0`}>{category}</span>
-                  <span className="flex-1 min-w-0 text-sm text-ink-800 font-medium truncate">{rec.title || '—'}</span>
-                </div>
-                <div className="text-[11px] text-ink-500 pl-1">
-                  <span className="font-medium text-ink-600">why:</span> {reasonForRec(category, rec, batch.status)}
-                </div>
-                <div className="text-[10px] text-ink-400 pl-1 flex flex-wrap gap-x-2 gap-y-0.5">
-                  <span>site={chain.site}</span>
-                  <span>run={chain.source_run_ts.slice(0, 19)}</span>
-                  <span>batch {batch.index}</span>
-                  {rec.implemented_at && (
-                    <span title={formatAbsDate(rec.implemented_at)}>
-                      <span className="text-emerald-600">implemented</span> {formatRelDate(rec.implemented_at)}
-                    </span>
-                  )}
-                  {rec.shipped_at && (
-                    <span title={formatAbsDate(rec.shipped_at)}>
-                      <span className="text-blue-600">shipped</span> {formatRelDate(rec.shipped_at)}
-                      {rec.shipped_tag ? ` · ${rec.shipped_tag}` : ''}
-                    </span>
-                  )}
-                </div>
-              </button>
-              {(category === 'shipped' || category === 'implemented') && (
+        <div className="space-y-3">
+          {groups.map(g => {
+            const isCollapsed = collapsed.has(g.agent)
+            return (
+              <div key={g.agent} className="rounded-md border border-surface-divider overflow-hidden bg-surface-card">
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setVerifying({ runDirBasename: chain.run_dir_basename, recId: rec.rec_id })
-                  }}
-                  className="px-3 self-stretch text-[11px] text-blue-700 hover:bg-blue-50 hover:text-blue-900 border-l border-surface-divider whitespace-nowrap flex items-center gap-1"
-                  title="Run a quick check that proves this change is live in production"
+                  type="button"
+                  onClick={() => toggle(g.agent)}
+                  className="w-full px-3 py-2 flex items-center justify-between gap-2 bg-surface-subtle hover:bg-surface-divider/30 transition-colors text-left"
                 >
-                  <span>🔍</span>
-                  <span>verify</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={`text-ink-500 text-[10px] transition-transform inline-block ${isCollapsed ? '' : 'rotate-90'}`}>▶</span>
+                    <span className="font-medium text-sm text-ink-900 truncate">{g.agent}</span>
+                    {g.site && (
+                      <span className="status-pill text-[10px] ring-1 ring-ink-200 bg-ink-50 text-ink-700 shrink-0">{g.site}</span>
+                    )}
+                    <span className="text-[11px] text-ink-500 shrink-0">
+                      {g.items.length} rec{g.items.length === 1 ? '' : 's'} · {g.runs.size} run{g.runs.size === 1 ? '' : 's'}
+                    </span>
+                  </div>
+                  {g.latestTs && (
+                    <span className="text-[10px] text-ink-400 font-mono shrink-0" title={formatAbsDate(g.latestTs)}>
+                      {formatRelDate(g.latestTs)}
+                    </span>
+                  )}
                 </button>
-              )}
+                {!isCollapsed && (
+                  <ul className="divide-y divide-surface-divider">
+                    {g.items.map(({ chain, batch, rec }) => (
+                      <li key={`${chain.run_dir_basename}/${rec.rec_id}`} className="hover:bg-surface-subtle transition-colors">
+                        <div className="flex items-stretch">
+                          <button
+                            onClick={() => onPickRec(chain.run_dir_basename, rec.rec_id)}
+                            className="flex-1 text-left px-3 py-2.5 flex flex-col gap-1"
+                          >
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-mono text-[11px] text-ink-500 shrink-0">{rec.rec_id}</span>
+                              {rec.kind && (
+                                <span className={`status-pill text-[10px] ${priorityClass(rec.kind)} shrink-0`}>{rec.kind}</span>
+                              )}
+                              <span className={`status-pill text-[10px] ring-1 ${meta.chip} shrink-0`}>{category}</span>
+                              <span className="flex-1 min-w-0 text-sm text-ink-800 font-medium truncate">{rec.title || '—'}</span>
+                            </div>
+                            <div className="text-[11px] text-ink-500 pl-1">
+                              <span className="font-medium text-ink-600">why:</span> {reasonForRec(category, rec, batch.status)}
+                            </div>
+                            <div className="text-[10px] text-ink-400 pl-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                              <span>run={chain.source_run_ts.slice(0, 19)}</span>
+                              <span>batch {batch.index}</span>
+                              {rec.implemented_at && (
+                                <span title={formatAbsDate(rec.implemented_at)}>
+                                  <span className="text-emerald-600">implemented</span> {formatRelDate(rec.implemented_at)}
+                                </span>
+                              )}
+                              {rec.shipped_at && (
+                                <span title={formatAbsDate(rec.shipped_at)}>
+                                  <span className="text-blue-600">shipped</span> {formatRelDate(rec.shipped_at)}
+                                  {rec.shipped_tag ? ` · ${rec.shipped_tag}` : ''}
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          {(category === 'shipped' || category === 'implemented') && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                setVerifying({ runDirBasename: chain.run_dir_basename, recId: rec.rec_id })
+                              }}
+                              className="px-3 self-stretch text-[11px] text-blue-700 hover:bg-blue-50 hover:text-blue-900 border-l border-surface-divider whitespace-nowrap flex items-center gap-1"
+                              title="Run a quick check that proves this change is live in production"
+                            >
+                              <span>🔍</span>
+                              <span>verify</span>
+                            </button>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-            </li>
-          ))}
-        </ul>
+            )
+          })}
+        </div>
       )}
     </section>
   )

@@ -1067,6 +1067,28 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                 **scored,
             }, indent=2))
             print(f"  ✓ goal-progress.json ({len(scored['goals'])} goals scored)", file=sys.stderr)
+            # Mirror each scored metric into the canonical goals/active.json
+            # progress_history so the dashboard's time-series + UI status pills
+            # reflect the latest measurement (without this the metric in the
+            # registry stays at baseline forever).
+            try:
+                from framework.core import goals as _goals_mod
+                _agent_id = (cfg.get("reporter", {}) or {}).get(
+                    "dashboard", {}).get("agent_id") or f"{cfg.site_id}-seo-opportunity-agent"
+                for sg in scored.get("goals", []):
+                    if sg.get("current") is None:
+                        continue
+                    try:
+                        _goals_mod.record_goal_progress(
+                            _agent_id, sg["id"], float(sg["current"]),
+                            run_ts=run_ts,
+                            note=f"scored from snapshot ({sg.get('status','')})",
+                        )
+                    except Exception as _e:
+                        print(f"  [warn] record_goal_progress({sg.get('id')}): {_e}",
+                              file=sys.stderr)
+            except Exception as e:
+                print(f"  [warn] progress_history sync failed: {e}", file=sys.stderr)
 
     # 4. Build recommendations + declare new goals
     # Load handled-rec keys from prior runs so we don't re-propose recs

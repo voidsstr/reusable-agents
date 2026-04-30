@@ -115,7 +115,7 @@ def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, 
     request_id = f"r-{run_ts}-seo-{cfg.site_id}"
 
     parts = [
-        f"<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#0f172a;line-height:1.5;max-width:780px;margin:0 auto;padding:24px'>",
+        f"<!DOCTYPE html><html><body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#0f172a;line-height:1.5;max-width:920px;margin:0 auto;padding:24px'>",
         f"<h1 style='color:#0f172a;border-bottom:1px solid #e2e8f0;padding-bottom:12px'>"
         f"SEO agent — {label} <span style='color:#64748b;font-weight:normal;font-size:14px'>({site})</span></h1>",
         f"<p><b>Mode:</b> <code style='background:{('#fef3c7' if mode=='recommend' else '#dcfce7')};padding:2px 8px;border-radius:3px'>{mode}</code> &nbsp;",

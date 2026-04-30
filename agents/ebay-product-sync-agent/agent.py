@@ -408,9 +408,9 @@ def _render_mapping_html(mapping: dict, *,
     )
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
-body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;max-width:820px;margin:0 auto;padding:24px;}}
-h1{{font-size:1.55rem;margin:0 0 8px}}
-h2{{font-size:1.15rem;margin:28px 0 8px}}
+body{{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;line-height:1.5;max-width:920px;margin:0 auto;padding:24px;}}
+h1{{font-size:22px;color:#0f172a;border-bottom:1px solid #e2e8f0;padding-bottom:12px;margin:0 0 12px 0}}
+h2{{font-size:1.15rem;margin:28px 0 8px;color:#0f172a}}
 h3{{margin:14px 0 6px}}
 table{{border-collapse:collapse;width:100%;font-size:13px}}
 th,td{{border:1px solid #e2e8f0;padding:6px 10px;text-align:left;vertical-align:top}}
@@ -569,6 +569,11 @@ def _products_lacking_listings(
 def _ensure_item_end_date_column(adapter: DbAdapter, table: str) -> None:
     """Idempotent ALTER TABLE — adds `item_end_date` if missing. Safe to
     call every run; cheap when the column already exists."""
+    # Long Claude-hydration calls upstream can outlive Azure Postgres' 5-min
+    # idle timeout. Probe + reconnect before issuing DDL.
+    if hasattr(adapter, "ensure_open"):
+        try: adapter.ensure_open()
+        except Exception: pass
     try:
         if adapter.kind == "postgres":
             cur = adapter.conn.cursor()
@@ -605,6 +610,9 @@ def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
     """
     if hours <= 0:
         return 0
+    if hasattr(adapter, "ensure_open"):
+        try: adapter.ensure_open()
+        except Exception: pass
     if adapter.kind == "postgres":
         cur = adapter.conn.cursor()
         cur.execute(f"""
@@ -699,6 +707,7 @@ class EbayProductSyncAgent(AgentBase):
 
         # ─── Bring up clients ──────────────────────────────────────
         adapter = make_adapter(db_kind, dsn)
+        self._adapter = adapter  # exposed so completion email can run COUNT(*)
         try:
             self._cfg = cfg
             return self._run_inner(
@@ -1239,15 +1248,52 @@ class EbayProductSyncAgent(AgentBase):
         # If destination has an `id` column we want returned, capture it.
         try:
             ir = adapter.upsert_rows(pt["name"], [row], key_cols)
+            # upsert_rows catches per-row exceptions internally and bumps
+            # result.failed; the caller MUST check this. Without the
+            # check, an FK violation (or similar) silently increments
+            # `failed`, the SELECT below finds nothing, and we report the
+            # opaque "no PK returned" error — which is what bit us with
+            # the products_site_id_fkey UUID-vs-slug mismatch.
+            if ir.failed and ir.failed_samples:
+                samp = ir.failed_samples[0]
+                err_text = samp.get("err", "(unknown)")[:300]
+                log.warning("product upsert failed [item=%s, asin=%s, site_id=%s]: %s",
+                            row.get("title", "")[:60], row.get("asin"),
+                            row.get("site_id"), err_text)
+                self._last_upsert_error = err_text
+                if adapter.kind == "postgres":
+                    try: adapter.conn.rollback()
+                    except Exception: pass
+                return None
             if adapter.kind == "postgres":
                 cur = adapter.conn.cursor()
                 where_clauses = " AND ".join(f"{k} = %s" for k in key_cols)
                 cur.execute(f"SELECT id FROM {pt['name']} WHERE {where_clauses} LIMIT 1",
                             [row[k] for k in key_cols])
                 r = cur.fetchone(); cur.close()
-                return r[0] if r else None
+                if r:
+                    return r[0]
+                # Insert claimed success but SELECT can't find it — log
+                # what we actually upserted so the cause is visible.
+                self._last_upsert_error = (
+                    f"upsert_rows reported inserted={ir.inserted} updated={ir.updated} "
+                    f"failed={ir.failed} but SELECT WHERE "
+                    f"{', '.join(k+'=%s' % repr(row.get(k)) for k in key_cols)} "
+                    f"returned no row — likely a trigger or RLS hiding the row, "
+                    f"or column-type mismatch (e.g. site_id slug vs UUID)"
+                )
+                log.warning("product upsert: %s", self._last_upsert_error[:300])
+                return None
         except Exception as e:
-            log.warning("product upsert failed: %s", e)
+            # Surface the actual error class + message so stats["errors"]
+            # has actionable detail instead of every row reading "product
+            # upsert failed". The 4-30 outage was 80+ FK-violation errors
+            # all logged as the same opaque string.
+            err_text = f"{type(e).__name__}: {str(e)[:300]}"
+            log.warning("product upsert failed [item=%s, asin=%s, site_id=%s]: %s",
+                        row.get("title", "")[:60], row.get("asin"), row.get("site_id"), err_text)
+            # Stash on the row so the caller can include it in stats["errors"]
+            self._last_upsert_error = err_text
             # Roll back so the next upsert in the loop doesn't fail with
             # "current transaction is aborted, commands ignored until end
             # of transaction block." Each rec gets a fresh transaction.
@@ -1295,6 +1341,20 @@ class EbayProductSyncAgent(AgentBase):
             except Exception: return f.get("default")
         return val if val is not None else f.get("default")
 
+    def _row_asin_for_product(self, mapping: dict, item: dict,
+                               hyd: Optional[dict]) -> str:
+        """Compute the synthetic ASIN that lands in products.asin for this
+        item, so the completion email can build the catalog URL
+        (/product/<asin>) where the eBay listings render."""
+        pt = mapping.get("products_table") or {}
+        for f in pt.get("fields", []):
+            if f.get("destination_column") == "asin":
+                try:
+                    return str(self._extract_field(item, f) or "")
+                except Exception:
+                    return ""
+        return ""
+
     def _lookup_existing_product(self, adapter: DbAdapter, table: str,
                                   match_cols: list[str], row: dict) -> Optional[Any]:
         """Find existing canonical product by match columns (e.g.
@@ -1302,6 +1362,9 @@ class EbayProductSyncAgent(AgentBase):
         present = [c for c in match_cols if row.get(c) not in (None, "")]
         if not present:
             return None
+        if hasattr(adapter, "ensure_open"):
+            try: adapter.ensure_open()
+            except Exception: pass
         try:
             if adapter.kind == "postgres":
                 cur = adapter.conn.cursor()
@@ -1400,21 +1463,43 @@ class EbayProductSyncAgent(AgentBase):
                     continue
                 if dry_run:
                     continue
+                self._last_upsert_error = ""
                 product_pk = self._upsert_canonical_product(
                     adapter, mapping, item, hyd, cat_id, site_constants,
                 )
                 if product_pk is None:
-                    stats["errors"].append({"item": item.get("legacyItemId"), "err": "product upsert failed"})
+                    err = self._last_upsert_error or "product upsert failed (no PK returned, no exception captured — likely SELECT after INSERT didn't find row)"
+                    stats["errors"].append({
+                        "item": item.get("legacyItemId"),
+                        "title": (item.get("title") or "")[:80],
+                        "err": err,
+                    })
+                    # Bucket distinct error classes for the email summary
+                    err_class = err.split(":", 1)[0]
+                    stats.setdefault("error_class_counts", {})[err_class] = (
+                        stats.get("error_class_counts", {}).get(err_class, 0) + 1
+                    )
                     continue
                 stats["products_upserted"] += 1
                 _bump_cat(cat, products=1)
                 if len(stats["product_samples"]) < 30:
+                    # Compute the public catalog URL where the eBay listings
+                    # for this product render. SpecPicks routes /products/<asin>
+                    # → 301 to /product/<asin> (the React shell mounts the
+                    # ProductDetailPage which calls /api/products/<asin>/ebay-listings).
+                    asin_for_url = self._row_asin_for_product(mapping, item, hyd)
+                    catalog_url = (
+                        f"https://specpicks.com/product/{asin_for_url}"
+                        if asin_for_url else ""
+                    )
                     stats["product_samples"].append({
                         "name": hyd.get("name") or "",
                         "manufacturer": hyd.get("manufacturer") or "",
                         "family": hyd.get("family") or "",
                         "category": cat or hyd.get("category_slug") or "",
                         "product_pk": product_pk,
+                        "asin": asin_for_url,
+                        "catalog_url": catalog_url,
                         "confidence": hyd.get("confidence"),
                     })
 
@@ -1513,18 +1598,26 @@ class EbayProductSyncAgent(AgentBase):
             for slug, c in cats
         ) or "<tr><td colspan=4><i>(no category activity)</i></td></tr>"
 
-        # Sample products
+        # Sample products — include the public catalog URL so the operator
+        # can click straight to the SpecPicks page that renders the eBay
+        # listings widget for that product.
         prod_rows = ""
         for p in (stats.get("product_samples") or [])[:15]:
+            curl = p.get("catalog_url") or ""
+            url_cell = (
+                f"<a href=\"{curl}\" target=\"_blank\" style='color:#2563eb;font-size:12px'>view →</a>"
+                if curl else "<small style='color:#94a3b8'>—</small>"
+            )
             prod_rows += (
                 f"<tr><td><strong>{p.get('name','')}</strong><br>"
                 f"<small>{p.get('manufacturer','')}"
                 f"{(' · ' + p.get('family')) if p.get('family') else ''}</small></td>"
                 f"<td><code>{p.get('category','')}</code></td>"
                 f"<td>{p.get('product_pk','?')}</td>"
-                f"<td>{(p.get('confidence') or 0):.2f}</td></tr>"
+                f"<td>{(p.get('confidence') or 0):.2f}</td>"
+                f"<td>{url_cell}</td></tr>"
             )
-        prod_rows = prod_rows or "<tr><td colspan=4><i>(no products created)</i></td></tr>"
+        prod_rows = prod_rows or "<tr><td colspan=5><i>(no products created)</i></td></tr>"
 
         # Sample listings
         list_rows = ""
@@ -1541,12 +1634,56 @@ class EbayProductSyncAgent(AgentBase):
             )
         list_rows = list_rows or "<tr><td colspan=5><i>(no listings ingested)</i></td></tr>"
 
-        # Errors (truncate noisy lists)
-        err_rows = ""
-        for e in (stats.get("errors") or [])[:5]:
-            err_rows += f"<li><code>{e.get('q') or e.get('item') or ''}</code> — {e.get('err','')[:160]}</li>"
-        err_html = f"<h2>Errors ({len(stats.get('errors') or [])})</h2><ul>{err_rows}</ul>" \
-                   if err_rows else ""
+        # Errors — group by error class to show what's actually broken
+        # at a glance, then list a few sample items per class. Was just
+        # showing the first 5 raw lines which made 80 identical FK
+        # violations look opaque.
+        all_errs = stats.get("errors") or []
+        err_class_counts = stats.get("error_class_counts") or {}
+        err_html = ""
+        if all_errs:
+            class_summary = ""
+            if err_class_counts:
+                for cls, cnt in sorted(err_class_counts.items(), key=lambda x: -x[1]):
+                    class_summary += f"<li><strong>{cnt}×</strong> <code>{cls}</code></li>"
+                class_summary = f"<p>Grouped by error class:</p><ul>{class_summary}</ul>"
+            sample_rows = ""
+            for e in all_errs[:6]:
+                ident = e.get("q") or e.get("item") or ""
+                title = e.get("title") or ""
+                line = f"<code>{ident}</code>"
+                if title: line += f" — <small>{title}</small>"
+                line += f"<br><small style='color:#b45309'>{(e.get('err') or '')[:240]}</small>"
+                sample_rows += f"<li>{line}</li>"
+            err_html = (
+                f"<h2 style='color:#b91c1c'>Errors ({len(all_errs)})</h2>"
+                f"{class_summary}"
+                f"<p style='font-size:13px;color:#64748b'>Sample:</p>"
+                f"<ul>{sample_rows}</ul>"
+            )
+
+        # Total live eBay listings the catalog now holds (not just this run).
+        # User explicitly asked: "have the email report how many total eBay
+        # listings have been found." Pulled live from the DB so it reflects
+        # state across all historical runs.
+        total_live_listings = "?"
+        total_active_listings = "?"
+        try:
+            from db_adapter import PostgresAdapter  # type: ignore
+            # Use the same connection the agent already opened during run()
+            ad = self._adapter if hasattr(self, "_adapter") else None
+            if ad and ad.kind == "postgres":
+                if hasattr(ad, "ensure_open"):
+                    try: ad.ensure_open()
+                    except Exception: pass
+                cur = ad.conn.cursor()
+                cur.execute(f"SELECT COUNT(*) FROM {list_table}")
+                total_live_listings = cur.fetchone()[0]
+                cur.execute(f"SELECT COUNT(*) FROM {list_table} WHERE is_active = true")
+                total_active_listings = cur.fetchone()[0]
+                cur.close()
+        except Exception as e:
+            log.warning("total-listings count query failed: %s", e)
 
         request_id = new_request_id()
         subject = encode_subject(
@@ -1556,7 +1693,7 @@ class EbayProductSyncAgent(AgentBase):
         )
 
         body = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;max-width:820px;margin:0 auto;padding:24px;}}
+body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a;line-height:1.5;max-width:920px;margin:0 auto;padding:24px;}}
 h1{{font-size:1.5rem;margin:0 0 8px}}
 h2{{font-size:1.1rem;margin:24px 0 8px}}
 .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0 18px}}
@@ -1574,11 +1711,24 @@ small{{color:#64748b}}
    listings into <code>{list_table}</code>.</p>
 
 <div class="kpis">
-  <div class="kpi"><div class="n">{n_queries}</div><div class="l">queries</div></div>
-  <div class="kpi"><div class="n">{n_items}</div><div class="l">items seen</div></div>
+  <div class="kpi"><div class="n">{n_queries}</div><div class="l">queries this run</div></div>
+  <div class="kpi"><div class="n">{n_items}</div><div class="l">items seen this run</div></div>
   <div class="kpi"><div class="n">{n_products}</div><div class="l">products upserted</div></div>
   <div class="kpi"><div class="n">{n_listings_in + n_listings_up}</div><div class="l">listings touched</div></div>
 </div>
+
+<h2>Catalog totals</h2>
+<div class="kpis">
+  <div class="kpi" style="background:#eff6ff;border-color:#bfdbfe">
+    <div class="n">{total_live_listings}</div>
+    <div class="l">total eBay listings (all time)</div>
+  </div>
+  <div class="kpi" style="background:#ecfdf5;border-color:#a7f3d0">
+    <div class="n">{total_active_listings}</div>
+    <div class="l">currently active</div>
+  </div>
+</div>
+
 <p style="font-size:13px;color:#64748b">
   Listings inserted: <strong>{n_listings_in}</strong> &middot;
   updated: <strong>{n_listings_up}</strong> &middot;
@@ -1593,8 +1743,12 @@ small{{color:#64748b}}
 </table>
 
 <h2>Sample canonical products created (up to 15)</h2>
+<p style="font-size:12px;color:#64748b;margin:0 0 6px">
+  Each "view" link opens the SpecPicks product page where the eBay listings
+  for that product render (via <code>/api/products/&lt;asin&gt;/ebay-listings</code>).
+</p>
 <table>
-  <thead><tr><th>Product</th><th>Category</th><th>PK</th><th>Conf.</th></tr></thead>
+  <thead><tr><th>Product</th><th>Category</th><th>PK</th><th>Conf.</th><th>Catalog</th></tr></thead>
   <tbody>{prod_rows}</tbody>
 </table>
 

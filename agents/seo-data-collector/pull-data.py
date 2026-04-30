@@ -38,6 +38,17 @@ if str(_REPO_ROOT) not in sys.path:
 
 from shared.site_config import load_config_from_env  # noqa: E402
 
+# Bot/spam GSC queries appear as <word><digits> patterns (e.g.
+# "celery25678", "rice45225", "thyme43450") — SEO probe traffic with
+# zero clicks that floats into top5-targets and gets re-proposed every
+# run as "build a keyword page". Real queries with digits ("rtx 5090",
+# "2026 inflation") have a space, so anchored ^[a-z]+\d{2+}$ is safe.
+_BOT_QUERY_PAT = re.compile(r'^[a-z]+\d{2,}$', re.I)
+
+
+def _is_bot_noise(query: str, clicks: int) -> bool:
+    return bool(_BOT_QUERY_PAT.match((query or "").strip())) and clicks == 0
+
 
 REFRESH_SCRIPT = Path(__file__).resolve().parent / "refresh-token.py"
 
@@ -171,20 +182,27 @@ def pull_gsc(token: str, site_url: str, default_country: str, out_dir: Path) -> 
     # ---- Derived files ----
     raw = json.loads((out_dir / "gsc-query-page-90d.json").read_text())
 
+    def _query_of(row):
+        keys = row.get("keys") or []
+        return keys[0] if keys else ""
+
+    def _not_bot(row):
+        return not _is_bot_noise(_query_of(row), row.get("clicks", 0))
+
     quick_wins = sorted(
-        (r for r in raw.get("rows", []) if 11 <= r["position"] <= 30 and r["impressions"] >= 5),
+        (r for r in raw.get("rows", []) if _not_bot(r) and 11 <= r["position"] <= 30 and r["impressions"] >= 5),
         key=lambda r: -r["impressions"],
     )
     (out_dir / "gsc-quick-wins.json").write_text(json.dumps({"rows": quick_wins[:200]}, indent=2))
 
     striking = sorted(
-        (r for r in raw.get("rows", []) if 4 <= r["position"] <= 10 and r["impressions"] >= 10),
+        (r for r in raw.get("rows", []) if _not_bot(r) and 4 <= r["position"] <= 10 and r["impressions"] >= 10),
         key=lambda r: -r["impressions"],
     )
     (out_dir / "gsc-striking-distance.json").write_text(json.dumps({"rows": striking[:200]}, indent=2))
 
     zero = sorted(
-        (r for r in raw.get("rows", []) if r["clicks"] == 0 and r["impressions"] >= 10 and r["position"] <= 20),
+        (r for r in raw.get("rows", []) if _not_bot(r) and r["clicks"] == 0 and r["impressions"] >= 10 and r["position"] <= 20),
         key=lambda r: -r["impressions"],
     )
     (out_dir / "gsc-zero-click.json").write_text(json.dumps({"rows": zero[:200]}, indent=2))
@@ -234,14 +252,17 @@ def pull_gsc(token: str, site_url: str, default_country: str, out_dir: Path) -> 
         for r in rows:
             keys = r.get("keys", [])
             if not keys: continue
+            query = keys[0]
             position = r.get("position", 100)
             impressions = r.get("impressions", 0)
+            clicks = r.get("clicks", 0)
+            if _is_bot_noise(query, clicks): continue
             if position > 50 or position <= 5 or impressions < impr_threshold: continue
             targets.append({
-                "query": keys[0],
+                "query": query,
                 "position": round(position, 2),
                 "impressions": impressions,
-                "clicks": r.get("clicks", 0),
+                "clicks": clicks,
                 "ctr": round(r.get("ctr", 0), 4),
                 "score": round(impressions / max(position, 1.0), 2),
                 "tier": "striking" if position <= 10 else "page-2" if position <= 20 else "deep",

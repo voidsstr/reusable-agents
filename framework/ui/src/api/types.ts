@@ -48,6 +48,11 @@ export interface AgentDetail extends AgentSummary {
   readme_body: string | null
   current_status: AgentLiveStatus | null
   recent_runs: RunSummary[]
+  confirmation_status?: {
+    approved?: boolean | null
+    approved_at?: string
+    approved_by?: string
+  }
 }
 
 export interface CapabilityDetail {

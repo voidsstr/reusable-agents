@@ -20,6 +20,12 @@ from ..auth import require_token
 
 router = APIRouter(prefix="/api/agents", tags=["agents"], dependencies=[Depends(require_token)])
 
+# Ghost-reap TTL state: only run reap_all once per minute, in a background
+# thread, so list_all stays fast even when storage round-trips are slow.
+from concurrent.futures import ThreadPoolExecutor as _ReapExecutor
+_LAST_REAP_AT: float = 0.0
+_REAP_POOL = _ReapExecutor(max_workers=1)
+
 
 # ---------------------------------------------------------------------------
 # Module-level 60s TTL cache for the AI provider/defaults config blobs.
@@ -123,6 +129,12 @@ class AgentDetail(AgentSummary):
     readme_body: Optional[str] = None
     current_status: Optional[dict] = None
     recent_runs: list[dict] = Field(default_factory=list)
+    # Live state of the confirmation gate (if confirmation_flow.enabled).
+    # For schema-mapping-approval kind, populated from the agent's
+    # mapping doc — surfaces approved_at + approved_by so the UI
+    # banner can show "✓ approved" instead of the static "first run
+    # emails proposal" text once approval has actually landed.
+    confirmation_status: dict = Field(default_factory=dict)
 
 
 class RegisterRequest(BaseModel):
@@ -305,16 +317,23 @@ def list_all():
     providers_cache, defaults_cache = _get_config_caches()
     manifests = list(registry.list_agents())
 
-    # Lazy ghost-run reap — costs O(reaped agents) writes, zero on the
-    # happy path. Anything stuck in running/starting with a stale
-    # heartbeat (>180s) gets flipped to failure so the dashboard stops
-    # showing a phantom "● tailing" badge and the next manual trigger
-    # is unblocked.
-    try:
-        from framework.core.ghost_reaper import reap_all
-        reap_all(storage=s)
-    except Exception:
-        pass
+    # Lazy ghost-run reap — TTL-rate-limited because reading 30 status.json
+    # blobs sequentially costs ~3s, which used to dominate the list_all
+    # endpoint's 3.5s response time. Reap is a best-effort cleanup; running
+    # it once a minute is plenty (a phantom "● tailing" badge that takes
+    # 60s to clear is fine).
+    import time as _t
+    global _LAST_REAP_AT
+    now_mono = _t.monotonic()
+    if now_mono - _LAST_REAP_AT > 60.0:
+        _LAST_REAP_AT = now_mono
+        try:
+            from framework.core.ghost_reaper import reap_all
+            from concurrent.futures import ThreadPoolExecutor
+            # Fire-and-forget: don't block the response on reap completion.
+            _REAP_POOL.submit(reap_all, storage=s)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Status fetch:
@@ -446,6 +465,38 @@ def get_one(agent_id: str):
     skill_body   = _load_md(f"agents/{m.id}/skill.md", m.skill_path)
     readme_body  = _load_md(f"agents/{m.id}/readme.md", "")
 
+    # Resolve confirmation_flow current state — for schema-mapping-approval
+    # kind, look up the agent's mapping doc to detect whether the schema
+    # has actually been approved yet. Without this the banner stays
+    # forever stuck on "first run emails proposal" even after approval.
+    confirmation_status: dict = {}
+    cf = m.confirmation_flow or {}
+    if cf.get("enabled") and cf.get("kind") == "schema-mapping-approval":
+        # Mapping docs live at agents/<id>/mappings/<site_id>.json. We
+        # don't always know the site_id from the manifest, so list the
+        # mappings/ prefix and pick the most recently-approved doc.
+        try:
+            best_at = ""
+            best_by = ""
+            for k in s.list_prefix(f"agents/{m.id}/mappings/"):
+                if not k.endswith(".json"):
+                    continue
+                doc = s.read_json(k) or {}
+                at = doc.get("approved_at") or ""
+                if at and at > best_at:
+                    best_at = at
+                    best_by = doc.get("approved_by") or ""
+            if best_at:
+                confirmation_status = {
+                    "approved": True,
+                    "approved_at": best_at,
+                    "approved_by": best_by,
+                }
+            else:
+                confirmation_status = {"approved": False}
+        except Exception:
+            confirmation_status = {"approved": None}
+
     base = _summary(m, providers_cache=providers_cache, defaults_cache=defaults_cache).dict()
     return AgentDetail(
         **base,
@@ -462,6 +513,7 @@ def get_one(agent_id: str):
         readme_body=readme_body,
         current_status=status,
         recent_runs=runs,
+        confirmation_status=confirmation_status,
     )
 
 

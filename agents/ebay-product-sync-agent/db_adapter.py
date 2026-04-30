@@ -151,6 +151,9 @@ class PostgresAdapter(DbAdapter):
     def upsert_rows(self, table: str, rows: list[dict], key_columns: list[str]) -> InsertResult:
         if not rows:
             return InsertResult()
+        # Probe + reconnect — long Claude-hydration calls upstream can outlive
+        # Azure Postgres' 5-min idle timeout, dropping the conn silently.
+        self.ensure_open()
         cols = list(rows[0].keys())
         placeholders = ",".join(["%s"] * len(cols))
         col_list = ",".join(cols)

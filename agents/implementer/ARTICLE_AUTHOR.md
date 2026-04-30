@@ -62,7 +62,7 @@ expect substantive content for that signal.
 - `tags` — 3-6 short topic tags
 - `difficulty` — one of: `beginner`, `intermediate`, `advanced`
 - `estimated_read_time` — integer minutes (assume 220 wpm)
-- `hero_image_url` — leave NULL; a separate backfill script handles hero images
+- `hero_image_url` — **MANDATORY: set this BEFORE the INSERT** (see "Picking the hero image" below). Leaving it NULL forces the SSR fallback, which used to pick HDMI cables / PSUs that were marketed "for RTX 5090". Set the right image at write-time so the article never depends on the fallback.
 - `related_hardware_slugs` — array of hardware slugs from the products
   table (from `expected_products_or_hardware` if present)
 - `related_product_asins` — array of ASINs (same source)
@@ -104,6 +104,37 @@ for production-grade local inference.
 Then INSERT into editorial_articles like any other article — populate
 all the standard editorial columns, and set `category='buying-guide'`
 so the dashboard / SEO analyzer can distinguish them.
+
+## Picking the hero image (MANDATORY before INSERT)
+
+The article's `hero_image_url` must be a real photo of one of the
+hardware items the article is about. Run this query against the DB
+BEFORE the INSERT and use the returned URL in the `hero_image_url`
+column:
+
+```sql
+SELECT p.main_image_url
+  FROM product_hardware_links l
+  JOIN products p ON p.id = l.product_id
+  JOIN hardware_specs h ON h.id = l.hardware_id
+ WHERE h.slug = ANY(<related_hardware_slugs>)
+   AND p.is_active AND p.main_image_url IS NOT NULL
+   -- Must actually be that hardware, not an accessory marketed "for X":
+   AND lower(p.title) LIKE '%' || lower(h.name) || '%'
+   -- Defense-in-depth blacklist — accessories whose title still
+   -- contains the GPU name (e.g. "RTX 5090 GPU support brace"):
+   AND p.title !~* '\y(cable|cord|adapter|bracket|water.?block|riser|thermal|backplate|heatsink|gpu.?stand|gpu.?holder|brace|sag|comb|mounting|enclosure|hub|extension|dock|capture.?card|rgb.?(strip|fan)|psu|power.?supply|case\y|fan\y|frame|stand\y|holder|protector|sleeve|cooler\y|cooling\s+fan)\y'
+ ORDER BY p.review_count DESC NULLS LAST
+ LIMIT 1;
+```
+
+If that returns nothing (e.g. an article about software like Mistral
+3.5 with no hardware product), fall back to a category-default image
+(or leave NULL — the SSR layer's DEFAULT_IMAGE picks up). The 4-30
+gemma-4 hero-image incident was exactly this: hero_image_url was NULL,
+the broken fallback picked an HDMI cable from product_hardware_links
+because it was marketed "for RTX 5090". Setting hero_image_url at
+write-time avoids the fallback entirely.
 
 ## How to write to the DB
 
@@ -240,27 +271,56 @@ Mark the rec implemented but NOT shipped — operator decides.
 ### MANDATORY verification step before marking shipped
 
 After INSERT, BEFORE writing the SHIPPED summary, hit the API and
-confirm the article actually serves:
+confirm the article actually serves. **The verification MUST retry with
+backoff** — Azure Container App + Postgres replica lag can take up to
+~30s before a freshly-inserted row is served by the public API. A
+single immediate fetch will frequently return body_md=0 right after
+INSERT even when the row is in the DB and will serve correctly seconds
+later. The 4-29 22:45Z dispatch shipped 0/5 articles for exactly this
+reason — all 5 were inserted but the immediate verify saw empty bodies
+and marked them DEFERRED.
 
 ```python
-import urllib.request
+import time, json, urllib.request
 api_url = f"https://specpicks.com/api/testbench/articles/{slug}"
-try:
-    with urllib.request.urlopen(api_url, timeout=15) as resp:
+
+def _verify_once():
+    req = urllib.request.Request(api_url, headers={"User-Agent": "specpicks-impl/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
         body = resp.read().decode()
-        # Must contain real content, not a generic "not found" page
-        assert "body_md" in body and len(body) > 1000, \
-               f"API responded but body is empty/wrong shape: {body[:200]}"
-except Exception as e:
-    print(f"verification FAILED for {slug}: {e}")
-    # DO NOT mark shipped. Write DEFERRED with the verification failure.
-    raise
+        try:
+            d = json.loads(body)
+        except Exception:
+            return False, f"non-JSON response: {body[:200]}"
+        article = d.get("article") or d
+        body_md = article.get("body_md") or ""
+        if len(body_md) > 1000:
+            return True, f"body_md={len(body_md)} chars"
+        return False, f"body_md={len(body_md)} chars (need >1000)"
+
+ok, detail = False, ""
+# Retry up to 6 times: 0s, 3s, 6s, 12s, 20s, 30s — total ~70s
+for delay in (0, 3, 6, 12, 20, 30):
+    if delay:
+        time.sleep(delay)
+    try:
+        ok, detail = _verify_once()
+    except Exception as e:
+        ok, detail = False, f"fetch error: {e}"
+    if ok:
+        break
+
+if not ok:
+    print(f"verification FAILED for {slug} after retries: {detail}")
+    # Even after 70s of retries, the row isn't serving. Write DEFERRED
+    # with the verification failure so a human can investigate.
+    raise RuntimeError(f"verify_failed: {detail}")
 ```
 
-If verification fails, write `DEFERRED: <reason>` instead of `SHIPPED:`
-and DO NOT set `shipped: true`. The DB row exists but the public site
-isn't serving it — likely a slug typo, status≠'published', or a CDN
-cache that needs to expire.
+If verification fails after all retries, write `DEFERRED: <reason>`
+instead of `SHIPPED:` and DO NOT set `shipped: true`. The DB row exists
+but the public site isn't serving it — likely a slug typo, status≠
+'published', or a CDN cache that needs to expire.
 
 Example successful summary:
 ```
@@ -277,8 +337,33 @@ Outline followed: yes
 After successful INSERT, update `recommendations.json` so each processed
 rec has `implemented: true`, `implemented_via: "article-author-write"`,
 `implemented_at: <iso-ts>`, `shipped: true`, `shipped_at: <iso-ts>`,
-`shipped_via: "db-insert"`. The framework's propagate step will mirror
-those flags to the source run dir for dashboard display.
+`shipped_via: "db-insert"`, `public_url: "https://specpicks.com/reviews/<slug>"`.
+The framework's propagate step will mirror those flags to the source
+run dir for dashboard display.
+
+### MANDATORY: write applied-recs.json
+
+You MUST write `<run_dir>/applied-recs.json` listing every rec_id you
+successfully inserted. Without this file the implementer's run.sh marks
+the dispatch `paused` (because there's no git commit to detect),
+emails the user "0 of N applied", and the dashboard shows the recs as
+NOT shipped — even though the DB rows are live. The 4-29 22:45Z and
+4-30 00:45Z runs both shipped 0/5 in the email despite all 10 articles
+being inserted and live, for exactly this reason.
+
+```python
+import json, pathlib
+applied = pathlib.Path("/path/to/run_dir/applied-recs.json")
+applied.write_text(json.dumps({
+    "applied_rec_ids": ["art-001", "art-002", "art-003"],  # whatever you actually inserted
+    "method": "article-author-db-insert",
+    "public_urls": {
+        "art-001": "https://specpicks.com/reviews/<slug-1>",
+        "art-002": "https://specpicks.com/reviews/<slug-2>",
+        "art-003": "https://specpicks.com/reviews/<slug-3>",
+    },
+}, indent=2))
+```
 
 (Articles "ship" the moment the DB row is written — there's no Docker
 build or Azure deploy in this flow, the SpecPicks site reads the

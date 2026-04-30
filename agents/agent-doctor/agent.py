@@ -36,7 +36,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # Framework path setup
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -138,20 +138,35 @@ def _read_log(agent_id: str) -> str:
     """
     if not HOST_LOGS_DIR.is_dir():
         return ""
-    candidates = sorted(
+    # Two log conventions: persistent `agent-<id>.log` (one stream across all
+    # runs) and per-run `<id>-<run-ts>.log` (one per cron firing). The
+    # framework's wrapper writes to BOTH, but tracebacks sometimes land in
+    # only one (e.g. the per-run file ends mid-Azure-blob-write while the
+    # actual python exception is in the persistent stream). Read BOTH and
+    # concatenate so the error-pattern scan below has full context.
+    sources: list[Path] = []
+    persistent = sorted(
         HOST_LOGS_DIR.glob(f"agent-{agent_id}.log"),
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
-    candidates += sorted(
+    if persistent:
+        sources.append(persistent[0])
+    per_run = sorted(
         HOST_LOGS_DIR.glob(f"{agent_id}-*.log"),
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
         reverse=True,
     )
-    if not candidates:
+    # Take the 2 most recent per-run logs (current + previous) — the failure
+    # might have happened in the prior run that the wrapper rotated past.
+    sources.extend(per_run[:2])
+    if not sources:
         return ""
     try:
-        text = candidates[0].read_text(errors="replace")
+        text = "\n".join(
+            f"=== source: {p.name} ===\n" + p.read_text(errors="replace")
+            for p in sources
+        )
     except Exception:
         return ""
 
@@ -647,6 +662,62 @@ def _read_agent_runbook(agent_id: str) -> str:
     return ""
 
 
+def _agent_source_dir(agent_id: str) -> Optional[Path]:
+    """Locate an agent's source directory across the known repos. Returns
+    None if not found. Used to detect in-source `.env` files (so the doctor
+    doesn't false-flag missing env vars when the agent loads its own
+    secrets — e.g. specpicks-ebay-product-sync-agent reads
+    agents/<id>/.env at startup; without this check the LLM kept
+    proposing 'inline EBAY_CLIENT_ID into the manifest' as a fix that
+    isn't needed)."""
+    for root in (
+        Path("/home/voidsstr/development/reusable-agents/agents"),
+        Path("/home/voidsstr/development/nsc-assistant/agents"),
+        Path("/home/voidsstr/development/specpicks/agents"),
+    ):
+        d = root / agent_id
+        if d.is_dir():
+            return d
+    # Strip site prefix
+    parts = agent_id.split("-")
+    if len(parts) > 2:
+        stem = "-".join(parts[1:])
+        for root in (
+            Path("/home/voidsstr/development/reusable-agents/agents"),
+            Path("/home/voidsstr/development/specpicks/agents"),
+        ):
+            d = root / stem
+            if d.is_dir():
+                return d
+    return None
+
+
+def _agent_local_env_summary(agent_id: str) -> str:
+    """Describe in-source secret files (existence + key names, NOT values)
+    so the LLM diagnoser knows the agent can satisfy env requirements
+    without manifest changes. Returns 'none' if no .env present."""
+    src = _agent_source_dir(agent_id)
+    if not src:
+        return "(source dir not found)"
+    out = []
+    for name in (".env", ".env.local", "config.yaml", "site.yaml"):
+        p = src / name
+        if not p.is_file():
+            continue
+        if name.endswith(".env") or name == ".env.local":
+            try:
+                keys = []
+                for line in p.read_text().splitlines():
+                    if "=" in line and not line.lstrip().startswith("#"):
+                        keys.append(line.split("=", 1)[0].strip())
+                out.append(f"{name} present (keys: {', '.join(keys[:20])})")
+            except Exception:
+                out.append(f"{name} present (read failed)")
+        else:
+            out.append(f"{name} present")
+    return "; ".join(out) if out else "none"
+
+
 def _read_agent_manifest_dict(agent_id: str) -> dict:
     """Pull the agent's manifest from the framework API."""
     try:
@@ -669,6 +740,7 @@ def _invoke_claude_diagnose(target: str, signature: str, log_excerpt: str,
     the parsed dict, or {} on any error. The claude call routes through
     the pool automatically (PATH-resolved `claude` is the pool shim)."""
     import subprocess
+    local_env = _agent_local_env_summary(target)
     prompt = f"""You are the operations diagnostician for the reusable-agents framework.
 An agent has failed and the pattern-classifier returned signature={signature!r}
 because no known pattern matched. Your job: diagnose the root cause and
@@ -681,11 +753,18 @@ manifest entry_command (truncated):
   {(manifest.get('entry_command', '') or '')[:600]}
 last_run_status: {manifest.get('last_run_status', '?')} at {manifest.get('last_run_at', '?')}
 
+# Agent source-dir secret files
+{local_env}
+
+IMPORTANT: when local secret files exist with relevant keys, the agent
+loads them at startup — do NOT propose inlining those vars into the
+manifest. The manifest may legitimately omit them.
+
 # Runbook (first 8KB)
 {runbook[:8000] if runbook else '(no runbook found)'}
 
-# Last log excerpt (most recent ~1KB of stderr/stdout)
-{log_excerpt[-1500:]}
+# Last log excerpt (multiple log files, error-windows + tail; up to 32KB)
+{log_excerpt[-8000:]}
 
 # Your task
 

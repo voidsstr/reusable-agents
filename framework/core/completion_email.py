@@ -199,6 +199,33 @@ def _published_urls_for_shipped_recs(run_dir: str, site: str,
                 })
             continue
 
+        # H2H comparison pages — head-to-head-agent recs have NO `type` field
+        # but DO have `compare_url` (relative path /compare?...). Surface as
+        # a clickable URL in the completion email.
+        if r.get("compare_url"):
+            cu = r["compare_url"]
+            full = cu if cu.startswith("http") else f"{base}{cu}"
+            kind = r.get("kind", "")
+            label = "comparison page" if kind == "hardware" else "product comparison" if kind == "product" else "comparison"
+            out.append({
+                "rec_id": rid,
+                "title": title or f"{r.get('left_title','?')} vs {r.get('right_title','?')}",
+                "url": full,
+                "label": label,
+            })
+            continue
+
+        # Some agents (article-author backfilled, PI implementer) write
+        # public_url directly on the rec — prefer that over typ-based dispatch.
+        if r.get("public_url"):
+            out.append({
+                "rec_id": rid,
+                "title": title or r["public_url"],
+                "url": r["public_url"],
+                "label": typ or "page",
+            })
+            continue
+
         # Generic catch-all for any other type that carries a url field
         url = r.get("url", "")
         if url:

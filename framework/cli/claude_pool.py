@@ -271,6 +271,20 @@ _RATE_LIMIT_PATTERNS = [
     re.compile(r"quota exceeded", re.I),
     re.compile(r"too many requests", re.I),
 ]
+# Patterns that indicate the profile's auth has been revoked / removed
+# (token still in keychain but no longer valid against the API). These
+# are unrecoverable until the user re-runs `claude /login` for that
+# profile. Hit on 4-30 when one Claude Max account was removed from its
+# org and started returning 403 — without this detection the pool kept
+# trying the dead profile and failing the agent's whole run.
+_AUTH_DEAD_PATTERNS = [
+    re.compile(r"no longer a member", re.I),
+    re.compile(r"permission_error", re.I),
+    re.compile(r"API Error: 403", re.I),
+    re.compile(r"Failed to authenticate", re.I),
+    re.compile(r"Invalid API key", re.I),
+    re.compile(r"authentication failed", re.I),
+]
 # Capture the human reset hint so we can store an approximate resets_at.
 _RESET_HINT_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?", re.I)
 
@@ -374,6 +388,29 @@ def _run_one_dispatch(picked_id: str, picked_home: str,
 
 def _looks_rate_limited(text: str) -> bool:
     return any(p.search(text or "") for p in _RATE_LIMIT_PATTERNS)
+
+
+def _looks_auth_dead(text: str) -> bool:
+    return any(p.search(text or "") for p in _AUTH_DEAD_PATTERNS)
+
+
+def _mark_auth_dead(profile_id: str, captured_text: str) -> None:
+    """Record that this profile's auth is revoked. Subsequent picks skip
+    it until the user re-runs `claude /login` (which the framework
+    detects via the keychain blob's mtime changing — see _is_authenticated)."""
+    fd = _open_state_locked()
+    try:
+        state = _read_state(fd)
+        if profile_id in state:
+            state[profile_id]["authenticated"] = False
+            state[profile_id]["auth_error_at"] = _now_iso()
+            state[profile_id]["auth_error_message"] = captured_text[:300]
+            _write_state(fd, state)
+    finally:
+        _close_state(fd)
+    sys.stderr.write(
+        f"[claude-pool] {profile_id} auth-dead — re-run `HOME=<profile_home> claude /login` to re-enable\n"
+    )
 
 
 def _claim_profile(picked: dict) -> None:
@@ -617,6 +654,11 @@ def cmd_exec(args) -> None:
             if _looks_rate_limited(captured):
                 _mark_rate_limited(picked_id, captured)
                 sys.stderr.write(f"[claude-pool] {picked_id} hit rate limit; trying next\n")
+                continue
+
+            if _looks_auth_dead(captured):
+                _mark_auth_dead(picked_id, captured)
+                sys.stderr.write(f"[claude-pool] {picked_id} auth revoked; trying next\n")
                 continue
 
             # Non-rate-limit failure — surface as-is. The user's prompt

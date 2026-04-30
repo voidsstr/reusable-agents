@@ -140,43 +140,55 @@ def list_dispatches(limit: int = Query(20, le=100)):
     return _list_dispatches(limit)
 
 
+_BATCHES_CACHE: dict = {"data": None, "ts": 0.0}
+_BATCHES_TTL_S = 30.0
+
+
 @router.get("/batches")
 def list_batches(limit: int = Query(20, le=50)):
     """List active + recent batched dispatch chains.
 
-    A "batch chain" is a single user reply that the responder split into
-    N batches (sorted high→low priority) — recorded as
-    `<run_dir>/dispatch-batches.json` and dispatched sequentially by the
-    implementer's auto-chain logic.
-
-    Reads from BOTH:
-      - Azure storage at agents/<source-agent>/runs/<run_ts>/dispatch-batches.json
-        (synced by the implementer's sync_back trap)
-      - /tmp/rundir-*/dispatch-batches.json on the host where the API
-        runs (only when the API runs on the same host as the implementer
-        — Docker deployments only see Azure)
+    Was 25s+ — every chain triggered ~10 sequential Azure blob reads
+    inside the loop body. Now: pre-sort dispatch-batches.json keys by
+    embedded run_ts desc, take top `limit`, then parallel-stitch those
+    chains with a 16-worker thread pool. Plus a 30s TTL cache because
+    the queue page polls every 5-15s.
     """
-    from glob import glob
     import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    now_mono = time.monotonic()
+    cached = _BATCHES_CACHE["data"]
+    if cached is not None and (now_mono - _BATCHES_CACHE["ts"]) < _BATCHES_TTL_S:
+        return {"chains": cached[:limit]}
 
     s = get_storage()
     manifests: list[dict] = []
-    seen_keys: set[str] = set()
 
-    # ── Azure: walk every <agent>/runs/<run_ts>/dispatch-batches.json ──
+    # 1. List dispatch-batches.json paths (cheap — one prefix walk)
+    candidate_keys: list[tuple[str, str]] = []  # (run_ts_for_sort, blob_key)
     try:
         for blob_key in s.list_prefix("agents/"):
             if not blob_key.endswith("/dispatch-batches.json"):
                 continue
-            if blob_key in seen_keys:
-                continue
-            seen_keys.add(blob_key)
-            try:
-                m = s.read_json(blob_key)
-            except Exception:
-                continue
-            if not m or not m.get("batches"):
-                continue
+            parts = blob_key.split("/")
+            run_ts_sort = parts[3] if len(parts) > 3 else ""
+            candidate_keys.append((run_ts_sort, blob_key))
+    except Exception:
+        candidate_keys = []
+    # Sort desc by embedded run_ts (lex sort is correct on UTC iso ts).
+    candidate_keys.sort(key=lambda x: x[0], reverse=True)
+    # Keep more than `limit` because some entries may be skipped (no batches);
+    # 3× provides headroom while still bounding worker count.
+    head_keys = [bk for _, bk in candidate_keys[: limit * 3]]
+
+    def _stitch_one(blob_key: str) -> dict | None:
+        try:
+            m = s.read_json(blob_key)
+        except Exception:
+            return None
+        if not m or not m.get("batches"):
+            return None
             # Derive metadata. Two run-ts values matter:
             #   - dispatch_run_ts: where dispatch-batches.json lives
             #     (typically `rundir-<agent>-<source-ts>-<rand>` because
@@ -184,163 +196,147 @@ def list_batches(limit: int = Query(20, le=50)):
             #   - source_run_ts: where the original SEO/PI run wrote
             #     recommendations.json. From the manifest itself, set
             #     by the responder's _write_batch_manifest.
-            parts = blob_key.split("/")
-            source_agent = parts[1] if len(parts) > 1 else ""
-            dispatch_run_ts = parts[3] if len(parts) > 3 else ""
-            source_run_ts = m.get("source_run_ts") or dispatch_run_ts
-            run_dir_basename = f"rundir-{source_agent}-{dispatch_run_ts}"
-            # Load rec titles + lifecycle markers from BOTH:
-            #   - source run's recommendations.json (titles, priority, base state)
-            #   - dispatch run's recommendations.json (overrides — implementer/
-            #     deployer write `implemented`, `implemented_via`, `shipped` here)
-            # Dispatch-run state wins where present so claude's
-            # `implemented_via: pre-existing` markers and the deployer's
-            # `shipped: true` propagate to the UI.
-            rec_titles: dict[str, str] = {}
-            rec_kinds: dict[str, str] = {}
-            rec_lifecycle: dict[str, dict] = {}  # rid -> {implemented, implemented_via, shipped, ...}
-            for read_run_ts in (source_run_ts, dispatch_run_ts):
-                if not read_run_ts:
-                    continue
-                try:
-                    rd = s.read_json(f"agents/{source_agent}/runs/{read_run_ts}/recommendations.json") or {}
-                    for r in rd.get("recommendations", []):
-                        rid = r.get("id")
-                        if not rid:
-                            continue
-                        if rid not in rec_titles:
-                            rec_titles[rid] = (
-                                r.get("title") or r.get("description") or ""
-                            )[:200]
-                            for f in ("priority", "severity", "tier"):
-                                if r.get(f):
-                                    rec_kinds[rid] = str(r.get(f))
-                                    break
-                        # Lifecycle markers — last writer wins (so dispatch
-                        # run's updates override source's defaults).
-                        for f in ("implemented", "implemented_at", "implemented_run_ts",
-                                  "implemented_via", "implemented_commit",
-                                  "shipped", "shipped_at",
-                                  "shipped_tag", "shipped_image", "shipped_via"):
-                            if f in r:
-                                rec_lifecycle.setdefault(rid, {})[f] = r[f]
-                except Exception:
-                    pass
-            # Load per-rec changes/<rec>.summary.md — implementer writes
-            # them under the DISPATCH run_ts (not source).
-            rec_status: dict[str, dict] = {}
+        parts = blob_key.split("/")
+        source_agent = parts[1] if len(parts) > 1 else ""
+        dispatch_run_ts = parts[3] if len(parts) > 3 else ""
+        source_run_ts = m.get("source_run_ts") or dispatch_run_ts
+        run_dir_basename = f"rundir-{source_agent}-{dispatch_run_ts}"
+        rec_titles: dict[str, str] = {}
+        rec_kinds: dict[str, str] = {}
+        rec_lifecycle: dict[str, dict] = {}
+        for read_run_ts in (source_run_ts, dispatch_run_ts):
+            if not read_run_ts:
+                continue
             try:
-                changes_prefix = f"agents/{source_agent}/runs/{dispatch_run_ts}/changes/"
-                for ck in s.list_prefix(changes_prefix):
-                    if not ck.endswith(".summary.md"):
+                rd = s.read_json(f"agents/{source_agent}/runs/{read_run_ts}/recommendations.json") or {}
+                for r in rd.get("recommendations", []):
+                    rid = r.get("id")
+                    if not rid:
                         continue
-                    fname = ck[len(changes_prefix):]
-                    rid = fname.split(".summary.md")[0]
-                    body = s.read_text(ck) or ""
-                    head = body.strip().split("\n", 1)[0]
-                    is_deferred = bool(re.match(
-                        r"^(DEFERRED|SKIP|SKIPPED|NO ACTION|NOT APPLIED)[:.]",
-                        head, re.I
-                    ))
-                    rec_status[rid] = {
-                        "summary_first_line": head[:200],
-                        "summary_chars": len(body),
-                        "deferred": is_deferred,
-                    }
+                    if rid not in rec_titles:
+                        rec_titles[rid] = (r.get("title") or r.get("description") or "")[:200]
+                        for f in ("priority", "severity", "tier"):
+                            if r.get(f):
+                                rec_kinds[rid] = str(r.get(f))
+                                break
+                    for f in ("implemented", "implemented_at", "implemented_run_ts",
+                              "implemented_via", "implemented_commit",
+                              "shipped", "shipped_at",
+                              "shipped_tag", "shipped_image", "shipped_via"):
+                        if f in r:
+                            rec_lifecycle.setdefault(rid, {})[f] = r[f]
             except Exception:
                 pass
-            # applied-recs.json under the dispatch run_ts (DB-write evidence)
-            applied_set: set[str] = set()
-            try:
-                ar = s.read_json(f"agents/{source_agent}/runs/{dispatch_run_ts}/applied-recs.json")
-                if ar:
-                    ids = ar.get("applied_rec_ids") or ar.get("rec_ids") or []
-                    if isinstance(ids, list):
-                        applied_set = {str(x) for x in ids if x}
-            except Exception:
-                pass
-            # Stitch
-            batches_out = []
-            for b in m.get("batches", []):
-                cs = b.get("completion_status") or b.get("status", "")
-                items = []
-                for rid in b.get("rec_ids", []):
-                    rs = dict(rec_status.get(rid, {}))
-                    lc = rec_lifecycle.get(rid, {})
-                    if rid in applied_set:
-                        rs["applied"] = True
-                    # Two-stage lifecycle. Order of precedence (highest first):
-                    #   shipped       — deployer pushed this rec live to Azure
-                    #   implemented   — claude committed code OR marked
-                    #                   implemented_via: pre-existing
-                    #   deferred      — summary file says DEFERRED/SKIP
-                    #   pending       — anything else
-                    if lc.get("shipped"):
-                        rs["shipped"] = True
-                        rs["shipped_at"] = lc.get("shipped_at", "")
-                        rs["shipped_tag"] = lc.get("shipped_tag", "")
-                        rs["shipped_via"] = lc.get("shipped_via", "")
-                    if lc.get("implemented"):
-                        rs["implemented"] = True
-                        rs["implemented_at"] = lc.get("implemented_at", "")
-                        rs["implemented_via"] = lc.get("implemented_via", "")
-                    items.append({
-                        "rec_id": rid,
-                        "title": rec_titles.get(rid, ""),
-                        "kind": rec_kinds.get(rid, ""),
-                        **rs,
-                    })
-                batches_out.append({
-                    "index": b.get("index"),
-                    "status": cs,
-                    "rec_count": b.get("rec_count", len(items)),
-                    "priority_summary": b.get("priority_summary", ""),
-                    "started_at": b.get("started_at", ""),
-                    "completed_at": b.get("completed_at", ""),
-                    "dispatch_log": b.get("dispatch_log", ""),
-                    "rec_items": items,
+        rec_status: dict[str, dict] = {}
+        try:
+            changes_prefix = f"agents/{source_agent}/runs/{dispatch_run_ts}/changes/"
+            for ck in s.list_prefix(changes_prefix):
+                if not ck.endswith(".summary.md"):
+                    continue
+                fname = ck[len(changes_prefix):]
+                rid = fname.split(".summary.md")[0]
+                body = s.read_text(ck) or ""
+                head = body.strip().split("\n", 1)[0]
+                is_deferred = bool(re.match(
+                    r"^(DEFERRED|SKIP|SKIPPED|NO ACTION|NOT APPLIED)[:.]",
+                    head, re.I
+                ))
+                rec_status[rid] = {
+                    "summary_first_line": head[:200],
+                    "summary_chars": len(body),
+                    "deferred": is_deferred,
+                }
+        except Exception:
+            pass
+        applied_set: set[str] = set()
+        try:
+            ar = s.read_json(f"agents/{source_agent}/runs/{dispatch_run_ts}/applied-recs.json")
+            if ar:
+                ids = ar.get("applied_rec_ids") or ar.get("rec_ids") or []
+                if isinstance(ids, list):
+                    applied_set = {str(x) for x in ids if x}
+        except Exception:
+            pass
+        batches_out = []
+        for b in m.get("batches", []):
+            cs = b.get("completion_status") or b.get("status", "")
+            items = []
+            for rid in b.get("rec_ids", []):
+                rs = dict(rec_status.get(rid, {}))
+                lc = rec_lifecycle.get(rid, {})
+                if rid in applied_set:
+                    rs["applied"] = True
+                if lc.get("shipped"):
+                    rs["shipped"] = True
+                    rs["shipped_at"] = lc.get("shipped_at", "")
+                    rs["shipped_tag"] = lc.get("shipped_tag", "")
+                    rs["shipped_via"] = lc.get("shipped_via", "")
+                if lc.get("implemented"):
+                    rs["implemented"] = True
+                    rs["implemented_at"] = lc.get("implemented_at", "")
+                    rs["implemented_via"] = lc.get("implemented_via", "")
+                items.append({
+                    "rec_id": rid,
+                    "title": rec_titles.get(rid, ""),
+                    "kind": rec_kinds.get(rid, ""),
+                    **rs,
                 })
-            chain_status = "completed"
-            statuses = {b["status"] for b in batches_out}
-            if "running" in statuses:
-                chain_status = "running"
-            elif "pending" in statuses:
-                chain_status = "queued"
-            elif "paused" in statuses and "completed" not in statuses:
-                chain_status = "paused"
-            site = ""
-            for suffix in ("-seo-opportunity-agent", "-progressive-improvement-agent",
-                            "-competitor-research-agent", "-catalog-audit-agent",
-                            "-head-to-head-agent", "-article-author-agent"):
-                if source_agent.endswith(suffix):
-                    site = source_agent[: -len(suffix)]
-                    break
-            # Use the latest started/completed_at for sort
-            ts_for_sort = ""
-            for b in reversed(batches_out):
-                if b.get("started_at") or b.get("completed_at"):
-                    ts_for_sort = b.get("completed_at") or b.get("started_at")
-                    break
-            manifests.append({
-                "run_dir": "",
-                "run_dir_basename": run_dir_basename,
-                "dispatch_run_ts": dispatch_run_ts,
-                "source_agent": source_agent,
-                "site": site,
-                "source_run_ts": source_run_ts,
-                "batch_size": m.get("batch_size", 0),
-                "total_recs": m.get("total_recs", 0),
-                "chain_status": chain_status,
-                "mtime": 0.0,
-                "mtime_iso": ts_for_sort,
-                "batches": batches_out,
+            batches_out.append({
+                "index": b.get("index"),
+                "status": cs,
+                "rec_count": b.get("rec_count", len(items)),
+                "priority_summary": b.get("priority_summary", ""),
+                "started_at": b.get("started_at", ""),
+                "completed_at": b.get("completed_at", ""),
+                "dispatch_log": b.get("dispatch_log", ""),
+                "rec_items": items,
             })
-    except Exception:
-        pass
+        chain_status = "completed"
+        statuses = {b["status"] for b in batches_out}
+        if "running" in statuses:
+            chain_status = "running"
+        elif "pending" in statuses:
+            chain_status = "queued"
+        elif "paused" in statuses and "completed" not in statuses:
+            chain_status = "paused"
+        site = ""
+        for suffix in ("-seo-opportunity-agent", "-progressive-improvement-agent",
+                        "-competitor-research-agent", "-catalog-audit-agent",
+                        "-head-to-head-agent", "-article-author-agent"):
+            if source_agent.endswith(suffix):
+                site = source_agent[: -len(suffix)]
+                break
+        ts_for_sort = ""
+        for b in reversed(batches_out):
+            if b.get("started_at") or b.get("completed_at"):
+                ts_for_sort = b.get("completed_at") or b.get("started_at")
+                break
+        return {
+            "run_dir": "",
+            "run_dir_basename": run_dir_basename,
+            "dispatch_run_ts": dispatch_run_ts,
+            "source_agent": source_agent,
+            "site": site,
+            "source_run_ts": source_run_ts,
+            "batch_size": m.get("batch_size", 0),
+            "total_recs": m.get("total_recs", 0),
+            "chain_status": chain_status,
+            "mtime": 0.0,
+            "mtime_iso": ts_for_sort,
+            "batches": batches_out,
+        }
 
-    # Sort by latest activity (mtime_iso descending — chains with active
-    # work first, then by recency).
+    # Parallel-stitch — 16 workers process the head keys concurrently.
+    # Was sequential, ~10 blob reads × 50 chains × 50ms = 25s. With
+    # concurrency 16: ~10 × 50 / 16 × 50ms ≈ 1.5s for the same data.
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for result in ex.map(_stitch_one, head_keys):
+            if result is not None:
+                manifests.append(result)
+
     manifests.sort(key=lambda mm: mm.get("mtime_iso", ""), reverse=True)
+    _BATCHES_CACHE["data"] = manifests
+    _BATCHES_CACHE["ts"] = now_mono
     return {"chains": manifests[:limit]}
 
 

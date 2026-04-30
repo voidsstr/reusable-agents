@@ -259,7 +259,48 @@ array (legacy parity — see generate-comparison-commentary.ts:209-211).
 
 Update `recommendations.json` in-place: for each pair_id, set
 `implemented: true`, `implemented_at: <ISO ts>`,
-`implemented_run_ts: <RESPONDER_RUN_TS>`.
+`implemented_run_ts: <RESPONDER_RUN_TS>`,
+`shipped: true`, `shipped_at: <ISO ts>`, `shipped_via: "db-insert"`,
+`public_url: "https://specpicks.com/compare?slugs=<left_ref>,<right_ref>"`.
+
+Also write `<source_run_dir>/applied-recs.json`:
+
+```python
+import json, pathlib
+applied = pathlib.Path(source_run_dir) / "applied-recs.json"
+applied.write_text(json.dumps({
+    "applied_rec_ids": [pair_id_1, pair_id_2, ...],
+    "method": "h2h-commentary-upsert",
+    "public_urls": { pair_id_1: "https://specpicks.com/compare?slugs=...",
+                       pair_id_2: "..." },
+}, indent=2))
+```
+
+Without `applied-recs.json` the dispatcher marks the run "paused" because
+there's no git commit to detect.
+
+#### 3g. MANDATORY: write per-pair verification.json
+
+For each pair, write
+`<source_run_dir>/verifications/<pair_id>.json`:
+
+```json
+{
+  "rec_id": "pair-001",
+  "rec_type": "h2h-comparison",
+  "generated_at": "<iso ts>",
+  "generated_by": "implementer",
+  "explanation": "1-2 sentences saying you verify by querying /api/compare/commentary, which is the same DB-backed API the SPA hydrates from.",
+  "script_js": "async function verify({ proxyFetch }) { const r = await proxyFetch('https://specpicks.com/api/compare/commentary?kind=<kind>&left_ref=<left_ref>&right_ref=<right_ref>'); if (!r.ok) return { ok:false, evidence:{ http_status:r.status }}; const obj = JSON.parse(r.body||'{}'); const c = obj.commentary; if (!c) return { ok:false, evidence:{ reason:'commentary row missing' }}; return { ok: !!(c.verdict_winner && (c.buy_advice||'').length>50), evidence:{ verdict_winner: c.verdict_winner, buy_advice_length:(c.buy_advice||'').length, updated_at: c.updated_at }}; }"
+}
+```
+
+The dashboard's "Verify" button on the shipped tab fetches this doc and
+runs `script_js` in a sandbox. The script must use `proxyFetch` (not
+browser fetch — the dashboard runs cross-origin), return
+`{ ok: boolean, evidence: object }`, and check the API endpoint NOT the
+SPA `/compare?slugs=...` page (the page is client-rendered and contains
+no product names in its SSR shell).
 
 ### 4. Per-pair logging
 

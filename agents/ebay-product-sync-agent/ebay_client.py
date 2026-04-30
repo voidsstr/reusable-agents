@@ -120,13 +120,32 @@ class EbayClient:
                 f"affiliateReferenceId=ebay-product-sync-agent"
             )
         req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=45) as r:
-                data = json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"eBay search failed: {e.code} {err_body}") from e
-        return list(data.get("itemSummaries") or [])
+        # Resilience: eBay's Browse API frontend (Envoy proxy) returns 503
+        # "upstream connect error" intermittently — typically <2% of calls
+        # but several in a row during regional traffic spikes. Retry with
+        # backoff on 503/502/504 and on transient socket errors. Other
+        # HTTP errors (401 token, 400 bad query, 429 rate-limit) are NOT
+        # retried — those need a different fix.
+        import time as _time
+        last_err = None
+        for attempt in range(3):
+            if attempt > 0:
+                _time.sleep(2 ** attempt)  # 2s, 4s
+            try:
+                with urllib.request.urlopen(req, timeout=45) as r:
+                    data = json.loads(r.read().decode())
+                return list(data.get("itemSummaries") or [])
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="replace")[:500]
+                last_err = RuntimeError(f"eBay search failed: {e.code} {err_body}")
+                if e.code in (502, 503, 504):
+                    continue  # retry
+                raise last_err from e
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                last_err = RuntimeError(f"eBay search failed (transport): {e}")
+                continue  # retry transport errors
+        # All retries exhausted
+        raise last_err if last_err else RuntimeError("eBay search failed: unknown")
 
     def healthcheck(self) -> dict:
         """Verify creds work and the marketplace is reachable."""
