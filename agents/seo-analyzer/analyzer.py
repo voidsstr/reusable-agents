@@ -466,6 +466,486 @@ def _match_files_by_type(routes: list[dict], page_type: str) -> list[str]:
     return out[:3]
 
 
+def _load_pages_by_type(data: Path) -> list[dict]:
+    """Load the inventory crawler's per-page records, one JSON per line."""
+    p = data / "pages-by-type.jsonl"
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _required_jsonld_for_type(page_type: str) -> list[str]:
+    """Map a page-type bucket to the JSON-LD @types we expect.
+
+    Modeled on studio-supplies.com:
+      product/recipe → Product or Recipe + BreadcrumbList + FAQPage
+      collection / shop_category → CollectionPage + BreadcrumbList
+      article / blog / review → Article (or Review) + BreadcrumbList
+      home → WebSite + Organization
+    """
+    pt = (page_type or "").lower()
+    if pt in ("product", "recipe"):
+        return ["Product", "BreadcrumbList"]  # FAQPage advisory
+    if pt in ("collection", "category", "shop_category"):
+        return ["CollectionPage", "BreadcrumbList"]
+    if pt in ("article", "blog", "review", "guide"):
+        return ["Article", "BreadcrumbList"]
+    if pt in ("home", "homepage"):
+        return ["WebSite", "Organization"]
+    return []
+
+
+def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Apply the studio-supplies-derived on-page audit rules.
+
+    Reads pages-by-type.jsonl + site-signals.json and emits up to a
+    handful of summary recs. Each rec aggregates issues across many
+    pages — we surface counts + 3-5 sample URLs rather than spamming
+    one rec per page (the implementer can fan out from one rec).
+    """
+    if len(recs) >= max_recs:
+        return
+
+    pages = _load_pages_by_type(data)
+    signals = _load(data / "site-signals.json")
+
+    def _budget() -> bool:
+        return len(recs) < max_recs
+
+    def _samples(items: list[dict], n: int = 5) -> list[str]:
+        return [it.get("url", "") for it in items[:n] if it.get("url")]
+
+    # ── Per-page rules (require pages-by-type.jsonl) ─────────────────
+    if pages:
+        ok_pages = [p for p in pages if 200 <= int(p.get("status", 0) or 0) < 300]
+
+        # Title length
+        if _budget():
+            short = [p for p in ok_pages if 0 < len(p.get("title") or "") < 30]
+            long = [p for p in ok_pages if len(p.get("title") or "") > 70]
+            if (short or long) and (len(short) + len(long)) >= 2:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-title-length", "priority": "medium",
+                    "title": f"Tighten <title> length on {len(short) + len(long)} page(s) (target 30-65 chars)",
+                    "rationale": (
+                        f"{len(short)} title(s) below 30 chars (under-using SERP real estate); "
+                        f"{len(long)} title(s) over 70 (Google truncates). studio-supplies pattern: "
+                        f"\"<Specific Phrase> | Brand\" 30-65 chars. Sample short: "
+                        f"{', '.join(_samples(short, 3))}. Sample long: {', '.join(_samples(long, 3))}."
+                    ),
+                    "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "For each flagged URL, rewrite <title> to 30-65 chars including the primary "
+                            "keyword first, brand suffix \" | Site Name\" last. Verify in /sitemap.xml "
+                            "doesn't 404 after the change."
+                        ),
+                    },
+                    "sample_urls": _samples(short, 3) + _samples(long, 3),
+                    "implemented": False,
+                })
+
+        # Missing / under-length / over-length meta description
+        if _budget():
+            missing = [p for p in ok_pages if not (p.get("description") or "").strip()]
+            short = [p for p in ok_pages if 0 < len(p.get("description") or "") < 120]
+            long = [p for p in ok_pages if len(p.get("description") or "") > 165]
+            tot = len(missing) + len(short) + len(long)
+            if tot >= 2:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-meta-description", "priority": "medium",
+                    "title": f"Fix meta description on {tot} page(s) — missing/short/long",
+                    "rationale": (
+                        f"missing: {len(missing)}, under 120 chars: {len(short)}, over 165: {len(long)}. "
+                        f"Studio-supplies-style pages run 145-160 chars and lead with the primary keyword. "
+                        f"Sample missing: {', '.join(_samples(missing, 3))}."
+                    ),
+                    "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Write a 145-160 char meta description per page that opens with the page's "
+                            "primary keyword, includes a benefit phrase, and ends with a soft CTA "
+                            "(\"Compare specs and prices.\")."
+                        ),
+                    },
+                    "sample_urls": _samples(missing + short + long, 5),
+                    "implemented": False,
+                })
+
+        # Canonical missing
+        if _budget():
+            no_canon = [p for p in ok_pages if not (p.get("canonical") or "").strip()]
+            if len(no_canon) >= 2:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-canonical-missing", "priority": "high",
+                    "title": f"Add <link rel=\"canonical\"> on {len(no_canon)} page(s)",
+                    "rationale": (
+                        "Pages without a canonical risk duplicate-content dilution when query "
+                        "params, tracking codes, or alternate template paths cause variant URLs "
+                        "to be indexed separately. studio-supplies sets canonical on every page."
+                    ),
+                    "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "In SSR <head>, emit `<link rel=\"canonical\" href=\"https://<domain><path>\">` "
+                            "where path strips query params, fragments, and trailing slashes. "
+                            "Verify on each flagged URL after deploy."
+                        ),
+                    },
+                    "sample_urls": _samples(no_canon, 5),
+                    "implemented": False,
+                })
+
+        # H1 — missing or multiple
+        if _budget():
+            no_h1 = [p for p in ok_pages if int(p.get("h1_count", 0) or 0) == 0]
+            many_h1 = [p for p in ok_pages if int(p.get("h1_count", 0) or 0) > 1]
+            if (no_h1 or many_h1) and (len(no_h1) + len(many_h1)) >= 2:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-h1-issue", "priority": "medium",
+                    "title": f"Fix h1 on {len(no_h1) + len(many_h1)} page(s) — exactly one h1 per page",
+                    "rationale": (
+                        f"{len(no_h1)} page(s) have no h1 (Google falls back to <title> "
+                        f"or worse, a nav link). {len(many_h1)} have multiple h1s "
+                        f"(diluted topical signal). Studio-supplies rule: 1 h1, primary keyword, "
+                        f"matches user-visible page topic."
+                    ),
+                    "expected_impact": {"metric": "gsc.avg_position", "horizon_weeks": 6},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Audit the SSR template. Demote redundant h1s (logo, nav) to <p>/<div>. "
+                            "On pages without h1, add one near the top of <main> using the page's "
+                            "primary keyword."
+                        ),
+                    },
+                    "sample_urls": _samples(no_h1 + many_h1, 5),
+                    "implemented": False,
+                })
+
+        # OG tag completeness
+        if _budget():
+            need = {"title", "description", "image", "url", "type"}
+            incomplete = [
+                p for p in ok_pages
+                if not need.issubset(set(p.get("og_keys") or []))
+            ]
+            if len(incomplete) >= 3:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-og-incomplete", "priority": "medium",
+                    "title": f"Complete Open Graph tags on {len(incomplete)} page(s)",
+                    "rationale": (
+                        "Open Graph drives the link preview Slack/Discord/Facebook/iMessage shows. "
+                        "Pages missing og:title/description/image/url/type get a generic preview that "
+                        "reduces CTR from social. Studio-supplies emits all five on every page."
+                    ),
+                    "expected_impact": {"metric": "social_referral_ctr", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "In SSR <head>, emit og:site_name, og:title, og:description, og:url, "
+                            "og:type (website|article|product), og:image (≥1200×630). Mirror title "
+                            "and meta description fallbacks when page-specific values are missing."
+                        ),
+                    },
+                    "sample_urls": _samples(incomplete, 5),
+                    "implemented": False,
+                })
+
+        # Twitter card missing
+        if _budget():
+            no_twitter = [p for p in ok_pages if not (p.get("twitter_card_keys") or [])]
+            if len(no_twitter) >= 3:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-twitter-card-missing", "priority": "low",
+                    "title": f"Add Twitter Card meta on {len(no_twitter)} page(s)",
+                    "rationale": (
+                        "Without twitter:card, X/Twitter renders a plain link instead of a rich "
+                        "preview. Studio-supplies emits twitter:card, twitter:title, twitter:description "
+                        "on every page (3 tags minimum)."
+                    ),
+                    "expected_impact": {"metric": "social_referral_ctr", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Emit `<meta name=\"twitter:card\" content=\"summary_large_image\">` plus "
+                            "twitter:title, twitter:description, optional twitter:site (@handle) and "
+                            "twitter:image (≥1200×675)."
+                        ),
+                    },
+                    "sample_urls": _samples(no_twitter, 5),
+                    "implemented": False,
+                })
+
+        # JSON-LD schema by page type
+        if _budget():
+            broken = []
+            for p in ok_pages:
+                req = _required_jsonld_for_type(p.get("type", ""))
+                have = set(p.get("jsonld_types") or [])
+                missing = [t for t in req if t not in have]
+                if req and missing:
+                    broken.append({"url": p.get("url", ""), "type": p.get("type", ""), "missing": missing})
+            if len(broken) >= 2:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-jsonld-missing", "priority": "high",
+                    "title": f"Add structured-data (JSON-LD) on {len(broken)} page(s)",
+                    "rationale": (
+                        "Per-page-type JSON-LD is the foundation of rich SERP results — review stars, "
+                        "breadcrumb trails, FAQ accordions, sitelinks. Studio-supplies emits "
+                        "Product+BreadcrumbList+FAQPage on products, Article+BreadcrumbList on blogs, "
+                        "WebSite+Organization on home, CollectionPage+BreadcrumbList on collections. "
+                        f"Sample gaps: " + "; ".join(
+                            f"{b['url']} (type={b['type']}, missing={','.join(b['missing'])})"
+                            for b in broken[:3]
+                        )
+                    ),
+                    "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 8},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "In each page-type's SSR template, emit a `<script type=\"application/ld+json\">` "
+                            "block. Use schema.org's per-type required fields (Product needs name, image, "
+                            "description, brand, offers; Article needs headline, author, datePublished, "
+                            "image, publisher; BreadcrumbList needs itemListElement with @id+name+position)."
+                        ),
+                    },
+                    "sample_urls": [b["url"] for b in broken[:5]],
+                    "missing_breakdown": broken[:10],
+                    "implemented": False,
+                })
+
+        # FAQ schema absent on product/category-style pages (advisory — high CTR lift)
+        if _budget():
+            faq_targets = [
+                p for p in ok_pages
+                if p.get("type") in ("product", "recipe", "collection", "category", "shop_category")
+                and "FAQPage" not in (p.get("jsonld_types") or [])
+                and not p.get("faq_heading")
+            ]
+            if len(faq_targets) >= 5:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-faqpage-opportunity", "priority": "medium",
+                    "title": f"Add FAQ block + FAQPage JSON-LD to {len(faq_targets)} commerce page(s)",
+                    "rationale": (
+                        "Studio-supplies product pages each ship a 10-question FAQ rendered as both "
+                        "an accordion in the body AND FAQPage JSON-LD. This produces rich-snippet "
+                        "expandable Q&A under the SERP listing — measurable CTR lift on commercial "
+                        "queries. The agent can generate Qs from product specs/category."
+                    ),
+                    "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 8},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Add a `faqs: [{question, answer}]` field on each product/category. "
+                            "Render in body as <details><summary>Q</summary><p>A</p></details>. Also "
+                            "emit FAQPage JSON-LD with mainEntity[*].@type=Question, .name=Q, "
+                            ".acceptedAnswer.@type=Answer, .acceptedAnswer.text=A. Aim for 5-10 Q&As."
+                        ),
+                    },
+                    "sample_urls": _samples(faq_targets, 5),
+                    "implemented": False,
+                })
+
+        # Image alt text rate
+        if _budget():
+            offenders = [
+                p for p in ok_pages
+                if int(p.get("img_count", 0) or 0) >= 4
+                and (int(p.get("img_with_alt", 0) or 0) / max(int(p.get("img_count", 1)), 1)) < 0.85
+            ]
+            if len(offenders) >= 3:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-images-alt-rate", "priority": "medium",
+                    "title": f"Lift image alt-text coverage on {len(offenders)} page(s) (target ≥90%)",
+                    "rationale": (
+                        "Image alt is required for accessibility AND helps Google Images rank — a "
+                        "real organic-discovery channel. Studio-supplies hits ~95% alt coverage on "
+                        "product pages with descriptive captions ('Apple Watch Ultra titanium ocean band') "
+                        "rather than filenames."
+                    ),
+                    "expected_impact": {"metric": "google_images_referrals", "horizon_weeks": 6},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "For each <img>, emit a descriptive alt that includes the product/topic "
+                            "name + attribute (color/size/era). Empty alt='' is acceptable for purely "
+                            "decorative images; missing alt is not. Auto-generate from `${product.name} "
+                            "${product.color || ''}` in the SSR template."
+                        ),
+                    },
+                    "sample_urls": _samples(offenders, 5),
+                    "implemented": False,
+                })
+
+        # Thin content
+        if _budget():
+            thin = [
+                p for p in ok_pages
+                if p.get("type") not in ("home", "homepage")
+                and 0 < int(p.get("word_count", 0) or 0) < 250
+            ]
+            if len(thin) >= 3:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-thin-content", "priority": "medium",
+                    "title": f"Expand thin-content pages — {len(thin)} page(s) under 250 words",
+                    "rationale": (
+                        "Thin pages rarely rank for competitive queries. Studio-supplies product "
+                        "pages run ~1500 words (description + FAQ + cross-references); category "
+                        "pages run 500+. Add a buying-guide intro paragraph, a 5-Q FAQ, and 3-5 "
+                        "cross-links to related products."
+                    ),
+                    "expected_impact": {"metric": "gsc.avg_position", "horizon_weeks": 8},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "On each flagged URL, add: (1) a 100-word intro lede, (2) a 5-question "
+                            "FAQ block (also wired to FAQPage JSON-LD), (3) 3 cross-links to "
+                            "related items in the same category."
+                        ),
+                    },
+                    "sample_urls": _samples(thin, 5),
+                    "implemented": False,
+                })
+
+        # Internal linking density
+        if _budget():
+            sparse = [
+                p for p in ok_pages
+                if int(p.get("internal_links", 0) or 0) < 10
+                and p.get("type") not in ("home", "homepage")
+            ]
+            if len(sparse) >= 3:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-low-internal-linking", "priority": "low",
+                    "title": f"Add internal links to {len(sparse)} sparsely-linked page(s)",
+                    "rationale": (
+                        "Pages with under 10 internal links pass minimal authority and are harder "
+                        "for Google to discover. Studio-supplies product pages average 50+ internal "
+                        "links via the global nav, breadcrumbs, related-products carousel, and footer."
+                    ),
+                    "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "sample_urls": _samples(sparse, 5),
+                    "implemented": False,
+                })
+
+    # ── Site-wide rules (require site-signals.json) ───────────────────
+    robots = (signals.get("robots") or {}) if isinstance(signals, dict) else {}
+    bots = robots.get("bots") or {}
+
+    # robots.txt missing AI-crawler explicit allows
+    if _budget() and bots:
+        ai_crit = ["GPTBot", "ClaudeBot", "PerplexityBot", "OAI-SearchBot", "Bingbot"]
+        missing_crit = [b for b in ai_crit if not bots.get(b, {}).get("declared")]
+        if len(missing_crit) >= 2:
+            rid = next_id()
+            recs.append({
+                "id": rid, "type": "robots-no-ai-allow", "priority": "high",
+                "title": f"Add explicit robots.txt allow for {len(missing_crit)} AI crawler(s)",
+                "rationale": (
+                    "AI search engines (ChatGPT, Claude, Perplexity, Google AI Overviews, Bing "
+                    "Copilot) are a fast-growing referral channel. Without explicit User-agent "
+                    "blocks, some bots fall back to conservative crawl patterns or skip the site "
+                    "entirely. Studio-supplies emits a per-bot Allow:/ block for "
+                    "GPTBot, OAI-SearchBot, ChatGPT-User, PerplexityBot, Perplexity-User, "
+                    "ClaudeBot, anthropic-ai, claude-web, Google-Extended, Applebot-Extended, "
+                    "Bingbot, Amazonbot, Bytespider, Meta-ExternalAgent. "
+                    f"Currently missing: {', '.join(missing_crit)}."
+                ),
+                "expected_impact": {"metric": "ai_referral_traffic", "horizon_weeks": 12},
+                "data_refs": ["data/site-signals.json"],
+                "implementation_outline": {
+                    "approach": (
+                        "Append to robots.txt a per-bot block for each AI crawler:\n"
+                        "  User-agent: GPTBot\n  Disallow: /admin\n  Disallow: /cart\n  Allow: /\n\n"
+                        "Repeat for ClaudeBot, PerplexityBot, OAI-SearchBot, Bingbot. Each block "
+                        "is independent (User-agent groups don't inherit from *)."
+                    ),
+                },
+                "missing_bots": missing_crit,
+                "implemented": False,
+            })
+
+    # robots.txt missing Sitemap directive
+    if _budget() and robots and robots.get("sitemap_directive") is False:
+        rid = next_id()
+        recs.append({
+            "id": rid, "type": "robots-no-sitemap", "priority": "high",
+            "title": "Add `Sitemap:` directive to robots.txt",
+            "rationale": (
+                "Without a Sitemap: line in robots.txt, crawlers must discover the sitemap by "
+                "convention (/sitemap.xml). Explicit declaration improves discovery latency and "
+                "ensures named bots (which don't inherit from *) see it."
+            ),
+            "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 4},
+            "data_refs": ["data/site-signals.json"],
+            "implementation_outline": {
+                "approach": "Append `Sitemap: https://<domain>/sitemap.xml` once at the bottom of robots.txt.",
+            },
+            "implemented": False,
+        })
+
+    # Homepage missing WebSite or Organization JSON-LD
+    if _budget():
+        home = (signals.get("homepage") or {}) if isinstance(signals, dict) else {}
+        types = set(home.get("jsonld_types") or [])
+        missing = [t for t in ("WebSite", "Organization") if t not in types]
+        if missing:
+            rid = next_id()
+            recs.append({
+                "id": rid, "type": "home-jsonld-missing", "priority": "high",
+                "title": f"Add {' + '.join(missing)} JSON-LD to homepage",
+                "rationale": (
+                    "WebSite + Organization on the homepage is what Google uses to build the "
+                    "knowledge-panel sitelinks search box and the brand sitelinks shown for "
+                    "navigational queries. Studio-supplies emits both at the root."
+                ),
+                "expected_impact": {"metric": "branded_serp_features", "horizon_weeks": 8},
+                "data_refs": ["data/site-signals.json"],
+                "implementation_outline": {
+                    "approach": (
+                        "Add to homepage <head>:\n"
+                        "  <script type=\"application/ld+json\">{\n"
+                        "    \"@context\":\"https://schema.org\",\n"
+                        "    \"@type\":\"WebSite\",\n"
+                        "    \"name\":\"<Site Name>\",\n"
+                        "    \"url\":\"https://<domain>/\",\n"
+                        "    \"potentialAction\":{\"@type\":\"SearchAction\",\n"
+                        "      \"target\":\"https://<domain>/search?q={search_term_string}\",\n"
+                        "      \"query-input\":\"required name=search_term_string\"}\n"
+                        "  }</script>\n\n"
+                        "And an Organization block with name, url, logo, sameAs (social profiles)."
+                    ),
+                },
+                "missing": missing,
+                "implemented": False,
+            })
+
+
 def build_recommendations(cfg, run_dir: Path, snap: dict,
                             handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict]]:
     """Return (recommendations, declared_goals).
@@ -886,6 +1366,17 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
                 "implemented": False,
             })
             article_recs_added += 1
+
+    # ---- On-page audit (studio-supplies playbook) ----
+    # Rules read pages-by-type.jsonl + site-signals.json (written by the
+    # data-collector). Modeled on the high-converting studio-supplies.com
+    # SEO patterns: comprehensive head metadata, JSON-LD per page type,
+    # FAQ blocks, robots.txt with explicit AI-crawler allows, etc.
+    if len(recs) < max_recs:
+        try:
+            _add_onpage_recs(data, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [onpage] rule eval failed: {e}", file=sys.stderr)
 
     # Filter out any rec whose canonical key matches a previously
     # shipped/skipped rec. This prevents the analyzer from re-proposing

@@ -963,30 +963,223 @@ def _http_get_with_cache(
 
 
 def _extract_page_meta(html: bytes) -> dict:
-    """Crude HTML metadata extraction — title, description, h1, canonical, body text.
-    Avoids a hard bs4 dependency; uses regex for the few fields the LLM audit needs."""
+    """HTML metadata extraction — title, description, canonical, headings,
+    body text, OG/Twitter cards, JSON-LD schema types, image alt-rate, and
+    link counts. The expanded signal set drives the on-page SEO analyzer
+    rules (onpage-* recs) modeled on the studio-supplies.com playbook.
+
+    Avoids a hard bs4 dependency — regex-based on raw HTML.
+    """
     try:
         text = html.decode("utf-8", errors="replace")
     except Exception:
         text = ""
+
     def _find(pat, flags=re.IGNORECASE | re.DOTALL):
         m = re.search(pat, text, flags)
         return (m.group(1) or "").strip() if m else ""
+
     title = _find(r"<title[^>]*>(.*?)</title>")
     description = _find(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']')
     canonical = _find(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']*)["\']')
+    meta_robots = _find(r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']*)["\']')
     h1 = _find(r"<h1[^>]*>(.*?)</h1>")
     h1 = re.sub(r"<[^>]+>", "", h1).strip()
-    # Crude body text extraction
+
+    # Heading counts
+    h1_count = len(re.findall(r"<h1[\s>]", text, re.IGNORECASE))
+    h2_count = len(re.findall(r"<h2[\s>]", text, re.IGNORECASE))
+    h3_count = len(re.findall(r"<h3[\s>]", text, re.IGNORECASE))
+
+    # Open Graph + Twitter cards
+    og = dict(re.findall(
+        r'<meta[^>]+property=["\']og:([^"\']+)["\'][^>]+content=["\']([^"\']*)',
+        text, re.IGNORECASE,
+    ))
+    tw = sorted(set(re.findall(
+        r'<meta[^>]+name=["\']twitter:([^"\']+)["\']',
+        text, re.IGNORECASE,
+    )))
+
+    # JSON-LD blocks — collect @type values across all blocks (handles
+    # both single-object and array forms and @graph nesting).
+    jsonld_types: list[str] = []
+    for blk in re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        text, re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            doc = json.loads(blk.strip())
+        except Exception:
+            continue
+        def _walk(node):
+            if isinstance(node, dict):
+                t = node.get("@type")
+                if isinstance(t, str):
+                    jsonld_types.append(t)
+                elif isinstance(t, list):
+                    jsonld_types.extend(str(x) for x in t)
+                if isinstance(node.get("@graph"), list):
+                    for c in node["@graph"]:
+                        _walk(c)
+            elif isinstance(node, list):
+                for c in node:
+                    _walk(c)
+        _walk(doc)
+    jsonld_types = sorted(set(jsonld_types))
+
+    # Image alt + lazy-load coverage
+    imgs = re.findall(r"<img\b[^>]*>", text, re.IGNORECASE)
+    img_count = len(imgs)
+    img_with_alt = sum(1 for i in imgs if re.search(r'\salt=["\'][^"\']{2,}', i))
+    img_lazy = sum(1 for i in imgs if re.search(r'loading=["\']lazy["\']', i, re.IGNORECASE))
+
+    # Link counts (inside <body>)
     body_html = _find(r"<body[^>]*>(.*?)</body>") or text
-    body_html = re.sub(r"<script[^>]*>.*?</script>", " ", body_html, flags=re.IGNORECASE | re.DOTALL)
-    body_html = re.sub(r"<style[^>]*>.*?</style>", " ", body_html, flags=re.IGNORECASE | re.DOTALL)
-    body_text = re.sub(r"<[^>]+>", " ", body_html)
-    body_text = re.sub(r"\s+", " ", body_text).strip()[:8000]
+    internal_links = len(re.findall(r'<a[^>]+href=["\']/[^"\']*["\']', body_html))
+    external_links = len(re.findall(r'<a[^>]+href=["\']https?://[^"\']+["\']', body_html))
+    nofollow_links = len(re.findall(r'<a[^>]+rel=["\'][^"\']*nofollow', body_html, re.IGNORECASE))
+
+    # Body text + word count (capped excerpt)
+    body_html_clean = re.sub(r"<script[^>]*>.*?</script>", " ", body_html, flags=re.IGNORECASE | re.DOTALL)
+    body_html_clean = re.sub(r"<style[^>]*>.*?</style>", " ", body_html_clean, flags=re.IGNORECASE | re.DOTALL)
+    body_text = re.sub(r"<[^>]+>", " ", body_html_clean)
+    body_text = re.sub(r"\s+", " ", body_text).strip()
+    word_count = len(body_text.split())
+    body_excerpt = body_text[:8000]
+
+    # FAQ heading present in body (a common signal even without FAQPage JSON-LD)
+    faq_heading = bool(re.search(
+        r'<h[1-3][^>]*>\s*(?:FAQ|Frequently Asked Questions?)',
+        body_html, re.IGNORECASE,
+    ))
+
+    # Performance-hint tags in <head>
+    head_html = _find(r"<head[^>]*>(.*?)</head>") or text
+    preconnect = len(re.findall(r'rel=["\']preconnect["\']', head_html, re.IGNORECASE))
+    dns_prefetch = len(re.findall(r'rel=["\']dns-prefetch["\']', head_html, re.IGNORECASE))
+    preload = len(re.findall(r'rel=["\']preload["\']', head_html, re.IGNORECASE))
+
     return {
-        "title": title, "description": description, "canonical": canonical,
-        "h1": h1, "body_text": body_text,
+        "title": title,
+        "description": description,
+        "canonical": canonical,
+        "meta_robots": meta_robots,
+        "h1": h1,
+        "h1_count": h1_count,
+        "h2_count": h2_count,
+        "h3_count": h3_count,
+        "og_keys": sorted(og.keys()),
+        "twitter_card_keys": tw,
+        "jsonld_types": jsonld_types,
+        "img_count": img_count,
+        "img_with_alt": img_with_alt,
+        "img_lazy": img_lazy,
+        "internal_links": internal_links,
+        "external_links": external_links,
+        "nofollow_links": nofollow_links,
+        "word_count": word_count,
+        "faq_heading": faq_heading,
+        "preconnect": preconnect,
+        "dns_prefetch": dns_prefetch,
+        "preload": preload,
+        "body_text": body_excerpt,
     }
+
+
+def audit_site_signals(site_cfg, out_dir: Path) -> None:
+    """Site-wide SEO signals — robots.txt rules + homepage schema.
+
+    Audits:
+      • robots.txt presence, AI-crawler allow rules (GPTBot, ClaudeBot,
+        PerplexityBot, OAI-SearchBot, ChatGPT-User, Bingbot, etc.),
+        Sitemap directive, /admin /cart /checkout disallows.
+      • Homepage JSON-LD — WebSite + Organization presence (modeled on
+        studio-supplies.com which carries both at the root).
+      • robots.txt size + AI-crawler coverage score.
+
+    Writes site-signals.json. Best-effort — every probe wraps any
+    network/parse error so a partial result still ships.
+    """
+    domain = site_cfg.get("site", {}).get("domain", "")
+    if not domain:
+        err("  site-signals: no domain configured, skipping")
+        return
+    base = f"https://{domain}"
+
+    signals: dict = {
+        "domain": domain,
+        "robots": {},
+        "homepage": {},
+    }
+
+    # ── robots.txt ───────────────────────────────────────────────────
+    try:
+        url = f"{base}/robots.txt"
+        cache_dir = out_dir / "page-cache"
+        status, body, _ = _http_get_with_cache(url, cache_dir)
+        text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+        signals["robots"]["status"] = status
+        signals["robots"]["bytes"] = len(text)
+
+        ai_bots = [
+            "GPTBot", "OAI-SearchBot", "ChatGPT-User",
+            "PerplexityBot", "Perplexity-User",
+            "ClaudeBot", "anthropic-ai", "claude-web",
+            "Google-Extended", "Applebot-Extended",
+            "Bingbot", "Amazonbot", "Bytespider", "Meta-ExternalAgent",
+        ]
+        # Per-bot status: present (User-agent declared), allowed (Allow: / present)
+        bot_blocks: dict = {}
+        for bot in ai_bots:
+            block_pat = re.compile(
+                rf"User-agent:\s*{re.escape(bot)}\s*\n(.*?)(?=\nUser-agent:|\Z)",
+                re.IGNORECASE | re.DOTALL,
+            )
+            m = block_pat.search(text)
+            if m:
+                blk = m.group(1)
+                bot_blocks[bot] = {
+                    "declared": True,
+                    "has_allow_root": bool(re.search(r"^\s*Allow:\s*/\s*$", blk, re.MULTILINE)),
+                    "has_disallow_root": bool(re.search(r"^\s*Disallow:\s*/\s*$", blk, re.MULTILINE)),
+                }
+            else:
+                bot_blocks[bot] = {
+                    "declared": False,
+                    "has_allow_root": False,
+                    "has_disallow_root": False,
+                }
+        signals["robots"]["bots"] = bot_blocks
+        signals["robots"]["sitemap_directive"] = bool(re.search(r"(?im)^\s*Sitemap:\s*https?://", text))
+        signals["robots"]["disallow_admin"] = bool(re.search(r"(?im)^\s*Disallow:\s*/admin", text))
+        signals["robots"]["disallow_cart"] = bool(re.search(r"(?im)^\s*Disallow:\s*/cart", text))
+        signals["robots"]["disallow_checkout"] = bool(re.search(r"(?im)^\s*Disallow:\s*/checkout", text))
+    except Exception as e:
+        signals["robots"]["error"] = str(e)[:300]
+
+    # ── homepage schema sniff ────────────────────────────────────────
+    try:
+        cache_dir = out_dir / "page-cache"
+        status, body, _ = _http_get_with_cache(base + "/", cache_dir)
+        meta = _extract_page_meta(body) if isinstance(body, (bytes, bytearray)) else _extract_page_meta(str(body).encode())
+        signals["homepage"] = {
+            "status": status,
+            "title": meta.get("title", ""),
+            "description": meta.get("description", ""),
+            "canonical": meta.get("canonical", ""),
+            "og_keys": meta.get("og_keys", []),
+            "twitter_card_keys": meta.get("twitter_card_keys", []),
+            "jsonld_types": meta.get("jsonld_types", []),
+            "h1_count": meta.get("h1_count", 0),
+            "internal_links": meta.get("internal_links", 0),
+            "word_count": meta.get("word_count", 0),
+        }
+    except Exception as e:
+        signals["homepage"]["error"] = str(e)[:300]
+
+    (out_dir / "site-signals.json").write_text(json.dumps(signals, indent=2))
+    err(f"  site-signals: wrote {(out_dir / 'site-signals.json').name}")
 
 
 def crawl_page_inventory(site_cfg, out_dir: Path) -> None:
@@ -1330,6 +1523,14 @@ def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path) -> None:
             err(f"  Ads: unhandled error {e}")
     else:
         err("  Ads: not configured, skipping")
+
+    # Site-wide signal audit — robots.txt + homepage schema. Always
+    # runs (no opt-in needed) so the analyzer's robots-/home- rules
+    # have data to work with on every site. Failures are non-fatal.
+    try:
+        audit_site_signals(cfg, data_dir)
+    except Exception as e:
+        err(f"  site-signals: unhandled error {e}")
 
     # Optional: page-type inventory (config-driven)
     if cfg.get("page_inventory"):
