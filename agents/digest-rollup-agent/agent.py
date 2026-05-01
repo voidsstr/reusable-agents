@@ -229,6 +229,206 @@ def _doctor_escalations(s, cutoff: datetime) -> list[dict]:
 _DASHBOARD = "https://agents.happysky-24190067.eastus.azurecontainerapps.io"
 
 
+def _handoff_metrics(s, cutoff: datetime) -> dict:
+    """Read agents/*/handoffs.jsonl across all known agents and roll up
+    inter-agent flow stats for the digest header. Read-only, never
+    fails the digest if some agents have no log yet.
+
+    Returns:
+        {
+          "total_out": int,
+          "total_in": int,
+          "shipped": int, "deferred": int, "rejected": int, "in_progress": int,
+          "edges": [{"from": ..., "to": ..., "count": ..., "outcomes": {...}}],
+          "stuck": [{"request_id":..., "from":..., "to":..., "work_type":...,
+                     "age_hours": ..., "rec_id":...}],
+        }
+    """
+    from collections import defaultdict
+    out = {
+        "total_out": 0, "total_in": 0,
+        "shipped": 0, "deferred": 0, "rejected": 0, "in_progress": 0,
+        "edges": [],
+        "stuck": [],
+    }
+    edge_counts: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"count": 0, "outcomes": defaultdict(int)}
+    )
+    # Track handoffs by request_id so we can detect "no outcome ever logged"
+    # → stuck. Indexed by (agent_id, request_id).
+    inbound: dict[tuple[str, str], dict] = {}
+    outcomes: dict[tuple[str, str], dict] = {}
+    try:
+        agent_keys = s.list_prefix("agents/")
+    except Exception:
+        return out
+    agent_ids: set[str] = set()
+    for k in agent_keys:
+        # agents/<id>/...
+        parts = k.split("/")
+        if len(parts) >= 3:
+            agent_ids.add(parts[1])
+    for agent_id in agent_ids:
+        raw = s.read_text(f"agents/{agent_id}/handoffs.jsonl") or ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            ts_str = row.get("ts") or row.get("received_at") or row.get("acted_at")
+            ts_dt = _iso_to_dt(ts_str) if ts_str else None
+            if not ts_dt or ts_dt < cutoff:
+                # Still consider stuck-tracking via inbound below
+                if row.get("direction") == "in":
+                    rid = row.get("request_id")
+                    if rid:
+                        inbound[(agent_id, rid)] = {**row, "_seen_agent": agent_id}
+                if row.get("direction") == "outcome":
+                    rid = row.get("request_id")
+                    if rid:
+                        outcomes[(agent_id, rid)] = row
+                continue
+            d = row.get("direction")
+            if d == "out":
+                out["total_out"] += 1
+                pair = (row.get("from_agent") or agent_id,
+                        row.get("to_agent") or "?")
+                edge_counts[pair]["count"] += 1
+            elif d == "in":
+                out["total_in"] += 1
+                rid = row.get("request_id")
+                if rid:
+                    inbound[(agent_id, rid)] = {**row, "_seen_agent": agent_id}
+            elif d == "outcome":
+                rid = row.get("request_id")
+                if rid:
+                    outcomes[(agent_id, rid)] = row
+                outcome = (row.get("outcome") or "").lower()
+                if outcome in out:
+                    out[outcome] += 1
+    # Build edges list
+    out["edges"] = [
+        {
+            "from": pair[0], "to": pair[1],
+            "count": e["count"], "outcomes": dict(e["outcomes"]),
+        }
+        for pair, e in sorted(edge_counts.items(), key=lambda kv: -kv[1]["count"])
+    ]
+    # Detect stuck handoffs — inbound rows older than 24h with no
+    # outcome row.
+    now = _now()
+    stuck_cutoff = now - timedelta(hours=24)
+    for (agent_id, rid), row in inbound.items():
+        outcome_row = outcomes.get((agent_id, rid))
+        if outcome_row:
+            # in_progress with no later "shipped"/"deferred" still counts
+            # as stuck after 48h
+            outc = (outcome_row.get("outcome") or "").lower()
+            if outc != "in_progress":
+                continue
+            ts = _iso_to_dt(outcome_row.get("acted_at"))
+            stuck_cutoff_ip = now - timedelta(hours=48)
+            if ts and ts < stuck_cutoff_ip:
+                out["stuck"].append({
+                    "request_id": rid,
+                    "to": agent_id,
+                    "from": outcome_row.get("from_agent") or "?",
+                    "work_type": outcome_row.get("work_type") or "?",
+                    "age_hours": int((now - ts).total_seconds() / 3600)
+                                  if ts else None,
+                    "stuck_state": "in_progress-too-long",
+                })
+            continue
+        ts = _iso_to_dt(row.get("received_at") or row.get("ts"))
+        if ts and ts < stuck_cutoff:
+            out["stuck"].append({
+                "request_id": rid,
+                "to": agent_id,
+                "from": row.get("from_agent") or "?",
+                "work_type": row.get("work_type") or "?",
+                "rec_id": row.get("rec_id") or "",
+                "age_hours": int((now - ts).total_seconds() / 3600),
+                "stuck_state": "no-outcome",
+            })
+    return out
+
+
+def _render_handoff_block(metrics: dict) -> str:
+    """Render the handoff section. Skipped when nothing happened."""
+    if not metrics or metrics.get("total_out", 0) == 0:
+        return ""
+    parts: list[str] = [
+        '<h2 style="font-size:15px;color:#0f172a;margin:24px 0 8px 0;'
+        'border-bottom:1px solid #e2e8f0;padding-bottom:6px">'
+        '🔀 Inter-agent handoffs</h2>'
+    ]
+    # KPI row
+    parts.append(
+        '<div style="display:grid;grid-template-columns:repeat(5,1fr);'
+        'gap:8px;margin-bottom:14px">'
+    )
+    for label, val, color in (
+        ("Sent", metrics["total_out"], "#3b82f6"),
+        ("Shipped", metrics.get("shipped", 0), "#10b981"),
+        ("In progress", metrics.get("in_progress", 0), "#64748b"),
+        ("Deferred", metrics.get("deferred", 0), "#f59e0b"),
+        ("Stuck", len(metrics.get("stuck") or []), "#ef4444" if metrics.get("stuck") else "#94a3b8"),
+    ):
+        parts.append(
+            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+            f'border-radius:8px;padding:8px;text-align:center">'
+            f'<div style="font-size:1.4rem;font-weight:700;color:{color}">{val}</div>'
+            f'<div style="font-size:.68rem;color:#64748b;text-transform:uppercase;'
+            f'letter-spacing:.05em;margin-top:2px">{label}</div></div>'
+        )
+    parts.append("</div>")
+    # Edges
+    if metrics["edges"]:
+        parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px">')
+        parts.append('<tr style="background:#f8fafc">'
+                     '<th style="text-align:left;padding:6px 8px">From → To</th>'
+                     '<th style="text-align:right;padding:6px 8px">Count</th>'
+                     '<th style="text-align:left;padding:6px 8px">Outcomes</th></tr>')
+        for e in metrics["edges"][:10]:
+            outcomes_str = " · ".join(f"{k}={v}" for k, v in e["outcomes"].items()) or "—"
+            parts.append(
+                f'<tr><td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">'
+                f'<code style="font-size:11px">{e["from"]}</code> '
+                f'<span style="color:#94a3b8">→</span> '
+                f'<code style="font-size:11px">{e["to"]}</code></td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;'
+                f'text-align:right;font-weight:600">{e["count"]}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;'
+                f'font-size:11px;color:#64748b">{outcomes_str}</td></tr>'
+            )
+        parts.append('</table>')
+    # Stuck handoffs
+    stuck = metrics.get("stuck") or []
+    if stuck:
+        parts.append(
+            '<div style="background:#fef3c7;border:1px solid #fbbf24;'
+            'border-radius:8px;padding:10px;font-size:12px;color:#78350f;margin-top:8px">'
+            f'<strong>⚠ {len(stuck)} handoff(s) stuck.</strong> '
+            'These items were routed to a specialist agent but the agent '
+            'has not produced an outcome ('
+            'shipped / deferred / rejected) within the SLA window. The '
+            'agent-doctor will escalate after another tick.<br>'
+            '<ul style="margin:6px 0 0 18px;padding:0">'
+        )
+        for sk in stuck[:8]:
+            parts.append(
+                f'<li><code style="font-size:11px">{sk.get("from")} → '
+                f'{sk.get("to")}</code> · {sk.get("work_type")} · '
+                f'rec={sk.get("rec_id","")} · {sk.get("age_hours",0)}h old · '
+                f'<i>{sk.get("stuck_state")}</i></li>'
+            )
+        parts.append('</ul></div>')
+    return "".join(parts)
+
+
 def _seo_traffic_metrics() -> list[dict]:
     """Pull per-site SEO traffic-readiness metrics for the digest header.
     Queries each known site's DB via DATABASE_URL_<UPPER_SITE>; sites
@@ -401,7 +601,8 @@ def _rec_row(r: dict, *, show_url: bool = True) -> str:
 def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: list[dict],
                  queued: list[dict], runs: list[dict], failed_runs: list[dict],
                  escalations: list[dict], suppressed_count: int,
-                 seo_metrics: list[dict] | None = None) -> str:
+                 seo_metrics: list[dict] | None = None,
+                 handoff_metrics: dict | None = None) -> str:
     now = _now()
     by_site_shipped: dict[str, list[dict]] = defaultdict(list)
     for r in shipped:
@@ -441,6 +642,11 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
     seo_block = _render_seo_traffic_block(seo_metrics or [])
     if seo_block:
         parts.append(seo_block)
+
+    # ── Inter-agent handoffs ────────────────────────────────────────
+    handoff_block = _render_handoff_block(handoff_metrics or {})
+    if handoff_block:
+        parts.append(handoff_block)
 
     # ── Shipped ─────────────────────────────────────────────────────
     if shipped:
@@ -610,6 +816,22 @@ class DigestRollupAgent(AgentBase):
         escalations = _doctor_escalations(s, cutoff)
         self.decide("observation", f"doctor escalations in window: {len(escalations)}")
 
+        # Inter-agent handoff metrics — read from agents/*/handoffs.jsonl.
+        # Surfaces sender→receiver counts, outcomes, and stuck handoffs.
+        try:
+            handoff_metrics = _handoff_metrics(s, cutoff)
+            self.decide(
+                "observation",
+                f"handoffs in window: out={handoff_metrics.get('total_out',0)} "
+                f"shipped={handoff_metrics.get('shipped',0)} "
+                f"in_progress={handoff_metrics.get('in_progress',0)} "
+                f"deferred={handoff_metrics.get('deferred',0)} "
+                f"stuck={len(handoff_metrics.get('stuck') or [])}"
+            )
+        except Exception as e:
+            self.decide("error", f"handoff metrics gather failed: {e}")
+            handoff_metrics = {}
+
         # Per-site SEO readiness metrics — pulled fresh each digest so
         # the user sees coverage progress trend across the 3h windows.
         seo_metrics = _seo_traffic_metrics()
@@ -636,6 +858,7 @@ class DigestRollupAgent(AgentBase):
             escalations=escalations,
             suppressed_count=len(suppressed),
             seo_metrics=seo_metrics,
+            handoff_metrics=handoff_metrics,
         )
         queued_recs = sum(q["rec_count"] for q in queued)
         subject_parts = [f"{len(shipped)} shipped"]

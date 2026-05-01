@@ -102,6 +102,115 @@ print(f"materialized {n}/{len(recs)} rec-context bundles → {target}/rec-contex
 PY
 fi
 
+# ── Handoff routing — recs with handoff_target go to the named agent ───────
+# The seo-analyzer tags each rec with handoff_target when its rec_type
+# implies content-team / specialist work that the implementer (a code
+# editor) shouldn't try to ship itself. We send handoff messages here
+# and filter those rec ids out of RESPONDER_REC_IDS so the LLM session
+# below only sees recs we're actually expected to ship.
+#
+# When the entire batch is handed off, we exit cleanly (rc=0) — the
+# downstream agents will pick up the work on their next run.
+if [ -n "${RESPONDER_REC_IDS:-}" ] && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+    HANDOFF_OUTPUT=$(
+        PYTHONPATH="$REPO_ROOT" \
+        SOURCE_AGENT_ID="${RESPONDER_AGENT_ID:-}" \
+        SOURCE_RUN_TS="${RESPONDER_RUN_TS:-}" \
+        REC_IDS="$RESPONDER_REC_IDS" \
+        RUN_DIR="$RESPONDER_RUN_DIR" \
+        python3 - <<'PY' 2>&1
+import json, os, sys
+sys.path.insert(0, os.environ.get("REPO_ROOT") or os.getcwd())
+try:
+    from framework.core.handoff import send_handoff
+except Exception as e:
+    print(f"FRAMEWORK_IMPORT_FAILED: {e}", file=sys.stderr)
+    print("KEEPS: " + os.environ.get("REC_IDS", ""))
+    sys.exit(0)
+
+run_dir = os.environ["RUN_DIR"]
+src_agent = os.environ.get("SOURCE_AGENT_ID", "")
+src_ts = os.environ.get("SOURCE_RUN_TS", "")
+batch_ids = {r.strip() for r in os.environ.get("REC_IDS", "").split(",") if r.strip()}
+
+try:
+    recs_doc = json.load(open(os.path.join(run_dir, "recommendations.json")))
+except Exception as e:
+    print(f"RECS_READ_FAILED: {e}", file=sys.stderr)
+    print("KEEPS: " + os.environ.get("REC_IDS", ""))
+    sys.exit(0)
+
+recs = recs_doc.get("recommendations", []) if isinstance(recs_doc, dict) else recs_doc
+recs_by_id = {r.get("id"): r for r in (recs or []) if r.get("id")}
+
+handoff_count = 0
+keeps = []
+handoff_log = []
+for rid in sorted(batch_ids):
+    rec = recs_by_id.get(rid)
+    if not rec:
+        keeps.append(rid)
+        continue
+    target = (rec.get("handoff_target") or "").strip()
+    work_type = (rec.get("work_type") or "").strip() or "code_edit"
+    if not target:
+        keeps.append(rid)
+        continue
+    try:
+        request_id = send_handoff(
+            from_agent="implementer",
+            to_agent=target,
+            work_type=work_type,
+            rec_id=rid,
+            rec=rec,
+            source_run_ts=src_ts,
+            source_agent=src_agent,
+            rationale=("Routed by analyzer's handoff tagger — "
+                        f"rec.type={rec.get('type','?')} maps to "
+                        f"work_type={work_type} handled by {target}."),
+        )
+        handoff_count += 1
+        handoff_log.append({
+            "rec_id": rid, "to": target, "work_type": work_type,
+            "request_id": request_id,
+        })
+    except Exception as e:
+        # If the handoff itself fails, fall back to keeping the rec on
+        # the implementer's plate — better to defer than drop.
+        print(f"HANDOFF_FAILED rec={rid} target={target}: {e}",
+              file=sys.stderr)
+        keeps.append(rid)
+
+print(f"HANDOFFS: {handoff_count}", file=sys.stderr)
+for h in handoff_log:
+    print(f"  → {h['rec_id']} → {h['to']} ({h['work_type']})  request_id={h['request_id']}",
+          file=sys.stderr)
+
+# Persist a sidecar so the post-run summary can attribute "shipped" vs
+# "handed off" cleanly in the digest email.
+sidecar = os.path.join(run_dir, "handoffs-sent.json")
+with open(sidecar, "w") as f:
+    json.dump({"handoffs": handoff_log, "kept_for_self": keeps}, f, indent=2)
+
+print("KEEPS: " + ",".join(keeps))
+PY
+    )
+    HANDOFF_KEEPS=$(echo "$HANDOFF_OUTPUT" | grep -E "^KEEPS:" | sed 's/^KEEPS: *//')
+    HANDOFF_LOG=$(echo "$HANDOFF_OUTPUT" | grep -vE "^KEEPS:")
+    if [ -n "$HANDOFF_LOG" ]; then
+        echo "$HANDOFF_LOG" | sed 's/^/[handoff] /'
+    fi
+    if [ -z "$HANDOFF_KEEPS" ]; then
+        echo "[handoff] all recs in batch routed to specialist agents — implementer has nothing to ship locally"
+        echo "[implementer] done agent_id=${RESPONDER_AGENT_ID:-?} run_ts=${RESPONDER_RUN_TS:-?} (handoff-only batch)"
+        exit 0
+    fi
+    if [ "$HANDOFF_KEEPS" != "$RESPONDER_REC_IDS" ]; then
+        echo "[handoff] filtered RESPONDER_REC_IDS: $RESPONDER_REC_IDS → $HANDOFF_KEEPS"
+        export RESPONDER_REC_IDS="$HANDOFF_KEEPS"
+    fi
+fi
+
 # ── Pre-run git SHA capture ─────────────────────────────────────────────────
 # Used at end-of-run to verify a NEW commit happened — the only reliable
 # signal that claude actually shipped code (vs. bailing out asking for

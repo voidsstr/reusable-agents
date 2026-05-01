@@ -19,6 +19,13 @@ codebase.
 - [`docs/repo-boundaries.md`](docs/repo-boundaries.md) — **read this
   before adding code anywhere**: what goes in framework vs customer
   repo vs `~/.reusable-agents/`. Decision tree + anti-patterns
+- [`framework/core/handoff.py`](framework/core/handoff.py) +
+  [`framework/core/work_types.py`](framework/core/work_types.py) —
+  inter-agent handoff protocol. When agent A finds work that belongs
+  to agent B, A calls `send_handoff()` and the framework routes it.
+  See `docs/architecture.md` § "Inter-agent handoffs" for the full
+  flow. **Whenever you add a new rec_type, also add it to
+  `DEFAULT_REC_ROUTING` in work_types.py.**
 - [`docs/seo-onboard-new-site.md`](docs/seo-onboard-new-site.md) —
   add a new site to SEO automation in 5 steps
 - [`blueprints/README.md`](blueprints/README.md) — pick the right

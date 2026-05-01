@@ -3324,6 +3324,40 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
         except Exception as e:
             print(f"  → LLM audit failed: {e}", file=sys.stderr)
 
+    # ── Tag every rec with its handoff target (work_type + handler agent)
+    # The implementer reads .handoff_target on each rec and either ships
+    # it (when target is empty/implementer) or sends a handoff to the
+    # named agent. Routing is data-driven via framework.core.work_types,
+    # overridable per-site via site.yaml.handoff_routes.
+    try:
+        from framework.core.work_types import handler_for as _handler_for
+        site_routes = (cfg.get("handoff_routes") or {})
+        # site overrides reference generic blueprint ids like
+        # "article-author-agent" — resolve to the site-specific instance
+        # using the optional site_handler_overrides map. Allows config
+        # like:
+        #   handoff_routes:
+        #     article-orphan-boost: specpicks-article-author-agent
+        for _r in recs:
+            rt = _r.get("type") or ""
+            wt, handler = _handler_for(rt, site_routes=site_routes)
+            _r["work_type"] = wt
+            # Resolve generic handler id to per-site one if the site
+            # provides a per-site agent for this handler (so the analyzer
+            # in specpicks routes to specpicks-article-author-agent rather
+            # than the generic article-author-agent).
+            if handler and handler != "implementer":
+                site_handler = (cfg.get("site_handler_overrides") or {}).get(handler)
+                _r["handoff_target"] = site_handler or handler
+            else:
+                _r["handoff_target"] = ""
+    except Exception as _e:
+        # Tagging is best-effort. If the framework module is unavailable
+        # for any reason, recs ship without handoff_target and the
+        # implementer treats them as "ship it yourself" (existing
+        # behavior).
+        print(f"  [handoff-tag] skipped: {_e}", file=sys.stderr)
+
     summary = (
         f"{len(recs)} recommendations: "
         f"{sum(1 for r in recs if r['type'] == 'top5-target-page')} top-5 pages, "
@@ -3332,7 +3366,8 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
         f"{sum(1 for r in recs if r['type'] == 'conversion-path')} conversion-path, "
         f"{sum(1 for r in recs if r['type'] == 'paid-organic-gap')} paid-organic gaps, "
         f"{sum(1 for r in recs if r['type'] == 'ad-copy-headline-winner')} ad-copy ports, "
-        f"{sum(1 for r in recs if r.get('llm_check_id'))} from adaptive LLM audit."
+        f"{sum(1 for r in recs if r.get('llm_check_id'))} from adaptive LLM audit, "
+        f"{sum(1 for r in recs if r.get('handoff_target'))} routed to specialist agents."
     )
     run_files.write_recommendations(
         run_dir,

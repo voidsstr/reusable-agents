@@ -123,6 +123,75 @@ The framework **never** prunes run dirs — they're durable
 audit trails. Storage cost is ~$0.018/GB/mo on Azure hot tier; even
 heavy-runner agents stay under 1GB total.
 
+## Inter-agent handoffs (the routing primitive)
+
+Some recommendations the analyzer produces aren't code edits — they're
+content-team work (orphan-article boost, internal-link addition, body
+rewrites, FAQ generation). The implementer can't ship these because
+its job is editing TypeScript / SQL / templates, not crafting prose.
+
+The framework's **handoff protocol** lets any agent route work to
+another agent that's better suited:
+
+```
+Analyzer emits a rec   →   tags it with handoff_target="article-author-agent"
+                                        based on framework/core/work_types.py
+                                        rec_type → handler mapping
+       ↓
+Reporter writes recs to recommendations.json + auto-queue/<request-id>.json
+       ↓
+Responder dispatches the rec batch to the implementer
+       ↓
+Implementer sees handoff_target on a rec  →  send_handoff() to that agent
+                                              writes
+                                              agents/<target>/handoff-queue/<id>.json
+                                              + appends an "out" row to
+                                              agents/implementer/handoffs.jsonl
+       ↓
+Target agent's next pre_run() calls drain_handoffs()  →  populates
+                                                          self.inbound_handoffs
+                                                          archives queue → processed
+                                                          appends an "in" row to
+                                                          agents/<target>/handoffs.jsonl
+       ↓
+Target agent's run() incorporates the handoffs into its work plan
+(e.g. article-author treats them as REQUIRED proposals to address)
+       ↓
+On completion, target agent calls record_handoff_outcome() → appends
+"outcome" row (shipped / in_progress / deferred / rejected) so the
+digest can show the inter-agent flow.
+```
+
+Lookup tables in `framework/core/work_types.py`:
+
+| rec_type | work_type | default handler |
+|---|---|---|
+| `article-orphan-boost` | internal_link_addition | article-author-agent |
+| `content-expansion` / `snippet-rewrite` | body_md_edit | article-author-agent |
+| `new-page-buying_guide` / `-use_case` | new_article_creation | article-author-agent |
+| `new-page-comparison` | comparison_page_generation | head-to-head-agent |
+| `catalog-broken-image` | quality_audit_fix | progressive-improvement-agent |
+| `product-content-incomplete` | product_content_hydration | product-hydration-agent |
+| `indexnow-submit` | index_submission | indexnow-submitter |
+| (everything else — code/SSR/template/route work) | code_edit | implementer |
+
+Sites can override the default routing in `site.yaml`:
+
+```yaml
+handoff_routes:
+  # Route this rec_type to a specific agent regardless of default
+  internal-link-add: specpicks-progressive-improvement-agent
+
+site_handler_overrides:
+  # Resolve generic handler ids to per-site instances
+  article-author-agent: specpicks-article-author-agent
+  progressive-improvement-agent: specpicks-progressive-improvement-agent
+```
+
+The digest email surfaces the inter-agent flow so the user can see what
+routed where + what's stuck (outcome=in_progress for >48h, or no-outcome
+inbound handoffs older than 24h get flagged).
+
 ## The dispatch graph
 
 Agents communicate via three asynchronous channels. Nothing makes a

@@ -130,6 +130,8 @@ class AgentBase:
         self.responses: list[dict] = []
         # Pending confirmations resolved this run
         self.resolved_confirmations: list[ConfirmationRecord] = []
+        # Handoffs drained from other agents this run (see handoff.py)
+        self.inbound_handoffs: list[dict] = []
 
         # Subsystems
         self.status_reporter = StatusReporter(
@@ -223,6 +225,33 @@ class AgentBase:
             self.storage.write_json(archive_key, {**payload, "consumed_at": _now(),
                                                   "consumed_in_run_ts": self.run_ts})
             self.storage.delete(key)
+
+        # Drain inbound handoffs from other agents — items routed here
+        # by the analyzer / implementer / any other agent because this
+        # agent's capabilities match the work_type. Stored on
+        # self.inbound_handoffs as a list of dicts; the agent's run()
+        # incorporates them into its work plan. drain_handoffs() also
+        # logs a "received" line to agents/<id>/handoffs.jsonl so the
+        # digest can show the inter-agent flow.
+        try:
+            from .handoff import drain_handoffs as _drain_handoffs
+            self.inbound_handoffs = _drain_handoffs(
+                self.agent_id, storage=self.storage,
+            )
+            if self.inbound_handoffs:
+                self.decisions.observe(
+                    f"Drained {len(self.inbound_handoffs)} inbound handoff(s) "
+                    f"from: {sorted({h.get('from_agent','?') for h in self.inbound_handoffs})}",
+                    evidence={"count": len(self.inbound_handoffs)},
+                )
+        except Exception as e:
+            # Non-fatal — agent runs without handoff context if storage
+            # hiccups. The next run picks them back up.
+            self.inbound_handoffs = []
+            self.decisions.observe(
+                f"Handoff drain failed: {e}",
+                evidence={"error": str(e)[:200]},
+            )
 
         # Resolve pending confirmations whose request_id matches a fresh response
         for rec in list_pending_confirmations(self.agent_id, self.storage):
