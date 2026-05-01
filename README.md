@@ -59,6 +59,19 @@ several of your repos (this codebase already does — `nsc-assistant`,
 `specpicks`, etc. all register with the same instance), or fork it for
 production deployments.
 
+## Documentation
+
+| Doc | What you read it for |
+|---|---|
+| **[`docs/architecture.md`](docs/architecture.md)** | The big-picture map: framework + customer repos + Azure storage, lifecycle of one agent run, end-to-end trace of how a SEO recommendation moves through the system. **Start here.** |
+| **[`docs/agents-catalog.md`](docs/agents-catalog.md)** | Every agent in the fleet, organized by category, with code path + manifest path + cron schedule + one-line description. |
+| **[`docs/repo-boundaries.md`](docs/repo-boundaries.md)** | What goes in `reusable-agents/` vs in a customer repo (specpicks, nsc-assistant) vs in `~/.reusable-agents/` (per-host). Decision tree + side-by-side examples + common mistakes. |
+| **[`docs/seo-onboard-new-site.md`](docs/seo-onboard-new-site.md)** | Step-by-step: add a new site to the SEO agent in 5 commands. |
+| **[`blueprints/README.md`](blueprints/README.md)** | The five blueprint patterns (site-quality-recommender, pipeline-stage, inbox-poller, llm-code-editor, scheduled-task) + when to pick each. |
+| **[`shared/schemas/site-config.schema.json`](shared/schemas/site-config.schema.json)** | The canonical `site.yaml` schema. Validates every per-site config at registration. |
+| **[`agents/<id>/README.md`](agents/)** | Per-agent docs (collector, analyzer, reporter, deployer, implementer, responder, digest-rollup, agent-doctor, hydration, ebay-sync, progressive-improvement, competitor-research). |
+| **[`CLAUDE.md`](CLAUDE.md)** | Instructions for Claude Code when working in this repo. References the docs above. |
+
 ## What's in the box
 
 ```

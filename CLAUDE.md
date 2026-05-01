@@ -8,8 +8,24 @@ customer apps, anywhere) and inherit lifecycle, scheduling, status,
 inter-agent messaging, confirmations, and a control UI from this
 codebase.
 
-Source of truth for the architecture + standards is [`README.md`](README.md).
-Read it before designing an agent.
+**Documentation:**
+
+- [`README.md`](README.md) — overview + quickstart + manifest format
+- [`docs/architecture.md`](docs/architecture.md) — three-tier model
+  (customer repos → framework → blob storage), agent lifecycle,
+  storage layout, dispatch graph, end-to-end trace of one rec
+- [`docs/agents-catalog.md`](docs/agents-catalog.md) — every agent across
+  every repo, categorized, with code path + manifest path + schedule
+- [`docs/repo-boundaries.md`](docs/repo-boundaries.md) — **read this
+  before adding code anywhere**: what goes in framework vs customer
+  repo vs `~/.reusable-agents/`. Decision tree + anti-patterns
+- [`docs/seo-onboard-new-site.md`](docs/seo-onboard-new-site.md) —
+  add a new site to SEO automation in 5 steps
+- [`blueprints/README.md`](blueprints/README.md) — pick the right
+  blueprint when scaffolding a new agent
+
+Read `architecture.md` once. Re-read `repo-boundaries.md` every time
+you wonder "should this code live here or in the customer repo?"
 
 ## When the user asks you to create a new agent (in ANY repo)
 
