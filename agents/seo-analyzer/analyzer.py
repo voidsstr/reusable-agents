@@ -2407,6 +2407,407 @@ def _add_competitor_keyword_recs(cfg, recs: list, next_id, max_recs: int) -> Non
     })
 
 
+def _build_inbound_index(pages: list[dict]) -> dict[str, list[str]]:
+    """Reverse-index `internal_link_targets` so we can ask: which pages
+    link TO this URL? Returns dict[target_path → list[source_url]].
+    Path normalization: strip query/fragment + trailing slash.
+    """
+    inbound: dict[str, list[str]] = {}
+    for src in pages:
+        src_url = src.get("url", "") or ""
+        try:
+            from urllib.parse import urlparse
+            src_path = urlparse(src_url).path.rstrip("/") or "/"
+        except Exception:
+            src_path = src_url
+        for target in src.get("internal_link_targets", []) or []:
+            t = (target or "").split("#", 1)[0].split("?", 1)[0].rstrip("/") or "/"
+            if not t or t == src_path:
+                continue
+            inbound.setdefault(t, []).append(src_url)
+    return inbound
+
+
+def _cluster_key(page: dict) -> Optional[str]:
+    """Derive a topical-cluster key from a page record.
+
+    Order of preference:
+      1. Explicit `cluster` field (collector or repo-routes)
+      2. Page-type-specific path hint (e.g. /recipes/category/<slug> → recipes:<slug>)
+      3. Page type fallback (e.g. type=product → product:<top-level path>)
+
+    Same-key pages are considered part of the same topical cluster.
+    """
+    explicit = page.get("cluster")
+    if isinstance(explicit, str) and explicit:
+        return f"explicit:{explicit}"
+
+    url = page.get("url", "") or ""
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(url).path
+    except Exception:
+        path = url
+
+    # Recipe category: /recipes/category/keto → recipes:keto
+    m = re.match(r"^/recipes/(?:category|cuisine)/([^/]+)/?$", path)
+    if m:
+        return f"recipes-cat:{m.group(1).lower()}"
+
+    # Recipe detail: /recipes/keto-chicken-stir-fry-1234 → recipes:<slug-cluster from category if available>
+    m = re.match(r"^/recipes/([^/]+)$", path)
+    if m and page.get("type") == "recipe":
+        # Use category if collector recorded it
+        cat = page.get("recipe_category") or page.get("category")
+        if cat:
+            return f"recipes-cat:{str(cat).lower()}"
+        return None  # uncategorized recipe — can't form cluster
+
+    # Kitchen subcategory: /kitchen/category/cookware/skillets-frying-pans
+    m = re.match(r"^/kitchen/category/([^/]+)/([^/]+)/?$", path)
+    if m:
+        return f"kitchen-sub:{m.group(1).lower()}:{m.group(2).lower()}"
+
+    # Kitchen category: /kitchen/category/cookware
+    m = re.match(r"^/kitchen/category/([^/]+)/?$", path)
+    if m:
+        return f"kitchen-cat:{m.group(1).lower()}"
+
+    # Kitchen product detail: /kitchen/<slug>
+    m = re.match(r"^/kitchen/([^/]+)$", path)
+    if m and page.get("type") == "product":
+        cat = page.get("category_slug") or page.get("category")
+        if cat:
+            return f"kitchen-cat:{str(cat).lower()}"
+        return None
+
+    # Buying guides / reviews / articles — group by inferred category from
+    # path: /buying-guide/<cat> or /best-<cat>-for-<persona>
+    m = re.match(r"^/(?:buying-guide|reviews|articles|guides)/([^/]+)/?$", path)
+    if m:
+        slug = m.group(1).lower()
+        # Strip trailing year/qualifier numerics
+        slug = re.sub(r"-\d+$", "", slug)
+        return f"article:{slug}"
+
+    return None
+
+
+def _add_topical_cluster_orphan_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Build a topical-cluster graph from pages-by-type.jsonl and flag
+    spoke pages that have ZERO inbound internal links from same-cluster
+    hub pages.
+
+    A "hub" is any page that is itself a category/cuisine/buying-guide
+    landing for the cluster. A "spoke" is a recipe/product/article that
+    *belongs* to the cluster. The cluster authority can't flow if the
+    hub doesn't link to its spokes.
+    """
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+
+    # Group pages by cluster key
+    clusters: dict[str, list[dict]] = {}
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        key = _cluster_key(p)
+        if not key:
+            continue
+        clusters.setdefault(key, []).append(p)
+
+    if not clusters:
+        return
+
+    # Reverse-index every page's internal_link_targets to find inbound from cluster
+    inbound = _build_inbound_index(pages)
+
+    # Hub page-types vs spoke page-types (cluster-orphan is a spoke condition)
+    HUB_TYPES = {"shop_category", "category", "buying_guide", "collection", "feature"}
+    SPOKE_TYPES = {"recipe", "product", "article", "review", "blog"}
+
+    orphans: list[dict] = []
+    for cluster_key, members in clusters.items():
+        if len(members) < 3:
+            continue  # too small to call a cluster
+        hub_urls = {m.get("url", "") for m in members if m.get("type") in HUB_TYPES}
+        if not hub_urls:
+            continue  # no hub means we can't measure orphan-ness
+        for spoke in members:
+            if spoke.get("type") not in SPOKE_TYPES:
+                continue
+            url = spoke.get("url", "") or ""
+            try:
+                from urllib.parse import urlparse
+                path = urlparse(url).path.rstrip("/") or "/"
+            except Exception:
+                path = url
+            sources = set(inbound.get(path, []))
+            cluster_inbound = sources & hub_urls
+            if not cluster_inbound:
+                orphans.append({
+                    "url": url,
+                    "cluster": cluster_key,
+                    "type": spoke.get("type", ""),
+                    "hub_count": len(hub_urls),
+                })
+
+    if len(orphans) < 3:
+        return
+
+    rid = next_id()
+    sample_clusters = sorted({o["cluster"] for o in orphans})[:5]
+    recs.append({
+        "id": rid, "type": "topical-cluster-orphan", "priority": "medium",
+        "title": (
+            f"{len(orphans)} spoke page(s) orphaned from their topical cluster "
+            f"hub(s) — internal-link-from-hub gap"
+        ),
+        "rationale": (
+            "These pages belong to a topical cluster (their category/cuisine/"
+            "subcategory hub exists on the site) but the hub doesn't link to "
+            "them. The hub's PageRank can't flow to the spokes, and Google "
+            "treats unlinked spokes as orphans regardless of sitemap presence. "
+            "Studio-supplies' cluster pattern is hub → product spoke + hub → "
+            "buying guide → spoke; both directions need real `<a>` tags. "
+            f"Affected clusters (sample): {', '.join(sample_clusters)}."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "For each affected cluster: in the hub-page SSR template, "
+                "render an ItemList rail of the cluster's spokes (e.g. on "
+                "/recipes/category/keto, render a `Latest Keto Recipes` rail "
+                "with 12-24 anchors). Anchor text should be each spoke's "
+                "title (descriptive, not generic). Studio-supplies' category "
+                "pages run 26+ ItemList anchors per page."
+            ),
+        },
+        "orphan_count": len(orphans),
+        "cluster_count": len(clusters),
+        "sample_orphans": orphans[:10],
+        "implemented": False,
+    })
+
+
+def _add_inbound_link_regression_recs(
+    data: Path, prior_data: Optional[Path], recs: list, next_id, max_recs: int,
+) -> None:
+    """Per-page inbound-link tracking. Compare current inbound count vs prior
+    run; flag pages that lost ≥30% of inbound (with a baseline ≥10).
+    """
+    if len(recs) >= max_recs:
+        return
+    if not prior_data or not prior_data.exists():
+        return
+
+    cur_pages = _load_pages_by_type(data) or []
+    pri_pages = _load_pages_by_type(prior_data) or []
+    if not cur_pages or not pri_pages:
+        return
+
+    cur_inbound = _build_inbound_index(cur_pages)
+    pri_inbound = _build_inbound_index(pri_pages)
+
+    regressions: list[dict] = []
+    for url, src_list in pri_inbound.items():
+        prior_count = len(set(src_list))
+        if prior_count < 10:
+            continue  # baseline too small to be meaningful
+        cur_count = len(set(cur_inbound.get(url, [])))
+        if cur_count >= prior_count:
+            continue
+        drop_pct = (prior_count - cur_count) / prior_count
+        if drop_pct < 0.30:
+            continue
+        regressions.append({
+            "url": url,
+            "prior_inbound": prior_count,
+            "current_inbound": cur_count,
+            "lost": prior_count - cur_count,
+            "drop_pct": round(drop_pct, 3),
+        })
+
+    if not regressions:
+        return
+    regressions.sort(key=lambda r: -r["lost"])
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "internal-link-graph-regression", "priority": "high",
+        "title": (
+            f"{len(regressions)} page(s) lost ≥30% of inbound internal links "
+            f"since prior run"
+        ),
+        "rationale": (
+            "Per-page inbound-link counts dropped sharply since the prior "
+            "run, with a ≥10-link baseline. Most common cause: a template/"
+            "nav refactor silently de-linked these pages, or a deploy "
+            "removed an ItemList rail that previously surfaced them. "
+            "Pages lose authority + crawl depth when they fall out of the "
+            "internal graph, even if the sitemap still lists them."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 2},
+        "data_refs": [
+            "data/pages-by-type.jsonl",
+            "prior-run/data/pages-by-type.jsonl",
+        ],
+        "implementation_outline": {
+            "approach": (
+                "Diff the two pages-by-type.jsonl files for the affected "
+                "URLs to see who used to link there but doesn't anymore. "
+                "git log the suspect SSR templates since the prior run "
+                "timestamp; the diff will reveal the de-linking change. "
+                "Restore the link or replace it with an equivalent one."
+            ),
+        },
+        "regressions": regressions[:20],
+        "sample_urls": [r["url"] for r in regressions[:5]],
+        "implemented": False,
+    })
+
+
+def _build_tier_goals(snap: dict, recs: list, total_impr_90d: int) -> list[dict]:
+    """Per-traffic-tier goal templates.
+
+    Three tiers, gated on 90d impressions:
+
+      • pre-traffic  (< 100):    publish-N-pages goals — lock in the
+                                 content engine until a baseline forms
+      • growth      (100-10k):   rank-target + indexed-pages goals
+                                 (handled by per-rec goals already)
+      • mature      (>10k):      CTR + conversion-rate goals
+                                 (overlay on top of rank goals)
+
+    Returns a list of GoalDeclaration dicts merged into the analyzer's
+    declared_goals output.
+    """
+    goals: list[dict] = []
+
+    if total_impr_90d < 100:
+        # Pre-traffic — publish 4 buying guides + 2 brand pages + 3
+        # comparisons every 14d cycle. Goals are baseline-anchored at
+        # current sitemap counts; targets are baseline + cycle target.
+        gsc_base = snap.get("gsc_90d", {}) or {}
+        goals.append({
+            "id": "pretraffic-content-engine",
+            "description": "Pre-traffic content engine — publish 9 net-new pages per 14d cycle",
+            "target_metric": "indexed_pages_delta_14d",
+            "baseline": 0,
+            "target": 9,
+            "rationale": (
+                "Pre-traffic mode (< 100 GSC impr/90d). Studio-supplies-style "
+                "publishing — 4 buying guides, 2 brand pages, 3 comparisons "
+                "per 14-day cycle — until baseline traffic forms. Target is "
+                "delta-per-cycle, not absolute."
+            ),
+            "check_by": "+14-days",
+            "tier": "pre-traffic",
+            "is_tier_goal": True,
+        })
+        goals.append({
+            "id": "pretraffic-impressions-floor",
+            "description": "Cross the 100-impr/90d floor → exit pre-traffic mode",
+            "target_metric": "gsc_90d.total_impressions",
+            "baseline": int(total_impr_90d),
+            "target": 100,
+            "rationale": (
+                "Pre-traffic mode exits when total GSC impressions/90d ≥ 100. "
+                "Hitting this triggers the growth-tier goal set (rank targets, "
+                "striking-distance, etc) which is currently producing zero "
+                "recs because there's nothing to mine."
+            ),
+            "check_by": "+12-weeks",
+            "tier": "pre-traffic",
+            "is_tier_goal": True,
+        })
+
+    elif total_impr_90d < 10_000:
+        # Growth tier — augment per-rec rank goals with site-level targets
+        rank_buckets = (snap.get("gsc_90d", {}) or {}).get("rank_buckets", {})
+        cur_top5 = int(rank_buckets.get("top5", 0))
+        goals.append({
+            "id": "growth-top5-bucket-expansion",
+            "description": f"Grow the top-5 rank bucket from {cur_top5} → {cur_top5 + 5} queries",
+            "target_metric": "gsc_90d.rank_buckets.top5",
+            "baseline": cur_top5,
+            "target": cur_top5 + 5,
+            "rationale": (
+                "Growth tier — site has > 100 impr/90d but < 10k. Net-new "
+                "top-5 ranks are the highest-leverage gain at this stage; "
+                "the per-rec top5-target-page goals already cover individual "
+                "queries, this overlay tracks the site-wide bucket size."
+            ),
+            "check_by": "+8-weeks",
+            "tier": "growth",
+            "is_tier_goal": True,
+        })
+        goals.append({
+            "id": "growth-impressions-target",
+            "description": "Cross the 10k-impr/90d threshold → enter mature tier",
+            "target_metric": "gsc_90d.total_impressions",
+            "baseline": int(total_impr_90d),
+            "target": 10_000,
+            "rationale": (
+                "Mature-tier qualification — at 10k+ impr/90d, CTR + "
+                "conversion-rate optimizations begin to outweigh "
+                "rank-target work. Track quarterly."
+            ),
+            "check_by": "+12-weeks",
+            "tier": "growth",
+            "is_tier_goal": True,
+        })
+
+    else:
+        # Mature tier — CTR + conversion targets. Read site-wide CTR from snap.
+        gsc = snap.get("gsc_90d", {}) or {}
+        cur_ctr = float(gsc.get("total_ctr", 0))
+        goals.append({
+            "id": "mature-ctr-lift",
+            "description": (
+                f"Lift site-wide CTR from {round(cur_ctr*100, 2)}% → "
+                f"{round((cur_ctr + 0.005)*100, 2)}%"
+            ),
+            "target_metric": "gsc_90d.total_ctr",
+            "baseline": round(cur_ctr, 4),
+            "target": round(cur_ctr + 0.005, 4),
+            "rationale": (
+                "Mature tier — 10k+ impr/90d means CTR is the highest-"
+                "leverage metric. A 0.5pp lift on 10k+ impressions is more "
+                "valuable than chasing additional rank improvements. Drives "
+                "title/meta CTR-fix recs to the top of the queue."
+            ),
+            "check_by": "+8-weeks",
+            "tier": "mature",
+            "is_tier_goal": True,
+        })
+        # Revenue-conversion goal (only if revenue KPIs configured)
+        rev = snap.get("revenue_28d", {}) or {}
+        if rev:
+            goals.append({
+                "id": "mature-revenue-lift-10pct",
+                "description": "Lift 28d revenue events by 10%",
+                "target_metric": "revenue_28d.total",
+                "baseline": sum(int(v) for v in rev.values() if isinstance(v, (int, float))),
+                "target": int(1.1 * sum(int(v) for v in rev.values() if isinstance(v, (int, float)))),
+                "rationale": (
+                    "Mature tier with configured revenue KPIs. Aggregate "
+                    "across all KPIs gives one site-wide target the "
+                    "analyzer can ladder back into per-page conversion "
+                    "recs (CTA position, trust signals, schema rich-result "
+                    "eligibility)."
+                ),
+                "check_by": "+12-weeks",
+                "tier": "mature",
+                "is_tier_goal": True,
+            })
+
+    return goals
+
+
 def build_recommendations(cfg, run_dir: Path, snap: dict,
                             handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict], dict]:
     """Return (recommendations, declared_goals, run_meta).
@@ -2916,9 +3317,22 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
         except Exception as e:
             print(f"  [{label}] rule eval failed: {e}", file=sys.stderr)
 
+    # ---- Topical-cluster orphan detector ----
+    # Builds an in-memory cluster graph from pages-by-type.jsonl: groups
+    # pages by category/cuisine/subcategory, finds spokes that have no
+    # inbound link from any same-cluster hub. Authority can't flow when
+    # the hub doesn't link to its spokes.
+    if len(recs) < max_recs:
+        try:
+            _add_topical_cluster_orphan_recs(data, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [topical-cluster] rule eval failed: {e}", file=sys.stderr)
+
     # ---- Diff alarms — compare current vs prior run ----
     # Sitemap shrinkage, schema regression, internal-link graph regression
     # all surface deploy-time bugs that the implementer should fix urgently.
+    prior_run_dir = None
+    prior_data = None
     if len(recs) < max_recs:
         try:
             prior_run_dir = find_prior_snapshot(cfg, run_dir.name)
@@ -2927,12 +3341,36 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
         except Exception as e:
             print(f"  [diff-recs] rule eval failed: {e}", file=sys.stderr)
 
+    # ---- Inbound-link graph regression ----
+    # Per-page inbound counts vs prior run. Flags pages that lost ≥30% of
+    # inbound (with ≥10 prior baseline). Catches template/nav refactors
+    # that silently de-link a page family.
+    if len(recs) < max_recs:
+        try:
+            _add_inbound_link_regression_recs(
+                data, prior_data, recs, next_id, max_recs,
+            )
+        except Exception as e:
+            print(f"  [inbound-link-regression] rule eval failed: {e}", file=sys.stderr)
+
     # ---- Competitor-research-agent parity gaps (pre-traffic boost) ----
     if pre_traffic_mode and len(recs) < max_recs:
         try:
             _add_competitor_keyword_recs(cfg, recs, next_id, max_recs)
         except Exception as e:
             print(f"  [competitor-keyword] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Per-tier goal templates ----
+    # Augment the per-rec goals (built above) with site-level goals
+    # gated on traffic tier. Pre-traffic gets publish-N-pages goals;
+    # growth gets bucket-expansion goals; mature gets CTR + revenue
+    # goals. These ride alongside the per-rec goals.
+    try:
+        tier_goals = _build_tier_goals(snap, recs, total_impr_90d)
+        if tier_goals:
+            goals.extend(tier_goals)
+    except Exception as e:
+        print(f"  [tier-goals] eval failed: {e}", file=sys.stderr)
 
     # ---- Revenue-focus pass: featured-product attribution audit ----
     # Scans every published article for featured-product mentions that

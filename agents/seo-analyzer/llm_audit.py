@@ -97,6 +97,8 @@ INTERNAL LINKING
 [link-broken]                  Internal link 404s (only flag if observed in crawl)
 [link-redirect-chain]          Internal link goes through 2+ redirects
 [link-nofollow-internal]       Internal link has rel=\"nofollow\" (usually wrong)
+[topical-cluster-orphan]       Spoke page (product/recipe/article) belongs to a topical cluster (same category/cuisine) but receives 0 inbound internal links from same-cluster hub pages (category landing, buying guide). The cluster authority can't flow.
+[internal-link-graph-regression]  A page's inbound-internal-link count dropped ≥30% vs the prior run (≥10 inbound prior baseline) — usually means a template/nav refactor silently de-linked it
 
 MOBILE-FIRST + UX
 ─────────────────────────────────────────────────────────────────────
@@ -273,6 +275,8 @@ CHECK_ID_TO_REC_TYPE = {
     "link-anchor-keyword": "internal-link",
     "link-broken": "redirect-fix", "link-redirect-chain": "redirect-fix",
     "link-nofollow-internal": "internal-link",
+    "topical-cluster-orphan": "internal-link",
+    "internal-link-graph-regression": "internal-link",
     # mobile/cwv
     "mobile-viewport-missing": "ssr-fix", "mobile-tap-targets": "ssr-fix",
     "mobile-font-small": "ssr-fix", "mobile-horizontal-scroll": "ssr-fix",

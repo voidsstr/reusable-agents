@@ -1102,6 +1102,28 @@ def _extract_page_meta(html: bytes) -> dict:
     body_internal_links = len(re.findall(r'<a[^>]+href=["\']/[^"\']*["\']', main_html))
     body_external_links = len(re.findall(r'<a[^>]+href=["\']https?://[^"\']+["\']', main_html))
 
+    # Internal-link target list — distinct same-origin paths this page links
+    # to from <main>/<article> body. Drives the topical-cluster graph
+    # (cluster-orphan detector) and the inbound-link regression alarm —
+    # both compare per-page inbound counts vs prior runs to spot pages
+    # that have been silently de-linked by a template or nav refactor.
+    # Capped at 200 unique targets to avoid pathological pages blowing
+    # up the JSONL line size.
+    internal_link_targets_raw = re.findall(
+        r'<a[^>]+href=["\'](/[^"\']*)["\']', main_html
+    )
+    internal_link_targets: list[str] = []
+    seen_targets: set[str] = set()
+    for href in internal_link_targets_raw:
+        # Strip fragment + query so /foo, /foo?utm=1, /foo#anchor collapse
+        path = href.split("#", 1)[0].split("?", 1)[0].rstrip("/") or "/"
+        if path in seen_targets:
+            continue
+        seen_targets.add(path)
+        internal_link_targets.append(path)
+        if len(internal_link_targets) >= 200:
+            break
+
     # Outbound-domain breakdown — classify external links so the analyzer
     # can compute the "≥3 authoritative outbound citations" signal that
     # high-E-E-A-T review pages emit. Same-domain (canonical) links are
@@ -1382,6 +1404,7 @@ def _extract_page_meta(html: bytes) -> dict:
         "nofollow_links": nofollow_links,
         "body_internal_links": body_internal_links,
         "body_external_links": body_external_links,
+        "internal_link_targets": internal_link_targets,
         "outbound_domains": outbound_domains,
         "outbound_domain_count": len(outbound_domains),
         "amazon_outbound_total": amazon_outbound_total,
