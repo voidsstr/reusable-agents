@@ -1410,22 +1410,93 @@ class EbayProductSyncAgent(AgentBase):
         fk_col = lt.get("fk_to_product_column") or "product_id"
 
         plan: list[tuple[Optional[str], str]] = []
-        # ─── Coverage goal: products without any active listing get
-        # priority. Prepends per-product queries derived from product
-        # names so each run actively closes coverage gaps before
-        # rotating through generic seed queries.
+        # Build coverage queue + seed queue separately, then INTERLEAVE
+        # them so seeds (the curated retro-PC / retro-console keyword
+        # rotation in site.yaml) always get airtime even when 70k+
+        # products lack listings. Without this, the coverage queue
+        # eats every slot and entire categories (retro-cpus, retro-gpus,
+        # retro-motherboards, retro-sound, etc.) never get crawled.
         coverage_targets = _products_lacking_listings(
             adapter, pt["name"], lt["name"], fk_col, limit=40,
         )
-        for prod in coverage_targets:
-            plan.append((prod.get("category_slug"), prod["query"]))
-        coverage_count = len(coverage_targets)
-        stats["coverage_targets"] = coverage_count
+        coverage_queue: list[tuple[Optional[str], str]] = [
+            (prod.get("category_slug"), prod["query"])
+            for prod in coverage_targets
+        ]
+        seed_queue: list[tuple[Optional[str], str]] = []
+        priority_categories = set(cfg.get("priority_categories") or [])
+        priority_seed_queue: list[tuple[Optional[str], str]] = []
         for entry in seeds:
             cat = entry.get("category") or entry.get("category_slug")
             for q in (entry.get("queries") or []):
-                plan.append((cat, q))
+                if cat and cat in priority_categories:
+                    priority_seed_queue.append((cat, q))
+                else:
+                    seed_queue.append((cat, q))
+
+        coverage_count = len(coverage_targets)
+        stats["coverage_targets"] = coverage_count
+        stats["seed_pool_size"] = len(seed_queue) + len(priority_seed_queue)
+        stats["priority_seed_pool"] = len(priority_seed_queue)
+
+        # Reservation policy:
+        #   • priority_seeds_pct of the budget is reserved for seeds in
+        #     `cfg.priority_categories` (e.g., retro-cpus, retro-gpus
+        #     when SpecPicks is rebuilding retro-PC coverage).
+        #   • seed_reservation_pct of the remaining budget goes to other
+        #     seeds.
+        #   • Coverage gets whatever's left.
+        priority_pct = float(cfg.get("priority_seeds_pct", 0.0))
+        seed_pct = float(cfg.get("seed_reservation_pct", 0.6))
+        priority_pct = max(0.0, min(1.0, priority_pct))
+        seed_pct = max(0.0, min(1.0, seed_pct))
+
+        priority_quota = (int(max_queries_per_run * priority_pct)
+                          if priority_seed_queue else 0)
+        non_priority_budget = max_queries_per_run - priority_quota
+        seed_quota = (int(non_priority_budget * seed_pct)
+                      if seed_queue else 0)
+        coverage_quota = non_priority_budget - seed_quota
+
+        # Stable rotation across runs so each tick advances the seed offset
+        # and the full pool gets covered over ~10-15 ticks.
+        from datetime import datetime as _rotdt
+        rot_seed = _rotdt.utcnow().timetuple().tm_yday * 7
+
+        def _rotate(pool: list, n: int) -> list:
+            if not pool or n <= 0:
+                return []
+            offset = rot_seed % len(pool)
+            rotated = pool[offset:] + pool[:offset]
+            return rotated[:n]
+
+        priority_pick = _rotate(priority_seed_queue, priority_quota)
+        seed_pick = _rotate(seed_queue, seed_quota)
+        coverage_pick = coverage_queue[:coverage_quota]
+
+        # Interleave: priority-seed, coverage, regular-seed, coverage, ...
+        # so the priority categories get crawled even if every other
+        # query fails.
+        plan = []
+        ps_iter = iter(priority_pick)
+        s_iter = iter(seed_pick)
+        c_iter = iter(coverage_pick)
+        while len(plan) < max_queries_per_run:
+            advanced = False
+            for it in (ps_iter, c_iter, s_iter):
+                try:
+                    plan.append(next(it))
+                    advanced = True
+                    if len(plan) >= max_queries_per_run:
+                        break
+                except StopIteration:
+                    continue
+            if not advanced:
+                break
         plan = plan[:max_queries_per_run]
+        stats["seeds_in_plan"] = (len(priority_pick) + len(seed_pick)
+                                   if plan else 0)
+        stats["coverage_in_plan"] = len(coverage_pick)
         if not plan:
             return RunResult(status="success", summary="no seeds configured")
 
