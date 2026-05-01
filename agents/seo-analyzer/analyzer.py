@@ -2547,11 +2547,12 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                         active_goals=active_goals,
                     )
                     print(f"  → LLM audit found {len(issues)} issues", file=sys.stderr)
-                    next_id_count = {"i": len(recs)}
-                    def _next_id():
-                        next_id_count["i"] += 1
-                        return f"rec-{next_id_count['i']:03d}"
-                    llm_recs = issues_to_recommendations(issues, _next_id)
+                    # Reuse the outer next_id() so LLM-audit ids continue
+                    # from where the rule passes left off. Earlier this
+                    # used `len(recs)` as the seed, which collided with
+                    # rule-pass ids whenever any rec was filtered out
+                    # (e.g. by the already-handled dedupe).
+                    llm_recs = issues_to_recommendations(issues, next_id)
                     # Wire repo-routes into implementation_outline.files so
                     # the implementer + the human reading the email get a
                     # concrete file:line target instead of guessing.
