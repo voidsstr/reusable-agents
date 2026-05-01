@@ -1,32 +1,198 @@
-# Generic site config — copy this and edit for your own site.
-# See ../../shared/schemas/site-config.schema.json for the full reference.
+# ============================================================================
+# Generic SEO site config — copy this and edit for your own site.
+#
+# This file is the SINGLE source of truth for what the SEO agent does on
+# your site. The reusable-agents SEO sub-agents (seo-data-collector,
+# seo-analyzer, seo-reporter, implementer, seo-deployer) read every
+# site-specific value from here. There are no hardcoded tags, domains,
+# or URL templates anywhere in the analyzer code — onboarding a new
+# site is config-only:
+#
+#   1. cp examples/sites/generic.yaml examples/sites/<your-site>.yaml
+#   2. Edit the values below.
+#   3. (If your site has a DB) drop a per-site DATABASE_URL_<UPPER> in
+#      ~/.reusable-agents/secrets.env so the implementer can resolve it.
+#   4. Copy a per-site agent dir like
+#        nsc-assistant/agents/<your-site>-seo-opportunity-agent/
+#      adjust the manifest's id + entry_command to point at this yaml.
+#   5. Re-register: bash scripts/register-agents.sh
+#
+# Schema reference: ../../shared/schemas/site-config.schema.json
+# Full reference impls: aisleprompt.yaml, specpicks.yaml in this dir.
+# ============================================================================
 
 site:
-  id: my-site                       # kebab-case, stable
-  domain: example.com
-  label: My Awesome Site
-  mode: recommend                   # 'recommend' for safe start; flip to 'implement' once trusted
+  id: my-site                       # kebab-case, stable. Used in subject
+                                     # tags + the per-site agent id +
+                                     # DATABASE_URL_<UPPER_SITE> env var.
+  domain: example.com               # bare domain, no scheme
+  label: My Awesome Site            # human-readable for emails / dashboards
+  mode: recommend                   # 'recommend' for safe start;
+                                     # 'implement' to enable auto-queue
+                                     # shipping via the implementer.
 
+# ─── Data sources ─────────────────────────────────────────────────────────
 data_sources:
   gsc:
-    site_url: sc-domain:example.com
-    default_country_filter: usa     # ISO-3 country code for the US-segment derived files
+    site_url: sc-domain:example.com    # GSC property URL
+    default_country_filter: usa        # ISO-3 code for US-segment files
   ga4:
-    property_id: "123456789"        # GA4 property numeric id, as a STRING
-  db: null                          # set if you have a backend DB you can query for revenue events
+    property_id: "123456789"           # GA4 numeric property id, as STRING
+  db:
+    type: postgres                     # set when the site has a backend DB
+    dsn_env: DATABASE_URL              # env var holding the DSN at run time
+    queries_file: ./db-queries.sql     # path to per-site SQL (see specpicks)
+  google_ads: null                     # optional — see specpicks.yaml shape
 
-revenue_kpis: []                    # populate if you track conversions; the analyzer will surface drops as recs
+# ─── Page-type inventory ──────────────────────────────────────────────────
+# The collector samples per type and feeds the HTML to the analyzer's
+# per-type rules. Each type's regex matches sitemap URL paths.
+page_inventory:
+  - { type: product,      sitemap_pattern: "/products?/[^/]+$",     sample_size: 40 }
+  - { type: head_to_head, sitemap_pattern: "/(?:vs|compare)/[^/]+$", sample_size: 30 }
+  - { type: article,      sitemap_pattern: "/(?:articles|reviews|blog)/[^/]+$", sample_size: 25 }
+  - { type: hardware,     sitemap_pattern: "/hardware/[^/]+$",      sample_size: 25 }
 
+# ─── Coverage targets — studio-supplies-style content engine ──────────────
+# The analyzer counts pages matching each pattern and emits new-page-<type>
+# recs when the count is below `expected_min`. Drop blocks you don't need.
+coverage_targets:
+  buying_guide:
+    sitemap_pattern: "/(?:buying-guides?|guides)/[^/]+$"
+    expected_min: 30
+    rec_priority: high
+    horizon_weeks: 12
+    json_ld: "Article + ItemList"
+    min_words: 1500
+    min_internal_links: 8
+    title_template: "Best {category} for {year}: Top Picks + Buying Guide"
+  brand:
+    sitemap_pattern: "/brands?/[^/]+$"
+    expected_min: 25
+    rec_priority: medium
+    horizon_weeks: 12
+    json_ld: "WebPage + Brand + BreadcrumbList"
+    min_words: 800
+    title_template: "{brand} Products & Reviews"
+  comparison:
+    sitemap_pattern: "/(?:vs|compare)/[^/]+$"
+    expected_min: 50
+    rec_priority: high
+    horizon_weeks: 12
+    json_ld: "Article"
+    min_words: 1500
+    title_template: "{product-A} vs {product-B}: Which is Better for {use-case}?"
+  use_case:
+    sitemap_pattern: "/best-[^/]+-for-[^/]+$"
+    expected_min: 25
+    rec_priority: high
+    horizon_weeks: 12
+    title_template: "Best {category} for {persona/use-case} ({year} Picks)"
+  troubleshooting:
+    sitemap_pattern: "/(?:articles|guides)/.*-(?:troubleshoot|fix|how-to)"
+    expected_min: 15
+    rec_priority: medium
+    horizon_weeks: 16
+    title_template: "How to Fix {common-issue} on {product/category}"
+
+# ─── Articles inventory ───────────────────────────────────────────────────
+# Pulls every published article + joins with GSC stats to surface boost
+# recs (snippet rewrite, title fix, orphan, low-position). When
+# `audit_full_body: true`, body_md is also pulled and the analyzer's
+# revenue-focus pass scans for product mentions missing tagged Amazon
+# links. Add this block ONLY if the site has a publishable article store.
+articles:
+  domain: example.com
+  dsn_env: DATABASE_URL
+  audit_full_body: false          # flip to true for the article-mention audit
+  audit_all: false                # flip to true to scan every article each run
+  sources: []                     # populate per-table source(s) — see below
+  # Example sources (uncomment + adapt):
+  # sources:
+  #   - name: editorial_articles
+  #     url_template: "https://{domain}/reviews/{slug}"
+  #     query: |
+  #       SELECT slug, title, body_md AS body,
+  #              subtitle, excerpt, category, tags,
+  #              published_at, updated_at
+  #       FROM editorial_articles
+  #       WHERE site_id='my-site' AND status='published'
+
+# ─── Revenue focus ────────────────────────────────────────────────────────
+# Drives Amazon-affiliate-revenue auditing. When enabled:
+#   1. The analyzer scans every published article for product mentions
+#      that lack a tagged Amazon link or an internal PDP link.
+#   2. Recs that touch is_featured products get a priority boost.
+#   3. Article-author + h2h agents bias toward content that names
+#      featured products (which drive the click).
+#
+# Leave the whole block out (or set enabled: false) for sites that
+# don't monetize via Amazon Associates.
+revenue_focus:
+  enabled: false
+  goal: "Drive affiliate revenue from organic search traffic"
+  amazon_associate_tag: ""        # e.g. "myassoc-20" — your Associates ID
+  product_url_template: "https://example.com/products/{asin}"
+  pdp_path_prefix: "/products/"   # the path part of product_url_template
+  sales_kpi: amazon-clicks
+  # Files the implementer should edit when wiring affiliate links.
+  # Override these defaults with the actual paths in your repo.
+  article_renderer_files:
+    - frontend/src/pages/ArticleDetailPage.tsx
+    - src/services/article-renderer.ts
+  # Page types audited extra hard (last click before the referral).
+  high_intent_page_types: [product, head_to_head, buying_guide]
+  # Multipliers applied by the analyzer when scoring rec priority.
+  priority_boost:
+    featured_pdp: 2.0
+    untagged_amazon_link: 3.0
+    schema_missing_on_featured: 2.5
+    internal_link_to_featured: 1.5
+  # Article-author + analyzer bias new-page recs toward these types.
+  preferred_rec_types:
+    - product-affiliate-tag-missing
+    - article-featured-product-mention-untagged
+    - new-page-comparison
+    - new-page-buying_guide
+    - new-page-use_case
+    - internal-link-to-featured
+
+# ─── Revenue KPIs ─────────────────────────────────────────────────────────
+# Populate when you track conversions; the analyzer surfaces drops as
+# recs and the reporter graphs trends in the email.
+revenue_kpis: []
+# Example:
+# revenue_kpis:
+#   - id: amazon-clicks
+#     label: Amazon affiliate click-throughs
+#     ga4_event: ""                  # or the GA4 event name
+#     db_table: ""                   # or the DB table the collector counts
+
+# ─── Analyzer ─────────────────────────────────────────────────────────────
 analyzer:
   primary_objective: top5-rank      # top5-rank | revenue-conversion | hybrid
   max_recs_per_run: 12
   us_traffic_weight: 1.5
   min_impressions_for_target: 3
+  max_llm_audit_pages: 30
+  pre_traffic_impr_threshold: 100   # below this → pre-traffic content mode
 
-# Required only if site.mode = implement
-implementer: null
+# ─── Implementer + deployer ───────────────────────────────────────────────
+# Required only if site.mode = implement. The implementer applies LLM-
+# driven edits + commits; the deployer optionally pushes / deploys.
+# When mode=implement, every rec auto-queues to the implementer (no email
+# reply needed) — see ../../agents/seo-reporter/send-report.py:_write_auto_queue.
+implementer:
+  repo_path: /path/to/your/repo
+  branch: main
+  commit_message_template: "SEO agent: %s"
 deployer: null
 
+# ─── Reporter ─────────────────────────────────────────────────────────────
+# Email notification of recommendations. Goes through send_via_msmtp so
+# the digest-rollup-agent can stitch it into the 3h summary email when
+# DIGEST_ONLY=1 is set. The auto-queue dispatch fires regardless — the
+# email is informational.
 reporter:
   email:
     to: [you@example.com]
@@ -35,7 +201,8 @@ reporter:
     subject_template: "[SEO:{site}] run {tag} — {recs_count} recs"
   dashboard: null                   # or {base_url, agent_id} to ping a dashboard
 
+# ─── Auth ─────────────────────────────────────────────────────────────────
 auth:
-  oauth_file: ~/.reusable-agents/seo/.oauth.json
+  oauth_file: ~/.reusable-agents/seo/.oauth.json   # GSC + GA4 + Graph
 
 runs_root: ~/.reusable-agents/seo/runs

@@ -268,19 +268,38 @@ echo "[implementer] dispatch_kind=$DISPATCH_KIND source_agent_from_recs=$SOURCE_
 # DB access for dispatches that write rows directly (article-author writes
 # to editorial_articles / buying_guides; h2h writes to comparison_commentary;
 # catalog-audit writes to product flag tables). The responder's process env
-# doesn't carry DATABASE_URL, so resolve it per-site here. The connection
-# string is a known constant per app — match the manifest's entry_command.
-if [ -z "${DATABASE_URL:-}" ]; then
-    case "${RESPONDER_SITE:-}" in
-        specpicks)
-            export DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require'
-            echo "[implementer] resolved DATABASE_URL for specpicks" >&2
-            ;;
-        aisleprompt)
-            export DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require'
-            echo "[implementer] resolved DATABASE_URL for aisleprompt" >&2
-            ;;
-    esac
+# doesn't carry DATABASE_URL, so we need a way to resolve it per-site
+# without hardcoding which sites exist. Resolution order:
+#   1. DATABASE_URL already in env — use it.
+#   2. Per-site env var DATABASE_URL_<UPPER_SNAKE_SITE> (e.g.
+#      DATABASE_URL_SPECPICKS, DATABASE_URL_AISLEPROMPT) seeded by
+#      ~/.reusable-agents/secrets.env.
+#   3. site.yaml's database.url_env → look that env var up.
+#   4. The site.yaml's site.id literal in DATABASE_URL_<UPPER>.
+# No hardcoded connection strings — adding a new site is purely
+# secrets.env + site.yaml work.
+if [ -z "${DATABASE_URL:-}" ] && [ -n "${RESPONDER_SITE:-}" ]; then
+    SITE_UPPER="$(echo "$RESPONDER_SITE" | tr '[:lower:]-' '[:upper:]_')"
+    PER_SITE_VAR="DATABASE_URL_${SITE_UPPER}"
+    if [ -n "${!PER_SITE_VAR:-}" ]; then
+        export DATABASE_URL="${!PER_SITE_VAR}"
+        echo "[implementer] resolved DATABASE_URL from \$$PER_SITE_VAR" >&2
+    fi
+fi
+# Also honor an explicit cfg.database.url_env from SEO_AGENT_CONFIG.
+if [ -z "${DATABASE_URL:-}" ] && [ -f "${SEO_AGENT_CONFIG:-/dev/null}" ]; then
+    URL_ENV=$(python3 -c "
+import sys, yaml
+try:
+    cfg = yaml.safe_load(open('$SEO_AGENT_CONFIG'))
+    print((cfg.get('database') or {}).get('url_env', ''))
+except Exception:
+    pass
+" 2>/dev/null)
+    if [ -n "$URL_ENV" ] && [ -n "${!URL_ENV:-}" ]; then
+        export DATABASE_URL="${!URL_ENV}"
+        echo "[implementer] resolved DATABASE_URL from cfg.database.url_env=$URL_ENV" >&2
+    fi
 fi
 
 case "$IMPLEMENTER_LLM" in

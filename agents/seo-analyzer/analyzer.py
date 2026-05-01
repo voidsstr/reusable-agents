@@ -1467,7 +1467,24 @@ def _add_article_amazon_attribution_recs(
     if not articles:
         return
 
-    associate_tag = "specpicks-20"  # could be made configurable later
+    # All site-specific knobs read from cfg.revenue_focus — never
+    # hardcode a tag/domain/template here. Sites without a cfg drop
+    # back to safe defaults (no tag → flag _every_ amazon mention as
+    # untagged, which is the right conservative behavior).
+    associate_tag = (revenue_focus.get("amazon_associate_tag")
+                      or revenue_focus.get("associate_tag")
+                      or "")
+    site_domain = (cfg.get("site") or {}).get("domain", "")
+    product_url_template = (
+        revenue_focus.get("product_url_template")
+        or (f"https://{site_domain}/products/{{asin}}"
+            if site_domain else "")
+    )
+    pdp_path_prefix = (
+        revenue_focus.get("pdp_path_prefix")
+        or (urlparse(product_url_template).path.split("{")[0]
+            if product_url_template else "/products/")
+    )
 
     # Build a lookup: ASIN -> list of mention tokens (title head, brand)
     def _mention_tokens(p: dict) -> list[str]:
@@ -1490,15 +1507,24 @@ def _add_article_amazon_attribution_recs(
         toks = _mention_tokens(p)
         if not toks:
             continue
-        aff = p.get("amazon_affiliate_url") or (
-            f"https://www.amazon.com/dp/{p.get('asin','')}?tag={associate_tag}"
-            if p.get("asin") else "")
+        if associate_tag and p.get("asin"):
+            default_aff = (f"https://www.amazon.com/dp/{p['asin']}"
+                            f"?tag={associate_tag}")
+        elif p.get("asin"):
+            default_aff = f"https://www.amazon.com/dp/{p['asin']}"
+        else:
+            default_aff = ""
+        aff = p.get("amazon_affiliate_url") or default_aff
+        product_url = (
+            product_url_template.format(asin=p.get("asin", ""))
+            if product_url_template and p.get("asin") else ""
+        )
         feat_lookup.append({
             "asin": p.get("asin"),
             "tokens": toks,
             "affiliate_url": aff,
             "title": p.get("title", ""),
-            "product_url": f"https://specpicks.com/products/{p.get('asin','')}",
+            "product_url": product_url,
         })
 
     if not feat_lookup:
@@ -1511,10 +1537,12 @@ def _add_article_amazon_attribution_recs(
         if not body or len(body) < 100:
             continue
         url = art.get("url") or art.get("slug") or ""
-        # Already-tagged Amazon link presence
-        has_tagged_amazon = (
-            f"tag={associate_tag}" in body
-            or f"tag%3D{associate_tag}" in body  # url-encoded
+        # Already-tagged Amazon link presence — only meaningful if the
+        # site declared its associate_tag. Without one, EVERY amazon
+        # outbound link counts as untagged (the conservative default).
+        has_tagged_amazon = bool(associate_tag) and (
+            f"tag={associate_tag}".lower() in body
+            or f"tag%3d{associate_tag}".lower() in body  # url-encoded
         )
         # Detect mentions
         missing_for_article: list[dict] = []
@@ -1523,13 +1551,20 @@ def _add_article_amazon_attribution_recs(
             if not mentioned:
                 continue
             # Check if THIS specific product is referenced via tagged amazon
-            # link OR via the SpecPicks PDP (which auto-tags server-side).
-            has_link = (
-                (f["asin"] and f["asin"].lower() in body
-                 and f"tag={associate_tag}" in body)
-                or (f["product_url"].lower() in body)
-                or (f"/products/{(f['asin'] or '').lower()}" in body)
+            # link OR via the site's own PDP (which auto-tags server-side).
+            asin_lower = (f["asin"] or "").lower()
+            tagged_amazon_match = (
+                bool(associate_tag) and asin_lower
+                and asin_lower in body
+                and f"tag={associate_tag}".lower() in body
             )
+            pdp_match = (
+                bool(f["product_url"]) and f["product_url"].lower() in body
+            ) or (
+                bool(asin_lower)
+                and f"{pdp_path_prefix.rstrip('/')}/{asin_lower}" in body
+            )
+            has_link = tagged_amazon_match or pdp_match
             if not has_link:
                 missing_for_article.append({
                     "asin": f["asin"],
@@ -1564,12 +1599,17 @@ def _add_article_amazon_attribution_recs(
         "rationale": (
             f"SEO content already mentions {total_missing} featured products "
             f"by name across {len(flagged)} published articles, but the "
-            f"mentions don't link to a tagged Amazon URL or the "
-            f"/products/<asin> PDP (which inserts an affiliate-tagged "
-            f"button). Every uncited mention is a buyer who almost "
-            f"converted. Adding a tagged ?tag={associate_tag} link or a "
-            f"/products/<asin> link captures the click and is a direct "
-            f"path to the 3 qualifying purchases needed to unlock PA-API."
+            f"mentions don't link to a tagged Amazon URL or the site's "
+            f"own PDP (which inserts an affiliate-tagged button). Every "
+            f"uncited mention is a buyer who almost converted. "
+            + (f"Adding a tagged ?tag={associate_tag} link "
+               if associate_tag
+               else "Adding a tagged Amazon affiliate link ")
+            + f"or a {pdp_path_prefix.rstrip('/')}/<asin> link captures "
+            + f"the click. "
+            + (revenue_focus.get("goal", "")
+               or "This is the highest-leverage way to convert organic traffic "
+               "into affiliate revenue.")
         ),
         "expected_impact": {
             "metric": "amazon_affiliate_clicks",
@@ -1578,23 +1618,30 @@ def _add_article_amazon_attribution_recs(
         },
         "data_refs": [
             "data/articles-inventory.json",
-            "data/featured-products.json",
+            "data/db-stats.json (featured_products)",
         ],
         "implementation_outline": {
             "approach": (
-                "For each article, locate the featured-product mention by "
-                "title-token (first 3 significant words) and replace with "
-                "either a Markdown link to /products/<asin> (preferred — "
-                "renders the SpecPicks PDP with a tagged buy button) or a "
-                "direct amazon.com/dp/<asin>?tag=specpicks-20 URL. Prefer "
-                "the PDP link because it gives us full template control "
-                "(price, image, related products) and cleanly funnels "
-                "click → affiliate-tagged outbound."
+                f"For each article, locate the featured-product mention by "
+                f"title-token (first 3 significant words) and replace with "
+                f"either a Markdown link to {pdp_path_prefix.rstrip('/')}/<asin> "
+                f"(preferred — renders the site PDP with a tagged buy button) or a "
+                + (f"direct amazon.com/dp/<asin>?tag={associate_tag} URL. "
+                   if associate_tag
+                   else "direct amazon.com/dp/<asin>?tag=<your-associate-id> URL. ")
+                + f"Prefer the PDP link because it gives full template control "
+                f"(price, image, related products) and cleanly funnels "
+                f"click → affiliate-tagged outbound."
             ),
-            "files": [
-                "frontend/src/pages/ArticleDetailPage.tsx",
-                "src/services/article-renderer.ts (if Amazon-link helper exists)",
-            ],
+            "files": (
+                revenue_focus.get("article_renderer_files")
+                or [
+                    # Heuristic defaults — implementer can override if these
+                    # paths don't match the site's tree.
+                    "frontend/src/pages/ArticleDetailPage.tsx",
+                    "src/services/article-renderer.ts (if an Amazon-link helper exists)",
+                ]
+            ),
         },
         "sample_articles": [
             {
