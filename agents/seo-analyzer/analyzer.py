@@ -1406,6 +1406,212 @@ def _add_jsonld_field_completeness_recs(data: Path, recs: list, next_id, max_rec
         })
 
 
+def _add_article_amazon_attribution_recs(
+    data: Path, cfg: dict, recs: list, next_id, max_recs: int,
+) -> None:
+    """Scan article bodies for featured-product mentions that lack a
+    tagged Amazon affiliate link. Driven by site.yaml.revenue_focus —
+    only fires when revenue_focus.enabled.
+
+    For every published article + buying guide that mentions a featured
+    product (by title-token, brand, or ASIN), check whether the article
+    contains either:
+      a) an inline link with `amazon.com/dp/<asin>?tag=<id>`, OR
+      b) the SpecPicks PDP URL `/products/<asin>` (which renders an
+         affiliate-tagged button server-side).
+    If neither, emit one rec per article aggregating the missing
+    attributions — every untagged mention is a missed referral.
+    """
+    if len(recs) >= max_recs:
+        return
+    revenue_focus = (cfg.get("revenue_focus") or {})
+    if not revenue_focus.get("enabled"):
+        return
+
+    # 1) Load featured products. The data collector writes the named
+    # @@QUERY blocks into db-stats.json; the analyzer reads from there.
+    # Falls back to a sidecar featured-products.json if present.
+    featured: list[dict] = []
+    db_path = data / "db-stats.json"
+    if db_path.is_file():
+        try:
+            db_data = json.loads(db_path.read_text())
+            v = db_data.get("featured_products")
+            if isinstance(v, list):
+                featured = v
+        except Exception:
+            featured = []
+    if not featured:
+        sidecar = data / "featured-products.json"
+        if sidecar.is_file():
+            try:
+                v = json.loads(sidecar.read_text())
+                if isinstance(v, list):
+                    featured = v
+            except Exception:
+                pass
+    if not featured:
+        return
+
+    # 2) Load articles inventory (with body)
+    articles_path = data / "articles-inventory.json"
+    articles: list[dict] = []
+    if articles_path.is_file():
+        try:
+            articles = json.loads(articles_path.read_text())
+            if isinstance(articles, dict):
+                # Older shape: {"articles": [...]}
+                articles = articles.get("articles") or []
+        except Exception:
+            articles = []
+    if not articles:
+        return
+
+    associate_tag = "specpicks-20"  # could be made configurable later
+
+    # Build a lookup: ASIN -> list of mention tokens (title head, brand)
+    def _mention_tokens(p: dict) -> list[str]:
+        tokens = []
+        title = (p.get("title") or "").strip()
+        if title:
+            # Use the first 4 significant words as the matchable phrase
+            words = [w for w in title.split() if len(w) > 2][:4]
+            if len(words) >= 2:
+                tokens.append(" ".join(words[:3]))
+        brand = (p.get("brand") or "").strip()
+        if brand and len(brand) >= 3:
+            tokens.append(brand)
+        if p.get("asin"):
+            tokens.append(p["asin"])
+        return [t.lower() for t in tokens if t]
+
+    feat_lookup = []  # list of (asin, [tokens], affiliate_url, title)
+    for p in featured:
+        toks = _mention_tokens(p)
+        if not toks:
+            continue
+        aff = p.get("amazon_affiliate_url") or (
+            f"https://www.amazon.com/dp/{p.get('asin','')}?tag={associate_tag}"
+            if p.get("asin") else "")
+        feat_lookup.append({
+            "asin": p.get("asin"),
+            "tokens": toks,
+            "affiliate_url": aff,
+            "title": p.get("title", ""),
+            "product_url": f"https://specpicks.com/products/{p.get('asin','')}",
+        })
+
+    if not feat_lookup:
+        return
+
+    # 3) For each article, find mentions + check for tagged links
+    flagged: list[dict] = []
+    for art in articles:
+        body = (art.get("body") or "").lower()
+        if not body or len(body) < 100:
+            continue
+        url = art.get("url") or art.get("slug") or ""
+        # Already-tagged Amazon link presence
+        has_tagged_amazon = (
+            f"tag={associate_tag}" in body
+            or f"tag%3D{associate_tag}" in body  # url-encoded
+        )
+        # Detect mentions
+        missing_for_article: list[dict] = []
+        for f in feat_lookup:
+            mentioned = any(tok in body for tok in f["tokens"])
+            if not mentioned:
+                continue
+            # Check if THIS specific product is referenced via tagged amazon
+            # link OR via the SpecPicks PDP (which auto-tags server-side).
+            has_link = (
+                (f["asin"] and f["asin"].lower() in body
+                 and f"tag={associate_tag}" in body)
+                or (f["product_url"].lower() in body)
+                or (f"/products/{(f['asin'] or '').lower()}" in body)
+            )
+            if not has_link:
+                missing_for_article.append({
+                    "asin": f["asin"],
+                    "title": f["title"][:80],
+                    "affiliate_url": f["affiliate_url"],
+                })
+        if missing_for_article:
+            flagged.append({
+                "url": url,
+                "slug": art.get("slug"),
+                "title": art.get("title"),
+                "missing": missing_for_article,
+                "has_any_tagged_amazon": has_tagged_amazon,
+            })
+
+    if not flagged:
+        return
+
+    # 4) Emit one rec covering the top N most-impactful articles. Cap to
+    # avoid drowning the report; the actual implementation can fan out.
+    top = sorted(flagged, key=lambda x: -len(x["missing"]))[:10]
+    total_missing = sum(len(x["missing"]) for x in flagged)
+    rid = next_id()
+    recs.append({
+        "id": rid,
+        "type": "article-featured-product-mention-untagged",
+        "priority": "critical",
+        "title": (
+            f"Add tagged Amazon links to {total_missing} featured-product "
+            f"mention(s) across {len(flagged)} article(s)"
+        ),
+        "rationale": (
+            f"SEO content already mentions {total_missing} featured products "
+            f"by name across {len(flagged)} published articles, but the "
+            f"mentions don't link to a tagged Amazon URL or the "
+            f"/products/<asin> PDP (which inserts an affiliate-tagged "
+            f"button). Every uncited mention is a buyer who almost "
+            f"converted. Adding a tagged ?tag={associate_tag} link or a "
+            f"/products/<asin> link captures the click and is a direct "
+            f"path to the 3 qualifying purchases needed to unlock PA-API."
+        ),
+        "expected_impact": {
+            "metric": "amazon_affiliate_clicks",
+            "horizon_weeks": 1,
+            "lift_pct_estimate": 15,
+        },
+        "data_refs": [
+            "data/articles-inventory.json",
+            "data/featured-products.json",
+        ],
+        "implementation_outline": {
+            "approach": (
+                "For each article, locate the featured-product mention by "
+                "title-token (first 3 significant words) and replace with "
+                "either a Markdown link to /products/<asin> (preferred — "
+                "renders the SpecPicks PDP with a tagged buy button) or a "
+                "direct amazon.com/dp/<asin>?tag=specpicks-20 URL. Prefer "
+                "the PDP link because it gives us full template control "
+                "(price, image, related products) and cleanly funnels "
+                "click → affiliate-tagged outbound."
+            ),
+            "files": [
+                "frontend/src/pages/ArticleDetailPage.tsx",
+                "src/services/article-renderer.ts (if Amazon-link helper exists)",
+            ],
+        },
+        "sample_articles": [
+            {
+                "url": x["url"], "slug": x["slug"],
+                "title": (x["title"] or "")[:80],
+                "missing_count": len(x["missing"]),
+                "missing_examples": [
+                    {"asin": m["asin"], "title": m["title"]}
+                    for m in x["missing"][:3]
+                ],
+            }
+            for x in top
+        ],
+        "implemented": False,
+    })
+
+
 def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
     """Flag pages with outbound Amazon links that lack a `?tag=<id>` —
     direct affiliate revenue leak."""
@@ -1952,6 +2158,18 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
             fn(data, recs, next_id, max_recs)
         except Exception as e:
             print(f"  [{label}] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Revenue-focus pass: featured-product attribution audit ----
+    # Scans every published article for featured-product mentions that
+    # lack a tagged Amazon link or a /products/<asin> internal link.
+    # Skipped quietly when site.yaml.revenue_focus.enabled is unset.
+    if len(recs) < max_recs:
+        try:
+            _add_article_amazon_attribution_recs(
+                data, cfg, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [article-amazon-attribution] rule eval failed: {e}",
+                   file=sys.stderr)
 
     # ---- Normal-mode content-gap fill-in ----
     # Already ran in pre-traffic mode above; in normal mode it runs last

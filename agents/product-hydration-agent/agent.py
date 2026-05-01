@@ -63,10 +63,13 @@ import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
 import yaml  # noqa: E402
 
-# Sibling module — colocated with agent.py.
+# Sibling modules — colocated with agent.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paapi_client import (  # noqa: E402
     PaapiClient, PaapiConfig, PaapiError, parse_get_items_response,
+)
+from brightdata_client import (  # noqa: E402
+    BrightDataClient, BrightDataConfig, BrightDataError, parse_bd_record,
 )
 
 
@@ -337,9 +340,12 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
 
 @with_retry(retries=3, backoff=1.5,
             on=(psycopg2.OperationalError, psycopg2.InterfaceError))
-def _persist_paapi_refresh(conn, product_id: int, parsed: dict) -> None:
-    """Apply PA-API GetItems output to a product row. Stamps
-    price_updated_at + last_fetched_at. Commit per row."""
+def _persist_provider_refresh(conn, product_id: int, parsed: dict, *,
+                                provider: str) -> None:
+    """Apply normalized provider output (PA-API or BrightData) to a
+    product row. Stamps price_updated_at + last_fetched_at and tags the
+    raw_amazon_data with the source provider for auditability. Commits
+    per row."""
     set_clauses = ["price_updated_at = NOW()", "last_fetched_at = NOW()"]
     params: list[Any] = []
     if parsed.get("price") is not None:
@@ -375,12 +381,14 @@ def _persist_paapi_refresh(conn, product_id: int, parsed: dict) -> None:
     # Mirror the parsed payload into raw_amazon_data for auditability.
     set_clauses.append("raw_amazon_data = %s::jsonb")
     params.append(json.dumps({
-        "source": "paapi",
+        "source": provider,
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "main_image_width": parsed.get("main_image_width"),
         "main_image_height": parsed.get("main_image_height"),
         "image_urls": parsed.get("image_urls") or [],
         "features": parsed.get("features") or [],
+        "bs_rank": parsed.get("bs_rank"),
+        "bought_past_month": parsed.get("bought_past_month"),
         "compliance": _compliance_flags(parsed),
     }))
     params.append(product_id)
@@ -414,18 +422,14 @@ def _compliance_flags(parsed: dict) -> dict:
     }
 
 
-def _refresh_amazon_prices(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
-                            site_id_filter: str | None,
-                            status_cb,
-                            decide_cb) -> dict:
-    """Refresh price + offer data for Amazon products with stale prices.
-
-    Returns: {refreshed, failed, processed, batches, asins_seen,
-              compliance_summary{flag: count}}.
-    Fails open — any per-batch error is logged and the loop continues.
-    """
+def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
+                        site_id_filter: str | None,
+                        status_cb, decide_cb) -> dict:
+    """Refresh price + offer data via Amazon PA-API. Used once SpecPicks
+    qualifies for the Creators API (3 qualifying purchases). Until then
+    the BrightData path is the default — see _refresh_via_brightdata."""
     freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
-    batch_size = int(raw_cfg.get("batch_size", 10))
+    batch_size = int(raw_cfg.get("paapi_batch_size", 10))
     max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
     candidates = _select_stale_amazon_prices(
         conn, site_id_filter=site_id_filter,
@@ -435,6 +439,7 @@ def _refresh_amazon_prices(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
               f"PA-API: {len(candidates)} stale-price products to refresh "
               f"(freshness={freshness_hours}h, cap={max_per_run})")
     summary = {
+        "provider": "paapi",
         "refreshed": 0, "failed": 0, "processed": 0,
         "batches": 0, "asins_seen": 0,
         "compliance_pass": 0, "compliance_fail": 0,
@@ -467,9 +472,9 @@ def _refresh_amazon_prices(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
             if not row:
                 continue
             try:
-                _persist_paapi_refresh(conn, row["id"], payload)
+                _persist_provider_refresh(conn, row["id"], payload,
+                                            provider="paapi")
                 summary["refreshed"] += 1
-                # Roll up compliance for goal-progress
                 compliance = _compliance_flags(payload)
                 if all(compliance.values()):
                     summary["compliance_pass"] += 1
@@ -479,28 +484,165 @@ def _refresh_amazon_prices(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
                 summary["failed"] += 1
                 decide_cb("error",
                            f"PA-API persist failed for {asin}: {str(e)[:200]}")
-        # Items missing from response (errors / unavailable / region-blocked)
-        # — stamp price_updated_at so we don't retry every run.
         missing = [a for a in chunk if a not in parsed]
         for a in missing:
             row = by_asin.get(a)
             if not row:
                 continue
             try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE products SET price_updated_at = NOW(), "
-                        "fetch_attempts = COALESCE(fetch_attempts, 0) + 1, "
-                        "fetch_error = %s WHERE id = %s",
-                        ["paapi: not in response", row["id"]],
-                    )
-                conn.commit()
+                _stamp_miss(conn, row["id"], "paapi: not in response")
                 summary["processed"] += 1
             except Exception as e:
                 decide_cb("error",
                            f"PA-API miss-stamp failed for {a}: {str(e)[:200]}")
     summary["processed"] = summary["refreshed"] + summary["failed"]
     return summary
+
+
+def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
+                             site_id_filter: str | None,
+                             status_cb, decide_cb) -> dict:
+    """Refresh price + offer data via Bright Data's Amazon Products
+    dataset. Default provider until PA-API qualification clears."""
+    freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
+    batch_size = int(raw_cfg.get("brightdata_batch_size", 100))
+    max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
+    candidates = _select_stale_amazon_prices(
+        conn, site_id_filter=site_id_filter,
+        freshness_hours=freshness_hours, limit=max_per_run,
+    )
+    decide_cb("observation",
+              f"BrightData: {len(candidates)} stale-price products "
+              f"(freshness={freshness_hours}h, cap={max_per_run}, "
+              f"batch={batch_size})")
+    summary = {
+        "provider": "brightdata",
+        "refreshed": 0, "failed": 0, "processed": 0,
+        "batches": 0, "asins_seen": 0,
+        "compliance_pass": 0, "compliance_fail": 0,
+        "estimated_cost_usd": 0.0,
+    }
+    if not candidates:
+        return summary
+
+    client = BrightDataClient(bd_cfg)
+    by_asin = {p["asin"]: p for p in candidates}
+    asins = list(by_asin.keys())
+    for i in range(0, len(asins), batch_size):
+        chunk = asins[i:i + batch_size]
+        summary["batches"] += 1
+        status_cb(
+            f"BrightData batch {summary['batches']}: {len(chunk)} ASINs "
+            f"(can take 30-90s)",
+            progress=0.05 + 0.05 * (i / max(1, len(asins))),
+            current_action=f"prices {i+1}-{i+len(chunk)}/{len(asins)}",
+        )
+        urls = [f"https://www.amazon.com/dp/{a}" for a in chunk]
+        try:
+            records = client.scrape(urls)
+        except BrightDataError as e:
+            summary["failed"] += len(chunk)
+            decide_cb("error",
+                       f"BrightData scrape failed for batch "
+                       f"{summary['batches']}: {str(e)[:200]}")
+            continue
+        seen_asins: set[str] = set()
+        for rec in records:
+            payload = parse_bd_record(rec)
+            if not payload:
+                continue
+            asin = payload["asin"]
+            seen_asins.add(asin)
+            row = by_asin.get(asin)
+            if not row:
+                continue
+            try:
+                _persist_provider_refresh(conn, row["id"], payload,
+                                            provider="brightdata")
+                summary["refreshed"] += 1
+                summary["asins_seen"] += 1
+                compliance = _compliance_flags(payload)
+                # Bright Data doesn't return image dimensions, so the
+                # zoom-eligible flag would always be False — skip it
+                # from the pass/fail check on BD-sourced rows.
+                bd_relevant = {k: v for k, v in compliance.items()
+                                if k != "amazon_image_zoom_eligible"}
+                if all(bd_relevant.values()):
+                    summary["compliance_pass"] += 1
+                else:
+                    summary["compliance_fail"] += 1
+            except Exception as e:
+                summary["failed"] += 1
+                decide_cb("error",
+                           f"BD persist failed for {asin}: {str(e)[:200]}")
+        missing = [a for a in chunk if a not in seen_asins]
+        for a in missing:
+            row = by_asin.get(a)
+            if not row:
+                continue
+            try:
+                _stamp_miss(conn, row["id"], "brightdata: warning/no-data")
+            except Exception as e:
+                decide_cb("error",
+                           f"BD miss-stamp failed for {a}: {str(e)[:200]}")
+    summary["processed"] = summary["refreshed"] + summary["failed"]
+    summary["estimated_cost_usd"] = round(summary["asins_seen"] * 0.001, 4)
+    return summary
+
+
+@with_retry(retries=3, backoff=1.5,
+            on=(psycopg2.OperationalError, psycopg2.InterfaceError))
+def _stamp_miss(conn, product_id: int, reason: str) -> None:
+    """Record a fetch miss without overwriting a real price. Stamps
+    price_updated_at so we don't try the same row every tick."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE products SET price_updated_at = NOW(), "
+            "fetch_attempts = COALESCE(fetch_attempts, 0) + 1, "
+            "fetch_error = %s WHERE id = %s",
+            [reason[:500], product_id],
+        )
+    conn.commit()
+
+
+def _refresh_amazon_prices(*, conn, raw_cfg: dict,
+                            paapi_cfg: PaapiConfig | None,
+                            bd_cfg: BrightDataConfig | None,
+                            provider: str,
+                            site_id_filter: str | None,
+                            status_cb, decide_cb) -> dict:
+    """Top-level dispatcher — selects the provider and delegates."""
+    if provider == "paapi":
+        if not paapi_cfg:
+            return {"provider": "paapi", "skipped_reason":
+                    "PA-API credentials not in env "
+                    "(AMAZON_PAAPI_ACCESS_KEY / SECRET_KEY / ASSOCIATE_TAG)",
+                    "refreshed": 0, "failed": 0, "processed": 0,
+                    "batches": 0, "asins_seen": 0,
+                    "compliance_pass": 0, "compliance_fail": 0}
+        return _refresh_via_paapi(
+            conn=conn, paapi_cfg=paapi_cfg, raw_cfg=raw_cfg,
+            site_id_filter=site_id_filter,
+            status_cb=status_cb, decide_cb=decide_cb,
+        )
+    if provider == "brightdata":
+        if not bd_cfg:
+            return {"provider": "brightdata", "skipped_reason":
+                    "BRIGHTDATA_API_KEY not in env",
+                    "refreshed": 0, "failed": 0, "processed": 0,
+                    "batches": 0, "asins_seen": 0,
+                    "compliance_pass": 0, "compliance_fail": 0,
+                    "estimated_cost_usd": 0.0}
+        return _refresh_via_brightdata(
+            conn=conn, bd_cfg=bd_cfg, raw_cfg=raw_cfg,
+            site_id_filter=site_id_filter,
+            status_cb=status_cb, decide_cb=decide_cb,
+        )
+    return {"provider": provider,
+            "skipped_reason": f"unknown provider: {provider}",
+            "refreshed": 0, "failed": 0, "processed": 0,
+            "batches": 0, "asins_seen": 0,
+            "compliance_pass": 0, "compliance_fail": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -849,56 +991,76 @@ class ProductHydrationAgent(AgentBase):
             return RunResult(status="failure",
                               summary=f"db connect failed: {e}", metrics={})
 
-        # ---- Phase 0: Amazon PA-API price refresh -------------------
+        # ---- Phase 0: Amazon price refresh (provider: brightdata|paapi) -----
+        price_refresh_cfg = (cfg.get("price_refresh") or {})
+        # Backward compat: if cfg.amazon_paapi exists with .enabled, treat
+        # as "paapi" provider.
+        paapi_block = (cfg.get("amazon_paapi") or {})
+        if not price_refresh_cfg and paapi_block.get("enabled"):
+            price_refresh_cfg = {**paapi_block, "provider": "paapi"}
+        provider = (price_refresh_cfg.get("provider") or "").lower()
         paapi_summary: dict = {
+            "provider": provider or "none",
             "refreshed": 0, "failed": 0, "processed": 0,
             "batches": 0, "asins_seen": 0,
             "compliance_pass": 0, "compliance_fail": 0,
             "skipped_reason": None,
         }
-        paapi_block = (cfg.get("amazon_paapi") or {})
-        if paapi_block.get("enabled"):
-            paapi_cfg = PaapiConfig.from_env(
-                access_key_env=paapi_block.get("access_key_env",
-                                                "AMAZON_PAAPI_ACCESS_KEY"),
-                secret_key_env=paapi_block.get("secret_key_env",
-                                                "AMAZON_PAAPI_SECRET_KEY"),
-                associate_tag_env=paapi_block.get("associate_tag_env",
-                                                   "AMAZON_PAAPI_ASSOCIATE_TAG"),
-                associate_tag=paapi_block.get("associate_tag"),
-                region=paapi_block.get("region", "us-east-1"),
-                marketplace=paapi_block.get("marketplace", "www.amazon.com"),
-                throttle_per_second=float(paapi_block.get(
-                    "throttle_per_second", 1.0)),
-            )
-            if paapi_cfg is None:
-                paapi_summary["skipped_reason"] = (
-                    "PA-API credentials not in env "
-                    "(AMAZON_PAAPI_ACCESS_KEY / SECRET_KEY / ASSOCIATE_TAG)"
-                )
-                self.decide("observation", paapi_summary["skipped_reason"])
-            else:
-                self.status("refreshing Amazon prices", progress=0.05,
-                             current_action="paapi-refresh")
-                try:
-                    paapi_summary.update(_refresh_amazon_prices(
-                        conn=conn, paapi_cfg=paapi_cfg, raw_cfg=paapi_block,
-                        site_id_filter=self.site_id_filter,
-                        status_cb=self.status, decide_cb=self.decide,
-                    ))
-                    self.decide(
-                        "action",
-                        f"PA-API: refreshed {paapi_summary['refreshed']}, "
-                        f"failed {paapi_summary['failed']}, "
-                        f"compliance {paapi_summary['compliance_pass']}/"
-                        f"{paapi_summary['compliance_pass'] + paapi_summary['compliance_fail']} pass"
-                    )
-                except Exception as e:
-                    paapi_summary["skipped_reason"] = f"refresh raised: {e}"
-                    self.decide("error",
-                                 f"PA-API refresh raised: {str(e)[:200]}")
+        if not provider or provider == "none":
+            paapi_summary["skipped_reason"] = "price_refresh.provider not set"
+            self.decide("observation", paapi_summary["skipped_reason"])
         else:
-            paapi_summary["skipped_reason"] = "amazon_paapi.enabled=false"
+            paapi_cfg = PaapiConfig.from_env(
+                access_key_env=price_refresh_cfg.get("paapi_access_key_env",
+                    paapi_block.get("access_key_env", "AMAZON_PAAPI_ACCESS_KEY")),
+                secret_key_env=price_refresh_cfg.get("paapi_secret_key_env",
+                    paapi_block.get("secret_key_env", "AMAZON_PAAPI_SECRET_KEY")),
+                associate_tag_env=price_refresh_cfg.get("paapi_associate_tag_env",
+                    paapi_block.get("associate_tag_env", "AMAZON_PAAPI_ASSOCIATE_TAG")),
+                associate_tag=price_refresh_cfg.get("associate_tag",
+                    paapi_block.get("associate_tag")),
+                region=price_refresh_cfg.get("paapi_region",
+                    paapi_block.get("region", "us-east-1")),
+                marketplace=price_refresh_cfg.get("marketplace",
+                    paapi_block.get("marketplace", "www.amazon.com")),
+                throttle_per_second=float(price_refresh_cfg.get(
+                    "paapi_throttle_per_second",
+                    paapi_block.get("throttle_per_second", 1.0))),
+            )
+            bd_key = os.environ.get(
+                price_refresh_cfg.get("brightdata_api_key_env", "BRIGHTDATA_API_KEY"),
+                "").strip()
+            bd_cfg = (BrightDataConfig(
+                api_key=bd_key,
+                poll_interval_s=int(price_refresh_cfg.get(
+                    "brightdata_poll_interval_s", 10)),
+                poll_timeout_s=int(price_refresh_cfg.get(
+                    "brightdata_poll_timeout_s", 600)),
+            ) if bd_key else None)
+
+            self.status(f"refreshing Amazon prices via {provider}",
+                         progress=0.05, current_action=f"{provider}-refresh")
+            try:
+                paapi_summary.update(_refresh_amazon_prices(
+                    conn=conn, raw_cfg=price_refresh_cfg,
+                    paapi_cfg=paapi_cfg, bd_cfg=bd_cfg,
+                    provider=provider,
+                    site_id_filter=self.site_id_filter,
+                    status_cb=self.status, decide_cb=self.decide,
+                ))
+                self.decide(
+                    "action",
+                    f"{provider}: refreshed {paapi_summary['refreshed']}, "
+                    f"failed {paapi_summary['failed']}, "
+                    f"compliance {paapi_summary['compliance_pass']}/"
+                    f"{paapi_summary['compliance_pass'] + paapi_summary['compliance_fail']} pass"
+                    + (f", est cost ${paapi_summary.get('estimated_cost_usd', 0):.4f}"
+                       if 'estimated_cost_usd' in paapi_summary else "")
+                )
+            except Exception as e:
+                paapi_summary["skipped_reason"] = f"refresh raised: {e}"
+                self.decide("error",
+                             f"{provider} refresh raised: {str(e)[:200]}")
 
         totals = {
             "queued": 0,
@@ -1121,6 +1283,50 @@ class ProductHydrationAgent(AgentBase):
                             f"{len(needs)} fields ({','.join(emitted_fields)})")
         finally:
             log_f.close()
+
+        # ---- Phase 2: refresh featured-products curation -----------
+        # Every tick recomputes the is_featured set so it reflects the
+        # freshest price/rating/review_count. The script lives in the
+        # site-specific agent dir (since the focus areas are site-
+        # specific); we look it up via env var so reusable-agents stays
+        # site-agnostic.
+        featured_summary: dict = {"executed": False, "skipped_reason": None}
+        featured_script = os.environ.get("FEATURED_SELECT_SCRIPT", "").strip()
+        if featured_script and Path(featured_script).is_file():
+            try:
+                self.status("refreshing featured-products set",
+                             progress=0.95,
+                             current_action="select-featured")
+                proc = subprocess.run(
+                    [sys.executable, featured_script],
+                    capture_output=True, text=True, timeout=120,
+                    env={**os.environ, "DATABASE_URL": self.dsn},
+                )
+                featured_summary["executed"] = True
+                featured_summary["rc"] = proc.returncode
+                if proc.returncode == 0:
+                    try:
+                        featured_summary["result"] = json.loads(proc.stdout.strip())
+                    except Exception:
+                        featured_summary["result_raw"] = proc.stdout[:500]
+                    self.decide("action",
+                                 "featured set refreshed: "
+                                 + (proc.stdout.strip().splitlines()[-1]
+                                    if proc.stdout.strip() else "ok"))
+                else:
+                    featured_summary["error"] = (proc.stderr or proc.stdout)[:500]
+                    self.decide("error",
+                                 f"featured-select rc={proc.returncode}: "
+                                 f"{(proc.stderr or proc.stdout)[:200]}")
+            except Exception as e:
+                featured_summary["error"] = str(e)[:500]
+                self.decide("error",
+                             f"featured-select raised: {str(e)[:200]}")
+        else:
+            featured_summary["skipped_reason"] = (
+                "FEATURED_SELECT_SCRIPT env var not set" if not featured_script
+                else f"script not found: {featured_script}"
+            )
 
         # Compute final coverage
         try:

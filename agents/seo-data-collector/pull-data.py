@@ -842,6 +842,8 @@ def pull_site_articles(articles_cfg: dict, out_dir: Path) -> None:
             continue
         slug_idx = cols.index("slug") if "slug" in cols else 0
         title_idx = cols.index("title") if "title" in cols else (1 if len(cols) > 1 else 0)
+        body_idx = cols.index("body") if "body" in cols else None
+        audit_full_body = bool(articles_cfg.get("audit_full_body"))
         for r in rows:
             slug = r[slug_idx]
             title = r[title_idx] if title_idx < len(r) else ""
@@ -866,7 +868,7 @@ def pull_site_articles(articles_cfg: dict, out_dir: Path) -> None:
                     signals.append("ranking-well")
             for s in signals:
                 counts_by_signal[s] = counts_by_signal.get(s, 0) + 1
-            inventory.append({
+            entry = {
                 "source": name,
                 "slug": slug,
                 "title": title,
@@ -879,7 +881,15 @@ def pull_site_articles(articles_cfg: dict, out_dir: Path) -> None:
                     "in_gsc": bool(gsc),
                 },
                 "boost_signals": signals,
-            })
+            }
+            # Embed body when revenue_focus / article-attribution audit
+            # needs full text (audit_full_body=true). Capped per-article so
+            # one giant guide can't bloat the run dir.
+            if audit_full_body and body_idx is not None and body_idx < len(r):
+                body = r[body_idx]
+                if isinstance(body, str) and body:
+                    entry["body"] = body[:200_000]  # 200KB hard cap per article
+            inventory.append(entry)
 
     try: conn.close()
     except Exception: pass
