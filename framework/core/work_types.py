@@ -63,11 +63,26 @@ DEFAULT_REC_ROUTING: dict[str, tuple[str, str]] = {
     "outbound-citations-thin":           ("body_md_edit", "article-author-agent"),
 
     # New-page generation — proposals + drafting belong to article-author.
+    # Both underscore and hyphen variants since the analyzer's content-gap
+    # rule emitter has used both.
     "new-page-buying_guide":             ("new_article_creation", "article-author-agent"),
+    "new-page-buying-guide":             ("new_article_creation", "article-author-agent"),
     "new-page-use_case":                 ("new_article_creation", "article-author-agent"),
+    "new-page-use-case":                 ("new_article_creation", "article-author-agent"),
     "new-page-troubleshooting":          ("new_article_creation", "article-author-agent"),
     "new-page-comparison":               ("comparison_page_generation", "head-to-head-agent"),
     "new-page-brand":                    ("new_article_creation", "article-author-agent"),
+
+    # On-page content edits — body / template / linking content. These
+    # are body_md or article-template work the implementer can technically
+    # do but article-author is more reliable for prose.
+    "onpage-thin-content":               ("body_md_edit", "article-author-agent"),
+    "onpage-low-internal-linking":       ("internal_link_addition", "article-author-agent"),
+    "review-template-incomplete":        ("body_md_edit", "article-author-agent"),
+    "body-internal-links-thin":          ("internal_link_addition", "article-author-agent"),
+    "body-link-density-thin":            ("internal_link_addition", "article-author-agent"),
+    "outbound-citations-missing":        ("body_md_edit", "article-author-agent"),
+    "pros-cons-thin":                    ("body_md_edit", "article-author-agent"),
 
     # Catalog / product-data work belongs to product-hydration.
     "price-stale":                       ("price_refresh", "product-hydration-agent"),
