@@ -16,17 +16,41 @@ quality bar from those generators was:
   who it's best for. Be specific. (Optional content type.)
 - **pros_cons** — exactly 5 pros AND 5 cons. Specific to the product, drawn
   from features + spec data, NOT generic boilerplate ("high quality
-  construction" is banned).
+  construction" is banned). **Each pro and each con must fit in 100
+  characters or fewer** — Amazon Associates pages render ~5 short bullets
+  best, and SERP rich snippets truncate longer ones. Use sentence fragments,
+  not full sentences.
 - **faq** — exactly 5 question/answer pairs. Each Q phrased as a real shopper
   would ask it. Each A is concrete (cite the rating, capacity, warranty,
   shipping). JSON-LD `FAQPage` compatible.
-- **seo_meta** — `title` ≤ 60 chars, `meta_description` ≤ 160 chars,
-  `keywords` 3-7 strings (lowercase, comma-free phrases). Title should
-  include the product name + a buyer-intent qualifier ("Review", "Best
-  Price", "Specs"). Description should land a value prop, not just restate
-  the title.
+- **seo_meta** — `title` ≤ 60 chars (Google SERP truncation point),
+  `meta_description` 120-160 chars (anything <120 looks thin; >160 is
+  truncated by Google). `keywords` 3-7 strings (lowercase, comma-free
+  phrases). Title should include the product name + a buyer-intent
+  qualifier ("Review", "Best Price", "Specs"). Description should land a
+  value prop, not just restate the title.
 - **buying_guide** / **comparison** — supplemental copy, only emit if
   requested.
+
+## Amazon Associates + Google Merchant guideline alignment
+
+The hydrated content is rendered into product detail pages that participate
+in **both** the Amazon Associates affiliate program (we link to amazon.com
+via tagged URLs) and Google Search (we emit Product structured data so
+listings show up as rich results). Every output must satisfy both:
+
+- **Amazon**: 5 short bullet pros (≤100 chars each), no claims that aren't
+  in the product context, no medical/safety claims, no price quotes in the
+  description (price changes hourly — leave price/availability to the
+  runtime).
+- **Google**: emit a Product JSON-LD-compatible shape. The runtime
+  builds the actual `application/ld+json` block from these fields:
+  `seo_meta.title` → `<title>` and JSON-LD `name`, `seo_meta.meta_description`
+  → JSON-LD `description`, `pros_cons.pros[]` → bullet schema, `faq` →
+  `FAQPage`, the catalog row's brand/image/offer → JSON-LD
+  `brand`/`image`/`offers`. Make sure title and description are
+  self-contained — if Google strips them out for a snippet, they should
+  still read coherently.
 
 ## Hydration goals (apply to EVERY field)
 

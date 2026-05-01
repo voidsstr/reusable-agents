@@ -63,6 +63,12 @@ import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
 import yaml  # noqa: E402
 
+# Sibling module — colocated with agent.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paapi_client import (  # noqa: E402
+    PaapiClient, PaapiConfig, PaapiError, parse_get_items_response,
+)
+
 
 AGENT_ID = "product-hydration-agent"
 
@@ -77,14 +83,22 @@ def _v_description(v: Any) -> str | None:
 
 
 def _v_pros_cons(v: Any) -> str | None:
+    """Validate {pros[5], cons[5]}. Each bullet capped at 100 chars to
+    fit Amazon's 5-bullet PDP shape and Google rich-snippet rendering.
+    Trim any LLM overrun rather than reject — the rest of the row is
+    usable even if a few bullets were long."""
     if not isinstance(v, dict):
         return None
     pros = v.get("pros") or []
     cons = v.get("cons") or []
     if not isinstance(pros, list) or not isinstance(cons, list):
         return None
-    pros = [str(p).strip() for p in pros if isinstance(p, (str, int, float)) and str(p).strip()]
-    cons = [str(c).strip() for c in cons if isinstance(c, (str, int, float)) and str(c).strip()]
+    pros = [str(p).strip()[:100] for p in pros
+            if isinstance(p, (str, int, float)) and str(p).strip()]
+    cons = [str(c).strip()[:100] for c in cons
+            if isinstance(c, (str, int, float)) and str(c).strip()]
+    pros = pros[:5]
+    cons = cons[:5]
     if not pros and not cons:
         return None
     return json.dumps({"pros": pros, "cons": cons})
@@ -107,6 +121,10 @@ def _v_faq(v: Any) -> str | None:
 
 
 def _v_seo_meta(v: Any) -> str | None:
+    """Validate seo_meta. Title hard-capped at 60 (Google SERP truncation).
+    Meta description hard-capped at 160 with a soft floor of 120 — values
+    below 120 chars don't fail validation but get a `short_meta_description`
+    flag the runtime can use to trigger rebuilds."""
     if not isinstance(v, dict):
         return None
     title = (v.get("title") or "").strip()[:60]
@@ -118,8 +136,11 @@ def _v_seo_meta(v: Any) -> str | None:
                 if isinstance(k, (str, int, float)) and str(k).strip()]
     if not title and not meta_desc and not keywords:
         return None
-    return json.dumps({"title": title, "meta_description": meta_desc,
-                        "keywords": keywords[:7]})
+    payload = {"title": title, "meta_description": meta_desc,
+               "keywords": keywords[:7]}
+    if meta_desc and len(meta_desc) < 120:
+        payload["short_meta_description"] = True
+    return json.dumps(payload)
 
 
 # content_type -> (column, validator/builder, is_jsonb)
@@ -280,6 +301,209 @@ def _persist_product(conn, product_id: int, updates: dict[str, str | None],
 
 
 # ---------------------------------------------------------------------------
+# Amazon PA-API price refresh
+# ---------------------------------------------------------------------------
+
+def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
+                                  freshness_hours: int,
+                                  limit: int) -> list[dict]:
+    """Return Amazon-sourced products whose price_updated_at is older than
+    `freshness_hours` (or NULL). Highest-traffic products first."""
+    site_clause = "AND p.site_id = %s" if site_id_filter else ""
+    params: list[Any] = []
+    if site_id_filter:
+        params.append(site_id_filter)
+    params.append(freshness_hours)
+    params.append(limit)
+    sql = f"""
+        SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source
+        FROM products p
+        WHERE p.is_active = TRUE
+          AND p.asin IS NOT NULL
+          AND p.asin <> ''
+          AND p.asin ~ '^[A-Z0-9]{{10}}$'
+          {site_clause}
+          AND (
+              p.price_updated_at IS NULL
+              OR p.price_updated_at < NOW() - (%s || ' hours')::interval
+          )
+        ORDER BY COALESCE(p.review_count, 0) DESC, p.id ASC
+        LIMIT %s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+@with_retry(retries=3, backoff=1.5,
+            on=(psycopg2.OperationalError, psycopg2.InterfaceError))
+def _persist_paapi_refresh(conn, product_id: int, parsed: dict) -> None:
+    """Apply PA-API GetItems output to a product row. Stamps
+    price_updated_at + last_fetched_at. Commit per row."""
+    set_clauses = ["price_updated_at = NOW()", "last_fetched_at = NOW()"]
+    params: list[Any] = []
+    if parsed.get("price") is not None:
+        set_clauses.append("price = %s")
+        params.append(parsed["price"])
+    if parsed.get("original_price") is not None:
+        set_clauses.append("original_price = %s")
+        params.append(parsed["original_price"])
+    if parsed.get("currency"):
+        set_clauses.append("currency = %s")
+        params.append(parsed["currency"])
+    if parsed.get("availability"):
+        set_clauses.append("availability = %s")
+        params.append(parsed["availability"])
+    if parsed.get("is_prime") is not None:
+        set_clauses.append("is_prime = %s")
+        params.append(bool(parsed["is_prime"]))
+    if parsed.get("rating") is not None:
+        set_clauses.append("rating = %s")
+        params.append(parsed["rating"])
+    if parsed.get("review_count") is not None:
+        set_clauses.append("review_count = %s")
+        params.append(parsed["review_count"])
+    if parsed.get("main_image_url"):
+        set_clauses.append("main_image_url = %s")
+        params.append(parsed["main_image_url"])
+    if parsed.get("amazon_url"):
+        set_clauses.append("amazon_url = %s")
+        params.append(parsed["amazon_url"])
+    if parsed.get("brand"):
+        set_clauses.append("brand = COALESCE(NULLIF(brand, ''), %s)")
+        params.append(parsed["brand"])
+    # Mirror the parsed payload into raw_amazon_data for auditability.
+    set_clauses.append("raw_amazon_data = %s::jsonb")
+    params.append(json.dumps({
+        "source": "paapi",
+        "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "main_image_width": parsed.get("main_image_width"),
+        "main_image_height": parsed.get("main_image_height"),
+        "image_urls": parsed.get("image_urls") or [],
+        "features": parsed.get("features") or [],
+        "compliance": _compliance_flags(parsed),
+    }))
+    params.append(product_id)
+    sql = f"UPDATE products SET {', '.join(set_clauses)} WHERE id = %s"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+    conn.commit()
+
+
+def _compliance_flags(parsed: dict) -> dict:
+    """Compute Amazon + Google guideline pass/fail flags from PA-API output.
+    Stored on raw_amazon_data so the runtime can hide non-compliant rows
+    and the dashboard can surface coverage % over time."""
+    title = parsed.get("title") or ""
+    img_w = parsed.get("main_image_width") or 0
+    img_h = parsed.get("main_image_height") or 0
+    long_side = max(img_w or 0, img_h or 0)
+    has_brand = bool(parsed.get("brand"))
+    has_image = bool(parsed.get("main_image_url"))
+    has_price = parsed.get("price") is not None
+    return {
+        # Amazon Associates / PDP guidelines
+        "amazon_title_in_range": 80 <= len(title) <= 200,
+        "amazon_image_zoom_eligible": long_side >= 1000,
+        "amazon_has_brand": has_brand,
+        "amazon_has_main_image": has_image,
+        # Google Search / Merchant Center
+        "google_seo_title_fits": 1 <= len(title) <= 60 if title else False,
+        "google_has_offer": has_price,
+        "google_jsonld_ready": has_image and has_price and bool(title),
+    }
+
+
+def _refresh_amazon_prices(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
+                            site_id_filter: str | None,
+                            status_cb,
+                            decide_cb) -> dict:
+    """Refresh price + offer data for Amazon products with stale prices.
+
+    Returns: {refreshed, failed, processed, batches, asins_seen,
+              compliance_summary{flag: count}}.
+    Fails open — any per-batch error is logged and the loop continues.
+    """
+    freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
+    batch_size = int(raw_cfg.get("batch_size", 10))
+    max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
+    candidates = _select_stale_amazon_prices(
+        conn, site_id_filter=site_id_filter,
+        freshness_hours=freshness_hours, limit=max_per_run,
+    )
+    decide_cb("observation",
+              f"PA-API: {len(candidates)} stale-price products to refresh "
+              f"(freshness={freshness_hours}h, cap={max_per_run})")
+    summary = {
+        "refreshed": 0, "failed": 0, "processed": 0,
+        "batches": 0, "asins_seen": 0,
+        "compliance_pass": 0, "compliance_fail": 0,
+    }
+    if not candidates:
+        return summary
+
+    client = PaapiClient(paapi_cfg)
+    by_asin = {p["asin"]: p for p in candidates}
+    asins = list(by_asin.keys())
+    for i in range(0, len(asins), batch_size):
+        chunk = asins[i:i + batch_size]
+        summary["batches"] += 1
+        status_cb(
+            f"PA-API batch {summary['batches']}: {len(chunk)} ASINs",
+            progress=0.05 + 0.05 * (i / max(1, len(asins))),
+            current_action=f"prices {i+1}-{i+len(chunk)}/{len(asins)}",
+        )
+        try:
+            resp = client.get_items(chunk)
+        except PaapiError as e:
+            summary["failed"] += len(chunk)
+            decide_cb("error", f"PA-API GetItems failed for "
+                                f"batch {summary['batches']}: {str(e)[:200]}")
+            continue
+        parsed = parse_get_items_response(resp)
+        summary["asins_seen"] += len(parsed)
+        for asin, payload in parsed.items():
+            row = by_asin.get(asin)
+            if not row:
+                continue
+            try:
+                _persist_paapi_refresh(conn, row["id"], payload)
+                summary["refreshed"] += 1
+                # Roll up compliance for goal-progress
+                compliance = _compliance_flags(payload)
+                if all(compliance.values()):
+                    summary["compliance_pass"] += 1
+                else:
+                    summary["compliance_fail"] += 1
+            except Exception as e:
+                summary["failed"] += 1
+                decide_cb("error",
+                           f"PA-API persist failed for {asin}: {str(e)[:200]}")
+        # Items missing from response (errors / unavailable / region-blocked)
+        # — stamp price_updated_at so we don't retry every run.
+        missing = [a for a in chunk if a not in parsed]
+        for a in missing:
+            row = by_asin.get(a)
+            if not row:
+                continue
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE products SET price_updated_at = NOW(), "
+                        "fetch_attempts = COALESCE(fetch_attempts, 0) + 1, "
+                        "fetch_error = %s WHERE id = %s",
+                        ["paapi: not in response", row["id"]],
+                    )
+                conn.commit()
+                summary["processed"] += 1
+            except Exception as e:
+                decide_cb("error",
+                           f"PA-API miss-stamp failed for {a}: {str(e)[:200]}")
+    summary["processed"] = summary["refreshed"] + summary["failed"]
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Claude prompt + invocation
 # ---------------------------------------------------------------------------
 
@@ -434,6 +658,7 @@ def _maybe_send_digest(*, cfg: dict, agent_id: str, run_ts: str,
     subject = subject_tpl.format(
         site=site,
         n=totals.get("hydrated", 0),
+        p=totals.get("prices_refreshed", 0),
         date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     )
 
@@ -453,6 +678,10 @@ def _maybe_send_digest(*, cfg: dict, agent_id: str, run_ts: str,
             f"<td style='color:#b91c1c'>{f['error'][:160]}</td></tr>"
         )
 
+    prices_refreshed = totals.get("prices_refreshed", 0)
+    prices_failed = totals.get("prices_failed", 0)
+    compliance_pass = totals.get("compliance_pass", 0)
+    compliance_fail = totals.get("compliance_fail", 0)
     body = f"""<!doctype html>
 <html><body style="font-family:-apple-system,sans-serif;color:#0f172a;line-height:1.5">
 <div style="max-width:820px;margin:0 auto;padding:20px">
@@ -460,7 +689,15 @@ def _maybe_send_digest(*, cfg: dict, agent_id: str, run_ts: str,
   <div style="color:#475569;font-size:13px;margin-bottom:18px">
     Run <code>{run_ts}</code> — {totals.get('hydrated', 0)} hydrated /
     {totals.get('failed', 0)} failed / {totals.get('skipped_already_fresh', 0)} already fresh
+    · {prices_refreshed} prices refreshed via Amazon PA-API
   </div>
+
+  <h3 style="margin-top:18px;font-size:14px;color:#475569;border-bottom:1px solid #e2e8f0;padding-bottom:4px">Amazon PA-API price refresh</h3>
+  <table style="font-size:13px;border-collapse:collapse">
+    <tr><td style="padding:4px 12px 4px 0;color:#64748b">Prices refreshed (24h freshness)</td><td>{prices_refreshed}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#64748b">PA-API failures</td><td style="color:{'#b91c1c' if prices_failed else '#0f172a'}">{prices_failed}</td></tr>
+    <tr><td style="padding:4px 12px 4px 0;color:#64748b">Amazon + Google compliance pass</td><td>{compliance_pass} / {compliance_pass + compliance_fail}</td></tr>
+  </table>
 
   <h3 style="margin-top:18px;font-size:14px;color:#475569;border-bottom:1px solid #e2e8f0;padding-bottom:4px">Catalog coverage</h3>
   <table style="font-size:13px;border-collapse:collapse">
@@ -612,6 +849,57 @@ class ProductHydrationAgent(AgentBase):
             return RunResult(status="failure",
                               summary=f"db connect failed: {e}", metrics={})
 
+        # ---- Phase 0: Amazon PA-API price refresh -------------------
+        paapi_summary: dict = {
+            "refreshed": 0, "failed": 0, "processed": 0,
+            "batches": 0, "asins_seen": 0,
+            "compliance_pass": 0, "compliance_fail": 0,
+            "skipped_reason": None,
+        }
+        paapi_block = (cfg.get("amazon_paapi") or {})
+        if paapi_block.get("enabled"):
+            paapi_cfg = PaapiConfig.from_env(
+                access_key_env=paapi_block.get("access_key_env",
+                                                "AMAZON_PAAPI_ACCESS_KEY"),
+                secret_key_env=paapi_block.get("secret_key_env",
+                                                "AMAZON_PAAPI_SECRET_KEY"),
+                associate_tag_env=paapi_block.get("associate_tag_env",
+                                                   "AMAZON_PAAPI_ASSOCIATE_TAG"),
+                associate_tag=paapi_block.get("associate_tag"),
+                region=paapi_block.get("region", "us-east-1"),
+                marketplace=paapi_block.get("marketplace", "www.amazon.com"),
+                throttle_per_second=float(paapi_block.get(
+                    "throttle_per_second", 1.0)),
+            )
+            if paapi_cfg is None:
+                paapi_summary["skipped_reason"] = (
+                    "PA-API credentials not in env "
+                    "(AMAZON_PAAPI_ACCESS_KEY / SECRET_KEY / ASSOCIATE_TAG)"
+                )
+                self.decide("observation", paapi_summary["skipped_reason"])
+            else:
+                self.status("refreshing Amazon prices", progress=0.05,
+                             current_action="paapi-refresh")
+                try:
+                    paapi_summary.update(_refresh_amazon_prices(
+                        conn=conn, paapi_cfg=paapi_cfg, raw_cfg=paapi_block,
+                        site_id_filter=self.site_id_filter,
+                        status_cb=self.status, decide_cb=self.decide,
+                    ))
+                    self.decide(
+                        "action",
+                        f"PA-API: refreshed {paapi_summary['refreshed']}, "
+                        f"failed {paapi_summary['failed']}, "
+                        f"compliance {paapi_summary['compliance_pass']}/"
+                        f"{paapi_summary['compliance_pass'] + paapi_summary['compliance_fail']} pass"
+                    )
+                except Exception as e:
+                    paapi_summary["skipped_reason"] = f"refresh raised: {e}"
+                    self.decide("error",
+                                 f"PA-API refresh raised: {str(e)[:200]}")
+        else:
+            paapi_summary["skipped_reason"] = "amazon_paapi.enabled=false"
+
         totals = {
             "queued": 0,
             "hydrated": 0,
@@ -620,6 +908,10 @@ class ProductHydrationAgent(AgentBase):
             "skipped_already_fresh": 0,
             "claude_calls": 0,
             "claude_total_seconds": 0.0,
+            "prices_refreshed": paapi_summary["refreshed"],
+            "prices_failed": paapi_summary["failed"],
+            "compliance_pass": paapi_summary["compliance_pass"],
+            "compliance_fail": paapi_summary["compliance_fail"],
         }
         per_type_counts = {ct: 0 for ct in content_types}
         per_type_failures = {ct: 0 for ct in content_types}
@@ -850,7 +1142,7 @@ class ProductHydrationAgent(AgentBase):
             cfg=cfg, totals=totals, per_type_counts=per_type_counts,
             per_type_failures=per_type_failures, coverage=coverage,
             successes=successes, failures=failures, model=model,
-            sample_outputs=sample_outputs,
+            sample_outputs=sample_outputs, paapi_summary=paapi_summary,
         )
 
         # Email
@@ -884,6 +1176,8 @@ class ProductHydrationAgent(AgentBase):
         summary = (
             f"Hydrated {totals['hydrated']} (+{totals['partial']} partial), "
             f"{totals['failed']} failed, {totals['skipped_already_fresh']} fresh. "
+            f"Refreshed {totals['prices_refreshed']} Amazon prices via PA-API "
+            f"(failed {totals['prices_failed']}). "
             f"Catalog coverage: {coverage.get('fully_hydrated_pct', 0.0)}% fully hydrated."
         )
         return RunResult(
@@ -899,6 +1193,12 @@ class ProductHydrationAgent(AgentBase):
                 "claude_total_seconds": round(totals["claude_total_seconds"], 1),
                 "catalog_coverage_pct": coverage.get("fully_hydrated_pct", 0.0),
                 "stale_pct": coverage.get("stale_pct", 0.0),
+                "prices_refreshed": totals["prices_refreshed"],
+                "prices_failed": totals["prices_failed"],
+                "amazon_paapi_batches": paapi_summary.get("batches", 0),
+                "amazon_paapi_skipped_reason": paapi_summary.get("skipped_reason"),
+                "compliance_pass": totals["compliance_pass"],
+                "compliance_fail": totals["compliance_fail"],
                 **{f"per_type_{ct}": n for ct, n in per_type_counts.items()},
                 **{f"per_type_failed_{ct}": n for ct, n in per_type_failures.items()},
             },
@@ -911,7 +1211,8 @@ class ProductHydrationAgent(AgentBase):
     def _write_artifacts(self, *, cfg: dict, totals: dict,
                           per_type_counts: dict, per_type_failures: dict,
                           coverage: dict, successes: list, failures: list,
-                          model: str, sample_outputs: list[str]) -> None:
+                          model: str, sample_outputs: list[str],
+                          paapi_summary: dict | None = None) -> None:
         run_prefix = f"agents/{self.agent_id}/runs/{self.run_ts}"
 
         results = {
@@ -934,17 +1235,26 @@ class ProductHydrationAgent(AgentBase):
                 if totals["claude_calls"] > 0 else 0.0
             ),
             "coverage": coverage,
+            "amazon_paapi": paapi_summary or {},
         }
         self._save("results.json", results, run_prefix)
 
         # goal-progress.json — narrow view aligned with site.yaml.goals
         goals_block = cfg.get("goals") or {}
+        ps = paapi_summary or {}
+        compliance_total = ps.get("compliance_pass", 0) + ps.get("compliance_fail", 0)
+        compliance_pct = (round(100.0 * ps.get("compliance_pass", 0)
+                                / compliance_total, 2)
+                          if compliance_total > 0 else None)
         goal_progress = {
             "schema_version": "1",
             "run_ts": self.run_ts,
             "primary": goals_block.get("primary"),
             "freshness": goals_block.get("freshness"),
+            "content_freshness": goals_block.get("content_freshness"),
             "quality": goals_block.get("quality"),
+            "amazon_compliance": goals_block.get("amazon_compliance"),
+            "google_compliance": goals_block.get("google_compliance"),
             "current": {
                 "fully_hydrated_pct": coverage.get("fully_hydrated_pct"),
                 "stale_pct": coverage.get("stale_pct"),
@@ -952,6 +1262,10 @@ class ProductHydrationAgent(AgentBase):
                     ct: v["pct"] for ct, v in
                     (coverage.get("per_content_type") or {}).items()
                 },
+                "prices_refreshed_this_run": ps.get("refreshed", 0),
+                "prices_failed_this_run": ps.get("failed", 0),
+                "amazon_paapi_skipped_reason": ps.get("skipped_reason"),
+                "compliance_pct_this_run": compliance_pct,
             },
         }
         self._save("goal-progress.json", goal_progress, run_prefix)
@@ -961,6 +1275,7 @@ class ProductHydrationAgent(AgentBase):
         self._save("llm-output.txt", sample_text, run_prefix)
 
         # context-summary.md — narrative for the next run
+        ps = paapi_summary or {}
         ctx_md = (
             f"# Hydration run {self.run_ts}\n\n"
             f"Site: **{(cfg.get('site') or {}).get('id')}**  Model: `{model}`\n\n"
@@ -971,7 +1286,15 @@ class ProductHydrationAgent(AgentBase):
             f"- Claude calls: {totals['claude_calls']} "
             f"(total {totals['claude_total_seconds']:.0f}s, "
             f"avg {(totals['claude_total_seconds']/max(1,totals['claude_calls'])):.1f}s)\n\n"
-            f"## Catalog coverage\n\n"
+            f"## Amazon PA-API price refresh\n\n"
+            f"- Refreshed: {ps.get('refreshed', 0)}\n"
+            f"- Failed: {ps.get('failed', 0)}\n"
+            f"- Batches: {ps.get('batches', 0)}\n"
+            f"- Compliance pass: {ps.get('compliance_pass', 0)} / "
+            f"{ps.get('compliance_pass', 0) + ps.get('compliance_fail', 0)}\n"
+            + (f"- Skipped: {ps['skipped_reason']}\n"
+               if ps.get('skipped_reason') else "")
+            + "\n## Catalog coverage\n\n"
             f"- Fully hydrated: {coverage.get('fully_hydrated')} "
             f"({coverage.get('fully_hydrated_pct')}%)\n"
             f"- Stale: {coverage.get('stale_count')} "
