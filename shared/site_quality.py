@@ -264,16 +264,66 @@ def send_via_msmtp(
     sender: str,
     msmtp_account: str = "automation",
     extra_headers: Optional[dict[str, str]] = None,
+    bypass_digest: bool = False,
 ) -> tuple[bool, str]:
     """Send an HTML email. Despite the legacy name, tries Microsoft Graph
     sendMail first (host's msmtp is sandboxed by AppArmor and can't exec the
     OAuth passwordeval), then falls back to msmtp. Caller doesn't need to
-    care which path is taken; success looks identical."""
+    care which path is taken; success looks identical.
+
+    Digest mode (set DIGEST_ONLY=1, default): all individual agent emails
+    are SUPPRESSED — the rollup-digest agent fires every 3h with a single
+    consolidated email instead. Callers that genuinely need to send (the
+    digest agent itself, the responder for confirmation flows the user
+    explicitly opted into, etc) pass bypass_digest=True.
+
+    To re-enable individual emails, set DIGEST_ONLY=0 in the agent host's
+    environment.
+    """
     import subprocess
+    import os as _os
     from email.utils import formatdate, make_msgid
 
     if not to:
         return False, "no recipients"
+
+    # Digest gate — suppress everything except explicitly bypassed senders.
+    # Was added 5-1 after the user reported "too many emails". The
+    # rollup-digest agent runs every 3h and packages all this content
+    # into one summary email.
+    if not bypass_digest and _os.environ.get("DIGEST_ONLY", "1") == "1":
+        # Persist the would-have-been email to digest-queue/ so the
+        # digest agent can include it in the next rollup. Each entry is
+        # a small JSON file: subject + 1KB body excerpt + agent + ts.
+        try:
+            import json, datetime, hashlib
+            from .storage import get_storage  # local import — avoids
+            # the storage layer initializing at module import time.
+        except Exception:
+            try:
+                from framework.core.storage import get_storage  # type: ignore
+            except Exception:
+                get_storage = None  # type: ignore
+        try:
+            if get_storage is not None:
+                s = get_storage()
+                ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+                key_hash = hashlib.sha1(f"{subject}|{ts}".encode()).hexdigest()[:10]
+                # Pull agent from headers if present
+                agent_hint = (extra_headers or {}).get("X-Reusable-Agent", "")
+                body_excerpt = body_html[:30000]  # cap so the queue is bounded
+                s.write_json(
+                    f"digest-queue/{ts}-{key_hash}.json",
+                    {"ts": ts, "agent": agent_hint, "to": to, "sender": sender,
+                     "subject": subject, "body_html": body_excerpt,
+                     "extra_headers": extra_headers or {}},
+                )
+        except Exception as _e:
+            # Logging the failure but never blocking — if the queue is
+            # broken, just silently suppress. Better than spamming.
+            print(f"[digest-queue] suppress {subject[:60]!r}: {_e}",
+                  file=__import__('sys').stderr)
+        return True, "suppressed: digest-mode"
 
     # Prefer Graph if oauth file is available
     import os as _os

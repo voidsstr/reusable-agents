@@ -35,6 +35,13 @@ if [ -z "$AGENT_ID" ]; then
     echo "ERROR: agent_run_wrapper called without agent_id" >&2
     exit 64  # EX_USAGE
 fi
+
+# Digest mode (5-1): suppress per-agent emails fleet-wide. The
+# digest-rollup-agent fires every 3h with a single consolidated email.
+# Set DIGEST_ONLY=0 in the environment before running this wrapper to
+# re-enable individual emails (the rollup agent's own manifest sets
+# DIGEST_ONLY=0 inline so it can actually send its own digest).
+export DIGEST_ONLY="${DIGEST_ONLY:-1}"
 if [ "$#" -eq 0 ]; then
     echo "ERROR: agent_run_wrapper called without entry command" >&2
     exit 64

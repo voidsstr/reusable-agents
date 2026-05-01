@@ -1,0 +1,22 @@
+{
+  "id": "digest-rollup-agent",
+  "name": "Activity Digest Rollup",
+  "description": "Single consolidated email every 3 hours summarizing everything that happened across the agent fleet — shipped recs, queued recs, deferred recs, failed runs, eBay catalog growth, articles published, H2H pairs proposed, and any escalations. Replaces the per-agent confirmation/proposal/completion emails (which are now suppressed via DIGEST_ONLY=1). Reads digest-queue/*.json (left there by individual agents' suppressed emails) and walks recent runs.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "0 */3 * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "README.md",
+  "entry_command": "DIGEST_ONLY=0 python3 /home/voidsstr/development/reusable-agents/agents/digest-rollup-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/digest-rollup-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/digest-rollup-agent"
+  },
+  "runnable_modes": ["cron", "manual"]
+}
