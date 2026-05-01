@@ -229,6 +229,146 @@ def _doctor_escalations(s, cutoff: datetime) -> list[dict]:
 _DASHBOARD = "https://agents.happysky-24190067.eastus.azurecontainerapps.io"
 
 
+def _seo_traffic_metrics() -> list[dict]:
+    """Pull per-site SEO traffic-readiness metrics for the digest header.
+    Queries each known site's DB via DATABASE_URL_<UPPER_SITE>; sites
+    whose env var isn't set are skipped silently. Read-only — never
+    writes anything. Failure on any site is logged + ignored, keeping
+    the digest robust against DB outages.
+
+    Currently supports SpecPicks (the affiliate-revenue-driving site).
+    Extend SITE_QUERIES to add more sites in the future.
+    """
+    SITE_QUERIES = {
+        "specpicks": {
+            "env": "DATABASE_URL_SPECPICKS",
+            "label": "specpicks.com",
+            "amazon_revenue": True,
+            "queries": {
+                "editorial_coverage": """
+                    WITH editorial_asins AS (
+                        SELECT DISTINCT unnest(related_product_asins) AS asin
+                        FROM editorial_articles
+                        WHERE status='published' AND related_product_asins IS NOT NULL
+                        UNION
+                        SELECT DISTINCT (p->>'asin') AS asin
+                        FROM buying_guides bg, jsonb_array_elements(bg.picks) p
+                        WHERE bg.status='published' AND jsonb_typeof(bg.picks)='array'
+                          AND (p->>'asin') IS NOT NULL AND (p->>'asin') <> ''
+                    )
+                    SELECT
+                        (SELECT COUNT(*) FROM editorial_asins) AS asins_in_editorial,
+                        (SELECT COUNT(*) FROM products WHERE is_active=TRUE) AS total_active,
+                        (SELECT COUNT(*) FROM products WHERE is_featured=TRUE) AS featured
+                """,
+                "pricing_freshness": """
+                    SELECT
+                        COUNT(*) FILTER (WHERE asin IS NOT NULL AND asin <> ''
+                                         AND asin !~ '^EBAY_' AND is_active=TRUE) AS amazon_active,
+                        COUNT(*) FILTER (WHERE asin IS NOT NULL AND asin !~ '^EBAY_'
+                                         AND is_active=TRUE
+                                         AND (price_updated_at IS NULL
+                                              OR price_updated_at < NOW() - INTERVAL '24 hours')) AS stale_24h,
+                        COUNT(*) FILTER (WHERE is_featured=TRUE
+                                         AND (price_updated_at IS NULL
+                                              OR price_updated_at < NOW() - INTERVAL '24 hours')) AS featured_stale,
+                        COUNT(*) FILTER (WHERE is_featured=TRUE
+                                         AND price_updated_at >= NOW() - INTERVAL '24 hours') AS featured_fresh
+                    FROM products
+                """,
+                "content_coverage": """
+                    SELECT
+                        (SELECT COUNT(*) FROM editorial_articles WHERE status='published') AS articles,
+                        (SELECT COUNT(*) FROM buying_guides WHERE status='published') AS guides,
+                        (SELECT COUNT(*) FROM editorial_topics WHERE status='researched') AS researched_queue,
+                        (SELECT COUNT(*) FROM trending_comparisons) AS h2h_pairs
+                """,
+            },
+        },
+    }
+    out: list[dict] = []
+    try:
+        import psycopg2
+    except ImportError:
+        return out
+    for site_id, cfg in SITE_QUERIES.items():
+        dsn = os.environ.get(cfg["env"], "").strip()
+        if not dsn:
+            continue
+        try:
+            with psycopg2.connect(dsn, connect_timeout=10) as conn:
+                conn.set_session(readonly=True, autocommit=True)
+                with conn.cursor() as cur:
+                    metrics = {"site": site_id, "label": cfg["label"],
+                                "amazon_revenue": cfg.get("amazon_revenue", False)}
+                    for name, sql in cfg["queries"].items():
+                        cur.execute(sql)
+                        cols = [d[0] for d in cur.description]
+                        row = cur.fetchone() or [None] * len(cols)
+                        metrics[name] = dict(zip(cols, row))
+                    out.append(metrics)
+        except Exception as e:
+            print(f"  [digest] SEO metrics for {site_id} failed: {e}",
+                   file=sys.stderr)
+    return out
+
+
+def _render_seo_traffic_block(seo_metrics: list[dict]) -> str:
+    """Render the per-site SEO traffic-readiness block. Empty string if
+    no metrics available."""
+    if not seo_metrics:
+        return ""
+    parts: list[str] = [
+        '<h2 style="font-size:15px;color:#0f172a;margin:24px 0 8px 0;'
+        'border-bottom:1px solid #e2e8f0;padding-bottom:6px">'
+        '🎯 SEO + Amazon-revenue readiness</h2>'
+    ]
+    for m in seo_metrics:
+        ec = m.get("editorial_coverage", {})
+        pf = m.get("pricing_freshness", {})
+        cc = m.get("content_coverage", {})
+        # Editorial coverage %
+        total = ec.get("total_active") or 0
+        in_ed = ec.get("asins_in_editorial") or 0
+        coverage_pct = (100.0 * in_ed / total) if total else 0.0
+        # Featured price freshness — the metric the user actually feels
+        f_fresh = pf.get("featured_fresh") or 0
+        f_stale = pf.get("featured_stale") or 0
+        feat_total = (f_fresh or 0) + (f_stale or 0)
+        feat_fresh_pct = (100.0 * f_fresh / feat_total) if feat_total else 100.0
+        amazon_active = pf.get("amazon_active") or 0
+        stale_24h = pf.get("stale_24h") or 0
+        # Coverage gap headline color
+        gap_color = "#10b981" if coverage_pct >= 5 else "#f59e0b" if coverage_pct >= 1 else "#ef4444"
+        feat_color = "#10b981" if feat_fresh_pct >= 90 else "#f59e0b" if feat_fresh_pct >= 50 else "#ef4444"
+        parts.append(
+            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
+            f'border-radius:8px;padding:14px;margin-bottom:10px">'
+            f'<div style="font-weight:600;color:#0f172a;margin-bottom:8px">'
+            f'{m["label"]}</div>'
+            f'<table style="border-collapse:collapse;font-size:13px;width:100%">'
+            f'<tr><td style="padding:4px 8px;color:#475569">Editorial coverage</td>'
+            f'<td style="padding:4px 8px;font-weight:600;color:{gap_color}">'
+            f'{in_ed:,} of {total:,} active products ({coverage_pct:.2f}%)</td></tr>'
+            f'<tr><td style="padding:4px 8px;color:#475569">Featured products fresh-priced (≤24h)</td>'
+            f'<td style="padding:4px 8px;font-weight:600;color:{feat_color}">'
+            f'{f_fresh} of {feat_total} ({feat_fresh_pct:.0f}%)</td></tr>'
+            f'<tr><td style="padding:4px 8px;color:#475569">Stale-priced Amazon products (catalog-wide)</td>'
+            f'<td style="padding:4px 8px">'
+            f'{stale_24h:,} of {amazon_active:,} '
+            f'<span style="color:#94a3b8;font-size:11px">(refreshed 6,000/day at 500/run × 12 runs)</span></td></tr>'
+            f'<tr><td style="padding:4px 8px;color:#475569">Published content</td>'
+            f'<td style="padding:4px 8px">'
+            f'{cc.get("articles", 0)} articles · '
+            f'{cc.get("guides", 0)} buying guides · '
+            f'{cc.get("h2h_pairs", 0)} head-to-head pairs · '
+            f'{cc.get("researched_queue", 0)} researched topics in queue</td></tr>'
+            f'</table>'
+            f'</div>'
+        )
+    return "".join(parts)
+
+
 def _section_header(title: str, count: int, color: str) -> str:
     return (
         f'<h2 style="font-size:16px;color:{color};border-bottom:2px solid {color};'
@@ -260,7 +400,8 @@ def _rec_row(r: dict, *, show_url: bool = True) -> str:
 
 def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: list[dict],
                  queued: list[dict], runs: list[dict], failed_runs: list[dict],
-                 escalations: list[dict], suppressed_count: int) -> str:
+                 escalations: list[dict], suppressed_count: int,
+                 seo_metrics: list[dict] | None = None) -> str:
     now = _now()
     by_site_shipped: dict[str, list[dict]] = defaultdict(list)
     for r in shipped:
@@ -295,6 +436,11 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
             f'letter-spacing:.05em;margin-top:4px">{label}</div></div>'
         )
     parts.append("</div>")
+
+    # ── SEO + Amazon-revenue readiness ──────────────────────────────
+    seo_block = _render_seo_traffic_block(seo_metrics or [])
+    if seo_block:
+        parts.append(seo_block)
 
     # ── Shipped ─────────────────────────────────────────────────────
     if shipped:
@@ -464,6 +610,20 @@ class DigestRollupAgent(AgentBase):
         escalations = _doctor_escalations(s, cutoff)
         self.decide("observation", f"doctor escalations in window: {len(escalations)}")
 
+        # Per-site SEO readiness metrics — pulled fresh each digest so
+        # the user sees coverage progress trend across the 3h windows.
+        seo_metrics = _seo_traffic_metrics()
+        if seo_metrics:
+            self.decide(
+                "observation",
+                f"SEO metrics: {len(seo_metrics)} site(s) — "
+                + ", ".join(
+                    f"{m['site']} editorial={m.get('editorial_coverage',{}).get('asins_in_editorial',0)}/"
+                    f"{m.get('editorial_coverage',{}).get('total_active',0)}"
+                    for m in seo_metrics
+                )
+            )
+
         # ── Render + send ──────────────────────────────────────────
         self.status("rendering digest", progress=0.70)
         body_html = _render_html(
@@ -475,6 +635,7 @@ class DigestRollupAgent(AgentBase):
             failed_runs=failed_runs,
             escalations=escalations,
             suppressed_count=len(suppressed),
+            seo_metrics=seo_metrics,
         )
         queued_recs = sum(q["rec_count"] for q in queued)
         subject_parts = [f"{len(shipped)} shipped"]

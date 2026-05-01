@@ -309,30 +309,80 @@ def _persist_product(conn, product_id: int, updates: dict[str, str | None],
 
 def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
                                   freshness_hours: int,
-                                  limit: int) -> list[dict]:
+                                  limit: int,
+                                  prioritize_featured_and_linked: bool = False) -> list[dict]:
     """Return Amazon-sourced products whose price_updated_at is older than
-    `freshness_hours` (or NULL). Highest-traffic products first."""
+    `freshness_hours` (or NULL).
+
+    Two ordering modes:
+      • plain: `ORDER BY review_count DESC` — old behavior
+      • tiered (when prioritize_featured_and_linked=True): rank with
+            tier 0 = is_featured (95 products today)
+            tier 1 = ASIN referenced in any published article or
+                     buying-guide pick (~276 today)
+            tier 2 = high-review-count tail (review_count DESC)
+        Within a tier, ORDER BY review_count DESC NULLS LAST.
+        Featured + editorially-linked tiers therefore refresh on
+        every run (since they fit comfortably under the per-run cap),
+        which keeps the most user-visible prices <24h fresh while the
+        long tail catches up.
+    """
     site_clause = "AND p.site_id = %s" if site_id_filter else ""
     params: list[Any] = []
     if site_id_filter:
         params.append(site_id_filter)
     params.append(freshness_hours)
     params.append(limit)
-    sql = f"""
-        SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source
-        FROM products p
-        WHERE p.is_active = TRUE
-          AND p.asin IS NOT NULL
-          AND p.asin <> ''
-          AND p.asin ~ '^[A-Z0-9]{{10}}$'
-          {site_clause}
-          AND (
-              p.price_updated_at IS NULL
-              OR p.price_updated_at < NOW() - (%s || ' hours')::interval
-          )
-        ORDER BY COALESCE(p.review_count, 0) DESC, p.id ASC
-        LIMIT %s
-    """
+
+    if prioritize_featured_and_linked:
+        sql = f"""
+            WITH editorial_asins AS (
+                SELECT DISTINCT unnest(related_product_asins) AS asin
+                FROM editorial_articles
+                WHERE status='published' AND related_product_asins IS NOT NULL
+                UNION
+                SELECT DISTINCT (p->>'asin') AS asin
+                FROM buying_guides bg, jsonb_array_elements(bg.picks) p
+                WHERE bg.status='published'
+                  AND jsonb_typeof(bg.picks)='array'
+                  AND (p->>'asin') IS NOT NULL
+                  AND (p->>'asin') <> ''
+            )
+            SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source,
+                   CASE
+                     WHEN p.is_featured = TRUE THEN 0
+                     WHEN p.asin IN (SELECT asin FROM editorial_asins) THEN 1
+                     ELSE 2
+                   END AS tier
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND p.asin IS NOT NULL
+              AND p.asin <> ''
+              AND p.asin ~ '^[A-Z0-9]{{10}}$'
+              {site_clause}
+              AND (
+                  p.price_updated_at IS NULL
+                  OR p.price_updated_at < NOW() - (%s || ' hours')::interval
+              )
+            ORDER BY tier ASC, COALESCE(p.review_count, 0) DESC, p.id ASC
+            LIMIT %s
+        """
+    else:
+        sql = f"""
+            SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source
+            FROM products p
+            WHERE p.is_active = TRUE
+              AND p.asin IS NOT NULL
+              AND p.asin <> ''
+              AND p.asin ~ '^[A-Z0-9]{{10}}$'
+              {site_clause}
+              AND (
+                  p.price_updated_at IS NULL
+                  OR p.price_updated_at < NOW() - (%s || ' hours')::interval
+              )
+            ORDER BY COALESCE(p.review_count, 0) DESC, p.id ASC
+            LIMIT %s
+        """
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return [dict(r) for r in cur.fetchall()]
@@ -434,6 +484,8 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
     candidates = _select_stale_amazon_prices(
         conn, site_id_filter=site_id_filter,
         freshness_hours=freshness_hours, limit=max_per_run,
+        prioritize_featured_and_linked=bool(
+            raw_cfg.get("prioritize_featured_and_linked", False)),
     )
     decide_cb("observation",
               f"PA-API: {len(candidates)} stale-price products to refresh "
@@ -510,6 +562,8 @@ def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
     candidates = _select_stale_amazon_prices(
         conn, site_id_filter=site_id_filter,
         freshness_hours=freshness_hours, limit=max_per_run,
+        prioritize_featured_and_linked=bool(
+            raw_cfg.get("prioritize_featured_and_linked", False)),
     )
     decide_cb("observation",
               f"BrightData: {len(candidates)} stale-price products "
