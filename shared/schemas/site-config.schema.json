@@ -89,27 +89,75 @@
     },
     "articles": {
       "type": "object",
-      "description": "Optional: site-articles inventory. The collector pulls every published article slug from the configured DB sources, joins with GSC pages-90d data, and writes data/articles-inventory.json. The analyzer surfaces SEO-boost recs (snippet-rewrite, title-fix, orphan-boost) per published article. Unconfigured sites skip the inventory step cleanly.",
+      "description": "Optional: site-articles inventory. The collector pulls every published article slug from the configured DB sources, joins with GSC pages-90d data, and writes data/articles-inventory.json. The analyzer surfaces SEO-boost recs (snippet-rewrite, title-fix, orphan-boost) per published article. When audit_full_body=true, body_md is also pulled so the analyzer's revenue_focus pass can scan for product mentions missing tagged Amazon links. Unconfigured sites skip the inventory step cleanly.",
       "additionalProperties": false,
       "required": ["domain", "sources"],
       "properties": {
         "domain": { "type": "string", "description": "Public domain for the URL templates (e.g. 'specpicks.com')." },
         "dsn_env": { "type": "string", "description": "Name of the env var holding the Postgres DSN. Either dsn_env OR dsn must be set." },
         "dsn": { "type": "string", "description": "Literal Postgres DSN. Prefer dsn_env in committed configs to avoid leaking credentials." },
+        "audit_full_body": { "type": "boolean", "default": false, "description": "When true, the collector pulls body_md alongside slug+title (capped 200KB/article) so the analyzer's revenue_focus pass can scan article bodies for product mentions that lack tagged affiliate links." },
+        "audit_all": { "type": "boolean", "default": false, "description": "When true, every published article is audited every run instead of being sampled. Enables comprehensive article-level SEO coverage at the cost of larger run dirs." },
         "sources": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "type": "object",
             "required": ["name", "query", "url_template"],
             "additionalProperties": false,
             "properties": {
               "name": { "type": "string", "description": "Logical source name (e.g. 'editorial_articles', 'buying_guides')." },
-              "query": { "type": "string", "description": "SELECT statement; result must include at least slug + title columns." },
+              "query": { "type": "string", "description": "SELECT statement; result must include at least slug + title columns. When articles.audit_full_body=true, also include a 'body' column (typically 'body_md AS body')." },
               "url_template": { "type": "string", "description": "URL pattern like 'https://{domain}/reviews/{slug}' — {domain} and {slug} are substituted at collect time." }
             }
           }
         }
+      }
+    },
+    "coverage_targets": {
+      "type": "object",
+      "description": "Optional: studio-supplies-style content engine. The analyzer counts pages matching each pattern in the sitemap and emits new-page-<type> recs when count < expected_min. Each entry is a page-type label whose value declares the regex + expectations.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "sitemap_pattern": { "type": "string", "description": "Regex matched against sitemap URL paths." },
+          "expected_min": { "type": "integer", "minimum": 0, "description": "Floor below which the analyzer emits new-page recs." },
+          "expected_from_db": { "type": "string", "description": "Optional: dynamic floor read from db-stats.json. The named query result must be a single integer." },
+          "rec_priority": { "type": "string", "enum": ["critical", "high", "medium", "low"], "description": "Priority tag the analyzer attaches to new-page recs from this target." },
+          "horizon_weeks": { "type": "integer", "minimum": 1, "description": "How many weeks the analyzer expects this gap to take to close — drives rec ordering." },
+          "json_ld": { "type": "string", "description": "Schema.org type(s) the page should emit (e.g. 'Article', 'WebPage + Brand + BreadcrumbList')." },
+          "min_words": { "type": "integer", "minimum": 0, "description": "Minimum word count the implementer should aim for when generating these pages." },
+          "min_internal_links": { "type": "integer", "minimum": 0, "description": "Minimum internal links for SEO depth." },
+          "title_template": { "type": "string", "description": "Template the article-author/implementer uses when proposing titles for this type." }
+        }
+      }
+    },
+    "revenue_focus": {
+      "type": ["object", "null"],
+      "description": "Optional: drives Amazon-affiliate-revenue-aware audits. When enabled, the analyzer scans article bodies for product mentions missing tagged Amazon links, boosts rec priority for changes touching is_featured products, and biases new-page recs toward content that names featured products. Leave out (or enabled=false) for sites that don't monetize via Amazon Associates.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "goal": { "type": "string", "description": "One-line goal statement reproduced verbatim in rec rationale (e.g. 'Drive Amazon affiliate purchases')." },
+        "amazon_associate_tag": { "type": "string", "description": "Your Amazon Associates ID (e.g. 'specpicks-20'). Empty → analyzer treats every Amazon outbound link as untagged (conservative)." },
+        "associate_tag": { "type": "string", "description": "Alias for amazon_associate_tag — accepted for backwards compatibility." },
+        "product_url_template": { "type": "string", "description": "URL pattern for the site's own PDPs, e.g. 'https://specpicks.com/products/{asin}'. The analyzer counts these as 'attributed' since the site server-renders a tagged Amazon button." },
+        "pdp_path_prefix": { "type": "string", "description": "Path prefix of product_url_template — derived from product_url_template if omitted." },
+        "sales_kpi": { "type": "string", "description": "Which revenue_kpis[] entry id is being optimized." },
+        "featured_url_pattern": { "type": "string", "description": "Optional regex pattern that identifies featured PDP URLs in the sitemap. Used by analyzer to weight rec priority." },
+        "featured_products_query": { "type": "string", "description": "Reference to a @@QUERY:<name> in queries_file that returns the featured product set. Default: '@@QUERY:featured_products'." },
+        "high_intent_page_types": { "type": "array", "items": { "type": "string" }, "description": "Page types audited extra hard (last click before referral)." },
+        "priority_boost": {
+          "type": "object",
+          "description": "Multipliers applied by the analyzer when scoring rec priority on revenue-touching changes.",
+          "properties": {
+            "featured_pdp": { "type": "number" },
+            "untagged_amazon_link": { "type": "number" },
+            "schema_missing_on_featured": { "type": "number" },
+            "internal_link_to_featured": { "type": "number" }
+          }
+        },
+        "preferred_rec_types": { "type": "array", "items": { "type": "string" }, "description": "Rec type ranking — analyzer prefers these when within max_recs_per_run budget." },
+        "article_renderer_files": { "type": "array", "items": { "type": "string" }, "description": "Files the implementer should edit when adding inline affiliate links to articles. Override the heuristic defaults (frontend/src/pages/ArticleDetailPage.tsx, src/services/article-renderer.ts) with the actual paths in your repo." }
       }
     },
     "sitemap_url": {
@@ -143,6 +191,7 @@
         "us_traffic_weight": { "type": "number", "default": 1.5 },
         "min_impressions_for_target": { "type": "integer", "default": 3 },
         "max_llm_audit_pages": { "type": "integer", "minimum": 1, "maximum": 200, "default": 30, "description": "Cap on number of pages fed to the LLM audit pass per run. Caps cost." },
+        "pre_traffic_impr_threshold": { "type": "integer", "minimum": 0, "default": 100, "description": "When the site's GSC 90d total_impressions is below this, the analyzer flips into pre-traffic mode and biases toward new-page (content-engine) recs over rank-target recs." },
         "ai_provider": { "type": "string", "description": "Optional override for the LLM provider used by the analyzer's audit pass." },
         "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." }
       }
