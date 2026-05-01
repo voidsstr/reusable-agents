@@ -26,14 +26,25 @@ _SPEC.loader.exec_module(llm_audit)
 # ---------------------------------------------------------------------------
 
 def test_check_id_to_rec_type_is_complete():
-    """Every check_id mapped to a valid SEO rec type."""
-    valid_types = {
+    """Every check_id maps either to a canonical SEO rec type OR to a
+    page-type-specific rec type (which the implementer dispatches on
+    directly — recipe-*, product-*, h2h-*, article-*, feature-*, review-*).
+    """
+    canonical_types = {
         "top5-target-page", "indexing-fix", "ctr-fix", "ssr-fix",
         "schema-markup", "internal-link", "sitemap-fix", "conversion-path",
         "content-expansion", "redirect-fix", "other",
     }
+    page_type_prefixes = (
+        "recipe-", "product-", "h2h-", "article-", "feature-", "review-",
+    )
     for cid, rt in llm_audit.CHECK_ID_TO_REC_TYPE.items():
-        assert rt in valid_types, f"{cid} maps to invalid rec type {rt}"
+        is_canonical = rt in canonical_types
+        is_page_type = rt.startswith(page_type_prefixes)
+        assert is_canonical or is_page_type, (
+            f"{cid} maps to invalid rec type {rt} "
+            f"(must be canonical or have a page-type prefix)"
+        )
 
 
 def test_all_check_ids_in_categories():

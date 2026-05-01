@@ -1003,7 +1003,14 @@ def _extract_page_meta(html: bytes) -> dict:
 
     # JSON-LD blocks — collect @type values across all blocks (handles
     # both single-object and array forms and @graph nesting).
+    # Also capture per-type field-name coverage so the analyzer can flag
+    # incomplete schemas (e.g. Product missing offers.priceCurrency,
+    # Article missing wordCount/dateModified) rather than only "missing
+    # entirely". Studio-supplies' Product schema includes
+    # sku+mpn+model+itemCondition+aggregateRating+image[18]+offers — the
+    # superset that maximizes rich-result eligibility.
     jsonld_types: list[str] = []
+    jsonld_field_coverage: dict[str, list[str]] = {}
     for blk in re.findall(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         text, re.IGNORECASE | re.DOTALL,
@@ -1015,10 +1022,32 @@ def _extract_page_meta(html: bytes) -> dict:
         def _walk(node):
             if isinstance(node, dict):
                 t = node.get("@type")
+                tnames: list[str] = []
                 if isinstance(t, str):
-                    jsonld_types.append(t)
+                    tnames = [t]
                 elif isinstance(t, list):
-                    jsonld_types.extend(str(x) for x in t)
+                    tnames = [str(x) for x in t]
+                jsonld_types.extend(tnames)
+                # Field coverage — record top-level keys this @type carries
+                # so analyzer can compute per-type completeness.
+                node_keys = sorted(k for k in node.keys() if not k.startswith("@"))
+                # Also record offers.* / aggregateRating.* / brand.* sub-fields
+                # since Google's product-rich-result spec requires
+                # offers.priceCurrency / aggregateRating.reviewCount /
+                # brand.name etc.
+                for sub_key in ("offers", "aggregateRating", "brand", "author", "publisher"):
+                    sub = node.get(sub_key)
+                    if isinstance(sub, dict):
+                        for k in sub.keys():
+                            if not k.startswith("@"):
+                                node_keys.append(f"{sub_key}.{k}")
+                # image[] presence and count (Product wants ≥3 for rich result)
+                if isinstance(node.get("image"), list):
+                    node_keys.append(f"image.count={len(node['image'])}")
+                elif isinstance(node.get("image"), (str, dict)):
+                    node_keys.append("image.count=1")
+                for tn in tnames:
+                    jsonld_field_coverage.setdefault(tn, []).extend(node_keys)
                 if isinstance(node.get("@graph"), list):
                     for c in node["@graph"]:
                         _walk(c)
@@ -1027,6 +1056,9 @@ def _extract_page_meta(html: bytes) -> dict:
                     _walk(c)
         _walk(doc)
     jsonld_types = sorted(set(jsonld_types))
+    jsonld_field_coverage = {
+        t: sorted(set(fields)) for t, fields in jsonld_field_coverage.items()
+    }
 
     # Image alt + lazy-load coverage
     imgs = re.findall(r"<img\b[^>]*>", text, re.IGNORECASE)
@@ -1034,11 +1066,54 @@ def _extract_page_meta(html: bytes) -> dict:
     img_with_alt = sum(1 for i in imgs if re.search(r'\salt=["\'][^"\']{2,}', i))
     img_lazy = sum(1 for i in imgs if re.search(r'loading=["\']lazy["\']', i, re.IGNORECASE))
 
-    # Link counts (inside <body>)
+    # Link counts (inside <body>) + body-only counts (inside <main> or
+    # <article>, falling back to <body>). The body-only counts are the
+    # studio-supplies-relevant signal — sitewide nav + footer inflate
+    # `internal_links` to 80+ on every page even when the actual
+    # in-content link density is just 5-8.
     body_html = _find(r"<body[^>]*>(.*?)</body>") or text
     internal_links = len(re.findall(r'<a[^>]+href=["\']/[^"\']*["\']', body_html))
     external_links = len(re.findall(r'<a[^>]+href=["\']https?://[^"\']+["\']', body_html))
     nofollow_links = len(re.findall(r'<a[^>]+rel=["\'][^"\']*nofollow', body_html, re.IGNORECASE))
+
+    main_html = (
+        _find(r"<main[^>]*>(.*?)</main>")
+        or _find(r"<article[^>]*>(.*?)</article>")
+        or body_html
+    )
+    body_internal_links = len(re.findall(r'<a[^>]+href=["\']/[^"\']*["\']', main_html))
+    body_external_links = len(re.findall(r'<a[^>]+href=["\']https?://[^"\']+["\']', main_html))
+
+    # Outbound-domain breakdown — classify external links so the analyzer
+    # can compute the "≥3 authoritative outbound citations" signal that
+    # high-E-E-A-T review pages emit. Same-domain (canonical) links are
+    # excluded so a site linking back to its own variants doesn't inflate.
+    outbound_domains: list[str] = []
+    try:
+        canonical_host = ""
+        if canonical:
+            try:
+                canonical_host = urllib.parse.urlparse(canonical).hostname or ""
+            except Exception:
+                canonical_host = ""
+        for href in re.findall(r'<a[^>]+href=["\'](https?://[^"\']+)["\']', main_html):
+            try:
+                d = (urllib.parse.urlparse(href).hostname or "").lower()
+                if d and d != canonical_host:
+                    outbound_domains.append(d)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    outbound_domains = sorted(set(outbound_domains))
+
+    # Affiliate-link health — outbound Amazon links are the revenue path
+    # for AislePrompt + SpecPicks. Flag when amazon.com links lack a
+    # `?tag=<id>` query string (lost commission). Cheap deterministic
+    # check that runs before any LLM pass.
+    amazon_outbound = re.findall(r'<a[^>]+href=["\'](https?://[^"\']*amazon\.[a-z.]+/[^"\']+)["\']', main_html)
+    amazon_outbound_total = len(amazon_outbound)
+    amazon_outbound_tagged = sum(1 for h in amazon_outbound if "tag=" in h)
 
     # Body text + word count (capped excerpt)
     body_html_clean = re.sub(r"<script[^>]*>.*?</script>", " ", body_html, flags=re.IGNORECASE | re.DOTALL)
@@ -1053,6 +1128,68 @@ def _extract_page_meta(html: bytes) -> dict:
         r'<h[1-3][^>]*>\s*(?:FAQ|Frequently Asked Questions?)',
         body_html, re.IGNORECASE,
     ))
+
+    # Heading text arrays — used downstream by the studio-supplies-template
+    # validator (review pages must hit 5+ of the canonical 9 H2 sections:
+    # methodology, specs, independent-testing, owners-say, strengths,
+    # limitations, who-should-buy, alternatives, sources/citations).
+    def _heading_texts(tag: str, limit: int = 30) -> list[str]:
+        out = []
+        for h in re.findall(rf'<{tag}[^>]*>(.*?)</{tag}>', body_html, re.IGNORECASE | re.DOTALL):
+            t = re.sub(r"<[^>]+>", "", h).strip()[:140]
+            if t:
+                out.append(t)
+            if len(out) >= limit:
+                break
+        return out
+    h2_texts = _heading_texts("h2")
+    h3_texts = _heading_texts("h3")
+
+    # Studio-supplies article-template section presence — checks each
+    # canonical section against the joined H2+H3 text. Each section's
+    # regex deliberately matches synonyms that competing review sites use,
+    # so the validator works for AislePrompt/SpecPicks even though their
+    # voice differs from studio-supplies'.
+    heading_blob = " | ".join(h2_texts + h3_texts).lower()
+    template_section_patterns = {
+        "methodology":         r'how\s+we\s+(?:approached|tested|evaluated|reviewed|chose)|methodology|testing\s+process',
+        "specs":               r'\bspecs?\b|specifications?|technical\s+details?',
+        "independent_testing": r'independent\s+(?:testing|review|labs)|third[\s-]party\s+(?:test|review)',
+        "owner_feedback":      r'(?:what\s+)?owners?\s+say|user\s+(?:reviews|feedback)|customer\s+(?:reviews|opinions)',
+        "strengths":           r'\bstrengths?\b|\bpros\b|\badvantages?\b|what\s+we\s+(?:like|love)|highlights?',
+        "limitations":         r'\blimitations?\b|\bcons\b|\bweaknesses?\b|\bdrawbacks?\b|what\s+we\s+don.?t',
+        "buyer_persona":       r'who\s+(?:should\s+)?(?:buy|skip|use|consider|avoid)|best\s+for\b|ideal\s+for\b|not\s+for\b',
+        "alternatives":        r'\balternatives?\b|competitor[s]?|similar\s+(?:options|products|picks)|other\s+options',
+        "citations":           r'\bsources?\b|\bcitations?\b|\breferences?\b',
+    }
+    template_sections_seen = sorted(
+        k for k, pat in template_section_patterns.items()
+        if re.search(pat, heading_blob)
+    )
+
+    # Pros/Cons block presence — a discrete content pattern beyond the
+    # template (some product pages have it without a full review structure).
+    has_pros_cons = bool(
+        re.search(r'\bpros\s*[&/]?\s*cons\b|\bpros\s+(?:and|&)\s+cons\b|\badvantages?\s*&\s*(?:disadvantages?|drawbacks?)', heading_blob)
+    ) or (re.search(r'\bpros\b', heading_blob) and re.search(r'\bcons\b', heading_blob)) is not None
+
+    # Source-attribution heading pattern: "(per X and Y)" / "according to X" /
+    # "via X" — tells LLM-search the data has provenance.
+    has_specs_attribution = bool(
+        re.search(r'(?:\(per\s+|according\s+to\s+|sourced\s+from\s+|via\s+)[A-Z][A-Za-z\s,&]+', " | ".join(h2_texts))
+    )
+
+    # Body-visible publish/update date — independent of JSON-LD, this is
+    # the date a reader (or LLM) sees rendered. Studio-supplies displays
+    # `Apr 4, 2026` next to every guide title.
+    visible_date_patterns = [
+        r'\b(?:Updated|Published|Last\s+(?:updated|modified)|Posted|Reviewed)[\s:]+(?:[A-Z][a-z]+\s+\d{1,2},?\s+\d{4})',
+        r'<time[^>]+datetime=["\'][^"\']+["\']',
+        r'\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4}\b',
+    ]
+    has_visible_date = any(
+        re.search(p, body_html, re.IGNORECASE) for p in visible_date_patterns
+    )
 
     # Performance-hint tags in <head>
     head_html = _find(r"<head[^>]*>(.*?)</head>") or text
@@ -1069,17 +1206,30 @@ def _extract_page_meta(html: bytes) -> dict:
         "h1_count": h1_count,
         "h2_count": h2_count,
         "h3_count": h3_count,
+        "h2_texts": h2_texts,
+        "h3_texts": h3_texts,
         "og_keys": sorted(og.keys()),
         "twitter_card_keys": tw,
         "jsonld_types": jsonld_types,
+        "jsonld_field_coverage": jsonld_field_coverage,
         "img_count": img_count,
         "img_with_alt": img_with_alt,
         "img_lazy": img_lazy,
         "internal_links": internal_links,
         "external_links": external_links,
         "nofollow_links": nofollow_links,
+        "body_internal_links": body_internal_links,
+        "body_external_links": body_external_links,
+        "outbound_domains": outbound_domains,
+        "outbound_domain_count": len(outbound_domains),
+        "amazon_outbound_total": amazon_outbound_total,
+        "amazon_outbound_tagged": amazon_outbound_tagged,
         "word_count": word_count,
         "faq_heading": faq_heading,
+        "template_sections_seen": template_sections_seen,
+        "has_pros_cons": has_pros_cons,
+        "has_specs_attribution": has_specs_attribution,
+        "has_visible_date": has_visible_date,
         "preconnect": preconnect,
         "dns_prefetch": dns_prefetch,
         "preload": preload,
@@ -1122,12 +1272,50 @@ def audit_site_signals(site_cfg, out_dir: Path) -> None:
         signals["robots"]["status"] = status
         signals["robots"]["bytes"] = len(text)
 
+        # AI / LLM / chat-agent crawlers — every user-agent must be
+        # named EXPLICITLY in robots.txt. A `User-agent: *` block does
+        # NOT cover most of these; many bots fall back to conservative
+        # behavior or skip the site entirely when their exact name
+        # isn't listed. Source: each crawler's published docs (2026-04).
+        # We probe every name; the analyzer flags any missing block.
         ai_bots = [
-            "GPTBot", "OAI-SearchBot", "ChatGPT-User",
-            "PerplexityBot", "Perplexity-User",
+            # OpenAI — four distinct user-agents
+            "GPTBot", "OAI-SearchBot", "ChatGPT-User", "OpenAI-Image",
+            # Anthropic — current + legacy + new search/user agents
             "ClaudeBot", "anthropic-ai", "claude-web",
-            "Google-Extended", "Applebot-Extended",
-            "Bingbot", "Amazonbot", "Bytespider", "Meta-ExternalAgent",
+            "Claude-User", "Claude-SearchBot",
+            # Perplexity
+            "PerplexityBot", "Perplexity-User",
+            # Google — core + AI-Overviews + Bard/Gemini opt-out token
+            "Google-Extended", "GoogleOther",
+            "Googlebot", "Googlebot-Image", "Googlebot-News", "Googlebot-Video",
+            "AdsBot-Google", "Mediapartners-Google",
+            # Apple Intelligence
+            "Applebot", "Applebot-Extended",
+            # Microsoft / Bing / Copilot
+            "Bingbot", "BingPreview", "msnbot",
+            # Amazon (Alexa + Amazon AI)
+            "Amazonbot",
+            # ByteDance / TikTok / Doubao
+            "Bytespider",
+            # Meta (Llama crawler + link-preview)
+            "Meta-ExternalAgent", "FacebookBot", "facebookexternalhit",
+            # Cohere
+            "cohere-ai", "cohere-training-data-crawler",
+            # Mistral
+            "MistralAI-User",
+            # You.com / Kagi / DuckDuckGo / Huawei / Yandex
+            "YouBot", "Kagibot", "DuckAssistBot", "PetalBot", "YandexBot",
+            # Diffbot (real-time data backbone for many LLM agents)
+            "Diffbot",
+            # Common Crawl (most LLM training corpora trace back here)
+            "CCBot",
+            # AI2 (OLMo / Dolma)
+            "ai2bot", "ai2bot-Dolma",
+            # Image AI
+            "ImagesiftBot",
+            # Social agents that surface links into AI summaries
+            "Twitterbot", "LinkedInBot", "Slackbot", "Discordbot", "TelegramBot",
         ]
         # Per-bot status: present (User-agent declared), allowed (Allow: / present)
         bot_blocks: dict = {}
@@ -1199,6 +1387,14 @@ def crawl_page_inventory(site_cfg, out_dir: Path) -> None:
     err(f"  inventory: fetching {sitemap_url}")
     all_urls = _fetch_sitemap_urls(sitemap_url)
     err(f"  inventory: {len(all_urls)} URLs in sitemap")
+    # Always persist the full sitemap URL list so the analyzer's
+    # content-gap detector can count pages matching `coverage_targets`
+    # patterns regardless of whether they were sampled into pages-by-type.
+    (out_dir / "sitemap-urls.json").write_text(json.dumps({
+        "fetched_from": sitemap_url,
+        "count": len(all_urls),
+        "urls": all_urls,
+    }))
     if not all_urls:
         # Write an empty file so downstream stages can rely on it existing
         (out_dir / "pages-by-type.jsonl").write_text("")

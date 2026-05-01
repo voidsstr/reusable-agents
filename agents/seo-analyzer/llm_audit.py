@@ -172,6 +172,11 @@ PAGE-TYPE: PRODUCT (only when the input record has type=product)
 [product-schema-incomplete]         Product JSON-LD missing brand, mpn/sku, offers.price, offers.priceCurrency, aggregateRating, review[]
 [product-comparison-link-missing]   No link to head-to-head pages featuring this product
 [product-affiliate-cta-position]    Amazon CTA below the fold (hurts conversion)
+[product-pros-cons-missing]         No "Pros & Cons" / "👍 / 👎" block on a product page (LLMs literally extract these for product summaries; studio-supplies emits one on every product)
+[product-image-count-thin]          Product page with fewer than 3 product images (Google's product-rich-result minimum)
+[product-aggregate-rating-thin]     Product schema with aggregateRating.reviewCount < 5 — Google won't show stars in SERP unless review count crosses a fuzzy threshold
+[product-specs-table-missing]       No structured spec table / list on a product page (every studio-supplies product has explicit Specifications section)
+[product-affiliate-tag-missing]     Outbound Amazon link without ?tag=<id> on a product page (lost commission)
 
 PAGE-TYPE: HEAD-TO-HEAD / VS (only when type=head_to_head)
 ─────────────────────────────────────────────────────────────────────
@@ -179,11 +184,20 @@ PAGE-TYPE: HEAD-TO-HEAD / VS (only when type=head_to_head)
 [h2h-quote-worthy-verdict-missing]  No single-sentence \"X wins for Y, Z wins for W\" line
 [h2h-stale-pricing]                 Prices in HTML > 14 days old vs DB current price
 
-PAGE-TYPE: ARTICLE / BLOG (only when type=article)
+PAGE-TYPE: ARTICLE / BLOG / REVIEW (only when type=article OR type=review)
 ─────────────────────────────────────────────────────────────────────
 [article-author-credentials-missing]  No author byline with bio link
 [article-publish-update-dates]        Missing or future-dated publish/update date
 [article-cited-sources-missing]       Fewer than 3 outbound citations
+[article-wordcount-schema-missing]    Article JSON-LD lacks wordCount field (signal Google + LLMs use to weight)
+[article-datemodified-missing]        Article JSON-LD has datePublished but no dateModified (freshness signal)
+[review-template-incomplete]          Review-style article missing canonical sections — methodology / specs / independent-testing / owners-say / strengths / limitations / who-should-buy / alternatives / sources. Studio-supplies' template hits all 8.
+[review-buyer-persona-segmentation-missing]  Review without "Who Should Buy It / Who Should Skip" or equivalent buyer-persona segmentation (LLM-search loves this — direct answer to "is this for me?")
+[review-specs-source-attribution-missing]    Specs heading without source attribution like "(per <manufacturer> and <test-site>)" — tells LLMs the data has provenance
+[review-citations-section-missing]    Review/article without distinct "Sources & Citations" / "References" section with ≥3 outbound links
+[eeat-outbound-citation-count]        Review or authoritative content with fewer than 3 outbound links to non-affiliate, non-social authoritative domains
+[body-visible-date-missing]           No human-visible publish or update date in body (LLM-search uses these as a freshness signal independent of schema)
+[body-internal-links-thin]            Fewer than 5 internal links inside <main>/<article> body (excludes nav + footer). Studio-supplies has 8+ in-content internal links per product page
 
 PAGE-TYPE: FEATURE / APP-PAGE (only when type=feature)
 ─────────────────────────────────────────────────────────────────────
@@ -283,12 +297,26 @@ CHECK_ID_TO_REC_TYPE = {
     "product-schema-incomplete": "product-schema-incomplete",
     "product-comparison-link-missing": "product-comparison-link-missing",
     "product-affiliate-cta-position": "product-affiliate-cta-position",
+    "product-pros-cons-missing": "content-expansion",
+    "product-image-count-thin": "schema-markup",
+    "product-aggregate-rating-thin": "schema-markup",
+    "product-specs-table-missing": "content-expansion",
+    "product-affiliate-tag-missing": "conversion-path",
     "h2h-comparison-format-readiness": "h2h-comparison-format-readiness",
     "h2h-quote-worthy-verdict-missing": "h2h-quote-worthy-verdict-missing",
     "h2h-stale-pricing": "h2h-stale-pricing",
     "article-author-credentials-missing": "article-author-credentials-missing",
     "article-publish-update-dates": "article-publish-update-dates",
     "article-cited-sources-missing": "article-cited-sources-missing",
+    "article-wordcount-schema-missing": "schema-markup",
+    "article-datemodified-missing": "schema-markup",
+    "review-template-incomplete": "content-expansion",
+    "review-buyer-persona-segmentation-missing": "content-expansion",
+    "review-specs-source-attribution-missing": "content-expansion",
+    "review-citations-section-missing": "content-expansion",
+    "eeat-outbound-citation-count": "content-expansion",
+    "body-visible-date-missing": "ssr-fix",
+    "body-internal-links-thin": "internal-link",
     "feature-conversational-content": "feature-conversational-content",
     "feature-internal-link-cluster": "feature-internal-link-cluster",
 }
@@ -495,4 +523,6 @@ CHECK_CATEGORIES = {
     "page-type-h2h": [c for c in ALL_CHECK_IDS if c.startswith("h2h-")],
     "page-type-article": [c for c in ALL_CHECK_IDS if c.startswith("article-")],
     "page-type-feature": [c for c in ALL_CHECK_IDS if c.startswith("feature-")],
+    "page-type-review": [c for c in ALL_CHECK_IDS if c.startswith("review-")],
+    "body-content-signals": [c for c in ALL_CHECK_IDS if c.startswith("body-")],
 }

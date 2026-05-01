@@ -857,33 +857,72 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
     robots = (signals.get("robots") or {}) if isinstance(signals, dict) else {}
     bots = robots.get("bots") or {}
 
-    # robots.txt missing AI-crawler explicit allows
+    # robots.txt missing AI-crawler explicit allows.
+    # CRITICAL: each AI/LLM/chat agent only honors a robots.txt block
+    # whose User-agent is its EXACT name. A `User-agent: *` block does
+    # NOT cover GPTBot/ClaudeBot/PerplexityBot/etc — most fall back to
+    # conservative crawl behavior or skip entirely without an explicit
+    # per-bot block. Flag any missing.
     if _budget() and bots:
-        ai_crit = ["GPTBot", "ClaudeBot", "PerplexityBot", "OAI-SearchBot", "Bingbot"]
+        ai_crit = [
+            # OpenAI (4 distinct agents)
+            "GPTBot", "OAI-SearchBot", "ChatGPT-User", "OpenAI-Image",
+            # Anthropic (current + legacy + 2025 search/user)
+            "ClaudeBot", "anthropic-ai", "claude-web",
+            "Claude-User", "Claude-SearchBot",
+            # Perplexity
+            "PerplexityBot", "Perplexity-User",
+            # Google AI
+            "Google-Extended", "GoogleOther",
+            # Apple Intelligence
+            "Applebot", "Applebot-Extended",
+            # Microsoft / Bing / Copilot
+            "Bingbot", "BingPreview",
+            # Amazon AI / Alexa
+            "Amazonbot",
+            # ByteDance / Doubao
+            "Bytespider",
+            # Meta Llama crawler + link-preview
+            "Meta-ExternalAgent", "FacebookBot",
+            # Other LLM + chat agents
+            "cohere-ai", "MistralAI-User", "YouBot", "Kagibot",
+            "DuckAssistBot", "PetalBot", "Diffbot", "CCBot",
+            "ai2bot",
+        ]
         missing_crit = [b for b in ai_crit if not bots.get(b, {}).get("declared")]
-        if len(missing_crit) >= 2:
+        # Lowered threshold to 1: each missing bot is a real loss of
+        # referral traffic from that specific AI surface.
+        if missing_crit:
             rid = next_id()
+            severity = "critical" if len(missing_crit) >= 5 else "high"
             recs.append({
-                "id": rid, "type": "robots-no-ai-allow", "priority": "high",
+                "id": rid, "type": "robots-no-ai-allow", "priority": severity,
                 "title": f"Add explicit robots.txt allow for {len(missing_crit)} AI crawler(s)",
                 "rationale": (
-                    "AI search engines (ChatGPT, Claude, Perplexity, Google AI Overviews, Bing "
-                    "Copilot) are a fast-growing referral channel. Without explicit User-agent "
-                    "blocks, some bots fall back to conservative crawl patterns or skip the site "
-                    "entirely. Studio-supplies emits a per-bot Allow:/ block for "
-                    "GPTBot, OAI-SearchBot, ChatGPT-User, PerplexityBot, Perplexity-User, "
-                    "ClaudeBot, anthropic-ai, claude-web, Google-Extended, Applebot-Extended, "
-                    "Bingbot, Amazonbot, Bytespider, Meta-ExternalAgent. "
+                    "AI search + chat agents (ChatGPT, Claude, Perplexity, Google AI "
+                    "Overviews, Apple Intelligence, Bing Copilot, Mistral Le Chat, "
+                    "Cohere, Meta Llama, You.com, Kagi, etc) are now a primary referral "
+                    "channel — and each crawler ONLY honors a block whose user-agent "
+                    "is its EXACT name. A `User-agent: *` block does NOT cover them; "
+                    "most fall back to conservative crawl or skip entirely without "
+                    "an explicit per-bot Allow. "
                     f"Currently missing: {', '.join(missing_crit)}."
                 ),
                 "expected_impact": {"metric": "ai_referral_traffic", "horizon_weeks": 12},
                 "data_refs": ["data/site-signals.json"],
                 "implementation_outline": {
                     "approach": (
-                        "Append to robots.txt a per-bot block for each AI crawler:\n"
-                        "  User-agent: GPTBot\n  Disallow: /admin\n  Disallow: /cart\n  Allow: /\n\n"
-                        "Repeat for ClaudeBot, PerplexityBot, OAI-SearchBot, Bingbot. Each block "
-                        "is independent (User-agent groups don't inherit from *)."
+                        "Append a per-bot block to robots.txt for each missing crawler. "
+                        "Each block is independent (groups don't inherit from *):\n\n"
+                        "  User-agent: GPTBot\n"
+                        "  Allow: /\n"
+                        "  Disallow: /admin\n"
+                        "  Disallow: /cart\n"
+                        "  Disallow: /checkout\n\n"
+                        "Repeat verbatim for each name in `missing_bots`. Group them "
+                        "under `# AI / LLM / chat-agent crawlers — explicit per-bot "
+                        "allowlist` at the bottom of robots.txt. No deploy needed — "
+                        "robots is fetched per-crawl."
                     ),
                 },
                 "missing_bots": missing_crit,
@@ -946,6 +985,482 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
             })
 
 
+def _add_content_gap_recs(cfg, data: Path, recs: list, next_id, max_recs: int,
+                          pre_traffic_mode: bool) -> None:
+    """Net-new-page recommendations — the pre-traffic content engine.
+
+    Studio-supplies' rank wins come from sheer published-page surface area:
+    one buying guide per category, one brand metaobject per brand carried,
+    a /vs/ page per high-overlap product pair, plus a constant churn of
+    troubleshooting + use-case landings. The agent's existing top5-target
+    loop only fires when GSC has impressions to mine — useless for sites
+    starting at zero.
+
+    Reads `coverage_targets` from YAML + sitemap-urls.json + pages-by-type.jsonl,
+    emits one `new-page-<type>` rec per shortfall.
+    """
+    if len(recs) >= max_recs:
+        return
+    targets = (cfg.get("coverage_targets") or {})
+    if not targets:
+        return
+
+    all_pages: list[dict] = []
+    pages_jsonl = data / "pages-by-type.jsonl"
+    if pages_jsonl.exists():
+        for line in pages_jsonl.read_text().splitlines():
+            if line.strip():
+                try:
+                    all_pages.append(json.loads(line))
+                except Exception:
+                    continue
+    sitemap_urls: list[str] = []
+    raw_sitemap = data / "sitemap-urls.json"
+    if raw_sitemap.exists():
+        try:
+            sitemap_urls = json.loads(raw_sitemap.read_text()).get("urls", [])
+        except Exception:
+            pass
+    inventory_urls = {p.get("url", "") for p in all_pages if p.get("url")}
+    all_urls = sorted(set(sitemap_urls) | inventory_urls)
+    db_stats = _load(data / "db-stats.json") or {}
+
+    for target_name, target_cfg in targets.items():
+        if len(recs) >= max_recs:
+            break
+        pattern_str = target_cfg.get("sitemap_pattern", "")
+        if not pattern_str:
+            continue
+        try:
+            pattern = re.compile(pattern_str)
+        except re.error:
+            continue
+
+        existing_count = sum(1 for u in all_urls if pattern.search(u))
+
+        expected_min = target_cfg.get("expected_min")
+        expected_source = ""
+        if not expected_min and target_cfg.get("expected_from_db"):
+            db_key = target_cfg["expected_from_db"]
+            db_val = db_stats.get(db_key)
+            if isinstance(db_val, list):
+                expected_min = len(db_val)
+                expected_source = f"db.{db_key} ({expected_min} entries)"
+            elif isinstance(db_val, int):
+                expected_min = db_val
+                expected_source = f"db.{db_key}"
+            elif isinstance(db_val, dict):
+                expected_min = db_val.get("count", 0)
+                expected_source = f"db.{db_key}.count"
+
+        if not expected_min or existing_count >= int(expected_min):
+            continue
+
+        gap = int(expected_min) - existing_count
+        priority = target_cfg.get(
+            "rec_priority",
+            "high" if pre_traffic_mode else "medium",
+        )
+        rid = next_id()
+        nice_label = target_name.replace("_", " ")
+        sample_titles_hint = target_cfg.get("title_template", "")
+        rationale = (
+            f"Currently {existing_count} {nice_label} page(s) exist; "
+            f"target is {expected_min}"
+            f"{' (from ' + expected_source + ')' if expected_source else ''}. "
+            f"Gap of {gap} new page(s) to publish. Studio-supplies' organic-traffic "
+            f"engine is built on this exact pattern: one buying guide per category, "
+            f"one brand metaobject per brand carried, and a /vs/ page per "
+            f"high-overlap product pair. With this site in pre-traffic mode "
+            f"(< 100 GSC impressions/90d), publishing these template pages is the "
+            f"highest-ROI action available."
+        )
+        if sample_titles_hint:
+            rationale += f" Title template: {sample_titles_hint!r}."
+
+        recs.append({
+            "id": rid,
+            "type": f"new-page-{target_name.replace('_', '-')}",
+            "priority": priority,
+            "title": f"Publish {gap} new {nice_label} page(s) — coverage gap",
+            "rationale": rationale,
+            "expected_impact": {
+                "metric": "indexed_pages",
+                "horizon_weeks": int(target_cfg.get("horizon_weeks", 12)),
+            },
+            "data_refs": [
+                "data/pages-by-type.jsonl",
+                "data/db-stats.json",
+                "data/sitemap-urls.json",
+            ],
+            "implementation_outline": {
+                "approach": (
+                    f"For each missing {nice_label}, create an SSR route at the "
+                    f"slug pattern matching `{pattern_str}`. Each page MUST emit "
+                    f"appropriate JSON-LD ({target_cfg.get('json_ld', 'CollectionPage|Article')}), "
+                    f"a single H1 with the primary keyword, breadcrumb trail, and at "
+                    f"least 5 in-content internal links to related pages. Pages should "
+                    f"be 1000+ words minimum (studio-supplies hits 1500-2000)."
+                ),
+                "json_ld": target_cfg.get("json_ld", "CollectionPage"),
+                "expected_word_count_min": int(target_cfg.get("min_words", 1000)),
+                "expected_internal_links_min": int(target_cfg.get("min_internal_links", 5)),
+                "title_template": sample_titles_hint,
+            },
+            "coverage_target": target_name,
+            "existing_count": existing_count,
+            "expected_min": int(expected_min),
+            "gap": gap,
+            "implemented": False,
+        })
+
+
+def _add_article_template_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag review/article pages missing 5+ of the 9 canonical sections
+    (methodology, specs, independent-testing, owner-feedback, strengths,
+    limitations, buyer-persona, alternatives, citations)."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    article_types = {"article", "review", "blog"}
+    article_pages = [
+        p for p in pages
+        if p.get("type", "") in article_types
+        and 200 <= int(p.get("status", 0) or 0) < 300
+    ]
+    incomplete = []
+    for p in article_pages:
+        seen = list(p.get("template_sections_seen") or [])
+        if len(seen) < 5:
+            missing = [s for s in (
+                "methodology", "specs", "independent_testing", "owner_feedback",
+                "strengths", "limitations", "buyer_persona", "alternatives",
+                "citations",
+            ) if s not in seen]
+            incomplete.append({
+                "url": p.get("url", ""),
+                "seen_sections": seen,
+                "missing_sections": missing,
+                "section_count": len(seen),
+            })
+    if len(incomplete) < 2:
+        return
+    rid = next_id()
+    sample = incomplete[:5]
+    avg = sum(p["section_count"] for p in incomplete) / max(len(incomplete), 1)
+    recs.append({
+        "id": rid,
+        "type": "review-template-incomplete",
+        "priority": "high",
+        "title": (
+            f"Restructure {len(incomplete)} review/article page(s) into the "
+            f"9-section template (current avg {avg:.1f}/9)"
+        ),
+        "rationale": (
+            "Studio-supplies' review template — Methodology / Specs (per X) / "
+            "Independent Testing / What Owners Say / Strengths / Limitations / "
+            "Who Should Buy / Who Should Skip / Alternatives / Sources & "
+            "Citations — is the structural pattern that ranks for high-intent "
+            "commercial review queries. LLM search engines (ChatGPT, Perplexity, "
+            "Google AI Overviews) literally look for these section markers when "
+            "deciding what to cite. Articles missing 5+ sections look thin and "
+            "get bypassed for citation."
+        ),
+        "expected_impact": {"metric": "gsc.avg_position", "horizon_weeks": 8},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "For each flagged URL, refactor the article template to include "
+                "all 9 H2 sections in canonical order. Each section should be "
+                "100-300 words. The 'Sources & Citations' H2 should hold ≥3 "
+                "outbound links to authoritative non-affiliate domains. "
+                "'Who Should Buy / Who Should Skip' should explicitly segment "
+                "by buyer persona."
+            ),
+        },
+        "sample_urls": [p["url"] for p in sample],
+        "missing_breakdown": sample,
+        "implemented": False,
+    })
+
+
+def _add_pros_cons_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag product pages without a Pros & Cons block."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    products = [
+        p for p in pages
+        if p.get("type", "") == "product"
+        and 200 <= int(p.get("status", 0) or 0) < 300
+    ]
+    missing = [p for p in products if not p.get("has_pros_cons")]
+    if len(missing) < 3:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid,
+        "type": "product-pros-cons-missing",
+        "priority": "medium",
+        "title": f"Add Pros & Cons block on {len(missing)} product page(s)",
+        "rationale": (
+            "Studio-supplies emits a 👍 Pros / 👎 Cons block on every product "
+            "page. ChatGPT, Perplexity, and Google AI Overviews extract these "
+            "blocks directly when summarizing a product — pages without them "
+            "get bypassed in citation and the affiliate referral goes to a "
+            "competitor."
+        ),
+        "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 6},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "On each product page template, render a section with H2 "
+                "'Pros & Cons' containing two H3 subsections '👍 Pros' and "
+                "'👎 Cons'. Each subsection should have 4-6 bullet points "
+                "(1 short sentence each)."
+            ),
+        },
+        "sample_urls": [p.get("url", "") for p in missing[:5]],
+        "implemented": False,
+    })
+
+
+def _add_outbound_citations_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag review/article pages with fewer than 3 outbound authoritative
+    citations (distinct external domains in body content)."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    article_types = {"article", "review", "blog"}
+    article_pages = [
+        p for p in pages
+        if p.get("type", "") in article_types
+        and 200 <= int(p.get("status", 0) or 0) < 300
+    ]
+    thin = [
+        p for p in article_pages
+        if int(p.get("outbound_domain_count", 0) or 0) < 3
+    ]
+    if len(thin) < 3:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid,
+        "type": "eeat-outbound-citation-count",
+        "priority": "medium",
+        "title": f"Add outbound authoritative citations to {len(thin)} review/article(s)",
+        "rationale": (
+            "Review/article pages with fewer than 3 outbound links to distinct "
+            "authoritative domains underperform on E-E-A-T. Studio-supplies' "
+            "review pages link out to manufacturer spec sheets, third-party "
+            "test labs, and expert review sites — Google reads this as "
+            "provenance and AI search engines preferentially cite well-sourced "
+            "articles."
+        ),
+        "expected_impact": {"metric": "gsc.avg_position", "horizon_weeks": 8},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "Add a 'Sources & Citations' section near the bottom of each "
+                "flagged article. Include ≥3 outbound links to (a) the "
+                "manufacturer's official product page, (b) a third-party "
+                "testing lab or industry-standard benchmark site, and (c) at "
+                "least one authoritative editorial review (RTINGS, Wirecutter, "
+                "CNET, Tom's Hardware, etc.). Use rel=\"nofollow noopener\" "
+                "since they're informational citations, not endorsements."
+            ),
+        },
+        "sample_urls": [p.get("url", "") for p in thin[:5]],
+        "implemented": False,
+    })
+
+
+def _add_body_link_density_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Refined version of onpage-low-internal-linking — counts links inside
+    <main>/<article> only, excluding nav + footer."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    sparse = [
+        p for p in pages
+        if 200 <= int(p.get("status", 0) or 0) < 300
+        and int(p.get("body_internal_links", 0) or 0) < 5
+        and p.get("type", "") not in ("home", "homepage")
+    ]
+    if len(sparse) < 3:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid,
+        "type": "body-internal-links-thin",
+        "priority": "medium",
+        "title": f"Add in-content internal links on {len(sparse)} page(s) (target ≥5 inside <main>)",
+        "rationale": (
+            "In-content internal links carry far more topical-cluster authority "
+            "than sitewide nav links. Studio-supplies' product pages have "
+            "8+ in-content links each (Related Guides + brand crosslink + body "
+            "breadcrumb). The prior internal-link check counted nav + footer — "
+            "those inflate trivially to 50+ on every page even when the editorial "
+            "body is naked. This refined check scopes to <main>/<article> only."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "On each flagged URL, add a 'Related <type>' section that "
+                "links to 3-5 same-cluster pages (same category, same brand, "
+                "comparable products). Anchor text should be descriptive (the "
+                "related page's title), not 'click here'."
+            ),
+        },
+        "sample_urls": [p.get("url", "") for p in sparse[:5]],
+        "implemented": False,
+    })
+
+
+def _add_jsonld_field_completeness_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag JSON-LD blocks present-but-incomplete: Product missing
+    sku/mpn/brand/offers/aggregateRating; Article missing wordCount/dateModified."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    required = {
+        "Product": [
+            "name", "image", "description", "brand.name",
+            "offers.priceCurrency", "aggregateRating.reviewCount",
+        ],
+        "Article": [
+            "headline", "datePublished", "dateModified",
+            "author.name", "publisher.name", "image",
+        ],
+    }
+    flagged_by_type: dict[str, list[dict]] = {"Product": [], "Article": []}
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        cov = p.get("jsonld_field_coverage") or {}
+        for type_name, req_fields in required.items():
+            if type_name not in cov:
+                continue  # absent entirely is handled by onpage-jsonld-missing
+            have = set(cov[type_name])
+            missing = [f for f in req_fields if f not in have]
+            if type_name == "Product":
+                img_count_keys = [k for k in have if k.startswith("image.count=")]
+                img_counts = [int(k.split("=", 1)[1]) for k in img_count_keys]
+                img_count = max(img_counts) if img_counts else 0
+                if img_count < 3:
+                    missing.append(f"image[≥3] (have {img_count})")
+            if missing:
+                flagged_by_type[type_name].append({
+                    "url": p.get("url", ""),
+                    "type": type_name,
+                    "missing": missing,
+                })
+    for type_name, flagged in flagged_by_type.items():
+        if len(recs) >= max_recs:
+            break
+        if len(flagged) < 2:
+            continue
+        rid = next_id()
+        rec_type = f"{type_name.lower()}-schema-incomplete"
+        recs.append({
+            "id": rid,
+            "type": rec_type,
+            "priority": "high",
+            "title": (
+                f"Tighten {type_name} JSON-LD on {len(flagged)} page(s) — "
+                f"missing rich-result-required fields"
+            ),
+            "rationale": (
+                f"{type_name} JSON-LD is present but missing fields Google "
+                f"requires for full rich-result eligibility. Studio-supplies "
+                f"emits the complete superset on every page — {type_name}: "
+                f"{', '.join(required[type_name])}. Without these, the page loses "
+                f"star ratings / price callouts / publish dates in the SERP."
+            ),
+            "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 6},
+            "data_refs": ["data/pages-by-type.jsonl"],
+            "implementation_outline": {
+                "approach": (
+                    f"Update the {type_name} JSON-LD template to emit all required "
+                    f"fields. For Product: brand.name, offers.priceCurrency + "
+                    f"availability, aggregateRating (only if reviewCount ≥5 to "
+                    f"avoid Google warnings), sku OR mpn, image[] with ≥3 photos. "
+                    f"For Article: wordCount, dateModified (distinct from "
+                    f"datePublished), author.name."
+                ),
+            },
+            "sample_urls": [f["url"] for f in flagged[:5]],
+            "missing_breakdown": flagged[:10],
+            "implemented": False,
+        })
+
+
+def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag pages with outbound Amazon links that lack a `?tag=<id>` —
+    direct affiliate revenue leak."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    leaky = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        total = int(p.get("amazon_outbound_total", 0) or 0)
+        tagged = int(p.get("amazon_outbound_tagged", 0) or 0)
+        if total > 0 and tagged < total:
+            leaky.append({
+                "url": p.get("url", ""),
+                "untagged": total - tagged,
+                "total": total,
+            })
+    if not leaky:
+        return
+    untagged_sum = sum(item["untagged"] for item in leaky)
+    rid = next_id()
+    recs.append({
+        "id": rid,
+        "type": "product-affiliate-tag-missing",
+        "priority": "high",
+        "title": (
+            f"Fix {untagged_sum} untagged Amazon link(s) across {len(leaky)} page(s) "
+            f"— direct affiliate-revenue leak"
+        ),
+        "rationale": (
+            "Outbound Amazon links without ?tag=<associate-id> generate zero "
+            "commission. Every untagged link is a direct revenue leak. "
+            "Studio-supplies tags 100% of Amazon outbound with "
+            "?tag=studiosuppl00-20."
+        ),
+        "expected_impact": {"metric": "amazon_affiliate_revenue", "horizon_weeks": 1},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "Centralize Amazon link generation through a single helper that "
+                "injects the associate tag from a config var "
+                "(AMAZON_AFFILIATE_TAG). Audit codebase for hardcoded amazon.com "
+                "hrefs (grep -r 'amazon.com/dp/' src/), wrap each through the helper. "
+                "Add a startup assertion that the tag is set in production env."
+            ),
+        },
+        "sample_urls": [item["url"] for item in leaky[:5]],
+        "leaky_pages": leaky[:20],
+        "implemented": False,
+    })
+
+
 def build_recommendations(cfg, run_dir: Path, snap: dict,
                             handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict]]:
     """Return (recommendations, declared_goals).
@@ -975,6 +1490,29 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
 
     max_recs = cfg.get("analyzer", {}).get("max_recs_per_run", 12)
     repo_routes = _load_repo_routes(run_dir)
+
+    # ---- Pre-traffic mode ----
+    # When GSC has effectively no traffic (< pre_traffic_impr_threshold over
+    # 90 days), the rank-target / striking-distance / zero-click loops all
+    # return empty — they have no organic data to mine. For sites in that
+    # state (AislePrompt + SpecPicks before ads kick in), the highest-leverage
+    # work is *creating new pages* in the templates that high-revenue
+    # affiliate sites use (studio-supplies playbook): buying-guide hubs per
+    # category, brand metaobject pages, head-to-head comparisons,
+    # use-case landings, troubleshooting guides. The flag below is consumed
+    # by `_add_content_gap_recs` to bias toward `new-page-*` rec types and
+    # by the reporter to relayout the email.
+    pre_traffic_threshold = int(
+        cfg.get("analyzer", {}).get("pre_traffic_impr_threshold", 100)
+    )
+    total_impr_90d = (snap.get("gsc_90d", {}) or {}).get("total_impressions", 0)
+    pre_traffic_mode = total_impr_90d < pre_traffic_threshold
+    if pre_traffic_mode:
+        print(
+            f"  [pre-traffic] {total_impr_90d} impr/90d < {pre_traffic_threshold} — "
+            f"prioritizing new-page content-gap recs over rank-target recs",
+            file=sys.stderr,
+        )
 
     # ---- Top-5 rank targets (US-first) ----
     country = cfg["data_sources"]["gsc"].get("default_country_filter", "usa")
@@ -1367,6 +1905,23 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
             })
             article_recs_added += 1
 
+    # ---- Net-new-page coverage gaps (pre-traffic content engine) ----
+    # Configurable via `coverage_targets` in the per-site YAML. Reads the
+    # full sitemap URL list + DB-derived expected counts and emits one
+    # `new-page-<type>` rec per shortfall.
+    #
+    # In pre-traffic mode we run this BEFORE the on-page audit so it can
+    # claim rec-budget slots first — otherwise on-page polish recs (title
+    # length, meta description, og tags) consume the whole 12-rec budget
+    # and the content engine never fires. In normal-traffic mode the
+    # rank-target / striking-distance recs above will have already filled
+    # most of the budget; content-gap runs as a fill-in.
+    if pre_traffic_mode and len(recs) < max_recs:
+        try:
+            _add_content_gap_recs(cfg, data, recs, next_id, max_recs, pre_traffic_mode)
+        except Exception as e:
+            print(f"  [content-gap] rule eval failed: {e}", file=sys.stderr)
+
     # ---- On-page audit (studio-supplies playbook) ----
     # Rules read pages-by-type.jsonl + site-signals.json (written by the
     # data-collector). Modeled on the high-converting studio-supplies.com
@@ -1377,6 +1932,35 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
             _add_onpage_recs(data, recs, next_id, max_recs)
         except Exception as e:
             print(f"  [onpage] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Studio-supplies template + content-density rules ----
+    # Each helper is independent + best-effort — failure in one doesn't
+    # abort the others. Run order is: high-revenue (affiliate-tag leak),
+    # then schema-completeness, then template structure, then in-content
+    # signals (pros/cons, citations, body-link density).
+    for fn, label in [
+        (_add_amazon_tag_recs, "amazon-tag"),
+        (_add_jsonld_field_completeness_recs, "jsonld-completeness"),
+        (_add_article_template_recs, "article-template"),
+        (_add_pros_cons_recs, "pros-cons"),
+        (_add_outbound_citations_recs, "outbound-citations"),
+        (_add_body_link_density_recs, "body-link-density"),
+    ]:
+        if len(recs) >= max_recs:
+            break
+        try:
+            fn(data, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [{label}] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Normal-mode content-gap fill-in ----
+    # Already ran in pre-traffic mode above; in normal mode it runs last
+    # to avoid crowding rank-target recs.
+    if not pre_traffic_mode and len(recs) < max_recs:
+        try:
+            _add_content_gap_recs(cfg, data, recs, next_id, max_recs, pre_traffic_mode)
+        except Exception as e:
+            print(f"  [content-gap] rule eval failed: {e}", file=sys.stderr)
 
     # Filter out any rec whose canonical key matches a previously
     # shipped/skipped rec. This prevents the analyzer from re-proposing
