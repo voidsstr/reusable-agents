@@ -629,6 +629,26 @@ def send_completion_email(
     to_list = [a.strip() for a in to.split(",") if a.strip()]
     extra_headers = [("X-Reusable-Agent", agent_id)]
 
+    # Digest gate (5-1) — if DIGEST_ONLY=1 (default), queue to digest
+    # rollup instead of sending. Was leaking direct Graph calls before
+    # this, contributing to the per-run email flood.
+    try:
+        from shared.site_quality import maybe_queue_to_digest as _mq  # type: ignore
+        _suppressed, _detail = _mq(
+            subject=subject, body_html=body_html, to=to_list, sender=sender,
+            extra_headers={"X-Reusable-Agent": agent_id},
+            bypass_digest=False,
+        )
+        if _suppressed:
+            _track(True, _detail)
+            return True, _detail
+    except Exception as _e:
+        # Defensive: if the gate import fails, still suppress when
+        # DIGEST_ONLY=1 to avoid the leak.
+        if os.environ.get("DIGEST_ONLY", "1") == "1":
+            _track(True, "suppressed: digest-mode (gate import failed)")
+            return True, "suppressed: digest-mode"
+
     # Try Graph first
     oauth_path = Path(os.path.expanduser(
         oauth_file or os.environ.get("RESPONDER_OAUTH_FILE",

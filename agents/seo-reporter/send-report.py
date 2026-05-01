@@ -263,6 +263,25 @@ def send_email(cfg, subject: str, html_body: str) -> bool:
         return False
     from_addr = email_cfg.get("from", "")
 
+    # Digest gate (5-1) — seo-reporter has its own Graph + smtplib paths
+    # that bypass send_via_msmtp. Route through the shared queue helper
+    # so DIGEST_ONLY=1 actually catches us.
+    try:
+        from shared.site_quality import maybe_queue_to_digest as _mq  # type: ignore
+        _suppressed, _detail = _mq(
+            subject=subject, body_html=html_body, to=to_list, sender=from_addr,
+            extra_headers={"X-Reusable-Agent": "seo-reporter",
+                           "X-Reusable-Agent-Site": cfg.site_id},
+            bypass_digest=False,
+        )
+        if _suppressed:
+            print(f"[reporter] {_detail}", file=sys.stderr)
+            return True
+    except Exception:
+        if os.environ.get("DIGEST_ONLY", "1") == "1":
+            print(f"[reporter] suppressed: digest-mode (gate import failed)", file=sys.stderr)
+            return True
+
     msg_id = make_msgid(domain="reusable-agents")
     headers = [
         f"From: {from_addr}",

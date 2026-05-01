@@ -256,6 +256,61 @@ def _send_via_graph_simple(*, subject: str, body_html: str, to: list[str],
     return False, last_err
 
 
+def maybe_queue_to_digest(
+    *,
+    subject: str,
+    body_html: str,
+    to: list[str],
+    sender: str = "",
+    extra_headers: Optional[dict[str, str]] = None,
+    bypass_digest: bool = False,
+) -> tuple[bool, str]:
+    """Single-source digest gate. Every email send path in the framework
+    calls this BEFORE doing real send work. Returns (suppressed, detail):
+      (True, "suppressed: digest-mode")  → caller should NOT send; we
+                                            queued it. Caller returns this
+                                            tuple as its own success.
+      (False, "")                        → not suppressed; caller proceeds
+                                            with its native send.
+
+    Honors DIGEST_ONLY env var (default '1' = suppress) and the
+    bypass_digest=True kwarg (digest-rollup-agent itself, the responder
+    for direct user-confirmation flows, etc).
+
+    Was added 5-1 after the user reported "too many emails". Earlier
+    version was inline in send_via_msmtp, which left three leaks
+    (completion_email + seo-reporter + h2h all called Graph directly,
+    bypassing the gate). Promoted to shared helper so EVERY sender
+    routes through it."""
+    import os as _os
+    if bypass_digest or _os.environ.get("DIGEST_ONLY", "1") != "1":
+        return False, ""
+    try:
+        import json as _json, datetime as _dt, hashlib as _hashlib
+        try:
+            from .storage import get_storage as _get_storage  # type: ignore
+        except Exception:
+            from framework.core.storage import get_storage as _get_storage  # type: ignore
+        s = _get_storage()
+        ts = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        key_hash = _hashlib.sha1(f"{subject}|{ts}".encode()).hexdigest()[:10]
+        agent_hint = (extra_headers or {}).get("X-Reusable-Agent", "")
+        body_excerpt = (body_html or "")[:30000]
+        s.write_json(
+            f"digest-queue/{ts}-{key_hash}.json",
+            {
+                "ts": ts, "agent": agent_hint, "to": list(to),
+                "sender": sender, "subject": subject,
+                "body_html": body_excerpt,
+                "extra_headers": extra_headers or {},
+            },
+        )
+    except Exception as _e:
+        import sys as _sys
+        print(f"[digest-queue] suppress {subject[:60]!r}: {_e}", file=_sys.stderr)
+    return True, "suppressed: digest-mode"
+
+
 def send_via_msmtp(
     *,
     subject: str,
@@ -287,14 +342,20 @@ def send_via_msmtp(
     if not to:
         return False, "no recipients"
 
-    # Digest gate — suppress everything except explicitly bypassed senders.
-    # Was added 5-1 after the user reported "too many emails". The
-    # rollup-digest agent runs every 3h and packages all this content
-    # into one summary email.
+    # Digest gate (shared helper — handles queueing + DIGEST_ONLY check)
+    suppressed, detail = maybe_queue_to_digest(
+        subject=subject, body_html=body_html, to=to, sender=sender,
+        extra_headers=extra_headers, bypass_digest=bypass_digest,
+    )
+    if suppressed:
+        return True, detail
     if not bypass_digest and _os.environ.get("DIGEST_ONLY", "1") == "1":
-        # Persist the would-have-been email to digest-queue/ so the
-        # digest agent can include it in the next rollup. Each entry is
-        # a small JSON file: subject + 1KB body excerpt + agent + ts.
+        # Defensive fallthrough — if the helper failed to queue, still
+        # suppress the send so we don't leak email when DIGEST_ONLY is on.
+        return True, "suppressed: digest-mode"
+    # Original flow continues below in the (now dead) inline branch — we
+    # leave that block as-is for backwards compat, but it's never entered.
+    if False and not bypass_digest and _os.environ.get("DIGEST_ONLY", "1") == "1":
         try:
             import json, datetime, hashlib
             from .storage import get_storage  # local import — avoids
