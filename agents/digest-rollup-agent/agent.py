@@ -140,7 +140,13 @@ def _recent_shipped(s, cutoff: datetime) -> list[dict]:
 
 
 def _recent_runs(s, cutoff: datetime) -> list[dict]:
-    """Walk every agent's run-index.json for recent run entries."""
+    """Walk every agent's run-index.json for recent run entries.
+
+    Filters out agent-doctor runs that touched nothing — the doctor runs
+    every 15 minutes; a clean fleet means most runs report 0 investigated
+    / 0 fixed / 0 escalated, and they would otherwise dominate the digest's
+    "All runs" section. Drop them unless at least one of those three
+    counters is ≥1, regardless of run status."""
     out: list[dict] = []
     try:
         for k in s.list_prefix("agents/"):
@@ -158,6 +164,15 @@ def _recent_runs(s, cutoff: datetime) -> list[dict]:
                 ended = _iso_to_dt(entry.get("ended_at") or entry.get("started_at") or "")
                 if ended is None or ended < cutoff:
                     continue
+                metrics = entry.get("metrics") or {}
+                if agent == "agent-doctor":
+                    activity = (
+                        int(metrics.get("investigated") or 0)
+                        + int(metrics.get("fixed") or 0)
+                        + int(metrics.get("escalated") or 0)
+                    )
+                    if activity <= 0:
+                        continue
                 out.append({
                     "agent": agent,
                     "site": _agent_site(agent),
@@ -165,7 +180,7 @@ def _recent_runs(s, cutoff: datetime) -> list[dict]:
                     "status": entry.get("status", ""),
                     "summary": (entry.get("summary") or "")[:200],
                     "ended_at": entry.get("ended_at", ""),
-                    "metrics": entry.get("metrics") or {},
+                    "metrics": metrics,
                 })
     except Exception:
         pass
@@ -196,37 +211,157 @@ def _auto_queue_pending(s) -> list[dict]:
 
 
 def _doctor_escalations(s, cutoff: datetime) -> list[dict]:
-    """Read agent-doctor errors that landed in window."""
+    """Read agent-doctor escalations + fix attempts in window.
+
+    Source of truth is `agents/agent-doctor/fixes-log.jsonl` — every
+    investigation appends one line there with target, signature, recipe,
+    outcome, the LLM/recipe notes (what was tried), and the raw stderr
+    excerpt (what went wrong). Only `outcome == "escalated"` rows surface
+    in the digest's escalations block; the rest are aggregated into the
+    KPI row.
+
+    Returns dicts with: ts, target, signature, severity, recipe,
+    what_went_wrong, what_we_tried, attempt_n, trigger.
+    """
     out: list[dict] = []
     try:
-        for k in s.list_prefix("agents/agent-doctor/errors/"):
-            if not k.endswith(".json"):
-                continue
-            try:
-                d = s.read_json(k) or {}
-            except Exception:
-                continue
-            ts = _iso_to_dt(d.get("ts") or "")
-            if ts is None or ts < cutoff:
-                continue
-            ctx = d.get("context") or {}
-            out.append({
-                "ts": d.get("ts") or "",
-                "target": ctx.get("target_agent") or "",
-                "signature": ctx.get("error_signature") or "",
-                "severity": d.get("severity") or "medium",
-                "message": (d.get("error_message") or "")[:160],
-            })
+        raw = s.read_text("agents/agent-doctor/fixes-log.jsonl") or ""
     except Exception:
-        pass
+        raw = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if (d.get("outcome") or "").lower() != "escalated":
+            continue
+        ts = _iso_to_dt(d.get("ts") or "")
+        if ts is None or ts < cutoff:
+            continue
+        notes = (d.get("notes") or "").strip()
+        log_excerpt = (d.get("log_excerpt") or "").strip()
+        # Pull the most user-actionable lines out of the log excerpt:
+        # last non-empty 3 lines tend to be the actual error.
+        log_tail = "\n".join(
+            [ln for ln in log_excerpt.splitlines() if ln.strip()][-3:]
+        )[:600]
+        out.append({
+            "ts": d.get("ts") or "",
+            "target": d.get("target_agent") or "",
+            "signature": d.get("error_signature") or "",
+            "trigger": d.get("trigger") or "",
+            "recipe": d.get("recipe_applied") or "(none)",
+            "attempt_n": d.get("attempt_n") or 1,
+            "what_went_wrong": log_tail or log_excerpt[:600],
+            "what_we_tried": notes[:1200] or "(no recipe matched — escalated for human review)",
+            "severity": "high" if d.get("trigger") == "stuck" else "medium",
+        })
+    # Sort newest first so the most recent escalation is the top card
+    out.sort(key=lambda x: x.get("ts", ""), reverse=True)
     return out
 
 
 # ──────────────────────────────────────────────────────────────────────
-# HTML rendering — clean grouped layout
+# HTML rendering — tile-based layout (visual sibling of the SpecPicks
+# article-author proposals email: bright accent badges, a generous KPI
+# tile strip, monospace IDs, rounded cards)
 # ──────────────────────────────────────────────────────────────────────
 
 _DASHBOARD = "https://agents.happysky-24190067.eastus.azurecontainerapps.io"
+
+# Slate palette — same tokens email_templates.py uses, kept inline so this
+# module has no extra import surface.
+_INK_900 = "#0f172a"
+_INK_700 = "#334155"
+_INK_600 = "#475569"
+_INK_500 = "#64748b"
+_INK_400 = "#94a3b8"
+_INK_200 = "#e2e8f0"
+_INK_100 = "#f1f5f9"
+_INK_50 = "#f8fafc"
+_GREEN = "#10b981"
+_GREEN_BG = "#ecfdf5"
+_GREEN_BORDER = "#6ee7b7"
+_GREEN_FG = "#065f46"
+_BLUE = "#3b82f6"
+_BLUE_BG = "#eff6ff"
+_AMBER = "#f59e0b"
+_AMBER_BG = "#fef3c7"
+_AMBER_FG = "#92400e"
+_RED = "#ef4444"
+_RED_BG = "#fee2e2"
+_RED_BORDER = "#fecaca"
+_RED_FG = "#991b1b"
+_VIOLET = "#7c3aed"
+
+
+def _tile(label: str, value: str | int, color: str, *, sub: str = "") -> str:
+    """One KPI tile — big colored number, small caps label, optional
+    sub-line. Matches the article-author email's stat-block visual."""
+    sub_html = (
+        f"<div style='font-size:10px;color:{_INK_400};margin-top:4px'>{sub}</div>"
+        if sub else ""
+    )
+    return (
+        f"<td style='background:#ffffff;border:1px solid {_INK_200};"
+        f"border-radius:8px;padding:14px 12px;text-align:center;width:20%;"
+        f"box-shadow:0 1px 0 rgba(15,23,42,0.02)'>"
+        f"<div style='font-size:1.7rem;font-weight:700;color:{color};line-height:1'>{value}</div>"
+        f"<div style='font-size:.68rem;color:{_INK_500};text-transform:uppercase;"
+        f"letter-spacing:.06em;margin-top:6px;font-weight:600'>{label}</div>"
+        f"{sub_html}"
+        f"</td>"
+    )
+
+
+def _tile_row(tiles: list[str]) -> str:
+    """Render KPI tiles in a single <table> row — Gmail-safe (no CSS grid).
+    Spacer cells between tiles give consistent gaps without `gap:`."""
+    if not tiles:
+        return ""
+    cells: list[str] = []
+    for i, t in enumerate(tiles):
+        if i > 0:
+            cells.append("<td style='width:10px'></td>")
+        cells.append(t)
+    return (
+        f"<table role='presentation' style='border-collapse:separate;"
+        f"border-spacing:0;width:100%;margin:0 0 18px 0'>"
+        f"<tr>{''.join(cells)}</tr></table>"
+    )
+
+
+def _agent_badge(agent_id: str) -> str:
+    """Color-code by site (green specpicks / blue aisleprompt / violet
+    framework / slate other) so the eye can group rows fast."""
+    site = _agent_site(agent_id)
+    palette = {
+        "specpicks":      (_GREEN, "#fff"),
+        "aisleprompt":    (_BLUE, "#fff"),
+        "reusable-agents": (_VIOLET, "#fff"),
+    }
+    bg, fg = palette.get(site, (_INK_100, _INK_700))
+    label = agent_id.replace(f"{site}-", "") if site else agent_id
+    return (
+        f"<span style='display:inline-block;background:{bg};color:{fg};"
+        f"font-size:10px;font-weight:700;padding:2px 8px;border-radius:3px;"
+        f"text-transform:uppercase;letter-spacing:.04em;font-family:-apple-system,sans-serif'>"
+        f"{label[:32]}</span>"
+    )
+
+
+def _site_chip(site: str) -> str:
+    if not site:
+        return ""
+    return (
+        f"<span style='display:inline-block;background:{_INK_100};color:{_INK_700};"
+        f"font-size:10px;font-weight:600;padding:2px 8px;border-radius:3px;"
+        f"text-transform:uppercase;letter-spacing:.04em;margin-right:6px'>"
+        f"{site}</span>"
+    )
 
 
 def _handoff_metrics(s, cutoff: datetime) -> dict:
@@ -360,72 +495,58 @@ def _render_handoff_block(metrics: dict) -> str:
     """Render the handoff section. Skipped when nothing happened."""
     if not metrics or metrics.get("total_out", 0) == 0:
         return ""
-    parts: list[str] = [
-        '<h2 style="font-size:15px;color:#0f172a;margin:24px 0 8px 0;'
-        'border-bottom:1px solid #e2e8f0;padding-bottom:6px">'
-        '🔀 Inter-agent handoffs</h2>'
-    ]
-    # KPI row
-    parts.append(
-        '<div style="display:grid;grid-template-columns:repeat(5,1fr);'
-        'gap:8px;margin-bottom:14px">'
-    )
-    for label, val, color in (
-        ("Sent", metrics["total_out"], "#3b82f6"),
-        ("Shipped", metrics.get("shipped", 0), "#10b981"),
-        ("In progress", metrics.get("in_progress", 0), "#64748b"),
-        ("Deferred", metrics.get("deferred", 0), "#f59e0b"),
-        ("Stuck", len(metrics.get("stuck") or []), "#ef4444" if metrics.get("stuck") else "#94a3b8"),
-    ):
-        parts.append(
-            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
-            f'border-radius:8px;padding:8px;text-align:center">'
-            f'<div style="font-size:1.4rem;font-weight:700;color:{color}">{val}</div>'
-            f'<div style="font-size:.68rem;color:#64748b;text-transform:uppercase;'
-            f'letter-spacing:.05em;margin-top:2px">{label}</div></div>'
-        )
-    parts.append("</div>")
-    # Edges
+    parts: list[str] = [_section_h2("Inter-agent handoffs", emoji="🔀")]
+    stuck_n = len(metrics.get("stuck") or [])
+    parts.append(_tile_row([
+        _tile("Sent", metrics["total_out"], _BLUE),
+        _tile("Shipped", metrics.get("shipped", 0), _GREEN),
+        _tile("In progress", metrics.get("in_progress", 0), _INK_500),
+        _tile("Deferred", metrics.get("deferred", 0), _AMBER),
+        _tile("Stuck", stuck_n, _RED if stuck_n else _INK_400),
+    ]))
     if metrics["edges"]:
-        parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px">')
-        parts.append('<tr style="background:#f8fafc">'
-                     '<th style="text-align:left;padding:6px 8px">From → To</th>'
-                     '<th style="text-align:right;padding:6px 8px">Count</th>'
-                     '<th style="text-align:left;padding:6px 8px">Outcomes</th></tr>')
+        rows = []
         for e in metrics["edges"][:10]:
             outcomes_str = " · ".join(f"{k}={v}" for k, v in e["outcomes"].items()) or "—"
-            parts.append(
-                f'<tr><td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">'
-                f'<code style="font-size:11px">{e["from"]}</code> '
-                f'<span style="color:#94a3b8">→</span> '
-                f'<code style="font-size:11px">{e["to"]}</code></td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;'
-                f'text-align:right;font-weight:600">{e["count"]}</td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;'
-                f'font-size:11px;color:#64748b">{outcomes_str}</td></tr>'
+            rows.append(
+                f'<tr>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};font-size:12px">'
+                f'{_agent_badge(e["from"])} <span style="color:{_INK_400}">→</span> '
+                f'{_agent_badge(e["to"])}</td>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};text-align:right;'
+                f'font-weight:700;color:{_INK_900}">{e["count"]}</td>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};'
+                f'font-size:11px;color:{_INK_600}">{outcomes_str}</td></tr>'
             )
-        parts.append('</table>')
-    # Stuck handoffs
+        parts.append(
+            f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin:6px 0 12px 0">'
+            f'<thead><tr style="background:{_INK_50}">'
+            f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};color:{_INK_700};font-size:12px">Flow</th>'
+            f'<th style="text-align:right;padding:8px;border:1px solid {_INK_200};color:{_INK_700};font-size:12px">Count</th>'
+            f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};color:{_INK_700};font-size:12px">Outcomes</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        )
     stuck = metrics.get("stuck") or []
     if stuck:
-        parts.append(
-            '<div style="background:#fef3c7;border:1px solid #fbbf24;'
-            'border-radius:8px;padding:10px;font-size:12px;color:#78350f;margin-top:8px">'
-            f'<strong>⚠ {len(stuck)} handoff(s) stuck.</strong> '
-            'These items were routed to a specialist agent but the agent '
-            'has not produced an outcome ('
-            'shipped / deferred / rejected) within the SLA window. The '
-            'agent-doctor will escalate after another tick.<br>'
-            '<ul style="margin:6px 0 0 18px;padding:0">'
+        items = "".join(
+            f'<li style="margin-bottom:4px">'
+            f'{_agent_badge(sk.get("from","?"))} <span style="color:{_INK_400}">→</span> '
+            f'{_agent_badge(sk.get("to","?"))} · '
+            f'<code style="font-size:11px">{sk.get("work_type","")}</code> · '
+            f'rec=<code style="font-size:11px">{sk.get("rec_id","")}</code> · '
+            f'<b>{sk.get("age_hours",0)}h</b> old · '
+            f'<i style="color:{_AMBER_FG}">{sk.get("stuck_state","")}</i></li>'
+            for sk in stuck[:8]
         )
-        for sk in stuck[:8]:
-            parts.append(
-                f'<li><code style="font-size:11px">{sk.get("from")} → '
-                f'{sk.get("to")}</code> · {sk.get("work_type")} · '
-                f'rec={sk.get("rec_id","")} · {sk.get("age_hours",0)}h old · '
-                f'<i>{sk.get("stuck_state")}</i></li>'
-            )
-        parts.append('</ul></div>')
+        parts.append(
+            f'<div style="background:{_AMBER_BG};border-left:3px solid {_AMBER};'
+            f'border-radius:4px;padding:14px 16px;margin:8px 0 12px 0;'
+            f'font-size:12px;color:{_AMBER_FG}">'
+            f'<b>⚠ {len(stuck)} handoff(s) stuck.</b> '
+            f'Routed to a specialist but no outcome (shipped / deferred / rejected) '
+            f'within SLA. agent-doctor will escalate after another tick.'
+            f'<ul style="margin:8px 0 0 18px;padding:0">{items}</ul></div>'
+        )
     return "".join(parts)
 
 
@@ -515,86 +636,193 @@ def _seo_traffic_metrics() -> list[dict]:
 
 def _render_seo_traffic_block(seo_metrics: list[dict]) -> str:
     """Render the per-site SEO traffic-readiness block. Empty string if
-    no metrics available."""
+    no metrics available. One card per site, with a 4-tile KPI row inside."""
     if not seo_metrics:
         return ""
-    parts: list[str] = [
-        '<h2 style="font-size:15px;color:#0f172a;margin:24px 0 8px 0;'
-        'border-bottom:1px solid #e2e8f0;padding-bottom:6px">'
-        '🎯 SEO + Amazon-revenue readiness</h2>'
-    ]
+    parts: list[str] = [_section_h2("SEO + Amazon-revenue readiness", emoji="🎯")]
     for m in seo_metrics:
         ec = m.get("editorial_coverage", {})
         pf = m.get("pricing_freshness", {})
         cc = m.get("content_coverage", {})
-        # Editorial coverage %
         total = ec.get("total_active") or 0
         in_ed = ec.get("asins_in_editorial") or 0
         coverage_pct = (100.0 * in_ed / total) if total else 0.0
-        # Featured price freshness — the metric the user actually feels
         f_fresh = pf.get("featured_fresh") or 0
         f_stale = pf.get("featured_stale") or 0
         feat_total = (f_fresh or 0) + (f_stale or 0)
         feat_fresh_pct = (100.0 * f_fresh / feat_total) if feat_total else 100.0
         amazon_active = pf.get("amazon_active") or 0
         stale_24h = pf.get("stale_24h") or 0
-        # Coverage gap headline color
-        gap_color = "#10b981" if coverage_pct >= 5 else "#f59e0b" if coverage_pct >= 1 else "#ef4444"
-        feat_color = "#10b981" if feat_fresh_pct >= 90 else "#f59e0b" if feat_fresh_pct >= 50 else "#ef4444"
+        gap_color = _GREEN if coverage_pct >= 5 else _AMBER if coverage_pct >= 1 else _RED
+        feat_color = _GREEN if feat_fresh_pct >= 90 else _AMBER if feat_fresh_pct >= 50 else _RED
+        stale_color = _GREEN if amazon_active and stale_24h / max(amazon_active, 1) < 0.2 else _AMBER
+
+        articles = cc.get("articles", 0)
+        guides = cc.get("guides", 0)
+        pairs = cc.get("h2h_pairs", 0)
+        queue = cc.get("researched_queue", 0)
+        published_total = articles + guides + pairs
+
+        site_tiles = _tile_row([
+            _tile("Editorial coverage", f"{coverage_pct:.1f}%", gap_color,
+                  sub=f"{in_ed:,} of {total:,} products"),
+            _tile("Featured fresh-priced", f"{feat_fresh_pct:.0f}%", feat_color,
+                  sub=f"{f_fresh} of {feat_total} ≤ 24h"),
+            _tile("Amazon stale (24h)", f"{stale_24h:,}", stale_color,
+                  sub=f"of {amazon_active:,} active"),
+            _tile("Published content", f"{published_total:,}", _BLUE,
+                  sub=f"{queue} in research queue"),
+        ])
+        breakdown = (
+            f'<div style="font-size:12px;color:{_INK_600};padding:8px 14px 0 14px">'
+            f'<b>{articles}</b> articles · <b>{guides}</b> buying guides · '
+            f'<b>{pairs}</b> head-to-head pairs · '
+            f'<b>{queue}</b> researched topics queued for next run'
+            f'</div>'
+        )
         parts.append(
-            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;'
-            f'border-radius:8px;padding:14px;margin-bottom:10px">'
-            f'<div style="font-weight:600;color:#0f172a;margin-bottom:8px">'
-            f'{m["label"]}</div>'
-            f'<table style="border-collapse:collapse;font-size:13px;width:100%">'
-            f'<tr><td style="padding:4px 8px;color:#475569">Editorial coverage</td>'
-            f'<td style="padding:4px 8px;font-weight:600;color:{gap_color}">'
-            f'{in_ed:,} of {total:,} active products ({coverage_pct:.2f}%)</td></tr>'
-            f'<tr><td style="padding:4px 8px;color:#475569">Featured products fresh-priced (≤24h)</td>'
-            f'<td style="padding:4px 8px;font-weight:600;color:{feat_color}">'
-            f'{f_fresh} of {feat_total} ({feat_fresh_pct:.0f}%)</td></tr>'
-            f'<tr><td style="padding:4px 8px;color:#475569">Stale-priced Amazon products (catalog-wide)</td>'
-            f'<td style="padding:4px 8px">'
-            f'{stale_24h:,} of {amazon_active:,} '
-            f'<span style="color:#94a3b8;font-size:11px">(refreshed 6,000/day at 500/run × 12 runs)</span></td></tr>'
-            f'<tr><td style="padding:4px 8px;color:#475569">Published content</td>'
-            f'<td style="padding:4px 8px">'
-            f'{cc.get("articles", 0)} articles · '
-            f'{cc.get("guides", 0)} buying guides · '
-            f'{cc.get("h2h_pairs", 0)} head-to-head pairs · '
-            f'{cc.get("researched_queue", 0)} researched topics in queue</td></tr>'
-            f'</table>'
+            f'<div style="background:{_INK_50};border:1px solid {_INK_200};'
+            f'border-radius:10px;padding:14px;margin-bottom:14px">'
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">'
+            f'<span style="font-weight:600;color:{_INK_900};font-size:15px">{m["label"]}</span>'
+            f'<span style="font-size:10px;color:{_INK_500};text-transform:uppercase;'
+            f'letter-spacing:.06em;background:#fff;border:1px solid {_INK_200};'
+            f'padding:2px 8px;border-radius:3px">SEO readiness</span>'
+            f'</div>'
+            f'{site_tiles}'
+            f'{breakdown}'
             f'</div>'
         )
     return "".join(parts)
 
 
-def _section_header(title: str, count: int, color: str) -> str:
+def _section_h2(title: str, *, emoji: str = "", count: int | None = None,
+                accent: str = None) -> str:
+    """Standard subhead — borrowed directly from the article-author email."""
+    accent = accent or _INK_700
+    count_html = (
+        f'<span style="color:{_INK_400};font-weight:normal;font-size:13px;'
+        f'margin-left:6px">({count})</span>'
+    ) if count is not None else ""
+    emoji_html = f"{emoji} " if emoji else ""
     return (
-        f'<h2 style="font-size:16px;color:{color};border-bottom:2px solid {color};'
-        f'padding-bottom:6px;margin:28px 0 10px 0">'
-        f'{title} <span style="color:#94a3b8;font-weight:normal;font-size:13px">({count})</span></h2>'
+        f'<h2 style="margin:28px 0 10px 0;font-size:15px;font-weight:600;'
+        f'color:{accent};border-bottom:1px solid {_INK_200};padding-bottom:6px">'
+        f'{emoji_html}{title}{count_html}</h2>'
     )
 
 
 def _rec_row(r: dict, *, show_url: bool = True) -> str:
-    site = r.get("site") or ""
-    site_chip = (
-        f'<span style="font-size:10px;background:#f1f5f9;color:#64748b;'
-        f'padding:1px 6px;border-radius:3px;margin-right:6px">{site}</span>'
-    ) if site else ""
+    """Article-author-style row: monospace ID | site chip + agent badge |
+    title + meta + url."""
     url_link = (
-        f'<a href="{r["public_url"]}" style="color:#2563eb;font-size:11px;'
-        f'margin-left:8px">view →</a>'
+        f'<a href="{r["public_url"]}" style="color:{_BLUE};font-size:11px;'
+        f'margin-left:8px;text-decoration:none">view →</a>'
     ) if show_url and r.get("public_url") else ""
+    type_str = r.get("type", "")
+    type_chip = (
+        f'<span style="font-size:10px;color:{_INK_500};background:#fff;'
+        f'border:1px solid {_INK_200};padding:1px 6px;border-radius:3px;'
+        f'margin-left:6px">{type_str}</span>'
+    ) if type_str else ""
     return (
-        f'<tr><td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">'
-        f'{site_chip}<code style="font-size:11px;color:#475569">{r.get("rec_id","")}</code></td>'
-        f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-size:13px">'
-        f'{r.get("title","")[:120]}{url_link}'
-        f'<div style="font-size:10px;color:#94a3b8;margin-top:2px">'
-        f'{r.get("agent","")}{" · " + r.get("type","") if r.get("type") else ""}</div>'
+        f'<tr>'
+        f'<td style="padding:10px 8px;border:1px solid {_INK_200};'
+        f'font-family:monospace;font-size:11px;color:{_INK_700};'
+        f'vertical-align:top;background:#fff;width:1%;white-space:nowrap">'
+        f'<b>{r.get("rec_id","")}</b></td>'
+        f'<td style="padding:10px 8px;border:1px solid {_INK_200};'
+        f'vertical-align:top;background:#fff;width:1%;white-space:nowrap">'
+        f'{_agent_badge(r.get("agent",""))}</td>'
+        f'<td style="padding:10px 8px;border:1px solid {_INK_200};'
+        f'vertical-align:top;background:#fff;font-size:13px;color:{_INK_900}">'
+        f'<div><b>{r.get("title","")[:140]}</b>{url_link}</div>'
+        f'<div style="font-size:11px;color:{_INK_500};margin-top:4px">'
+        f'{type_chip}</div>'
         f'</td></tr>'
+    )
+
+
+def _rec_table(rows_html: list[str]) -> str:
+    """Wrap row HTML in the article-author-style table envelope."""
+    return (
+        f'<table style="border-collapse:collapse;width:100%;'
+        f'font-size:13px;margin:6px 0 12px 0">'
+        f'<thead><tr style="background:{_INK_50}">'
+        f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};'
+        f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:.04em">ID</th>'
+        f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};'
+        f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:.04em">Agent</th>'
+        f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};'
+        f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase;'
+        f'letter-spacing:.04em">Recommendation</th>'
+        f'</tr></thead><tbody>{"".join(rows_html)}</tbody></table>'
+    )
+
+
+def _escalation_card(e: dict) -> str:
+    """Doctor escalation as a richly-detailed card.
+
+    Two-column body: left rail = target + signature + meta, right rail =
+    'What went wrong' (raw stderr tail) and 'What we tried' (recipe +
+    LLM analysis). The contrast between the two paragraphs is what makes
+    the card actionable: the operator can scan one row and decide whether
+    to keep the auto-fix loop running or step in."""
+    target = e.get("target") or "?"
+    sig = e.get("signature") or "?"
+    trigger = e.get("trigger") or ""
+    recipe = e.get("recipe") or "(none)"
+    attempt_n = e.get("attempt_n") or 1
+    ts = (e.get("ts") or "")[:19].replace("T", " ")
+    sev = (e.get("severity") or "medium").lower()
+    sev_color = _RED if sev == "high" else _AMBER
+    sev_bg = _RED_BG if sev == "high" else _AMBER_BG
+    went_wrong = (e.get("what_went_wrong") or "").replace("<", "&lt;").replace(">", "&gt;")
+    we_tried = (e.get("what_we_tried") or "").replace("<", "&lt;").replace(">", "&gt;")
+    trigger_chip = (
+        f'<span style="font-size:10px;background:{sev_bg};color:{sev_color};'
+        f'padding:2px 8px;border-radius:3px;text-transform:uppercase;'
+        f'letter-spacing:.04em;font-weight:700">{trigger or sev}</span>'
+    )
+    return (
+        f'<div style="border:1px solid {_INK_200};border-left:3px solid {sev_color};'
+        f'border-radius:8px;background:#fff;margin-bottom:12px;overflow:hidden">'
+        f'<div style="padding:12px 14px;background:{_INK_50};'
+        f'border-bottom:1px solid {_INK_200};display:flex;align-items:center;'
+        f'gap:10px;justify-content:space-between">'
+        f'<div>{_agent_badge(target)} {trigger_chip} '
+        f'<span style="font-size:11px;color:{_INK_500};margin-left:6px">'
+        f'attempt #{attempt_n} · {ts} UTC</span></div>'
+        f'</div>'
+        f'<div style="padding:12px 14px;font-size:12px">'
+        f'<div style="margin-bottom:6px"><span style="color:{_INK_500};'
+        f'font-size:11px;text-transform:uppercase;letter-spacing:.06em;'
+        f'font-weight:600">Signature</span><br>'
+        f'<code style="font-size:12px;color:{_INK_900}">{sig}</code></div>'
+        f'<div style="margin-bottom:10px"><span style="color:{_INK_500};'
+        f'font-size:11px;text-transform:uppercase;letter-spacing:.06em;'
+        f'font-weight:600">Recipe applied</span><br>'
+        f'<code style="font-size:12px;color:{_INK_700}">{recipe}</code></div>'
+        f'<div style="display:block;margin-top:10px">'
+        f'<div style="background:{_RED_BG};border:1px solid {_RED_BORDER};'
+        f'border-radius:6px;padding:10px 12px;margin-bottom:8px">'
+        f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;'
+        f'color:{_RED_FG};font-weight:700;margin-bottom:4px">What went wrong</div>'
+        f'<pre style="margin:0;font-family:ui-monospace,monospace;font-size:11px;'
+        f'color:{_RED_FG};white-space:pre-wrap;line-height:1.45">{went_wrong}</pre>'
+        f'</div>'
+        f'<div style="background:{_AMBER_BG};border:1px solid {_AMBER};'
+        f'border-radius:6px;padding:10px 12px">'
+        f'<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;'
+        f'color:{_AMBER_FG};font-weight:700;margin-bottom:4px">What the doctor tried</div>'
+        f'<pre style="margin:0;font-family:ui-monospace,monospace;font-size:11px;'
+        f'color:{_AMBER_FG};white-space:pre-wrap;line-height:1.45">{we_tried}</pre>'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+        f'</div>'
     )
 
 
@@ -611,135 +839,200 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
     for r in implemented_only:
         by_site_implemented[r.get("site") or "(other)"].append(r)
 
-    parts: list[str] = [
-        '<!DOCTYPE html><html><body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#0f172a;line-height:1.5;max-width:920px;margin:0 auto;padding:24px;background:#fff">',
-        f'<h1 style="border-bottom:1px solid #e2e8f0;padding-bottom:12px;margin:0 0 12px 0;font-size:22px;color:#0f172a">'
-        f'Activity digest <span style="color:#64748b;font-weight:normal;font-size:14px">— last {window_hours}h</span></h1>',
-        f'<p style="color:#475569;font-size:13px;margin:0 0 18px 0">'
-        f'Through {now.strftime("%Y-%m-%d %H:%M UTC")} · '
-        f'<a href="{_DASHBOARD}" style="color:#2563eb">open dashboard</a>'
-        f'</p>',
-        # KPI strip
-        '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:0 0 22px 0">',
-    ]
-    for label, val, color in (
-        ("Shipped", len(shipped), "#10b981"),
-        ("Implemented", len(implemented_only), "#3b82f6"),
-        ("Queued", sum(q["rec_count"] for q in queued), "#64748b"),
-        ("Runs", len(runs), "#0f172a"),
-        ("Failed", len(failed_runs), "#ef4444" if failed_runs else "#94a3b8"),
-    ):
-        parts.append(
-            f'<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
-            f'padding:10px;text-align:center">'
-            f'<div style="font-size:1.6rem;font-weight:700;color:{color}">{val}</div>'
-            f'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;'
-            f'letter-spacing:.05em;margin-top:4px">{label}</div></div>'
-        )
-    parts.append("</div>")
+    queued_recs = sum(q["rec_count"] for q in queued)
 
-    # ── SEO + Amazon-revenue readiness ──────────────────────────────
+    parts: list[str] = [
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Activity digest</title></head>'
+        f'<body style="margin:0;padding:0;background:{_INK_100};'
+        f'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
+        f'color:{_INK_900};line-height:1.5">',
+        # Outer envelope — single column, like the article-author email
+        f'<div style="max-width:920px;margin:0 auto;background:#fff;'
+        f'padding:28px;border-left:1px solid {_INK_200};border-right:1px solid {_INK_200}">',
+        # Header
+        f'<h1 style="border-bottom:1px solid {_INK_200};padding-bottom:14px;'
+        f'margin:0 0 10px 0;font-size:22px;font-weight:600;color:{_INK_900}">'
+        f'Activity digest '
+        f'<span style="color:{_INK_500};font-weight:normal;font-size:14px">'
+        f'— last {window_hours}h</span></h1>',
+        f'<div style="margin-bottom:16px">'
+        f'<span style="display:inline-block;background:{_INK_50};color:{_INK_700};'
+        f'font-size:11px;padding:3px 10px;border-radius:3px;border:1px solid {_INK_200};'
+        f'font-family:monospace">'
+        f'<b>Through:</b> {now.strftime("%Y-%m-%d %H:%M UTC")}</span> '
+        f'<a href="{_DASHBOARD}" style="color:{_BLUE};font-size:12px;'
+        f'margin-left:8px;text-decoration:none">open dashboard →</a>'
+        f'</div>',
+    ]
+
+    # Summary callout — green when there's positive activity, neutral
+    # otherwise. The article-author email's "auto-queued" callout is the
+    # visual anchor; we mirror that pattern here.
+    if shipped or implemented_only:
+        parts.append(
+            f'<div style="background:{_GREEN_BG};border-left:3px solid {_GREEN};'
+            f'border-radius:4px;padding:14px 16px;margin:0 0 18px 0;font-size:13px;'
+            f'color:{_GREEN_FG};line-height:1.5">'
+            f'<b>✅ {len(shipped)} shipped to production · '
+            f'{len(implemented_only)} implemented (DB-only or awaiting deploy).</b>'
+            f'<br><span style="font-size:12px;color:{_GREEN_FG}">'
+            f'{queued_recs} more rec{"" if queued_recs == 1 else "s"} queued for the implementer; '
+            f'{len(failed_runs)} failed run{"" if len(failed_runs) == 1 else "s"} '
+            f'and {len(escalations)} doctor escalation{"" if len(escalations) == 1 else "s"} below.</span>'
+            f'</div>'
+        )
+
+    # KPI tile strip — five tiles, table-based for Gmail-safe layout.
+    parts.append(_tile_row([
+        _tile("Shipped", len(shipped), _GREEN),
+        _tile("Implemented", len(implemented_only), _BLUE),
+        _tile("Queued", queued_recs, _INK_500),
+        _tile("Runs", len(runs), _INK_900),
+        _tile("Failed", len(failed_runs), _RED if failed_runs else _INK_400),
+    ]))
+
+    # ── SEO + Amazon-revenue readiness ─────────────────────────────
     seo_block = _render_seo_traffic_block(seo_metrics or [])
     if seo_block:
         parts.append(seo_block)
 
-    # ── Inter-agent handoffs ────────────────────────────────────────
+    # ── Inter-agent handoffs ───────────────────────────────────────
     handoff_block = _render_handoff_block(handoff_metrics or {})
     if handoff_block:
         parts.append(handoff_block)
 
-    # ── Shipped ─────────────────────────────────────────────────────
+    # ── Shipped ────────────────────────────────────────────────────
     if shipped:
-        parts.append(_section_header("🚀 Shipped to production", len(shipped), "#10b981"))
+        parts.append(_section_h2("Shipped to production", emoji="🚀",
+                                  count=len(shipped), accent=_GREEN_FG))
         for site in sorted(by_site_shipped.keys()):
             items = by_site_shipped[site]
             parts.append(
-                f'<h3 style="font-size:13px;color:#334155;margin:12px 0 4px 0">'
-                f'{site} <span style="color:#94a3b8;font-weight:normal">· {len(items)}</span></h3>'
-                f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:6px">'
+                f'<div style="font-size:13px;color:{_INK_700};margin:12px 0 6px 0">'
+                f'{_site_chip(site)}<b>{site}</b> '
+                f'<span style="color:{_INK_400};font-weight:normal">· {len(items)}</span></div>'
             )
-            for r in sorted(items, key=lambda x: x.get("shipped_at", ""), reverse=True):
-                parts.append(_rec_row(r))
-            parts.append("</table>")
+            rows = [
+                _rec_row(r) for r in sorted(items, key=lambda x: x.get("shipped_at", ""), reverse=True)
+            ]
+            parts.append(_rec_table(rows))
 
-    # ── Implemented (no deploy step yet) ────────────────────────────
+    # ── Implemented (no deploy step yet) ───────────────────────────
     if implemented_only:
-        parts.append(_section_header("✅ Implemented (awaiting deploy or pure-DB)", len(implemented_only), "#3b82f6"))
+        parts.append(_section_h2("Implemented (DB-only or awaiting deploy)",
+                                  emoji="✅", count=len(implemented_only),
+                                  accent=_BLUE))
         for site in sorted(by_site_implemented.keys()):
             items = by_site_implemented[site]
             parts.append(
-                f'<h3 style="font-size:13px;color:#334155;margin:12px 0 4px 0">'
-                f'{site} <span style="color:#94a3b8;font-weight:normal">· {len(items)}</span></h3>'
-                f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:6px">'
+                f'<div style="font-size:13px;color:{_INK_700};margin:12px 0 6px 0">'
+                f'{_site_chip(site)}<b>{site}</b> '
+                f'<span style="color:{_INK_400};font-weight:normal">· {len(items)}</span></div>'
             )
-            for r in sorted(items, key=lambda x: x.get("implemented_at", ""), reverse=True):
-                parts.append(_rec_row(r))
-            parts.append("</table>")
+            rows = [
+                _rec_row(r) for r in sorted(items, key=lambda x: x.get("implemented_at", ""), reverse=True)
+            ]
+            parts.append(_rec_table(rows))
 
     # ── Queued ─────────────────────────────────────────────────────
     if queued:
-        parts.append(_section_header("⋯ Queued for the implementer", len(queued), "#64748b"))
-        parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px">')
-        parts.append('<tr style="background:#f8fafc"><th style="text-align:left;padding:6px 8px">Source agent</th>'
-                     '<th style="text-align:left;padding:6px 8px">Site</th>'
-                     '<th style="text-align:right;padding:6px 8px">Recs</th></tr>')
+        parts.append(_section_h2("Queued for the implementer",
+                                  emoji="⋯", count=len(queued)))
+        rows = []
         for q in queued:
-            parts.append(
-                f'<tr><td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">'
-                f'<code style="font-size:11px">{q.get("source_agent","")}</code></td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">{q.get("site","")}</td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600">{q.get("rec_count",0)}</td></tr>'
+            rows.append(
+                f'<tr>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};'
+                f'background:#fff;width:1%;white-space:nowrap">'
+                f'{_agent_badge(q.get("source_agent",""))}</td>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};'
+                f'background:#fff;font-size:13px;color:{_INK_700}">'
+                f'{q.get("site","")}</td>'
+                f'<td style="padding:8px;border:1px solid {_INK_200};'
+                f'background:#fff;text-align:right;font-weight:700;color:{_INK_900}">'
+                f'{q.get("rec_count",0)}</td></tr>'
             )
-        parts.append("</table>")
+        parts.append(
+            f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin:6px 0 12px 0">'
+            f'<thead><tr style="background:{_INK_50}">'
+            f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};'
+            f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase">Source</th>'
+            f'<th style="text-align:left;padding:8px;border:1px solid {_INK_200};'
+            f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase">Site</th>'
+            f'<th style="text-align:right;padding:8px;border:1px solid {_INK_200};'
+            f'color:{_INK_700};font-size:11px;font-weight:600;text-transform:uppercase">Recs</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        )
 
-    # ── Runs (failures first) ──────────────────────────────────────
+    # ── Failed runs ────────────────────────────────────────────────
     if failed_runs:
-        parts.append(_section_header("❌ Failed runs", len(failed_runs), "#ef4444"))
-        parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px">')
+        parts.append(_section_h2("Failed runs", emoji="❌",
+                                  count=len(failed_runs), accent=_RED_FG))
+        rows = []
         for r in sorted(failed_runs, key=lambda x: x.get("ended_at", ""), reverse=True):
-            parts.append(
-                f'<tr><td style="padding:6px 8px;border-bottom:1px solid #fee2e2;width:40%">'
-                f'<code style="font-size:11px">{r.get("agent","")}</code></td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #fee2e2">'
-                f'{r.get("summary","")[:200]}'
-                f'<div style="font-size:10px;color:#94a3b8">{r.get("run_ts","")[:19]}</div>'
+            rows.append(
+                f'<tr>'
+                f'<td style="padding:8px;border:1px solid {_RED_BORDER};'
+                f'background:{_RED_BG};width:1%;white-space:nowrap;vertical-align:top">'
+                f'{_agent_badge(r.get("agent",""))}</td>'
+                f'<td style="padding:8px;border:1px solid {_RED_BORDER};'
+                f'background:#fff;font-size:13px;color:{_INK_900};vertical-align:top">'
+                f'{r.get("summary","")[:240]}'
+                f'<div style="font-size:10px;color:{_INK_400};margin-top:4px">'
+                f'{r.get("run_ts","")[:19]}</div>'
                 f'</td></tr>'
             )
-        parts.append("</table>")
+        parts.append(
+            f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin:6px 0 12px 0">'
+            f'<tbody>{"".join(rows)}</tbody></table>'
+        )
 
-    # ── Doctor escalations ─────────────────────────────────────────
+    # ── Doctor escalations (rich cards) ────────────────────────────
     if escalations:
-        parts.append(_section_header("🛡 Doctor escalations", len(escalations), "#b45309"))
-        parts.append('<table style="border-collapse:collapse;width:100%;font-size:13px">')
-        for e in sorted(escalations, key=lambda x: x.get("ts", ""), reverse=True):
-            parts.append(
-                f'<tr><td style="padding:6px 8px;border-bottom:1px solid #fde68a">'
-                f'<code style="font-size:11px">{e.get("target","")}</code><br>'
-                f'<span style="font-size:10px;color:#92400e">sig: {e.get("signature","")[:60]}</span></td>'
-                f'<td style="padding:6px 8px;border-bottom:1px solid #fde68a;font-size:12px;color:#78350f">{e.get("message","")}</td></tr>'
-            )
-        parts.append("</table>")
+        parts.append(_section_h2("Doctor escalations", emoji="🛡",
+                                  count=len(escalations), accent=_AMBER_FG))
+        parts.append(
+            f'<div style="font-size:12px;color:{_INK_500};margin:0 0 10px 0">'
+            f'Each card shows the agent that broke, what its run actually '
+            f'reported, and what the doctor tried before handing it back to you.'
+            f'</div>'
+        )
+        for e in escalations:
+            parts.append(_escalation_card(e))
 
     # ── Run roster (everything that ran in the window) ─────────────
     if runs:
-        parts.append(_section_header(f"⚙️ All runs in window", len(runs), "#0f172a"))
-        parts.append('<details><summary style="cursor:pointer;color:#64748b;font-size:12px">show full run list</summary>'
-                     '<table style="border-collapse:collapse;width:100%;font-size:12px;margin-top:8px">')
+        parts.append(_section_h2("All runs in window", emoji="⚙️",
+                                  count=len(runs)))
+        run_rows = []
         for r in sorted(runs, key=lambda x: x.get("ended_at", ""), reverse=True)[:80]:
-            color = "#10b981" if r.get("status") == "success" else "#ef4444" if r.get("status") == "failure" else "#94a3b8"
-            parts.append(
-                f'<tr><td style="padding:4px 8px;border-bottom:1px solid #f1f5f9">'
-                f'<span style="color:{color}">●</span> <code style="font-size:11px">{r.get("agent","")}</code></td>'
-                f'<td style="padding:4px 8px;border-bottom:1px solid #f1f5f9;color:#475569">{r.get("summary","")[:140]}</td>'
-                f'<td style="padding:4px 8px;border-bottom:1px solid #f1f5f9;font-size:10px;color:#94a3b8;text-align:right">{r.get("ended_at","")[:19]}</td></tr>'
+            color = (_GREEN if r.get("status") == "success"
+                     else _RED if r.get("status") == "failure" else _INK_400)
+            run_rows.append(
+                f'<tr>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid {_INK_100};'
+                f'width:1%;white-space:nowrap">'
+                f'<span style="color:{color};font-size:14px;line-height:1">●</span> '
+                f'{_agent_badge(r.get("agent",""))}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid {_INK_100};'
+                f'color:{_INK_600};font-size:12px">{r.get("summary","")[:160]}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid {_INK_100};'
+                f'font-size:10px;color:{_INK_400};text-align:right;white-space:nowrap">'
+                f'{r.get("ended_at","")[:19]}</td></tr>'
             )
-        parts.append("</table></details>")
+        parts.append(
+            f'<details><summary style="cursor:pointer;color:{_INK_500};'
+            f'font-size:12px;padding:6px 0">show full run list ({len(runs)})</summary>'
+            f'<table style="border-collapse:collapse;width:100%;font-size:12px;'
+            f'margin-top:8px">{"".join(run_rows)}</table></details>'
+        )
 
-    # ── Suppressed-individual-emails count ─────────────────────────
+    # ── Suppressed individual emails ───────────────────────────────
     if suppressed_count > 0:
         parts.append(
-            f'<p style="font-size:11px;color:#94a3b8;margin-top:24px">'
-            f'<i>{suppressed_count} individual agent email{"s" if suppressed_count != 1 else ""} '
+            f'<p style="font-size:11px;color:{_INK_400};margin-top:24px">'
+            f'<i>{suppressed_count} individual agent email'
+            f'{"s" if suppressed_count != 1 else ""} '
             f'were suppressed in this window and rolled into this digest. '
             f'Set DIGEST_ONLY=0 in the agent host environment to re-enable individual emails.</i>'
             f'</p>'
@@ -748,18 +1041,22 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
     # ── Empty-state ────────────────────────────────────────────────
     if not (shipped or implemented_only or queued or failed_runs or escalations):
         parts.append(
-            '<div style="padding:18px;background:#f8fafc;border:1px dashed #cbd5e1;'
-            'border-radius:8px;text-align:center;color:#64748b;font-size:13px">'
-            'Nothing notable in the last window. All agents idle or waiting on cron.'
-            '</div>'
+            f'<div style="padding:20px;background:{_INK_50};'
+            f'border:1px dashed #cbd5e1;'
+            f'border-radius:8px;text-align:center;color:{_INK_500};font-size:13px;'
+            f'margin-top:8px">'
+            f'Nothing notable in the last window. All agents idle or waiting on cron.'
+            f'</div>'
         )
 
     parts.append(
-        '<hr style="margin:32px 0 16px;border:none;border-top:1px solid #e2e8f0">'
-        '<p style="color:#94a3b8;font-size:11px;margin:0">'
+        f'<hr style="margin:32px 0 16px;border:none;border-top:1px solid {_INK_200}">'
+        f'<p style="color:{_INK_400};font-size:11px;margin:0">'
         f'Generated by <code>{AGENT_ID}</code> · '
-        f'<a href="{_DASHBOARD}/agents/{AGENT_ID}" style="color:#94a3b8">edit cadence in dashboard</a>'
-        '</p></body></html>'
+        f'<a href="{_DASHBOARD}/agents/{AGENT_ID}" style="color:{_INK_400}">'
+        f'edit cadence in dashboard</a>'
+        f'</p>'
+        f'</div></body></html>'
     )
     return "".join(parts)
 
