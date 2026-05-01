@@ -1424,7 +1424,7 @@ class EbayProductSyncAgent(AgentBase):
             for prod in coverage_targets
         ]
         seed_queue: list[tuple[Optional[str], str]] = []
-        priority_categories = set(cfg.get("priority_categories") or [])
+        priority_categories = set((self._cfg or {}).get("priority_categories") or [])
         priority_seed_queue: list[tuple[Optional[str], str]] = []
         for entry in seeds:
             cat = entry.get("category") or entry.get("category_slug")
@@ -1446,8 +1446,8 @@ class EbayProductSyncAgent(AgentBase):
         #   • seed_reservation_pct of the remaining budget goes to other
         #     seeds.
         #   • Coverage gets whatever's left.
-        priority_pct = float(cfg.get("priority_seeds_pct", 0.0))
-        seed_pct = float(cfg.get("seed_reservation_pct", 0.6))
+        priority_pct = float((self._cfg or {}).get("priority_seeds_pct", 0.0))
+        seed_pct = float((self._cfg or {}).get("seed_reservation_pct", 0.6))
         priority_pct = max(0.0, min(1.0, priority_pct))
         seed_pct = max(0.0, min(1.0, seed_pct))
 
