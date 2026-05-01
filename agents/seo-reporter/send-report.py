@@ -76,6 +76,17 @@ def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, 
     recs = recs_data.get("recommendations", [])
     summary = recs_data.get("summary", "")
 
+    # Pre-traffic mode detection — when the analyzer has tagged this run
+    # as pre-traffic (or when GSC reports < 100 impressions over 90d),
+    # the email should lead with content-creation recs (`new-page-*`)
+    # rather than rank-target recs. Even when both kinds are present, the
+    # pre-traffic layout makes content gaps visually first.
+    pre_traffic_mode = bool(recs_data.get("pre_traffic_mode")) or any(
+        (r.get("type") or "").startswith("new-page-") for r in recs
+    )
+    new_page_recs = [r for r in recs if (r.get("type") or "").startswith("new-page-")]
+    other_recs = [r for r in recs if not (r.get("type") or "").startswith("new-page-")]
+
     # Subject — defensively handle any extra placeholders the user adds
     subject_template = cfg.get("reporter", {}).get("email", {}).get(
         "subject_template", "SEO agent run — {site} — {tag}"
@@ -139,10 +150,70 @@ def render_html(cfg, run_dir: Path, run_ts: Optional[str] = None) -> tuple[str, 
                          f"no auto-queue, no email reply needed. This is the expected state when the site has "
                          f"no current SEO opportunities matching the analyzer's heuristics.</div>")
 
+    # Pre-traffic banner — lead with content-creation framing when this
+    # site has no organic traffic to mine.
+    if pre_traffic_mode and new_page_recs:
+        parts.append(
+            "<div style='background:linear-gradient(90deg,#dbeafe,#ede9fe);"
+            "border-left:4px solid #6366f1;padding:14px 18px;margin:16px 0;border-radius:6px;font-size:13px'>"
+            f"<b style='color:#4338ca'>📈 Pre-traffic mode — content engine</b><br>"
+            f"This site has &lt; 100 GSC impressions/90d, so the analyzer is leading with "
+            f"<b>net-new pages</b> ({len(new_page_recs)} below) instead of rank-target recs. "
+            f"Studio-supplies.com nets ~$500/day of Amazon affiliate revenue on the same "
+            f"engine: per-category buying guides + per-brand metaobject pages + "
+            f"head-to-head comparisons. Each rec maps to a publishable template — the "
+            f"implementer agent will scaffold the SSR routes once you reply with the "
+            f"recs you want shipped."
+            "</div>"
+        )
+
     # Recommendations
     parts.append("<h2 style='margin-top:24px'>Recommendations</h2>")
     if not recs:
         parts.append("<p style='color:#64748b'>No recommendations this run.</p>")
+    elif pre_traffic_mode and new_page_recs:
+        # Render content-creation recs first, then everything else as
+        # "Polish work" (so the high-leverage stuff isn't buried under
+        # title/meta tweaks).
+        parts.append("<h3 style='margin:18px 0 8px;color:#4338ca'>📰 New pages to publish "
+                     f"<span style='color:#64748b;font-weight:normal;font-size:13px'>"
+                     f"({len(new_page_recs)} content-gap recs)</span></h3>")
+        parts.append("<table style='border-collapse:collapse;width:100%;font-size:13px'>")
+        parts.append("<tr style='background:#f8fafc'><th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>ID</th>"
+                     "<th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>Priority</th>"
+                     "<th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>Recommendation</th>"
+                     "<th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>Expected impact</th></tr>")
+        for r in new_page_recs:
+            color = PRIORITY_COLORS.get(r.get("priority", "low"), "#64748b")
+            emoji = "📰"
+            impact = r.get("expected_impact") or {}
+            impact_str = impact.get("metric", "") if impact else ""
+            parts.append(
+                f"<tr><td style='padding:8px;border:1px solid #e2e8f0;font-family:monospace'>{r.get('id','')}</td>"
+                f"<td style='padding:8px;border:1px solid #e2e8f0'><span style='color:{color};font-weight:bold'>{r.get('priority','')}</span></td>"
+                f"<td style='padding:8px;border:1px solid #e2e8f0'>{emoji} <b>{r.get('title','')}</b><br>"
+                f"<span style='color:#475569;font-size:12px'>{r.get('rationale','')[:300]}</span></td>"
+                f"<td style='padding:8px;border:1px solid #e2e8f0;font-size:12px'>{impact_str}</td></tr>"
+            )
+        parts.append("</table>")
+        if other_recs:
+            parts.append(f"<details style='margin-top:18px'><summary style='cursor:pointer;color:#64748b;font-size:13px'>"
+                         f"Polish work ({len(other_recs)} on-page tweaks — title/meta/schema/etc.)</summary>"
+                         "<table style='border-collapse:collapse;width:100%;font-size:13px;margin-top:8px'>")
+            parts.append("<tr style='background:#f8fafc'><th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>ID</th>"
+                         "<th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>Priority</th>"
+                         "<th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>Recommendation</th></tr>")
+            for r in other_recs:
+                color = PRIORITY_COLORS.get(r.get("priority", "low"), "#64748b")
+                emoji = REC_TYPE_EMOJI.get(r.get("type", "other"), "•")
+                parts.append(
+                    f"<tr><td style='padding:8px;border:1px solid #e2e8f0;font-family:monospace'>{r.get('id','')}</td>"
+                    f"<td style='padding:8px;border:1px solid #e2e8f0'><span style='color:{color}'>{r.get('priority','')}</span></td>"
+                    f"<td style='padding:8px;border:1px solid #e2e8f0'>{emoji} {r.get('title','')}</td></tr>"
+                )
+            parts.append("</table></details>")
+        # Skip the legacy single-table render below
+        recs = []
     else:
         parts.append("<table style='border-collapse:collapse;width:100%;font-size:13px'>")
         parts.append("<tr style='background:#f8fafc'><th style='text-align:left;padding:8px;border:1px solid #e2e8f0'>ID</th>"

@@ -113,6 +113,8 @@ CORE WEB VITALS / PERFORMANCE
 [cwv-image-format]             Image is JPEG/PNG when WebP/AVIF would be smaller
 [cwv-font-no-display]          @font-face without font-display:swap
 [cwv-large-dom]                DOM > ~1500 nodes (LCP penalty)
+[cwv-ttfb-slow]                TTFB > 600ms on a SSR route (Lighthouse-equivalent threshold)
+[cwv-ttfb-very-slow]           TTFB > 1500ms — page feels broken; almost certainly hurting Core Web Vitals INP
 
 CRAWLABILITY + INDEXING
 ─────────────────────────────────────────────────────────────────────
@@ -120,9 +122,14 @@ CRAWLABILITY + INDEXING
 [indexing-canonical-self]      Canonical missing or pointing wrong (self-canonical recommended)
 [indexing-canonical-non-2xx]   Canonical URL returns non-2xx
 [indexing-sitemap-404]         Sitemap entry returns 404
+[indexing-sitemap-shrank]      Current sitemap has lost ≥30 URLs vs prior run (alarm — broken pipeline?)
 [indexing-robots-blocked]      Important page blocked by robots.txt
 [indexing-pagination-rel]      Paginated series without prev/next or canonical
 [indexing-soft-404]            Real page returning 200 but with thin/error content
+[indexing-hreflang-missing]    Multi-locale site emits no hreflang link tag on this page
+[indexing-hreflang-asymmetric] Page declares hreflang for X but the X page has no return-link to this page
+[indexing-breadcrumb-parity]   Visible breadcrumb labels don't match BreadcrumbList JSON-LD itemListElement names
+[indexing-itemlist-numberOfItems-missing]  ItemList / CollectionPage schema lacks numberOfItems (Google carousel ineligible)
 
 URL STRUCTURE
 ─────────────────────────────────────────────────────────────────────
@@ -153,6 +160,13 @@ CONVERSION-RELEVANT (revenue-tracking sites)
 [cta-weak]                     CTA text is generic (\"submit\") not specific (\"start free trial\")
 [cta-position]                 Primary CTA below the fold on revenue page
 [trust-signals-missing]        Conversion page lacks reviews / testimonials / guarantees
+[trust-signal-density-thin]    Conversion page has fewer than 3 trust-signal phrases visible (guarantee/warranty/authorized/verified/return-policy/etc.)
+[footer-trust-links-missing]   Footer doesn't carry privacy/terms/contact/about/affiliate-disclosure (FTC + E-E-A-T baseline)
+[content-freshness-low]        ≥70% of content pages haven't been updated in 90+ days (site-wide signal — stale catalogs lose rank)
+[faq-quality-thin]             FAQPage schema present but has fewer than 3 questions or average answer < 20 words (LLM-citation sweet spot is 5 Q × 50-80-word answers)
+[featured-product-pdp-improve] On a revenue_focus site, a featured PDP has any of: thin content, missing schema, or low body-internal-link count
+[internal-link-to-featured]    Featured product PDP receives no inbound internal links from buying-guide/comparison/category pages on the same site
+[h2h-stale-pricing-product]    Product page's visible price is stale relative to DB price (>14 days drift)
 
 LLM-SEARCH READINESS (apply to ALL pages — generative-engine optimization)
 ─────────────────────────────────────────────────────────────────────
@@ -265,11 +279,17 @@ CHECK_ID_TO_REC_TYPE = {
     "cwv-render-blocking": "ssr-fix", "cwv-image-no-dimensions": "ssr-fix",
     "cwv-image-no-lazy": "ssr-fix", "cwv-image-format": "ssr-fix",
     "cwv-font-no-display": "ssr-fix", "cwv-large-dom": "ssr-fix",
+    "cwv-ttfb-slow": "ssr-fix", "cwv-ttfb-very-slow": "ssr-fix",
     # indexing
     "indexing-noindex-conflict": "indexing-fix", "indexing-canonical-self": "indexing-fix",
     "indexing-canonical-non-2xx": "indexing-fix", "indexing-sitemap-404": "sitemap-fix",
+    "indexing-sitemap-shrank": "sitemap-fix",
     "indexing-robots-blocked": "indexing-fix", "indexing-pagination-rel": "indexing-fix",
     "indexing-soft-404": "indexing-fix",
+    "indexing-hreflang-missing": "indexing-fix",
+    "indexing-hreflang-asymmetric": "indexing-fix",
+    "indexing-breadcrumb-parity": "schema-markup",
+    "indexing-itemlist-numberOfItems-missing": "schema-markup",
     # url/images
     "url-non-descriptive": "ssr-fix", "url-deep": "ssr-fix",
     "url-uppercase": "ssr-fix", "url-trailing-slash": "redirect-fix",
@@ -285,6 +305,13 @@ CHECK_ID_TO_REC_TYPE = {
     # cta
     "cta-missing": "conversion-path", "cta-weak": "conversion-path",
     "cta-position": "conversion-path", "trust-signals-missing": "conversion-path",
+    "trust-signal-density-thin": "conversion-path",
+    "footer-trust-links-missing": "conversion-path",
+    "content-freshness-low": "content-expansion",
+    "faq-quality-thin": "schema-markup",
+    "featured-product-pdp-improve": "product-affiliate-cta-position",
+    "internal-link-to-featured": "internal-link",
+    "h2h-stale-pricing-product": "product-schema-incomplete",
     # LLM-search readiness (apply everywhere)
     "llm-search-direct-answer-missing": "content-expansion",
     "llm-search-citation-readiness": "content-expansion",

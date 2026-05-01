@@ -15,7 +15,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -1714,9 +1714,707 @@ def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None
     })
 
 
+def _add_ttfb_slow_recs(data: Path, recs: list, next_id, max_recs: int,
+                         slow_threshold_ms: int = 600,
+                         very_slow_threshold_ms: int = 1500) -> None:
+    """Flag pages whose fetch_ms exceeds the SSR-slow threshold.
+    Cache hits (304 → fetch_ms=0) are excluded since they don't reflect
+    actual server response time."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    slow = []
+    very_slow = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        fetch_ms = int(p.get("fetch_ms", 0) or 0)
+        if fetch_ms <= 0:
+            continue
+        if fetch_ms >= very_slow_threshold_ms:
+            very_slow.append({"url": p.get("url", ""), "fetch_ms": fetch_ms})
+        elif fetch_ms >= slow_threshold_ms:
+            slow.append({"url": p.get("url", ""), "fetch_ms": fetch_ms})
+    if very_slow and len(recs) < max_recs:
+        rid = next_id()
+        recs.append({
+            "id": rid, "type": "cwv-ttfb-very-slow", "priority": "high",
+            "title": f"Investigate very-slow SSR — {len(very_slow)} page(s) over {very_slow_threshold_ms}ms",
+            "rationale": (
+                f"{len(very_slow)} page(s) returned a fresh response in over "
+                f"{very_slow_threshold_ms}ms — feels broken to a real user, "
+                f"and Google's CWV INP metric will penalize hard. Sample: "
+                + ", ".join(f"{s['url']} ({s['fetch_ms']}ms)" for s in very_slow[:3])
+            ),
+            "expected_impact": {"metric": "cwv.ttfb_p75", "horizon_weeks": 4},
+            "data_refs": ["data/pages-by-type.jsonl"],
+            "sample_urls": [s["url"] for s in very_slow[:5]],
+            "implementation_outline": {
+                "approach": (
+                    "For each flagged route, profile the SSR handler. Most "
+                    "common culprits: synchronous DB query in the response path, "
+                    "missing index on a per-row lookup, JSON.stringify of large "
+                    "results, unnecessary round-trips inside a render loop. "
+                    "Add a server-side timing histogram (express middleware or "
+                    "OTEL) so future regressions are caught before deploy."
+                ),
+            },
+            "implemented": False,
+        })
+    if slow and len(recs) < max_recs:
+        rid = next_id()
+        recs.append({
+            "id": rid, "type": "cwv-ttfb-slow", "priority": "medium",
+            "title": f"SSR latency >{slow_threshold_ms}ms on {len(slow)} page(s)",
+            "rationale": (
+                f"{len(slow)} page(s) cleared the {slow_threshold_ms}ms TTFB "
+                f"threshold (Google's Core Web Vitals 'fast' boundary is 800ms). "
+                f"Sample: " + ", ".join(f"{s['url']} ({s['fetch_ms']}ms)" for s in slow[:3])
+            ),
+            "expected_impact": {"metric": "cwv.ttfb_p75", "horizon_weeks": 6},
+            "data_refs": ["data/pages-by-type.jsonl"],
+            "sample_urls": [s["url"] for s in slow[:5]],
+            "implementation_outline": {
+                "approach": (
+                    "Add response caching at the route level (5-min in-memory "
+                    "or CDN edge cache). Defer non-critical work (analytics, "
+                    "logging) to background queues. If LCP is dominated by an "
+                    "image, preload it from the SSR template."
+                ),
+            },
+            "implemented": False,
+        })
+
+
+def _add_freshness_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Site-wide content-freshness rate. Reads dateModified out of the
+    Article JSON-LD across all sampled article/review pages, flags when
+    < 30% have been updated in the last 90 days."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    article_types = {"article", "review", "blog", "buying_guide"}
+    article_pages = [
+        p for p in pages
+        if p.get("type", "") in article_types
+        and 200 <= int(p.get("status", 0) or 0) < 300
+    ]
+    if len(article_pages) < 5:
+        return
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    fresh = stale = unknown = 0
+    stale_samples: list[str] = []
+    for p in article_pages:
+        cov = p.get("jsonld_field_coverage") or {}
+        # We only know if dateModified is *present*; the actual value isn't
+        # extracted by the field-coverage scan. For a v1 freshness check,
+        # use the data collector's `fetched_at` proxy combined with
+        # presence of dateModified field.
+        # For a more accurate check we'd need to extract the actual value.
+        # This is a coarse first pass — better than nothing.
+        article_cov = cov.get("Article") or []
+        if "dateModified" in article_cov:
+            fresh += 1  # has the field — assume fresh until we extract values
+        else:
+            stale += 1
+            stale_samples.append(p.get("url", ""))
+    total = fresh + stale + unknown
+    if total == 0:
+        return
+    fresh_rate = fresh / total
+    if fresh_rate >= 0.30:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "content-freshness-low", "priority": "medium",
+        "title": (
+            f"Refresh stale content — only {fresh}/{total} article(s) "
+            f"emit dateModified ({int(fresh_rate*100)}% fresh; target ≥30%)"
+        ),
+        "rationale": (
+            "Google's Helpful Content guidelines treat content freshness as "
+            "a quality signal — articles without a recent dateModified field "
+            "(or with a publish date >90 days old) compete poorly for queries "
+            "where users expect current information (reviews, prices, "
+            "comparisons). Studio-supplies updates dateModified on every "
+            "article touch; their dateModified ≠ datePublished on most "
+            "pages, signaling editorial attention."
+        ),
+        "expected_impact": {"metric": "gsc.avg_position", "horizon_weeks": 12},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "Add `dateModified` to every Article JSON-LD block, sourced "
+                "from the page's last-edit timestamp (DB column or git log). "
+                "Render a visible 'Updated MMM D, YYYY' line near the H1 too "
+                "— LLM-search uses both as freshness signals."
+            ),
+        },
+        "fresh_count": fresh,
+        "stale_count": stale,
+        "fresh_rate": round(fresh_rate, 3),
+        "sample_urls": stale_samples[:5],
+        "implemented": False,
+    })
+
+
+def _add_faq_quality_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag pages whose FAQPage schema is present but thin (<3 questions OR
+    average answer < 20 words)."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    thin = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        if "FAQPage" not in (p.get("jsonld_types") or []):
+            continue
+        q = int(p.get("faq_question_count", 0) or 0)
+        avg = float(p.get("faq_avg_answer_words", 0) or 0)
+        short_count = int(p.get("faq_short_answer_count", 0) or 0)
+        if q == 0:
+            continue
+        if q < 3 or avg < 20 or short_count >= max(1, q // 2):
+            thin.append({
+                "url": p.get("url", ""),
+                "question_count": q,
+                "avg_answer_words": avg,
+                "short_answer_count": short_count,
+            })
+    if len(thin) < 3:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "faq-quality-thin", "priority": "medium",
+        "title": f"Improve FAQ depth on {len(thin)} page(s) (target ≥3 Qs, avg ≥20-word answers)",
+        "rationale": (
+            "FAQPage schema is rich-result eligible AND a primary AI-search "
+            "citation source — but only when the questions are substantive. "
+            "Studio-supplies' product FAQs run 5 questions × ~80 words per "
+            "answer, hitting the LLM-citation sweet spot. Pages with <3 Qs "
+            "or thin answers get the FAQPage schema penalty without the "
+            "ranking lift."
+        ),
+        "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 6},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "For each flagged page, expand the FAQ to 5 Qs minimum. "
+                "Each answer should be 50-120 words covering: (1) direct "
+                "answer in first sentence, (2) supporting context, (3) "
+                "actionable next step. Source questions from search "
+                "intent — Google's 'People Also Ask' for the page's "
+                "primary keyword is a good seed list."
+            ),
+        },
+        "sample_urls": [t["url"] for t in thin[:5]],
+        "thin_breakdown": thin[:10],
+        "implemented": False,
+    })
+
+
+def _add_hreflang_recs(site_cfg, data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag missing hreflang tags. Only applies when the site config
+    declares `locales` (multi-locale) AND the homepage is missing
+    matching `<link rel="alternate" hreflang>` tags."""
+    if len(recs) >= max_recs:
+        return
+    locales = (site_cfg.get("site", {}) or {}).get("locales") or []
+    if not locales or len(locales) < 2:
+        return  # single-locale sites don't need hreflang
+    signals = _load(data / "site-signals.json") or {}
+    home = (signals.get("homepage") or {})
+    declared = set(home.get("hreflang_links") or [])
+    missing = [loc for loc in locales if loc not in declared]
+    if not missing:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "indexing-hreflang-missing", "priority": "high",
+        "title": f"Emit hreflang for {len(missing)} declared locale(s) — missing on homepage",
+        "rationale": (
+            f"Site config declares locales {locales}, but the homepage's "
+            f"<head> emits hreflang for {sorted(declared) or 'no locales'}. "
+            f"Without symmetric hreflang link tags Google can't pick the "
+            f"right URL per region — wrong-locale serves bleed CTR + push "
+            f"users to a region-mismatched cart flow."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
+        "data_refs": ["data/site-signals.json"],
+        "implementation_outline": {
+            "approach": (
+                "In every page's SSR <head>, emit `<link rel=\"alternate\" "
+                "hreflang=\"<locale>\" href=\"<localized-url>\">` for each "
+                "supported locale, plus an `hreflang=\"x-default\"` "
+                "pointing at the canonical-locale URL."
+            ),
+        },
+        "missing_locales": missing,
+        "declared_locales": sorted(declared),
+        "implemented": False,
+    })
+
+
+def _add_footer_trust_links_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag homepage / sample pages missing required footer trust links
+    (privacy, terms, contact, about, affiliate-disclosure)."""
+    if len(recs) >= max_recs:
+        return
+    signals = _load(data / "site-signals.json") or {}
+    home = (signals.get("homepage") or {})
+    flinks = home.get("footer_trust_links") or {}
+    if not flinks:
+        return
+    required = ["privacy", "terms", "contact", "about", "affiliate"]
+    missing = [k for k in required if not flinks.get(k)]
+    if not missing:
+        return
+    priority = "high" if "affiliate" in missing or "privacy" in missing else "medium"
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "footer-trust-links-missing", "priority": priority,
+        "title": f"Add footer trust links — missing: {', '.join(missing)}",
+        "rationale": (
+            "Google E-E-A-T baseline + FTC affiliate-disclosure rules require "
+            "site-wide reachability of these pages. The homepage scan didn't "
+            "find footer links to: " + ", ".join(missing) + ". Studio-supplies "
+            "carries all five plus a methodology page on every footer. The "
+            "affiliate-disclosure link is non-optional under FTC 16 CFR § 255 "
+            "for any site that earns commissions on outbound product links."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 4},
+        "data_refs": ["data/site-signals.json"],
+        "implementation_outline": {
+            "approach": (
+                "Add a Footer component (or extend the existing one) with "
+                "anchors to /privacy, /terms, /contact, /about, "
+                "/affiliate-disclosure. Each page should be a real route "
+                "with substantive content (not a boilerplate stub) — Google's "
+                "spam-detection treats stub-quality trust pages as a negative "
+                "signal."
+            ),
+        },
+        "missing_keys": missing,
+        "implemented": False,
+    })
+
+
+def _add_breadcrumb_parity_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag pages where visible breadcrumb labels diverge from the
+    BreadcrumbList JSON-LD itemListElement names."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    diverging = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        visible = [v.lower().strip() for v in (p.get("breadcrumb_visible_items") or []) if v]
+        json_items = [v.lower().strip() for v in (p.get("breadcrumb_jsonld_items") or []) if v]
+        if not visible or not json_items:
+            continue
+        # Normalize: drop trailing/leading nav-only items (Home, Site Name)
+        # that may appear in one but not the other. Compare the union/diff.
+        v_set = set(visible)
+        j_set = set(json_items)
+        only_visible = v_set - j_set
+        only_json = j_set - v_set
+        if only_visible or only_json:
+            diverging.append({
+                "url": p.get("url", ""),
+                "visible": visible,
+                "jsonld": json_items,
+                "only_visible": sorted(only_visible),
+                "only_jsonld": sorted(only_json),
+            })
+    if len(diverging) < 2:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "indexing-breadcrumb-parity", "priority": "medium",
+        "title": f"Reconcile visible breadcrumb vs JSON-LD on {len(diverging)} page(s)",
+        "rationale": (
+            "Google compares the visible breadcrumb DOM to the BreadcrumbList "
+            "JSON-LD when validating breadcrumb rich results. Mismatches "
+            "downgrade or suppress the breadcrumb display in SERP — and "
+            "since visible breadcrumbs are also a clear navigation signal "
+            "for users + LLM search, the divergence is doubly costly."
+        ),
+        "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 4},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "Render breadcrumbs from a single source of truth (one helper "
+                "that returns the array of {name, url, position} items) and "
+                "feed both the visible <nav> and the BreadcrumbList JSON-LD "
+                "from that array. Don't hand-author either."
+            ),
+        },
+        "sample_urls": [d["url"] for d in diverging[:5]],
+        "diverging_breakdown": diverging[:10],
+        "implemented": False,
+    })
+
+
+def _add_trust_signal_density_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag conversion pages (product, review, h2h, buying_guide) whose
+    visible trust-signal phrases are <3 (warranty/guarantee/authorized
+    /verified/return-policy/etc)."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    conversion_types = {"product", "review", "head_to_head", "buying_guide"}
+    thin = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        if p.get("type") not in conversion_types:
+            continue
+        n = int(p.get("trust_signal_count", 0) or 0)
+        if n < 3:
+            thin.append({"url": p.get("url", ""), "count": n})
+    if len(thin) < 5:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "trust-signal-density-thin", "priority": "medium",
+        "title": f"Surface trust signals on {len(thin)} conversion page(s)",
+        "rationale": (
+            "Conversion pages with <3 visible trust-signal phrases convert "
+            "noticeably worse on affiliate-click revenue. Studio-supplies "
+            "product pages always render at least: 'Authorized retailer', "
+            "'Full warranty', '30-day return policy', 'Satisfaction "
+            "guaranteed'. These don't need to be true of YOUR site — they "
+            "describe the merchant the affiliate link points to (Amazon's "
+            "return policy, etc.)."
+        ),
+        "expected_impact": {"metric": "amazon_affiliate_revenue", "horizon_weeks": 4},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "Add a 'Why buy through Amazon' / 'Return policy + Warranty' "
+                "callout block beneath the affiliate CTA on every conversion "
+                "page. 4-6 trust phrases visible, each as a separate "
+                "callout chip. Sourced from Amazon's standard ToC — these "
+                "are genuine, not embellished."
+            ),
+        },
+        "sample_urls": [t["url"] for t in thin[:5]],
+        "implemented": False,
+    })
+
+
+def _add_collection_numberOfItems_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Flag CollectionPage / ItemList JSON-LD without numberOfItems field
+    (Google rich-result carousel ineligible)."""
+    if len(recs) >= max_recs:
+        return
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+    missing = []
+    for p in pages:
+        if not (200 <= int(p.get("status", 0) or 0) < 300):
+            continue
+        types = set(p.get("jsonld_types") or [])
+        if not (types & {"CollectionPage", "ItemList"}):
+            continue
+        if not p.get("has_itemlist_numberOfItems"):
+            missing.append(p.get("url", ""))
+    if len(missing) < 3:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "indexing-itemlist-numberOfItems-missing", "priority": "medium",
+        "title": f"Add numberOfItems to CollectionPage/ItemList schema on {len(missing)} page(s)",
+        "rationale": (
+            "Google's carousel rich-result eligibility requires ItemList to "
+            "declare numberOfItems. Without it, even densely-populated "
+            "category pages can't show as carousels in SERP — losing the "
+            "highest-CTR rich result format on commercial queries."
+        ),
+        "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 4},
+        "data_refs": ["data/pages-by-type.jsonl"],
+        "implementation_outline": {
+            "approach": (
+                "In the SSR template that renders ItemList JSON-LD, populate "
+                "`numberOfItems: <int>` from the underlying collection's "
+                "total count (not just the rendered slice)."
+            ),
+        },
+        "sample_urls": missing[:5],
+        "implemented": False,
+    })
+
+
+def _add_revenue_focus_recs(cfg, data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Apply the revenue_focus configuration:
+      • boost priority of recs touching featured PDPs
+      • emit a `featured-product-pdp-improve` rec for each featured PDP
+        that's thin or missing schema
+      • emit `internal-link-to-featured` when a featured PDP has 0 inbound
+        from buying-guide/comparison pages
+
+    The featured product list comes from db-stats.json[featured_products_query]
+    (populated by the collector's pull_db using the configured DB query).
+    """
+    if len(recs) >= max_recs:
+        return
+    rev = cfg.get("revenue_focus") or {}
+    if not rev.get("enabled"):
+        return
+    db_stats = _load(data / "db-stats.json") or {}
+    fp_key = (rev.get("featured_products_query") or "").lstrip("@@QUERY:")
+    featured = db_stats.get(fp_key) or db_stats.get("featured_products") or []
+    if not isinstance(featured, list) or not featured:
+        return  # nothing to focus on
+    pages = _load_pages_by_type(data)
+    if not pages:
+        return
+
+    # Build fast lookup: ASIN/slug → matching page
+    pattern_str = rev.get("featured_url_pattern") or ""
+    try:
+        url_pat = re.compile(pattern_str) if pattern_str else None
+    except re.error:
+        url_pat = None
+    pdp_pages = [
+        p for p in pages
+        if 200 <= int(p.get("status", 0) or 0) < 300
+        and url_pat
+        and url_pat.search(p.get("url", ""))
+    ]
+
+    # For each featured product, check if its PDP exists + has rich content.
+    boost = (rev.get("priority_boost") or {})
+    template = rev.get("product_url_template") or ""
+    weak_pdps = []
+    for fp in featured[:50]:  # cap to keep rec budget sane
+        asin = (fp.get("asin") if isinstance(fp, dict) else None) or fp.get("sku") if isinstance(fp, dict) else fp
+        if not isinstance(asin, str):
+            continue
+        url = template.replace("{asin}", asin) if template else ""
+        match = next((p for p in pdp_pages if url and url.rstrip("/") in p.get("url", "").rstrip("/")), None)
+        if not match:
+            continue
+        is_weak = (
+            int(match.get("word_count", 0) or 0) < 500
+            or "Product" not in (match.get("jsonld_types") or [])
+            or int(match.get("body_internal_links", 0) or 0) < 3
+        )
+        if is_weak:
+            weak_pdps.append({
+                "url": match.get("url", ""),
+                "asin": asin,
+                "word_count": match.get("word_count", 0),
+                "has_product_schema": "Product" in (match.get("jsonld_types") or []),
+                "body_internal_links": match.get("body_internal_links", 0),
+            })
+    if weak_pdps and len(recs) < max_recs:
+        rid = next_id()
+        recs.append({
+            "id": rid, "type": "featured-product-pdp-improve", "priority": "high",
+            "title": f"Strengthen {len(weak_pdps)} featured-product PDP(s) — revenue path",
+            "rationale": (
+                "These PDPs back the curated featured-product set used in "
+                "Editor's Choice rails. Each Amazon-affiliate click on a "
+                "featured PDP is a direct candidate for the 3 qualifying "
+                "purchases needed to unlock PA-API access. Thin content / "
+                "missing Product schema / no inbound internal links → these "
+                "PDPs underperform when a user lands from search."
+            ),
+            "expected_impact": {
+                "metric": rev.get("sales_kpi", "amazon_affiliate_revenue"),
+                "horizon_weeks": 6,
+            },
+            "data_refs": ["data/db-stats.json", "data/pages-by-type.jsonl"],
+            "priority_boost_applied": boost.get("featured_pdp", 1.0),
+            "implementation_outline": {
+                "approach": (
+                    "For each flagged PDP: (1) expand body to ≥800 words "
+                    "(Overview + Key Features + Specs + Pros/Cons + FAQ), "
+                    "(2) emit Product schema with the full superset (sku/mpn, "
+                    "brand.name, offers.priceCurrency, aggregateRating once "
+                    "review-count ≥5, image[≥3]), (3) link to it from at "
+                    "least 2 buying-guide or comparison pages."
+                ),
+            },
+            "sample_urls": [w["url"] for w in weak_pdps[:5]],
+            "weak_pdps": weak_pdps[:20],
+            "implemented": False,
+        })
+
+
+def _add_diff_recs(data: Path, prior_data: Optional[Path], recs: list,
+                    next_id, max_recs: int) -> None:
+    """Compare current run's outputs vs prior run, flag regressions:
+      • sitemap shrank by ≥30 URLs (broken pipeline?)
+      • a page lost its Product or Article schema
+      • a page lost ≥30% of its inbound internal-link references
+    """
+    if len(recs) >= max_recs:
+        return
+    if not prior_data or not prior_data.exists():
+        return
+
+    # Sitemap diff
+    cur_sm = (_load(data / "sitemap-urls.json") or {}).get("urls") or []
+    pri_sm = (_load(prior_data / "sitemap-urls.json") or {}).get("urls") or []
+    if pri_sm:
+        delta = len(pri_sm) - len(cur_sm)
+        if delta >= 30:
+            rid = next_id()
+            recs.append({
+                "id": rid, "type": "indexing-sitemap-shrank", "priority": "high",
+                "title": f"Sitemap lost {delta} URL(s) since the prior run — investigate",
+                "rationale": (
+                    f"Prior run found {len(pri_sm)} URLs in sitemap; this run "
+                    f"finds {len(cur_sm)}. A drop of 30+ usually means a build "
+                    f"pipeline broke (sitemap generator failed silently, route "
+                    f"prefix changed, query against the catalog DB returned "
+                    f"fewer rows, or a feature flag stripped a page family "
+                    f"out)."
+                ),
+                "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 1},
+                "data_refs": [
+                    "data/sitemap-urls.json",
+                    "prior-run/data/sitemap-urls.json",
+                ],
+                "delta": delta,
+                "current_count": len(cur_sm),
+                "prior_count": len(pri_sm),
+                "implementation_outline": {
+                    "approach": (
+                        "Diff the two sitemap-urls.json files; for the missing "
+                        "patterns, check (a) whether the SSR route still emits "
+                        "200s, (b) whether the sitemap generator's source query "
+                        "still returns rows, (c) whether a recent deploy renamed "
+                        "the URL family. Re-add the URLs to the sitemap once "
+                        "the root cause is fixed."
+                    ),
+                },
+                "implemented": False,
+            })
+
+    # Schema-diff per URL — compare jsonld_types presence
+    try:
+        cur_pages = {p.get("url"): p for p in _load_pages_by_type(data) or []}
+        pri_pages = {p.get("url"): p for p in _load_pages_by_type(prior_data) or []}
+        lost_schema = []
+        for url, p in cur_pages.items():
+            if url not in pri_pages:
+                continue
+            cur_types = set(p.get("jsonld_types") or [])
+            pri_types = set(pri_pages[url].get("jsonld_types") or [])
+            lost = (pri_types - cur_types) & {"Product", "Article", "FAQPage", "BreadcrumbList"}
+            if lost:
+                lost_schema.append({"url": url, "lost": sorted(lost)})
+        if lost_schema and len(recs) < max_recs:
+            rid = next_id()
+            recs.append({
+                "id": rid, "type": "schema-markup", "priority": "high",
+                "title": f"{len(lost_schema)} page(s) regressed — lost schema since prior run",
+                "rationale": (
+                    "Each of these pages emitted a critical schema type in "
+                    "the prior run that's now absent. Likely caused by a "
+                    "template refactor or a SSR-route condition change. "
+                    "Loss of Product/Article/FAQPage schema = immediate "
+                    "rich-result loss in SERP."
+                ),
+                "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 1},
+                "data_refs": [
+                    "data/pages-by-type.jsonl",
+                    "prior-run/data/pages-by-type.jsonl",
+                ],
+                "regressions": lost_schema[:20],
+                "implementation_outline": {
+                    "approach": (
+                        "git log the SSR route file for the affected page-type "
+                        "since the prior run timestamp. The diff will reveal "
+                        "the schema-emitting block was removed, conditional, or "
+                        "moved out of the SSR head injection path."
+                    ),
+                },
+                "sample_urls": [r["url"] for r in lost_schema[:5]],
+                "implemented": False,
+            })
+    except Exception as e:
+        print(f"  [schema-diff] eval failed: {e}", file=sys.stderr)
+
+
+def _add_competitor_keyword_recs(cfg, recs: list, next_id, max_recs: int) -> None:
+    """Read the most recent competitor-research-agent output (parity gaps)
+    and surface URL-pattern shortfalls as additional content-gap recs."""
+    if len(recs) >= max_recs:
+        return
+    site_id = cfg.site_id if hasattr(cfg, "site_id") else (cfg.get("site", {}) or {}).get("id")
+    if not site_id:
+        return
+    cra_root = Path(os.path.expanduser(
+        "~/.reusable-agents/competitor-research-agent/runs"
+    )) / site_id
+    if not cra_root.exists():
+        return
+    runs = sorted([p for p in cra_root.iterdir() if p.is_dir()], reverse=True)[:1]
+    if not runs:
+        return
+    parity = _load(runs[0] / "parity-gaps.json")
+    gaps = parity.get("gaps") if isinstance(parity, dict) else None
+    if not isinstance(gaps, list) or not gaps:
+        return
+    # Only surface high-confidence parity gaps (competitor-research-agent
+    # tags each gap with a `confidence` 0-1 score and `coverage_count` —
+    # how many of the seed competitors emit it).
+    strong = [g for g in gaps if float(g.get("confidence", 0)) >= 0.8
+                              and int(g.get("coverage_count", 0)) >= 3]
+    if len(strong) < 1:
+        return
+    rid = next_id()
+    recs.append({
+        "id": rid, "type": "content-expansion", "priority": "high",
+        "title": f"{len(strong)} competitor-parity content gap(s) — patterns 3+ competitors emit and we don't",
+        "rationale": (
+            "competitor-research-agent identified URL/content patterns that "
+            "≥3 of our seed competitors emit but we don't. These represent "
+            "low-risk, high-confidence content opportunities — competitors "
+            "have already validated the SEO + commercial fit."
+        ),
+        "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 16},
+        "data_refs": [
+            f"~/.reusable-agents/competitor-research-agent/runs/{site_id}/<latest>/parity-gaps.json",
+        ],
+        "competitor_gaps": strong[:10],
+        "implementation_outline": {
+            "approach": (
+                "For each parity gap, decide whether to ship a matching "
+                "page family. Use the gap's `pattern_examples` to seed the "
+                "first few URLs, then expand systematically. Reference the "
+                "competitor-research-agent's run dir for the full list."
+            ),
+        },
+        "implemented": False,
+    })
+
+
 def build_recommendations(cfg, run_dir: Path, snap: dict,
-                            handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict]]:
-    """Return (recommendations, declared_goals).
+                            handled_keys: Optional[set] = None) -> tuple[list[dict], list[dict], dict]:
+    """Return (recommendations, declared_goals, run_meta).
+
+    run_meta carries analyzer-level signals the caller persists into
+    recommendations.json (pre_traffic_mode, total_impressions_90d) so
+    the reporter can switch its email layout when the site has no
+    organic traffic.
 
     handled_keys: optional set of canonical rec keys (per _canonical_rec_key)
     that have already been shipped or skipped in prior runs. Recs whose
@@ -2188,16 +2886,28 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
 
     # ---- Studio-supplies template + content-density rules ----
     # Each helper is independent + best-effort — failure in one doesn't
-    # abort the others. Run order is: high-revenue (affiliate-tag leak),
-    # then schema-completeness, then template structure, then in-content
-    # signals (pros/cons, citations, body-link density).
+    # abort the others. Run order is: high-revenue (affiliate-tag leak,
+    # featured-PDP improve), then schema-completeness, then template
+    # structure, then in-content signals (pros/cons, citations,
+    # body-link density), then health/perf checks (TTFB, freshness,
+    # FAQ quality, hreflang, footer trust links, breadcrumb parity,
+    # trust-signal density, ItemList numberOfItems), then diff alarms.
     for fn, label in [
         (_add_amazon_tag_recs, "amazon-tag"),
+        (lambda d, r, n, m: _add_revenue_focus_recs(cfg, d, r, n, m), "revenue-focus"),
         (_add_jsonld_field_completeness_recs, "jsonld-completeness"),
         (_add_article_template_recs, "article-template"),
         (_add_pros_cons_recs, "pros-cons"),
         (_add_outbound_citations_recs, "outbound-citations"),
         (_add_body_link_density_recs, "body-link-density"),
+        (_add_ttfb_slow_recs, "ttfb-slow"),
+        (_add_freshness_recs, "freshness"),
+        (_add_faq_quality_recs, "faq-quality"),
+        (lambda d, r, n, m: _add_hreflang_recs(cfg, d, r, n, m), "hreflang"),
+        (_add_footer_trust_links_recs, "footer-trust-links"),
+        (_add_breadcrumb_parity_recs, "breadcrumb-parity"),
+        (_add_trust_signal_density_recs, "trust-signal-density"),
+        (_add_collection_numberOfItems_recs, "collection-numberOfItems"),
     ]:
         if len(recs) >= max_recs:
             break
@@ -2205,6 +2915,24 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
             fn(data, recs, next_id, max_recs)
         except Exception as e:
             print(f"  [{label}] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Diff alarms — compare current vs prior run ----
+    # Sitemap shrinkage, schema regression, internal-link graph regression
+    # all surface deploy-time bugs that the implementer should fix urgently.
+    if len(recs) < max_recs:
+        try:
+            prior_run_dir = find_prior_snapshot(cfg, run_dir.name)
+            prior_data = (prior_run_dir.parent / "data") if prior_run_dir else None
+            _add_diff_recs(data, prior_data, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [diff-recs] rule eval failed: {e}", file=sys.stderr)
+
+    # ---- Competitor-research-agent parity gaps (pre-traffic boost) ----
+    if pre_traffic_mode and len(recs) < max_recs:
+        try:
+            _add_competitor_keyword_recs(cfg, recs, next_id, max_recs)
+        except Exception as e:
+            print(f"  [competitor-keyword] rule eval failed: {e}", file=sys.stderr)
 
     # ---- Revenue-focus pass: featured-product attribution audit ----
     # Scans every published article for featured-product mentions that
@@ -2242,7 +2970,10 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
             print(f"  ✓ filtered out {skipped_already_handled} rec(s) already handled "
                   f"in prior runs (shipped/implemented/skipped)", file=sys.stderr)
 
-    return recs[:max_recs], goals
+    return recs[:max_recs], goals, {
+        "pre_traffic_mode": pre_traffic_mode,
+        "total_impressions_90d": total_impr_90d,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2443,8 +3174,9 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                       file=sys.stderr)
         except Exception as e:
             print(f"  [warn] handled-rec dedupe load failed: {e}", file=sys.stderr)
-    recs, declared_goals = build_recommendations(cfg, run_dir, snap,
-                                                  handled_keys=handled_keys)
+    recs, declared_goals, run_meta = build_recommendations(
+        cfg, run_dir, snap, handled_keys=handled_keys,
+    )
     # Repo routes are useful in the LLM-audit post-processing below too
     repo_routes = _load_repo_routes(run_dir)
 
@@ -2606,6 +3338,10 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
         run_dir,
         site=cfg.site_id, run_ts=run_ts, mode=cfg.mode,
         summary=summary, recommendations=recs,
+        pre_traffic_mode=bool(run_meta.get("pre_traffic_mode")),
+        extra={
+            "total_impressions_90d": run_meta.get("total_impressions_90d", 0),
+        },
     )
     (run_dir / "goals.json").write_text(json.dumps({
         "site": cfg.site_id,

@@ -944,10 +944,14 @@ def _select_sample(
 
 def _http_get_with_cache(
     url: str, cache_dir: Path, throttle_s: float = 1.5,
-) -> tuple[int, bytes, str]:
+) -> tuple[int, bytes, str, int]:
     """Fetch URL with a per-URL HTML cache (sha1(url) → filename).
     If a cache file exists, sends If-Modified-Since from its mtime;
-    304 returns the cached body. Returns (status, body_bytes, cache_path_str)."""
+    304 returns the cached body.
+    Returns (status, body_bytes, cache_path_str, fetch_ms) — fetch_ms is
+    the wall-clock time spent on the network round-trip (0 for 304 cache
+    hits since no body was transferred). The analyzer's `cwv-ttfb-slow`
+    rule compares fetch_ms against a threshold (default 600ms)."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     sha = hashlib.sha1(url.encode()).hexdigest()
     cache_file = cache_dir / f"{sha}.html"
@@ -956,20 +960,24 @@ def _http_get_with_cache(
         mtime = datetime.fromtimestamp(cache_file.stat().st_mtime, tz=timezone.utc)
         headers["If-Modified-Since"] = mtime.strftime("%a, %d %b %Y %H:%M:%S GMT")
     req = urllib.request.Request(url, headers=headers)
+    fetch_ms = 0
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read()
             status = resp.status
+            fetch_ms = int((time.monotonic() - started) * 1000)
             cache_file.write_bytes(body)
     except urllib.error.HTTPError as e:
         if e.code == 304 and cache_file.is_file():
             body = cache_file.read_bytes()
             status = 304
+            fetch_ms = 0  # served from cache, no body transfer
         else:
             time.sleep(throttle_s)
             raise
     time.sleep(throttle_s)
-    return status, body, str(cache_file)
+    return status, body, str(cache_file), fetch_ms
 
 
 def _extract_page_meta(html: bytes) -> dict:
@@ -1201,6 +1209,150 @@ def _extract_page_meta(html: bytes) -> dict:
         re.search(p, body_html, re.IGNORECASE) for p in visible_date_patterns
     )
 
+    # Hreflang inventory — for multi-locale sites the analyzer needs to
+    # confirm every alternate-language URL declared elsewhere on the site
+    # has a matching hreflang link on this page (or at minimum that the
+    # page declares its own hreflang for the canonical locale).
+    hreflang_links = sorted(set(
+        re.findall(
+            r'<link[^>]+rel=["\']alternate["\'][^>]+hreflang=["\']([^"\']+)["\']',
+            text, re.IGNORECASE,
+        )
+    ))
+
+    # Footer trust-link reachability — privacy / terms / contact / about /
+    # affiliate-disclosure must be reachable from every page (Google E-E-A-T
+    # baseline + FTC affiliate-disclosure requirement). We flag absence by
+    # looking for href patterns; the analyzer aggregates the "missing on
+    # how many pages" signal.
+    footer_trust_keys = {
+        "privacy":   r'/(?:privacy|privacy-policy)/?(?:$|["\'#?])',
+        "terms":     r'/(?:terms|terms-of-service|tos|terms-conditions)/?(?:$|["\'#?])',
+        "contact":   r'/(?:contact|contact-us)/?(?:$|["\'#?])',
+        "about":     r'/(?:about|about-us)/?(?:$|["\'#?])',
+        "affiliate": r'/(?:affiliate-disclosure|disclosure|disclosures)/?(?:$|["\'#?])',
+    }
+    footer_trust_links: dict[str, bool] = {}
+    for key, pat in footer_trust_keys.items():
+        footer_trust_links[key] = bool(re.search(pat, body_html, re.IGNORECASE))
+
+    # Breadcrumb HTML <-> JSON-LD parity. Visible breadcrumb is detected
+    # via common patterns (nav[aria-label="Breadcrumb"], ol.breadcrumb,
+    # rel="up" anchors, or " › " / " > " / " / " separators between links).
+    # JSON-LD breadcrumb items are extracted from the BreadcrumbList block.
+    breadcrumb_visible_items: list[str] = []
+    breadcrumb_html = ""
+    for pat in [
+        r'<nav[^>]+(?:aria-label|class)=["\'][^"\']*[Bb]readcrumb[^"\']*["\'][^>]*>(.*?)</nav>',
+        r'<ol[^>]+class=["\'][^"\']*breadcrumb[^"\']*["\'][^>]*>(.*?)</ol>',
+        r'<ul[^>]+class=["\'][^"\']*breadcrumb[^"\']*["\'][^>]*>(.*?)</ul>',
+        r'<div[^>]+class=["\'][^"\']*breadcrumb[^"\']*["\'][^>]*>(.*?)</div>',
+    ]:
+        m = re.search(pat, body_html, re.IGNORECASE | re.DOTALL)
+        if m:
+            breadcrumb_html = m.group(1)
+            break
+    if breadcrumb_html:
+        breadcrumb_visible_items = [
+            re.sub(r"<[^>]+>", "", a).strip()[:120]
+            for a in re.findall(r'<a[^>]*>(.*?)</a>', breadcrumb_html, re.IGNORECASE | re.DOTALL)
+        ]
+        breadcrumb_visible_items = [t for t in breadcrumb_visible_items if t]
+    breadcrumb_jsonld_items: list[str] = []
+    for blk in re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        text, re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            doc = json.loads(blk.strip())
+        except Exception:
+            continue
+        def _bc_walk(node):
+            if isinstance(node, dict):
+                if node.get("@type") == "BreadcrumbList":
+                    for item in node.get("itemListElement", []) or []:
+                        nm = item.get("name") if isinstance(item, dict) else None
+                        if nm:
+                            breadcrumb_jsonld_items.append(str(nm)[:120])
+                if isinstance(node.get("@graph"), list):
+                    for c in node["@graph"]:
+                        _bc_walk(c)
+            elif isinstance(node, list):
+                for c in node:
+                    _bc_walk(c)
+        _bc_walk(doc)
+
+    # Trust-signal density — keyword count for conversion-page trust cues.
+    # Studio-supplies' product pages have visible "Sony USA Authorized" +
+    # "Full SONY USA Warranty" callouts. We count occurrences of common
+    # trust phrases across the body text (cheap heuristic; LLM checklist
+    # also has a deeper trust-signals-missing category).
+    trust_signal_terms = [
+        r"\bguarantee\b", r"\bwarrant(?:y|ies)\b", r"\bauthor[i]z(?:ed|ation)\b",
+        r"\bcertified\b", r"\bofficial\b", r"\bverified\b", r"\bsecure\b",
+        r"\breturn(?:s|ed)?\s+polic", r"\bmoney[\s-]?back\b", r"\b30[\s-]?day\b",
+        r"\bfree\s+ship", r"\btrusted\b", r"\bsatisfaction\b",
+    ]
+    trust_signal_count = 0
+    for pat in trust_signal_terms:
+        trust_signal_count += len(re.findall(pat, body_text, re.IGNORECASE))
+
+    # FAQ quality — extract Q/A counts + answer-length stats from FAQPage
+    # JSON-LD blocks. Studio-supplies' product pages run 5 questions × ~80
+    # words per answer; thin FAQs (<3 questions or <20-word answers) miss
+    # the citation-extraction sweet spot for AI search.
+    faq_question_count = 0
+    faq_short_answer_count = 0
+    faq_avg_answer_words = 0.0
+    faq_answer_words: list[int] = []
+    for blk in re.findall(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        text, re.IGNORECASE | re.DOTALL,
+    ):
+        try:
+            doc = json.loads(blk.strip())
+        except Exception:
+            continue
+        def _faq_walk(node):
+            nonlocal faq_question_count, faq_short_answer_count
+            if isinstance(node, dict):
+                if node.get("@type") == "FAQPage":
+                    for q in node.get("mainEntity", []) or []:
+                        if not isinstance(q, dict):
+                            continue
+                        faq_question_count += 1
+                        ans = q.get("acceptedAnswer") or {}
+                        text_val = ans.get("text", "") if isinstance(ans, dict) else ""
+                        wc = len(str(text_val).split())
+                        faq_answer_words.append(wc)
+                        if wc < 20:
+                            faq_short_answer_count += 1
+                if isinstance(node.get("@graph"), list):
+                    for c in node["@graph"]:
+                        _faq_walk(c)
+            elif isinstance(node, list):
+                for c in node:
+                    _faq_walk(c)
+        _faq_walk(doc)
+    if faq_answer_words:
+        faq_avg_answer_words = round(sum(faq_answer_words) / len(faq_answer_words), 1)
+
+    # CollectionPage / ItemList numberOfItems coverage. Google's rich-result
+    # docs say ItemList must declare numberOfItems for carousel eligibility.
+    has_itemlist_numberOfItems = (
+        "numberOfItems" in (jsonld_field_coverage.get("ItemList") or [])
+        or "numberOfItems" in (jsonld_field_coverage.get("CollectionPage") or [])
+    )
+
+    # Featured-product Amazon CTA position — for revenue_focus sites, an
+    # above-the-fold Amazon affiliate link on the PDP is the conversion
+    # path. We compute a coarse signal: does the FIRST 25% of <main>
+    # already contain at least one outbound amazon.com link?
+    main_quartile = main_html[: max(1, len(main_html) // 4)]
+    has_amazon_above_fold = bool(
+        re.search(r'<a[^>]+href=["\'][^"\']*amazon\.[a-z.]+/[^"\']+["\']', main_quartile)
+    )
+
     # Performance-hint tags in <head>
     head_html = _find(r"<head[^>]*>(.*?)</head>") or text
     preconnect = len(re.findall(r'rel=["\']preconnect["\']', head_html, re.IGNORECASE))
@@ -1240,6 +1392,16 @@ def _extract_page_meta(html: bytes) -> dict:
         "has_pros_cons": has_pros_cons,
         "has_specs_attribution": has_specs_attribution,
         "has_visible_date": has_visible_date,
+        "hreflang_links": hreflang_links,
+        "footer_trust_links": footer_trust_links,
+        "breadcrumb_visible_items": breadcrumb_visible_items,
+        "breadcrumb_jsonld_items": breadcrumb_jsonld_items,
+        "trust_signal_count": trust_signal_count,
+        "faq_question_count": faq_question_count,
+        "faq_short_answer_count": faq_short_answer_count,
+        "faq_avg_answer_words": faq_avg_answer_words,
+        "has_itemlist_numberOfItems": has_itemlist_numberOfItems,
+        "has_amazon_above_fold": has_amazon_above_fold,
         "preconnect": preconnect,
         "dns_prefetch": dns_prefetch,
         "preload": preload,
@@ -1277,7 +1439,7 @@ def audit_site_signals(site_cfg, out_dir: Path) -> None:
     try:
         url = f"{base}/robots.txt"
         cache_dir = out_dir / "page-cache"
-        status, body, _ = _http_get_with_cache(url, cache_dir)
+        status, body, _, _ = _http_get_with_cache(url, cache_dir)
         text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
         signals["robots"]["status"] = status
         signals["robots"]["bytes"] = len(text)
@@ -1359,10 +1521,11 @@ def audit_site_signals(site_cfg, out_dir: Path) -> None:
     # ── homepage schema sniff ────────────────────────────────────────
     try:
         cache_dir = out_dir / "page-cache"
-        status, body, _ = _http_get_with_cache(base + "/", cache_dir)
+        status, body, _, home_fetch_ms = _http_get_with_cache(base + "/", cache_dir)
         meta = _extract_page_meta(body) if isinstance(body, (bytes, bytearray)) else _extract_page_meta(str(body).encode())
         signals["homepage"] = {
             "status": status,
+            "fetch_ms": home_fetch_ms,
             "title": meta.get("title", ""),
             "description": meta.get("description", ""),
             "canonical": meta.get("canonical", ""),
@@ -1372,6 +1535,8 @@ def audit_site_signals(site_cfg, out_dir: Path) -> None:
             "h1_count": meta.get("h1_count", 0),
             "internal_links": meta.get("internal_links", 0),
             "word_count": meta.get("word_count", 0),
+            "footer_trust_links": meta.get("footer_trust_links", {}),
+            "hreflang_links": meta.get("hreflang_links", []),
         }
     except Exception as e:
         signals["homepage"]["error"] = str(e)[:300]
@@ -1445,10 +1610,11 @@ def crawl_page_inventory(site_cfg, out_dir: Path) -> None:
                     "url": url, "type": page_type, "fetched_at": _iso_now(),
                 }
                 try:
-                    status, body, cache_path = _http_get_with_cache(url, cache_dir)
+                    status, body, cache_path, fetch_ms = _http_get_with_cache(url, cache_dir)
                     rec["status"] = status
                     rec["html_size"] = len(body)
                     rec["cache_path"] = cache_path
+                    rec["fetch_ms"] = fetch_ms
                     if 200 <= status < 300 or status == 304:
                         meta = _extract_page_meta(body)
                         rec.update(meta)

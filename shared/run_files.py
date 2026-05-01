@@ -52,17 +52,30 @@ def write_recommendations(
     mode: str,
     summary: str,
     recommendations: list[dict],
+    pre_traffic_mode: bool = False,
+    extra: Optional[dict] = None,
 ) -> Path:
     """Write recommendations.json. recommendations is a list of dicts matching
-    the recommendations.schema.json Recommendation definition."""
+    the recommendations.schema.json Recommendation definition.
+
+    pre_traffic_mode: True when GSC has < N impressions/90d, used by the
+    reporter to switch the email layout to lead with content-creation recs.
+    extra: optional dict of additional top-level fields to merge in (e.g.
+    revenue_focus snapshot, total_impr_90d).
+    """
     payload = {
         "schema_version": SCHEMA_VERSIONS["recommendations"],
         "site": site,
         "run_ts": run_ts,
         "mode": mode,
         "summary": summary,
+        "pre_traffic_mode": pre_traffic_mode,
         "recommendations": recommendations,
     }
+    if extra:
+        for k, v in extra.items():
+            if k not in payload:
+                payload[k] = v
     out = run_dir / "recommendations.json"
     out.write_text(json.dumps(payload, indent=2))
     return out
