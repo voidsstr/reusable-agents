@@ -129,6 +129,30 @@ async def lifespan(app: FastAPI):
         logger.info("ghost-reaper periodic sweep started (60s)")
     except Exception as e:
         logger.warning(f"ghost-reaper periodic sweep start failed: {e}")
+    # Pre-warm cold-path caches at startup so the first request after
+    # API restart isn't a multi-second cold hit. Then warmer threads
+    # keep them fresh on TTL cycles.
+    try:
+        from .routes import dispatch as _dispatch
+        from framework.core.status import read_recent_events
+        import threading
+        def _initial_warm():
+            try:
+                _dispatch._refresh_batches_cache()
+                logger.info("batches cache pre-warmed at startup")
+            except Exception as e:
+                logger.warning(f"batches pre-warm failed: {e}")
+            try:
+                # Populates _EVENTS_CACHE
+                read_recent_events(limit=100)
+                logger.info("events cache pre-warmed at startup")
+            except Exception as e:
+                logger.warning(f"events pre-warm failed: {e}")
+        threading.Thread(target=_initial_warm, daemon=True, name="cache-prewarm").start()
+        # Kick off the recurring batches warmer immediately too
+        _dispatch._start_batches_warmer()
+    except Exception as e:
+        logger.warning(f"cache warmer start failed: {e}")
     try:
         loop = asyncio.get_running_loop()
         _install_signal_handlers(loop)
