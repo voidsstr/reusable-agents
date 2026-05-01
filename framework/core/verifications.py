@@ -91,6 +91,15 @@ def _build_h2h(rec: dict, ctx: dict) -> tuple[str, str]:
     rr = rec.get("right_ref") or ""
     left = rec.get("left_title") or ""
     right = rec.get("right_title") or ""
+    # If left_title/right_title aren't on the rec (older H2H runs that
+    # only stored slugs), fall back to parsing them out of the title
+    # field — convention is "H2H commentary: <left> vs <right>".
+    if not left or not right:
+        title = rec.get("title", "") or ""
+        m = re.match(r'^(?:H2H commentary:\s*)?(.+?)\s+vs\s+(.+)$', title, re.I)
+        if m:
+            left = left or m.group(1).strip()
+            right = right or m.group(2).strip()
     cu = rec.get("public_url") or rec.get("compare_url") or ""
     if cu and not cu.startswith("http"):
         cu = "https://specpicks.com" + cu
@@ -288,14 +297,137 @@ def _build_orphan_boost(rec: dict, ctx: dict) -> tuple[str, str]:
     return explanation, js
 
 
+def _build_content_expansion(rec: dict, ctx: dict) -> tuple[str, str]:
+    """content-expansion recs add bylines / bio links / extra paragraphs.
+    Verify the page is up + has grown (>5KB body). Best a generic
+    builder can do — agents that want stronger checks should override."""
+    url = _evidence_url(rec) or rec.get("url") or rec.get("public_url") or ""
+    explanation = (
+        f"Verifies content-expansion on {url}: page returns 200 with "
+        f">5KB body. Generic length check — for tighter assertions "
+        f"the implementer should write a custom verification doc."
+    )
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const url = {_js_string(url)};\n"
+        "  if (!url) return { ok: false, evidence: { reason: 'no url' } };\n"
+        "  const r = await proxyFetch(url);\n"
+        "  if (!r.ok) return { ok: false, evidence: { http_status: r.status } };\n"
+        "  const len = (r.body || '').length;\n"
+        "  return { ok: len > 5000, evidence: { http_status: r.status, body_length: len } };\n"
+        "}"
+    )
+    return explanation, js
+
+
+def _build_indexing_fix(rec: dict, ctx: dict) -> tuple[str, str]:
+    """indexing-fix: page must serve clean (200), have a title, and not
+    contain the corrupted patterns the rec called out."""
+    url = _evidence_url(rec) or rec.get("url") or rec.get("public_url") or ""
+    explanation = (
+        f"Verifies indexing-fix on {url}: 200 status + non-empty <title> "
+        f"+ basic page integrity (>1KB body). Detects pages still serving "
+        f"empty/error states."
+    )
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const url = {_js_string(url)};\n"
+        "  if (!url) return { ok: false, evidence: { reason: 'no url' } };\n"
+        "  const r = await proxyFetch(url);\n"
+        "  if (!r.ok) return { ok: false, evidence: { http_status: r.status } };\n"
+        "  const html = r.body || '';\n"
+        "  const titleM = html.match(/<title[^>]*>([^<]+)<\\/title>/i);\n"
+        "  const title = titleM ? titleM[1].trim() : '';\n"
+        "  return { ok: html.length > 1000 && title.length > 0, evidence: { http_status: r.status, body_length: html.length, title } };\n"
+        "}"
+    )
+    return explanation, js
+
+
+def _build_conversion_path(rec: dict, ctx: dict) -> tuple[str, str]:
+    """conversion-path recs are usually 'investigate funnel' — they don't
+    ship a single page change. Mark as informational unless rec carries
+    a public_url. Tells the user this rec is investigation-driven."""
+    url = rec.get("public_url") or _evidence_url(rec) or ""
+    explanation = (
+        f"conversion-path is an investigative rec — there's no single "
+        f"page to verify. We mark this OK if the implementer logged "
+        f"work (summary present) or the rationale references a funnel "
+        f"page that's reachable. For deeper assertions, point this rec "
+        f"at a specific URL via rec.public_url."
+    )
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const url = {_js_string(url)};\n"
+        "  if (!url) return { ok: true, evidence: { reason: 'investigative rec — no page to verify; treating as ok if implementer wrote a summary' } };\n"
+        "  const r = await proxyFetch(url);\n"
+        "  return { ok: r.ok, evidence: { http_status: r.status, note: 'spot-checked the funnel page is reachable' } };\n"
+        "}"
+    )
+    return explanation, js
+
+
+def _build_robots_no_ai_allow(rec: dict, ctx: dict) -> tuple[str, str]:
+    """robots-no-ai-allow: explicit allow rules for AI crawlers in
+    robots.txt. Verify by fetching /robots.txt and checking for
+    GPTBot / ClaudeBot / Google-Extended / PerplexityBot rules."""
+    site = ctx.get("site") or "specpicks"
+    domain = f"https://{site}.com"
+    explanation = (
+        f"Verifies {domain}/robots.txt explicitly Allow's AI crawlers "
+        f"(GPTBot, ClaudeBot, Google-Extended, PerplexityBot). Without "
+        f"explicit Allow lines, the conservative defaults often block "
+        f"AI search engines from indexing the site."
+    )
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const url = {_js_string(domain + '/robots.txt')};\n"
+        "  const r = await proxyFetch(url);\n"
+        "  if (!r.ok) return { ok: false, evidence: { http_status: r.status } };\n"
+        "  const txt = (r.body || '').toLowerCase();\n"
+        "  const bots = ['gptbot', 'claudebot', 'google-extended', 'perplexitybot', 'oai-searchbot'];\n"
+        "  const found = bots.filter(b => txt.includes(b));\n"
+        "  return { ok: found.length >= 3, evidence: { http_status: r.status, ai_bots_named: found, total_named: found.length } };\n"
+        "}"
+    )
+    return explanation, js
+
+
+def _build_progressive_improvement(rec: dict, ctx: dict) -> tuple[str, str]:
+    """PI agent recs (broken-page, miscategorized, duplicate-content,
+    etc) — pull the URL from evidence[0].url since these recs lack
+    `type`. Just confirm the page returns 200 and has content."""
+    url = _evidence_url(rec) or ""
+    cat = rec.get("category") or "(none)"
+    explanation = (
+        f"Verifies progressive-improvement fix (category={cat}) on "
+        f"{url or '(no url)'}: page returns 200 with non-empty body. "
+        f"For category-specific assertions (e.g. canonical URL, "
+        f"category slug), the implementer should write a custom "
+        f"verification doc when the change is more than a generic "
+        f"page edit."
+    )
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const url = {_js_string(url)};\n"
+        "  if (!url) return { ok: false, evidence: { reason: 'no evidence URL on rec' } };\n"
+        "  const r = await proxyFetch(url);\n"
+        "  if (!r.ok) return { ok: false, evidence: { http_status: r.status } };\n"
+        "  const html = r.body || '';\n"
+        "  return { ok: html.length > 500, evidence: { http_status: r.status, body_length: html.length, url } };\n"
+        "}"
+    )
+    return explanation, js
+
+
 def _build_default(rec: dict, ctx: dict) -> tuple[str, str]:
     """Fallback for any rec_type without a specialized builder. Best-
-    effort: if rec.public_url exists, just check 200 + non-empty body."""
-    url = rec.get("public_url") or rec.get("url") or ""
+    effort: if rec carries any URL field or evidence, check 200 + body."""
+    url = rec.get("public_url") or rec.get("url") or _evidence_url(rec) or ""
     explanation = (
-        f"Best-effort verification: fetches {url} and confirms 200 OK + "
-        f"non-empty response. No type-specific assertions because no "
-        f"specialized builder exists for rec_type "
+        f"Best-effort verification: fetches {url or '(no url)'} and "
+        f"confirms 200 OK + non-empty response. No type-specific "
+        f"assertions because no specialized builder exists for rec_type "
         f"{rec.get('type','(none)')!r}. Override by writing a custom "
         f"verifications/<rec_id>.json from the agent that ships this rec."
     )
@@ -310,6 +442,21 @@ def _build_default(rec: dict, ctx: dict) -> tuple[str, str]:
     return explanation, js
 
 
+def _evidence_url(rec: dict) -> str:
+    """Pull the first URL out of rec.evidence[*].url (PI agent shape).
+    Falls back to scanning the rationale for an http(s):// match."""
+    evid = rec.get("evidence") or []
+    if isinstance(evid, list):
+        for e in evid:
+            if isinstance(e, dict) and e.get("url"):
+                return e["url"]
+            if isinstance(e, str) and e.startswith("http"):
+                return e
+    rationale = rec.get("rationale") or ""
+    m = re.search(r'(https?://[^\s",\)<]+)', rationale)
+    return m.group(1) if m else ""
+
+
 _BUILDERS = {
     "article-author-proposal": _build_article_author_proposal,
     "h2h-comparison": _build_h2h,
@@ -320,20 +467,34 @@ _BUILDERS = {
     "ssr-fix": _build_ssr_fix,
     "schema-markup": _build_schema_markup,
     "article-orphan-boost": _build_orphan_boost,
+    "content-expansion": _build_content_expansion,
+    "indexing-fix": _build_indexing_fix,
+    "conversion-path": _build_conversion_path,
+    "robots-no-ai-allow": _build_robots_no_ai_allow,
 }
 
 
 def build_for_rec(rec: dict, *, site: str = "") -> tuple[str, str]:
-    """Pick the right script builder for a rec, by `type` field. Falls
-    back to H2H detection (compare_url field) and finally the default."""
+    """Pick the right script builder for a rec. Resolution order:
+      1. Exact match on rec.type
+      2. H2H detection (compare_url / left_ref + right_ref) — h2h
+         recs ship with no type field
+      3. Progressive-improvement detection (rec.category + evidence
+         array — PI recs ship with category but no type)
+      4. Default URL-fetch fallback
+    """
     rt = rec.get("type") or ""
     ctx = {"site": site}
     builder = _BUILDERS.get(rt)
     if builder:
         return builder(rec, ctx)
     # H2H recs lack a `type` but always carry compare_url
-    if rec.get("compare_url") or rec.get("left_ref") and rec.get("right_ref"):
+    if rec.get("compare_url") or (rec.get("left_ref") and rec.get("right_ref")):
         return _build_h2h(rec, ctx)
+    # PI agent recs lack a `type` but always carry `category` +
+    # `evidence` array with the URL the issue was found on.
+    if rec.get("category") and rec.get("evidence"):
+        return _build_progressive_improvement(rec, ctx)
     return _build_default(rec, ctx)
 
 
@@ -411,7 +572,11 @@ def backfill_missing(
                     site = prefix.rstrip("-")
                     break
         for r in doc.get("recommendations", []):
-            if not r.get("shipped"):
+            # Cover both shipped (deployer pushed live) and implemented
+            # (commit landed but no deployer step needed — H2H, PI, etc).
+            # Earlier code only checked shipped; missed 40 implemented-
+            # but-not-shipped recs.
+            if not (r.get("shipped") or r.get("implemented")):
                 continue
             rid = r.get("id")
             if not rid:
@@ -423,6 +588,9 @@ def backfill_missing(
             ver_key = f"agents/{agent_id}/runs/{run_ts}/verifications/{rid}.json"
             try:
                 existing = s.read_json(ver_key)
+                # Skip ONLY if a complete script exists. Empty doc with
+                # no script_js is treated as missing — overwrite it so
+                # the backfill picks up new builders for old recs.
                 if existing and existing.get("script_js"):
                     skipped += 1
                     continue

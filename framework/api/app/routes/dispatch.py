@@ -432,14 +432,41 @@ def get_rec_verification_script(run_dir_basename: str, rec_id: str):
         doc = s.read_json(key)
     except Exception:
         doc = None
+    # Generate-on-demand fallback — if the doc isn't there, look up the
+    # rec in the source recommendations.json and let the framework's
+    # verifications module produce one. Persist it for next time.
+    # This means clicking "verify" never 404s as long as the rec exists.
+    if not doc:
+        try:
+            rd = s.read_json(f"agents/{source_agent}/runs/{source_run_ts}/recommendations.json") or {}
+            rec = next(
+                (r for r in (rd.get("recommendations") or [])
+                 if r.get("id") == rec_id),
+                None,
+            )
+            if rec:
+                from framework.core import verifications as _verifs
+                site_hint = ""
+                for prefix in ("specpicks-", "aisleprompt-", "reusable-agents-"):
+                    if source_agent.startswith(prefix):
+                        site_hint = prefix.rstrip("-")
+                        break
+                doc = _verifs.generate_and_persist(
+                    source_agent=source_agent,
+                    source_run_ts=source_run_ts,
+                    rec=rec, site=site_hint,
+                    generated_by="api-on-demand",
+                    storage=s, overwrite=False,
+                )
+        except Exception:
+            doc = None
     if not doc:
         raise HTTPException(
             status_code=404,
             detail={
                 "error": "no verification script for this rec yet",
                 "key_checked": key,
-                "hint": "future implementer runs write verification.json automatically; "
-                        "existing recs need a one-shot backfill (see scripts/backfill-verification.py)",
+                "hint": "rec not found in source run, or framework couldn't generate a script for it",
             },
         )
     return doc
