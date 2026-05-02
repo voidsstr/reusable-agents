@@ -534,6 +534,15 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
                     summary["compliance_fail"] += 1
             except Exception as e:
                 summary["failed"] += 1
+                # Roll back so the next iteration's queries don't fail with
+                # "current transaction is aborted, commands ignored until
+                # end of transaction block." Without this, a single bad
+                # ASIN poisons the connection for the entire run, including
+                # the post-refresh _select_candidates() call.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 decide_cb("error",
                            f"PA-API persist failed for {asin}: {str(e)[:200]}")
         missing = [a for a in chunk if a not in parsed]
@@ -545,6 +554,10 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
                 _stamp_miss(conn, row["id"], "paapi: not in response")
                 summary["processed"] += 1
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 decide_cb("error",
                            f"PA-API miss-stamp failed for {a}: {str(e)[:200]}")
     summary["processed"] = summary["refreshed"] + summary["failed"]
@@ -627,6 +640,11 @@ def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
                     summary["compliance_fail"] += 1
             except Exception as e:
                 summary["failed"] += 1
+                # Rollback the aborted transaction (see PA-API path).
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 decide_cb("error",
                            f"BD persist failed for {asin}: {str(e)[:200]}")
         missing = [a for a in chunk if a not in seen_asins]
@@ -637,6 +655,10 @@ def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
             try:
                 _stamp_miss(conn, row["id"], "brightdata: warning/no-data")
             except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 decide_cb("error",
                            f"BD miss-stamp failed for {a}: {str(e)[:200]}")
     summary["processed"] = summary["refreshed"] + summary["failed"]
@@ -1141,6 +1163,17 @@ class ProductHydrationAgent(AgentBase):
         try:
             self.status("selecting candidates", progress=0.10,
                         current_action=f"batch_size={batch_size}")
+            # Defensive rollback: if anything earlier in this run (price
+            # refresh batches especially) hit a SQL error and the inner
+            # except didn't roll back, the connection is in an aborted-
+            # transaction state and EVERY query fails with "current
+            # transaction is aborted, commands ignored until end of
+            # transaction block." Clearing it here makes the rest of
+            # the run robust to upstream bugs we haven't found yet.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             try:
                 queue = _select_candidates(
                     conn,
