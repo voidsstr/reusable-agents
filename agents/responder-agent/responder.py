@@ -752,14 +752,21 @@ def _write_batch_manifest(run_dir: Path, batches: list[list[str]],
 def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
                        run_ts: str, run_dir: Path,
                        batch_index: int = 0,
-                       batch_total: int = 0) -> None:
-    """Call the configured downstream agent (or just log + exit if --no-dispatch)."""
+                       batch_total: int = 0):
+    """Call the configured downstream agent (or just log + exit if --no-dispatch).
+
+    Returns the spawned ``subprocess.Popen`` (or ``None`` if no dispatch ran),
+    so callers in serial-drain mode can ``proc.wait()`` before the next
+    dispatch. Concurrent dispatches against the same source IP triggered
+    Anthropic edge rate-limiting on 2026-05-02 — drain_auto_queue now
+    serializes by waiting on this Popen between queue items.
+    """
     dispatcher = route.get("dispatcher", {})
     typ = dispatcher.get("type", "")
     script = dispatcher.get("script", "")
     if not script or not Path(script).is_file():
         print(f"  [dispatch] no script configured for type={typ}, action={action} — recorded only", file=sys.stderr)
-        return
+        return None
     env = os.environ.copy()
     env["RESPONDER_ACTION"] = action
     env["RESPONDER_REC_IDS"] = ",".join(rec_ids)
@@ -847,8 +854,10 @@ def trigger_dispatcher(route: dict, action: str, rec_ids: list[str], site: str,
             print(f"  [dispatch] spawned {script} pid={proc.pid} action={action} "
                   f"recs={rec_ids} log={log_path} (no systemd-run — descendant may be cgroup-killed)",
                   file=sys.stderr)
+        return proc
     except Exception as e:
         print(f"  [dispatch] failed: {e}", file=sys.stderr)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1325,7 +1334,7 @@ def drain_auto_queue(cfg: dict) -> int:
             else:
                 print(f"[responder] auto-queue {request_id}: {len(rec_ids)} recs in 1 batch",
                       file=sys.stderr)
-            trigger_dispatcher(
+            proc = trigger_dispatcher(
                 matched_route, action, batches[0], site, run_ts, td,
                 batch_index=1, batch_total=len(batches),
             )
@@ -1338,6 +1347,33 @@ def drain_auto_queue(cfg: dict) -> int:
             except Exception as e:
                 print(f"[responder] auto-queue archive failed for {key}: {e}", file=sys.stderr)
             processed += 1
+            # Serialize: wait for this dispatch to finish before processing the
+            # next queue item. Concurrent dispatches against the same source IP
+            # tripped Anthropic's edge rate-limit on 2026-05-02 (8 parallel
+            # `claude --print` calls → IP-level 429 that blocked all accounts
+            # for hours). Block here so each implementer drains in turn.
+            #
+            # Override timeouts:
+            #   RESPONDER_DISPATCH_WAIT_S — max seconds to wait for one
+            #     dispatch (default 7200 = 2h). After timeout we move on but
+            #     leave the systemd-run scope alive (it may still finish).
+            #   RESPONDER_DISPATCH_GAP_S — sleep between completed dispatches
+            #     (default 30s) to let any leftover IP-rate-limit pressure
+            #     ease before the next implementer hammers the API.
+            if proc is not None:
+                wait_s = int(os.environ.get("RESPONDER_DISPATCH_WAIT_S", "7200"))
+                gap_s = int(os.environ.get("RESPONDER_DISPATCH_GAP_S", "30"))
+                try:
+                    rc = proc.wait(timeout=wait_s)
+                    print(f"[responder] auto-queue {request_id}: dispatch finished "
+                          f"rc={rc}; sleeping {gap_s}s before next",
+                          file=sys.stderr)
+                except subprocess.TimeoutExpired:
+                    print(f"[responder] auto-queue {request_id}: dispatch still running "
+                          f"after {wait_s}s — moving on (scope continues independently)",
+                          file=sys.stderr)
+                if gap_s > 0:
+                    time.sleep(gap_s)
         except Exception as e:
             print(f"[responder] auto-queue error processing {key}: {e}", file=sys.stderr)
     return processed
