@@ -21,6 +21,20 @@ if [ "${CLAUDE_POOL:-1}" != "0" ] && [ -x "$CLAUDE_POOL_ROOT/bin/claude" ]; then
     echo "[implementer] claude-pool routing active (root=$CLAUDE_POOL_ROOT)" >&2
 fi
 
+# Route the implementer's claude --print calls through Cloudflare WARP's
+# local SOCKS5 proxy so we don't hammer Anthropic's edge from the same
+# IP as the interactive Claude Code session. On 2026-05-02 a burst of
+# 8 parallel implementer dispatches tripped Anthropic's IP-level rate
+# limit and blocked all accounts from this IP for hours. Routing only
+# the batched implementer calls through a separate egress IP (WARP)
+# isolates that load. Wrapper falls back to direct exec if WARP isn't
+# running, so this never breaks the implementer if the proxy is down.
+# Disable with IMPLEMENTER_USE_PROXY=0.
+if [ "${IMPLEMENTER_USE_PROXY:-1}" != "0" ] && [ -x "$HOME/.local/bin/claude-via-proxy" ]; then
+    export CLAUDE_POOL_REAL_CLAUDE="$HOME/.local/bin/claude-via-proxy"
+    echo "[implementer] proxy wrapper active (CLAUDE_POOL_REAL_CLAUDE=$CLAUDE_POOL_REAL_CLAUDE)" >&2
+fi
+
 # Trace mode (debugging silent failures from systemd spawn).
 # Disable with IMPLEMENTER_TRACE=0 in env.
 if [ "${IMPLEMENTER_TRACE:-1}" != "0" ]; then
@@ -144,8 +158,42 @@ recs = recs_doc.get("recommendations", []) if isinstance(recs_doc, dict) else re
 recs_by_id = {r.get("id"): r for r in (recs or []) if r.get("id")}
 
 handoff_count = 0
+deduped_count = 0
 keeps = []
 handoff_log = []
+
+# ── Dedupe: don't re-send a handoff for a (target, src_ts, rec_id) tuple
+# that's already in the receiver's queue OR was processed in the past 7
+# days. Without this, every SEO run re-sends the same coverage-gap recs
+# and the receiver's queue churns. Cheap to compute — list_prefix is
+# already used by drain_handoffs, just one extra read per receiver.
+try:
+    from framework.core.storage import get_storage as _get_storage
+    _store = _get_storage()
+    _recent_signatures: dict[str, set[tuple[str, str]]] = {}
+
+    def _signature_set_for(target: str) -> set[tuple[str, str]]:
+        """Set of (source_run_ts, rec_id) tuples this target has seen.
+        Includes both pending queue + past 7 days of processed."""
+        if target in _recent_signatures:
+            return _recent_signatures[target]
+        sigs: set[tuple[str, str]] = set()
+        for prefix in (
+            f"agents/{target}/handoff-queue/",
+            f"agents/{target}/handoff-processed/",
+        ):
+            for k in _store.list_prefix(prefix, limit=500):
+                env = _store.read_json(k) or {}
+                ts = env.get("source_run_ts") or ""
+                rid = env.get("rec_id") or ""
+                if rid:
+                    sigs.add((ts, rid))
+        _recent_signatures[target] = sigs
+        return sigs
+except Exception as _e:
+    print(f"DEDUPE_INIT_FAILED: {_e}", file=sys.stderr)
+    _signature_set_for = None  # type: ignore[assignment]
+
 for rid in sorted(batch_ids):
     rec = recs_by_id.get(rid)
     if not rec:
@@ -156,6 +204,19 @@ for rid in sorted(batch_ids):
     if not target:
         keeps.append(rid)
         continue
+    # Dedupe check: same (target, src_ts, rec_id) sent before? skip.
+    if _signature_set_for is not None:
+        try:
+            sigs = _signature_set_for(target)
+            if (src_ts, rid) in sigs:
+                deduped_count += 1
+                handoff_log.append({
+                    "rec_id": rid, "to": target, "work_type": work_type,
+                    "request_id": "(deduped — already in receiver's queue/archive)",
+                })
+                continue
+        except Exception as e:
+            print(f"DEDUPE_CHECK_FAILED rec={rid}: {e}", file=sys.stderr)
     try:
         request_id = send_handoff(
             from_agent="implementer",
@@ -181,7 +242,7 @@ for rid in sorted(batch_ids):
               file=sys.stderr)
         keeps.append(rid)
 
-print(f"HANDOFFS: {handoff_count}", file=sys.stderr)
+print(f"HANDOFFS: {handoff_count}  deduped={deduped_count}", file=sys.stderr)
 for h in handoff_log:
     print(f"  → {h['rec_id']} → {h['to']} ({h['work_type']})  request_id={h['request_id']}",
           file=sys.stderr)
