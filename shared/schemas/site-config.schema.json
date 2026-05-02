@@ -278,6 +278,16 @@
       "type": "string",
       "description": "Where per-run output dirs are created. Each run writes to <runs_root>/<site.id>/<UTC-ts>/.",
       "default": "~/.reusable-agents/seo/runs"
+    },
+    "handoff_routes": {
+      "type": "object",
+      "description": "Per-site overrides for the rec_type → handler-agent mapping defined in framework.core.work_types.DEFAULT_REC_ROUTING. Keys are rec_type strings; values are agent ids that should receive the handoff for that rec_type. Use this only when the default routing picks the wrong agent for this site (rare). Example: {\"internal-link-add\": \"specpicks-progressive-improvement-agent\"}.",
+      "additionalProperties": { "type": "string" }
+    },
+    "site_handler_overrides": {
+      "type": "object",
+      "description": "Resolves generic blueprint handler ids (e.g. 'article-author-agent', 'progressive-improvement-agent', 'product-hydration-agent') to the per-site instance ids registered with the framework (e.g. 'specpicks-article-author-agent'). The analyzer applies this when tagging a rec's handoff_target so the handoff lands at the right per-site agent. Without overrides, generic ids are used verbatim — works only if a non-namespaced instance is registered.",
+      "additionalProperties": { "type": "string" }
     }
   }
 }
