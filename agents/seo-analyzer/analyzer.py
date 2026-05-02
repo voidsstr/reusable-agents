@@ -3851,7 +3851,15 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
     # valid id counter. Without this the audit fails with "name 'next_id' is not
     # defined" / "name 'max_recs' is not defined" and produces 0 final recs.
     max_recs = int(cfg.get("analyzer", {}).get("max_recs_per_run", 12))
-    _llm_audit_counter = len(recs) + 1
+    # Seed from the highest id the rule passes already used, not just len(recs).
+    # Rule passes may skip/filter many recs (handled-key dedup), so the internal
+    # counter can be much higher than len(recs). Parsing the max existing id avoids
+    # collisions like rec-011 appearing from both rule pass and LLM audit.
+    _existing_max = max(
+        (int(r["id"].split("-")[1]) for r in recs if r.get("id","").startswith("rec-")),
+        default=0,
+    )
+    _llm_audit_counter = _existing_max + 1
     def next_id():
         nonlocal _llm_audit_counter
         rid = f"rec-{_llm_audit_counter:03d}"; _llm_audit_counter += 1; return rid
