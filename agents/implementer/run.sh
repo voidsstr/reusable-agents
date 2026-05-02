@@ -694,6 +694,71 @@ if [ "$COMPLETION_STATUS" = "completed" ]; then
     fi
 fi
 
+# ── Close handoff loop on shipped recs ──────────────────────────────────
+# When this run shipped a rec carrying fulfills_handoff_request_id (set by
+# article-author / progressive-improvement / etc. in their proposal-to-rec
+# conversion), call record_handoff_outcome(outcome="shipped") on the
+# RECEIVING agent so the handoffs.jsonl ledger reflects a terminal state.
+# Without this, every handoff sits at in_progress forever and the digest
+# eventually flags it as stuck even though the work shipped.
+#
+# Only runs on completed-status runs (commit happened OR rec was verified
+# already-implemented). Reads recommendations.json for the source-of-truth
+# fulfills_handoff_request_id field, scoped to the EMAIL_REC_IDS that
+# actually shipped this run.
+if [ "$COMPLETION_STATUS" = "completed" ] && [ -n "$EMAIL_REC_IDS" ] \
+        && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+    PYTHONPATH="$REPO_ROOT" \
+        SHIPPED_REC_IDS="$EMAIL_REC_IDS" \
+        RECS_JSON="$RESPONDER_RUN_DIR/recommendations.json" \
+        DOWNSTREAM_RUN_TS="${RESPONDER_RUN_TS:-}" \
+        GIT_SHA="$GIT_SHA" \
+        python3 - <<'PY' 2>&1 | sed 's/^/[handoff-close] /' || true
+import json, os, sys
+sys.path.insert(0, os.environ["REPO_ROOT"])
+try:
+    from framework.core.handoff import record_handoff_outcome
+except Exception as e:
+    print(f"framework import failed: {e}")
+    sys.exit(0)
+shipped_ids = {
+    r.strip() for r in os.environ.get("SHIPPED_REC_IDS", "").split(",")
+    if r.strip()
+}
+recs_path = os.environ["RECS_JSON"]
+try:
+    recs = json.load(open(recs_path)).get("recommendations", [])
+except Exception as e:
+    print(f"recs.json read failed: {e}")
+    sys.exit(0)
+n = 0
+for r in recs:
+    rid = r.get("id")
+    if rid not in shipped_ids:
+        continue
+    handoff_rid = r.get("fulfills_handoff_request_id")
+    receiver = r.get("fulfills_handoff_receiver_agent")
+    if not handoff_rid or not receiver:
+        continue
+    try:
+        record_handoff_outcome(
+            agent_id=receiver,
+            request_id=handoff_rid,
+            outcome="shipped",
+            outcome_detail=(
+                f"implementer shipped rec={rid} via commit "
+                f"{(os.environ.get('GIT_SHA','') or '')[:8]}"
+            ),
+            downstream_run_ts=os.environ.get("DOWNSTREAM_RUN_TS",""),
+        )
+        n += 1
+        print(f"shipped → {receiver}/{handoff_rid} (rec={rid})")
+    except Exception as e:
+        print(f"record failed for {handoff_rid}: {e}")
+print(f"recorded {n} shipped outcome(s)")
+PY
+fi
+
 # Walk the run dir's recommendations.json to extract titles for nicer email body
 REC_TITLES_JSON=""
 if [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then

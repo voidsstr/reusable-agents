@@ -269,6 +269,24 @@ class ProgressiveImprovementAgent(AgentBase):
         self.status("starting", progress=0.05,
                     current_action=f"site={cfg.site_id}")
 
+        # ── 0. Surface any inbound handoffs from other agents ──────────────
+        # framework.core.work_types routes catalog-broken-image,
+        # catalog-miscategorization, and any cfg.handoff_routes entries here.
+        # AgentBase.pre_run() already drained the queue; we just need to
+        # log them in the decision stream so the LLM analyzer pass sees
+        # them as priority work and the digest reports the inter-agent flow.
+        if self.inbound_handoffs:
+            self.decide(
+                "observation",
+                f"received {len(self.inbound_handoffs)} inbound handoff(s) "
+                f"from: {sorted({h.get('from_agent','?') for h in self.inbound_handoffs})}",
+                evidence={
+                    "rec_types": sorted({(h.get('rec') or {}).get('type','?')
+                                          for h in self.inbound_handoffs}),
+                    "request_ids": [h.get('request_id') for h in self.inbound_handoffs[:10]],
+                },
+            )
+
         # ── 1. Apply any pending user replies from the prior run ────────────
         prior_recs = self._most_recent_recs_path()
         applied = apply_user_responses(
@@ -555,6 +573,60 @@ class ProgressiveImprovementAgent(AgentBase):
             self.decide("action",
                         f"auto-dispatched {len(dispatched)} recs to implementer",
                         evidence={"rec_ids": dispatched})
+
+        # ── 7. Record outcomes for inbound handoffs ─────────────────────────
+        # Mark every drained handoff as in_progress when this run produced
+        # at least one rec covering the same rec_type — same fuzzy-match
+        # logic as the article-author agent. The implementer's post-commit
+        # hook will later promote these to "shipped" when the rec actually
+        # lands in code.
+        try:
+            from framework.core.handoff import record_handoff_outcome
+            HANDOFF_RECTYPE_TO_REC_CATEGORY = {
+                # rec.type from analyzer → category prefixes the PI rec
+                # writer emits when handling that class of work
+                "catalog-broken-image": ("catalog-quality",),
+                "catalog-miscategorization": ("catalog-quality",),
+                "catalog-thin-description": ("catalog-quality", "content"),
+                "quality_audit_fix": ("catalog-quality", "content", "ux"),
+                "onpage-thin-content": ("content",),
+                "onpage-low-internal-linking": ("content", "internal-link"),
+                "article-orphan-boost": ("internal-link", "content"),
+            }
+            produced_categories = {
+                str(r.get("category") or r.get("issue_class") or "")
+                for r in (recs or [])
+            }
+            for h in (self.inbound_handoffs or []):
+                rid = h.get("request_id")
+                if not rid:
+                    continue
+                rec_type = (h.get("rec") or {}).get("type") or ""
+                relevant_prefixes = HANDOFF_RECTYPE_TO_REC_CATEGORY.get(rec_type, ())
+                covered = any(
+                    any(cat.startswith(p) for p in relevant_prefixes)
+                    for cat in produced_categories
+                )
+                if covered:
+                    record_handoff_outcome(
+                        agent_id=self.agent_id,
+                        request_id=rid, outcome="in_progress",
+                        outcome_detail=(
+                            f"PI run produced rec(s) covering rec.type={rec_type}"
+                        ),
+                        downstream_run_ts=self.run_ts,
+                    )
+                else:
+                    record_handoff_outcome(
+                        agent_id=self.agent_id,
+                        request_id=rid, outcome="deferred",
+                        outcome_detail=(
+                            f"no rec produced this run matched rec.type={rec_type}"
+                        ),
+                        downstream_run_ts=self.run_ts,
+                    )
+        except Exception as e:
+            self.decide("error", f"handoff outcome record failed: {e}")
 
         self.status("done", progress=1.0, state="success")
         return RunResult(
