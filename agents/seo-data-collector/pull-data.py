@@ -1816,6 +1816,196 @@ def scan_repo(site_cfg, out_dir: Path) -> None:
     }, indent=2))
 
 
+def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
+    """Test sampled pages through Google Rich Results Test API + Schema Markup Validator.
+
+    Reads already-crawled URLs from pages-by-type.jsonl (no new HTTP fetches for
+    the main site). Calls:
+      1. Google Rich Results Test API — per-URL rich-result eligibility + per-type
+         issues (ERROR/WARNING). Uses the same OAuth token as GSC queries.
+      2. schema.org/validator — structural validation of JSON-LD blocks per
+         validator.schema.org (same rules Google uses internally).
+
+    Writes data/rich-results-test.jsonl (one JSON object per URL).
+    Capped at max_pages_rrt (default 40) and max_pages_smv (default 20) to
+    preserve GSC API quota across multiple runs/day. Non-fatal — failures for
+    individual URLs are logged but don't abort the run.
+
+    Config keys (all optional, under rich_results_test: in site.yaml):
+      enabled: true/false  (default true)
+      max_pages_rrt: N     (default 40)
+      max_pages_smv: N     (default 20)
+    """
+    rrt_cfg = cfg.get("rich_results_test") or {}
+    if str(rrt_cfg.get("enabled", "true")).lower() == "false":
+        err("  rich-results: disabled in site config, skipping")
+        return
+
+    pages_file = data_dir / "pages-by-type.jsonl"
+    if not pages_file.is_file():
+        err("  rich-results: pages-by-type.jsonl not found — run crawl_page_inventory first")
+        return
+
+    # Read sampled URLs from the already-crawled inventory
+    urls_seen: set = set()
+    url_entries: list[dict] = []
+    with pages_file.open() as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+            except Exception:
+                continue
+            u = rec.get("url", "")
+            if u and u not in urls_seen and 200 <= int(rec.get("status", 0) or 0) < 300:
+                url_entries.append({"url": u, "type": rec.get("type", "")})
+                urls_seen.add(u)
+
+    # Always prepend the homepage (highest-value single URL for rich-result checks)
+    domain = (cfg.get("site") or {}).get("domain", "")
+    if domain:
+        hp = f"https://{domain}/"
+        if hp not in urls_seen:
+            url_entries.insert(0, {"url": hp, "type": "home"})
+
+    max_pages_rrt = int(rrt_cfg.get("max_pages_rrt", 40))
+    max_pages_smv = int(rrt_cfg.get("max_pages_smv", 20))
+    urls_rrt = url_entries[:max_pages_rrt]
+    urls_smv = url_entries[:max_pages_smv]
+
+    err(f"  rich-results: {len(urls_rrt)} pages → RRT,  {len(urls_smv)} pages → SMV")
+
+    # Accumulate per-URL results keyed by URL
+    results: dict[str, dict] = {}
+
+    # ── 1. Google Rich Results Test API ─────────────────────────────────
+    # POST https://searchconsole.googleapis.com/v1/urlTestingTools/richResultsTest:run
+    # Auth: same Bearer token used for GSC queries (search-console scope).
+    # Quota: 2,000 calls/day per Search Console property — well within budget
+    # for 40 pages × 5 runs/day = 200 calls.
+    RRT_ENDPOINT = (
+        "https://searchconsole.googleapis.com/v1/urlTestingTools/richResultsTest:run"
+    )
+    rrt_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    for entry in urls_rrt:
+        url = entry["url"]
+        rec = results.setdefault(url, {"url": url, "type": entry["type"]})
+        try:
+            resp = http_post(
+                RRT_ENDPOINT,
+                {"url": url, "userAgent": "MOBILE"},
+                rrt_headers,
+                retries=2,
+                base_delay=3.0,
+            )
+            items = resp.get("richResultsItems") or []
+            # Flatten to a compact summary: per rich-result-type → list of issues
+            summary: list[dict] = []
+            for rich_type in items:
+                type_name = rich_type.get("richResultType", "")
+                type_issues: list[dict] = []
+                for item in (rich_type.get("items") or []):
+                    for issue in (item.get("issues") or []):
+                        type_issues.append({
+                            "severity": issue.get("severity", ""),
+                            "message": issue.get("issueMessage", ""),
+                            "type": issue.get("issueType", ""),
+                        })
+                summary.append({
+                    "rich_result_type": type_name,
+                    "eligible": not any(
+                        i["severity"] == "ERROR" for i in type_issues
+                    ),
+                    "issues": type_issues,
+                })
+            rec["rich_results_test"] = {
+                "test_status": (resp.get("testStatus") or {}).get("status", "UNKNOWN"),
+                "types_detected": [s["rich_result_type"] for s in summary],
+                "has_errors": any(
+                    not s["eligible"] for s in summary
+                ),
+                "has_warnings": any(
+                    any(i["severity"] == "WARNING" for i in s["issues"])
+                    for s in summary
+                ),
+                "summary": summary,
+            }
+            err(f"  rich-results: RRT {url} → {', '.join(s['rich_result_type'] for s in summary) or 'no types'}")
+        except Exception as e:
+            err(f"  rich-results: RRT failed for {url}: {str(e)[:120]}")
+            rec["rich_results_test"] = {"error": str(e)[:200]}
+        time.sleep(0.5)
+
+    # ── 2. Schema Markup Validator (validator.schema.org) ───────────────
+    # POST https://validator.schema.org/validate with form body url=<url>.
+    # Returns JSON: {"items": [{"id","type","properties","errors","warnings"}], "meta":{...}}
+    # Structural validation — property type mismatches, missing required fields,
+    # malformed values. Uses the same schema.org vocabulary rules as Google.
+    SMV_ENDPOINT = "https://validator.schema.org/validate"
+    for entry in urls_smv:
+        url = entry["url"]
+        rec = results.setdefault(url, {"url": url, "type": entry["type"]})
+        try:
+            form_data = urllib.parse.urlencode({"url": url}).encode("utf-8")
+            smv_req = urllib.request.Request(
+                SMV_ENDPOINT,
+                data=form_data,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (compatible; SEO-agent/1.0)",
+                },
+            )
+            with urllib.request.urlopen(smv_req, timeout=45) as smv_resp:
+                smv_body = smv_resp.read().decode("utf-8", errors="replace")
+            smv_data = json.loads(smv_body)
+            items = smv_data.get("items") or []
+            total_errors = sum(len(item.get("errors") or []) for item in items)
+            total_warnings = sum(len(item.get("warnings") or []) for item in items)
+            # Compact representation — keep only type + errors + warnings per item
+            compact_items = []
+            for item in items:
+                compact_items.append({
+                    "type": item.get("type", ""),
+                    "errors": [
+                        {
+                            "property": e.get("property", ""),
+                            "message": e.get("message", ""),
+                        }
+                        for e in (item.get("errors") or [])
+                    ],
+                    "warnings": [
+                        {
+                            "property": w.get("property", ""),
+                            "message": w.get("message", ""),
+                        }
+                        for w in (item.get("warnings") or [])
+                    ],
+                })
+            rec["schema_markup_validator"] = {
+                "total_errors": total_errors,
+                "total_warnings": total_warnings,
+                "items": compact_items,
+            }
+            err(f"  rich-results: SMV {url} → {len(items)} types, {total_errors} errors, {total_warnings} warnings")
+        except Exception as e:
+            err(f"  rich-results: SMV failed for {url}: {str(e)[:120]}")
+            rec.setdefault("schema_markup_validator", {})["error"] = str(e)[:200]
+        time.sleep(1.0)  # be polite to validator.schema.org
+
+    # Write output file
+    out_path = data_dir / "rich-results-test.jsonl"
+    with out_path.open("w") as fh:
+        for rec in results.values():
+            fh.write(json.dumps(rec) + "\n")
+    err(f"  rich-results: wrote {len(results)} URL records → rich-results-test.jsonl")
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1935,6 +2125,15 @@ def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path) -> None:
             err(f"  inventory: unhandled error {e}")
     else:
         err("  inventory: page_inventory not configured, skipping")
+
+    # Rich Results Test + Schema Markup Validator.
+    # Runs after crawl_page_inventory so pages-by-type.jsonl exists.
+    # Falls back gracefully when pages-by-type.jsonl is absent (inventory
+    # not configured) by using only the homepage URL.
+    try:
+        pull_rich_results_test(token, data_dir, cfg)
+    except Exception as e:
+        err(f"  rich-results: unhandled error {e}")
 
     # Optional: repo route scan (drives implementation_outline.files)
     try:

@@ -1659,6 +1659,230 @@ def _add_article_amazon_attribution_recs(
     })
 
 
+def _add_rich_results_api_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Produce recs from Google Rich Results Test API + Schema Markup Validator.
+
+    Reads data/rich-results-test.jsonl written by pull_rich_results_test().
+    Emits up to 3 recs (errors, warnings, schema-validator-errors) aggregated
+    across all tested pages. All three are low-effort + high-impact: fixing
+    ERROR issues unlocks rich-result eligibility immediately; WARNING fixes
+    harden eligibility; structural SMV errors suppress the schema type entirely.
+    """
+    rrt_file = data / "rich-results-test.jsonl"
+    if not rrt_file.is_file():
+        return
+
+    records: list[dict] = []
+    with rrt_file.open() as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                records.append(json.loads(raw))
+            except Exception:
+                pass
+    if not records:
+        return
+
+    # ── Parse Rich Results Test (per rich_results_test key) ─────────────
+    error_pages: list[dict] = []   # pages with ≥1 ERROR issue (ineligible)
+    warning_pages: list[dict] = [] # pages with only WARNINGs (eligible but fragile)
+
+    for rec in records:
+        url = rec.get("url", "")
+        rrt = rec.get("rich_results_test") or {}
+        if rrt.get("error"):
+            continue  # API call failed for this URL — skip
+        summary = rrt.get("summary") or []
+        errors_here: list[str] = []
+        warnings_here: list[str] = []
+        for s in summary:
+            rtype = s.get("rich_result_type", "")
+            for issue in (s.get("issues") or []):
+                msg = issue.get("message", "")
+                sev = issue.get("severity", "")
+                label = f"{rtype}: {msg}" if rtype else msg
+                if sev == "ERROR":
+                    errors_here.append(label)
+                elif sev == "WARNING":
+                    warnings_here.append(label)
+        if errors_here:
+            error_pages.append({
+                "url": url,
+                "type": rec.get("type", ""),
+                "issues": errors_here,
+            })
+        elif warnings_here:
+            warning_pages.append({
+                "url": url,
+                "type": rec.get("type", ""),
+                "issues": warnings_here,
+            })
+
+    if error_pages and len(recs) < max_recs:
+        # Count issue frequency to surface the most common blocking pattern
+        freq: dict[str, int] = {}
+        for p in error_pages:
+            for issue in p["issues"]:
+                freq[issue] = freq.get(issue, 0) + 1
+        top = sorted(freq, key=lambda k: -freq[k])[:5]
+
+        rid = next_id()
+        recs.append({
+            "id": rid,
+            "type": "rich-result-error",
+            "priority": "high",
+            "title": (
+                f"Fix rich-result ERRORS — {len(error_pages)} page(s) ineligible "
+                f"for Google rich snippets"
+            ),
+            "rationale": (
+                f"Google Rich Results Test (MOBILE) returned ERROR-severity issues "
+                f"on {len(error_pages)} crawled page(s). These pages are currently "
+                f"INELIGIBLE for rich results (star ratings, recipe cards, "
+                f"breadcrumb trails, sitelinks) — Google won't show the enhanced "
+                f"SERP card at all until the errors are fixed. "
+                f"Most common blocking issue: {top[0] if top else 'see affected_pages'}. "
+                f"Verify any URL at https://search.google.com/test/rich-results."
+            ),
+            "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 3},
+            "data_refs": ["data/rich-results-test.jsonl"],
+            "implementation_outline": {
+                "approach": (
+                    "For each URL in affected_pages: open "
+                    "https://search.google.com/test/rich-results, paste the URL, "
+                    "and fix every ERROR. Common patterns: missing required field "
+                    "(add the field to JSON-LD template), wrong value type "
+                    "(e.g. ratingValue must be Number not String), or image "
+                    "missing/wrong size (≥696px wide for Recipe/Product). "
+                    "Re-test after fixing. One template fix typically resolves "
+                    "the same error across all pages of that type."
+                ),
+            },
+            "sample_urls": [p["url"] for p in error_pages[:5]],
+            "top_issues": top,
+            "affected_pages": error_pages[:10],
+            "implemented": False,
+        })
+
+    if warning_pages and len(recs) < max_recs:
+        freq_w: dict[str, int] = {}
+        for p in warning_pages:
+            for issue in p["issues"]:
+                freq_w[issue] = freq_w.get(issue, 0) + 1
+        top_w = sorted(freq_w, key=lambda k: -freq_w[k])[:5]
+
+        rid = next_id()
+        recs.append({
+            "id": rid,
+            "type": "rich-result-warning",
+            "priority": "medium",
+            "title": (
+                f"Resolve rich-result WARNINGS on {len(warning_pages)} page(s) "
+                f"for robust eligibility"
+            ),
+            "rationale": (
+                f"Google Rich Results Test found WARNING-severity issues on "
+                f"{len(warning_pages)} page(s). These pages are currently eligible "
+                f"for rich results, but warnings indicate optional-but-recommended "
+                f"fields are missing (e.g. Recipe.nutrition, Product.mpn, "
+                f"Article.dateModified). Google may demote the rich result if "
+                f"competing pages resolve the same warnings. "
+                f"Top warning: {top_w[0] if top_w else 'see affected_pages'}."
+            ),
+            "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 6},
+            "data_refs": ["data/rich-results-test.jsonl"],
+            "implementation_outline": {
+                "approach": (
+                    "Resolve each WARNING at "
+                    "https://search.google.com/test/rich-results. "
+                    "Typical fixes: add Recipe.nutrition / cookTime / recipeYield; "
+                    "add Product.mpn + brand.name; set Article.dateModified "
+                    "distinct from datePublished; ensure images are ≥696px wide. "
+                    "These fields are 'recommended' by Google's spec — adding them "
+                    "unlocks additional SERP features (nutrition facts, price ranges)."
+                ),
+            },
+            "sample_urls": [p["url"] for p in warning_pages[:5]],
+            "top_issues": top_w,
+            "affected_pages": warning_pages[:10],
+            "implemented": False,
+        })
+
+    # ── Parse Schema Markup Validator results ────────────────────────────
+    smv_error_pages: list[dict] = []
+    for rec in records:
+        url = rec.get("url", "")
+        smv = rec.get("schema_markup_validator") or {}
+        if smv.get("error") or not smv.get("items"):
+            continue
+        schema_errors: list[dict] = []
+        for item in (smv.get("items") or []):
+            type_name = item.get("type", "")
+            for e in (item.get("errors") or []):
+                schema_errors.append({
+                    "schema_type": type_name,
+                    "property": e.get("property", ""),
+                    "message": e.get("message", ""),
+                })
+        if schema_errors:
+            smv_error_pages.append({
+                "url": url,
+                "type": rec.get("type", ""),
+                "errors": schema_errors,
+            })
+
+    if smv_error_pages and len(recs) < max_recs:
+        freq_s: dict[str, int] = {}
+        for p in smv_error_pages:
+            for e in p["errors"]:
+                key = f"{e['schema_type']}.{e['property']}: {e['message']}"
+                freq_s[key] = freq_s.get(key, 0) + 1
+        top_s = sorted(freq_s, key=lambda k: -freq_s[k])[:5]
+
+        rid = next_id()
+        recs.append({
+            "id": rid,
+            "type": "schema-validator-error",
+            "priority": "high",
+            "title": (
+                f"Fix schema.org structural errors on {len(smv_error_pages)} page(s)"
+            ),
+            "rationale": (
+                f"validator.schema.org found structural errors on "
+                f"{len(smv_error_pages)} page(s) — property type mismatches, "
+                f"missing required sub-properties, or malformed values. Google's "
+                f"structured-data parser uses the same schema.org vocabulary "
+                f"rules; these errors cause Google to silently ignore the schema "
+                f"block entirely rather than rendering a partial rich result. "
+                f"Top error: {top_s[0] if top_s else 'see affected_pages'}. "
+                f"Verify at https://validator.schema.org/."
+            ),
+            "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 4},
+            "data_refs": ["data/rich-results-test.jsonl"],
+            "implementation_outline": {
+                "approach": (
+                    "Paste the page URL into https://validator.schema.org/ to see "
+                    "per-property errors with property paths and expected types. "
+                    "Common fixes: ensure Rating.ratingValue is a Number (not "
+                    "'4.5' string), nest Offer inside Product (not top-level), "
+                    "verify @context is 'https://schema.org' (not 'http://'), "
+                    "use ImageObject for image (not bare URL string) when "
+                    "Google requires the ImageObject form. One template fix "
+                    "typically resolves the same error class site-wide."
+                ),
+            },
+            "sample_urls": [p["url"] for p in smv_error_pages[:5]],
+            "top_issues": top_s,
+            "affected_pages": [{
+                "url": p["url"],
+                "errors": p["errors"][:3],
+            } for p in smv_error_pages[:10]],
+            "implemented": False,
+        })
+
+
 def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
     """Flag pages with outbound Amazon links that lack a `?tag=<id>` —
     direct affiliate revenue leak."""
@@ -3296,6 +3520,7 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
     for fn, label in [
         (_add_amazon_tag_recs, "amazon-tag"),
         (lambda d, r, n, m: _add_revenue_focus_recs(cfg, d, r, n, m), "revenue-focus"),
+        (_add_rich_results_api_recs, "rich-results-api"),
         (_add_jsonld_field_completeness_recs, "jsonld-completeness"),
         (_add_article_template_recs, "article-template"),
         (_add_pros_cons_recs, "pros-cons"),
