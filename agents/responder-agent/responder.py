@@ -1280,14 +1280,30 @@ def drain_auto_queue(cfg: dict) -> int:
                 continue
 
             # Find a route — auto-queue routes through the implementer like
-            # SEO replies. Pick the first route with a usable implementer
-            # script. Most simple match: agent_subject_tag=seo.
+            # email replies. Resolution order:
+            #   1. payload.subject_tag exact match on route.match.agent_subject_tag
+            #      (preferred — site-aware when route also has site_id_re)
+            #   2. agent_subject_tag=seo (legacy default for SEO triggers)
+            #   3. any route with implementer dispatcher
+            payload_tag = (payload.get("subject_tag") or "").lower()
             matched_route = None
-            for route in routes:
-                m = route.get("match", {})
-                if m.get("agent_subject_tag") == "seo":
+            if payload_tag:
+                import re as _re
+                for route in routes:
+                    m = route.get("match", {})
+                    if m.get("agent_subject_tag") != payload_tag:
+                        continue
+                    site_re = m.get("site_id_re")
+                    if site_re and site and not _re.match(site_re, site):
+                        continue
                     matched_route = route
                     break
+            if not matched_route:
+                for route in routes:
+                    m = route.get("match", {})
+                    if m.get("agent_subject_tag") == "seo":
+                        matched_route = route
+                        break
             if not matched_route:
                 # Fallback: any route with implementer dispatcher
                 for route in routes:

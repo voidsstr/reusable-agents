@@ -709,6 +709,7 @@ def _write_auto_queue(cfg, run_dir: Path, run_ts: Optional[str] = None) -> None:
             "schema_version": "1",
             "request_id": request_id,
             "source_agent": agent_id,
+            "subject_tag": "seo",
             "site": cfg.site_id,
             "run_ts": run_ts,
             "rec_ids": [r["id"] for r in recs],
