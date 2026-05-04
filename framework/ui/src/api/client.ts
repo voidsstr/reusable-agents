@@ -158,6 +158,25 @@ export const api = {
     annotations: { ts: string; rec_id: string; title: string; goal_id: string; kind: 'shipped' | 'implemented' }[]
   }>(`/api/agents/${encodeURIComponent(id)}/goals/timeseries?limit_runs=${limitRuns}`),
 
+  /** Fast pre-aggregated cache (preferred over timeseries — single storage read) */
+  goalsCache: (id: string) => http<{
+    agent_id: string
+    updated_at: string
+    goals: Record<string, {
+      points: { ts: string; value: number; run_ts?: string }[]
+      latest_value?: number
+      latest_ts?: string
+    }>
+    definitions_only?: boolean
+  }>(`/api/agents/${encodeURIComponent(id)}/goals/cache`),
+
+  /** High-resolution per-goal progress (used when expanding a goal's chart) */
+  goalProgress: (id: string, goalId: string, limit = 500) => http<{
+    agent_id: string
+    goal_id: string
+    points: { ts: string; value: number; run_ts?: string; note?: string }[]
+  }>(`/api/agents/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/progress?limit=${limit}`),
+
   // implementer dispatch queue
   implementerQueue: (limit = 20) => http<{
     pending: { agent_id: string; request_id?: string; site?: string; from_run?: string; rec_ids?: string[]; action?: string; ts?: string; _key?: string }[];

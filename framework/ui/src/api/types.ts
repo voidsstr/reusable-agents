@@ -32,6 +32,9 @@ export interface AgentSummary {
   ai_kind?: string
   ai_model?: string
   ai_uses_claude?: boolean
+  ai_manifest_provider?: string
+  ai_manifest_model?: string
+  ai_source?: string  // 'override' | 'manifest' | 'default' | 'unset'
 }
 
 export interface AgentDetail extends AgentSummary {

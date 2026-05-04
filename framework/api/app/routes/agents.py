@@ -113,6 +113,17 @@ class AgentSummary(BaseModel):
     ai_kind: str = ""            # e.g. "claude-cli", "ollama", "anthropic"
     ai_model: str = ""           # default model
     ai_uses_claude: bool = False # convenience flag — uses Claude (any path)
+    # The agent's MANIFEST-declared AI config, before any override is
+    # applied. Populated from manifest.metadata.ai. Surfaced here so
+    # the /llms page can show override-vs-manifest source without doing
+    # an N+1 follow-up GET /api/agents/<id> per agent (was ~15s for 39
+    # agents on production).
+    ai_manifest_provider: str = ""
+    ai_manifest_model: str = ""
+    # Why the effective provider+model was picked: "override" |
+    # "manifest" | "default" | "unset". Same resolution order as
+    # framework.core.ai_providers.ai_client_for().
+    ai_source: str = ""
 
 
 class AgentDetail(AgentSummary):
@@ -290,6 +301,29 @@ def _summary(m: registry.AgentManifest,
     ai_name, ai_kind, ai_model, uses_claude = _resolve_ai_summary(
         m.id, providers_cache=providers_cache, defaults_cache=defaults_cache,
     )
+    # Manifest-declared AI config (from manifest.metadata.ai). Useful
+    # for the /llms page to show override-vs-manifest source without
+    # an N+1 GET /api/agents/<id> per agent.
+    metadata = getattr(m, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    manifest_ai = metadata.get("ai") or {}
+    if not isinstance(manifest_ai, dict):
+        manifest_ai = {}
+    manifest_provider = str(manifest_ai.get("provider") or "")
+    manifest_model = str(manifest_ai.get("model") or "")
+    # Source resolution mirrors framework.core.ai_providers.ai_client_for():
+    #   override > manifest > default > unset
+    overrides = (defaults_cache or {}).get("agent_overrides") or {}
+    ovr = overrides.get(m.id) or {}
+    if isinstance(ovr, dict) and (ovr.get("provider") or ovr.get("model")):
+        ai_source = "override"
+    elif manifest_provider or manifest_model:
+        ai_source = "manifest"
+    elif (defaults_cache or {}).get("default_provider"):
+        ai_source = "default"
+    else:
+        ai_source = "unset"
     return AgentSummary(
         id=m.id, name=m.name, description=m.description, category=m.category,
         task_type=m.task_type, cron_expr=m.cron_expr, timezone=m.timezone,
@@ -303,6 +337,9 @@ def _summary(m: registry.AgentManifest,
         ai_kind=ai_kind,
         ai_model=ai_model,
         ai_uses_claude=uses_claude,
+        ai_manifest_provider=manifest_provider,
+        ai_manifest_model=manifest_model,
+        ai_source=ai_source,
     )
 
 
@@ -427,8 +464,19 @@ def discover(req: DiscoverRequest):
     return {"ok": True, **result}
 
 
+_GET_ONE_CACHE: dict[str, tuple[float, "AgentDetail"]] = {}
+_GET_ONE_TTL_S = 5.0  # tight enough that toggle-state shows up quickly,
+                      # loose enough to absorb tab clicks + back/forward
+                      # nav without re-loading 2.6s of run-list + markdown
+
+
 @router.get("/{agent_id}", response_model=AgentDetail)
 def get_one(agent_id: str):
+    import time as _t
+    now = _t.monotonic()
+    cached = _GET_ONE_CACHE.get(agent_id)
+    if cached and (now - cached[0]) < _GET_ONE_TTL_S:
+        return cached[1]
     m = registry.get_agent(agent_id)
     if m is None:
         raise HTTPException(status_code=404, detail=f"unknown agent {agent_id!r}")
@@ -498,7 +546,7 @@ def get_one(agent_id: str):
             confirmation_status = {"approved": None}
 
     base = _summary(m, providers_cache=providers_cache, defaults_cache=defaults_cache).dict()
-    return AgentDetail(
+    detail = AgentDetail(
         **base,
         repo_dir=m.repo_dir,
         runbook_path=m.runbook_path,
@@ -515,6 +563,8 @@ def get_one(agent_id: str):
         recent_runs=runs,
         confirmation_status=confirmation_status,
     )
+    _GET_ONE_CACHE[agent_id] = (now, detail)
+    return detail
 
 
 @router.patch("/{agent_id}", response_model=AgentSummary)
@@ -540,13 +590,21 @@ def patch(agent_id: str, req: PatchRequest):
     if patch_dict:
         registry.update_agent(agent_id, patch_dict, storage=s)
 
+    _bust_get_one_cache(agent_id)
     return _summary(registry.get_agent(agent_id, storage=s))
+
+
+def _bust_get_one_cache(agent_id: str) -> None:
+    """Invalidate the /api/agents/<id> TTL cache entry so the next
+    GET reflects an enable/disable/patch/trigger we just performed."""
+    _GET_ONE_CACHE.pop(agent_id, None)
 
 
 @router.post("/{agent_id}/enable")
 def enable(agent_id: str):
     m = registry.update_agent(agent_id, {"enabled": True})
     if m is None: raise HTTPException(status_code=404, detail="unknown agent")
+    _bust_get_one_cache(agent_id)
     return {"ok": True, "enabled": True}
 
 
@@ -554,6 +612,7 @@ def enable(agent_id: str):
 def disable(agent_id: str):
     m = registry.update_agent(agent_id, {"enabled": False})
     if m is None: raise HTTPException(status_code=404, detail="unknown agent")
+    _bust_get_one_cache(agent_id)
     return {"ok": True, "enabled": False}
 
 
@@ -561,6 +620,7 @@ def disable(agent_id: str):
 def deregister(agent_id: str, delete_storage: bool = False):
     ok = registry.deregister_agent(agent_id, delete_storage=delete_storage)
     if not ok: raise HTTPException(status_code=404, detail="unknown agent")
+    _bust_get_one_cache(agent_id)
     # Best-effort: remove systemd timer if it was autowired
     try: scheduler.remove_systemd_units(agent_id)
     except Exception: pass

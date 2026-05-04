@@ -498,7 +498,11 @@ function RunsTab({ agentId }: { agentId: string }) {
 
   const refresh = async () => {
     setLoading(true)
-    try { setRuns(await api.listRuns(agentId, 200)) }
+    // 50 = the run-index.json fast-path cap. Asking for >50 falls
+    // through to the server's slow list_prefix legacy path; the page
+    // only renders the most-recent few anyway, so 50 is plenty for
+    // first-paint. (Cuts ~2s off the AgentDetail load.)
+    try { setRuns(await api.listRuns(agentId, 50)) }
     catch (e) { console.error(e) }
     finally { setLoading(false) }
   }
