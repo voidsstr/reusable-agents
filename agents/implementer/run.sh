@@ -548,6 +548,20 @@ EOF
                 AIDER_BIN="$(command -v aider)"
             fi
 
+            # Aider is a code-editing tool — it has no DB / HTTP / Read /
+            # Bash tools. The article-author and h2h runbooks REQUIRE those
+            # tools (write to editorial_articles, fetch live URLs, run
+            # SQL). Falling back to aider on those dispatches produces
+            # rc=0 + zero work shipped (the LLM responds "I can't do this
+            # without DB access"). Defer cleanly instead so the next
+            # claude-pool reset retries with the proper toolchain.
+            case "$DISPATCH_KIND" in
+                article-author|h2h|catalog-audit)
+                    echo "[implementer] $DISPATCH_KIND requires DB/Read/Bash tools — skipping aider fallback (defer until claude-pool reset)" >&2
+                    AIDER_BIN=""
+                    ;;
+            esac
+
             if [ "$COPILOT_OK" = "1" ] && [ -n "$AIDER_BIN" ]; then
                 echo "[implementer] falling back to aider via copilot-api ($FALLBACK_MODEL)" >&2
                 # Aider in --message mode: one-shot prompt, auto-edit,

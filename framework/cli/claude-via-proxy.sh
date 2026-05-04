@@ -25,23 +25,25 @@ if (echo > /dev/tcp/${PROXY_HOST}/${PROXY_PORT}) >/dev/null 2>&1; then
     USE_PROXY=1
 fi
 
-# Locate the real claude binary. The pool sets CLAUDE_POOL_REAL_CLAUDE
-# when running through claude-pool exec; otherwise we walk PATH.
-REAL_CLAUDE="${CLAUDE_POOL_REAL_CLAUDE:-}"
-if [ -z "$REAL_CLAUDE" ]; then
-    # Skip ourselves on PATH lookup so we don't recurse.
-    SELF="$(readlink -f "$0")"
-    OIFS="$IFS"
-    IFS=":"
-    for d in $PATH; do
-        cand="$d/claude"
-        [ -x "$cand" ] || continue
-        [ "$(readlink -f "$cand")" = "$SELF" ] && continue
-        REAL_CLAUDE="$cand"
-        break
-    done
-    IFS="$OIFS"
-fi
+# Locate the real claude binary by walking PATH. We deliberately do NOT
+# read CLAUDE_POOL_REAL_CLAUDE — the pool sets that env var to OUR OWN
+# path so it spawns this wrapper, and reading it here would cause
+# `exec "$REAL_CLAUDE"` to re-enter this script in an infinite loop.
+# Symptom of the bug: bash pinned at ~67% CPU forever, no claude session
+# files, no API traffic. The PATH walk below skips entries whose
+# realpath equals this script, landing on the actual claude binary.
+SELF="$(readlink -f "$0")"
+REAL_CLAUDE=""
+OIFS="$IFS"
+IFS=":"
+for d in $PATH; do
+    cand="$d/claude"
+    [ -x "$cand" ] || continue
+    [ "$(readlink -f "$cand")" = "$SELF" ] && continue
+    REAL_CLAUDE="$cand"
+    break
+done
+IFS="$OIFS"
 if [ -z "$REAL_CLAUDE" ] || [ ! -x "$REAL_CLAUDE" ]; then
     echo "[claude-via-proxy] cannot find real claude binary" >&2
     exit 127
