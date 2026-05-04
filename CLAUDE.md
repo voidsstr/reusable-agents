@@ -1,5 +1,74 @@
 # Claude Instructions — reusable-agents framework
 
+> ## ⚠️ FRAMEWORK-FIRST POLICY — READ EVERY SESSION ⚠️
+>
+> **Every change MUST be evaluated for framework abstraction BEFORE
+> writing the first line of code.** Ask:
+>
+> 1. **"Could another site or agent ever want this?"** If yes → it goes
+>    in `framework/core/` or `framework/cli/` and is **configurable per
+>    deployment**.
+> 2. **"Is the LOGIC site-specific, or only the VALUES?"** Logic →
+>    framework with knobs. Values (DSNs, brand voice, slugs) → site repo
+>    or per-deployment storage config.
+> 3. **"If I deploy this framework somewhere else tomorrow, would they
+>    have to fork my changes to get value?"** If yes — STOP, refactor as
+>    framework primitive + config now, NOT later.
+>
+> **Required pattern: primitive + config + extension point.** Every new
+> framework feature ships as:
+>
+> - A reusable primitive in `framework/core/<name>.py` with no
+>   site-specific assumptions
+> - A storage-backed config (`config/<name>-config.json`) so each
+>   deployment can override behavior without code changes
+> - A manifest field (added to `framework/core/registry.py`
+>   `AgentManifest`) when per-agent override matters
+> - A CLI entry point in `framework/cli/<name>.py` when shell-side
+>   callers (host-worker, scripts) need it
+> - **Default config that ships sensible behavior out of the box** so
+>   first-time users don't need to configure anything to get going
+>
+> **Anti-patterns that MUST be refactored on sight:**
+>
+> - `if site == "specpicks": ...` in framework code — extract to config
+> - Hardcoded agent-id lists in `host-worker.sh`, `responder.py`,
+>   anywhere in `framework/` — move to a storage config
+> - Duplicate logic in two site-agent `agent.py` files — lift to
+>   `framework/core/` and have both call into it
+> - Site-specific tier/priority/threshold constants — config-driven
+>   per deployment
+> - "I'll abstract it later" — there is no later
+>
+> **Reference implementations of this pattern:**
+>
+> - [`framework/core/priority.py`](framework/core/priority.py) +
+>   [`framework/cli/priority.py`](framework/cli/priority.py) +
+>   `config/priority-config.json` — agent queue priority tiers
+> - [`framework/core/short_circuit.py`](framework/core/short_circuit.py) —
+>   skip-LLM-when-inputs-unchanged primitives
+> - [`framework/core/work_types.py`](framework/core/work_types.py) +
+>   per-site `handoff_routes` in `site.yaml` — rec routing
+> - [`framework/core/article_mentions.py`](framework/core/article_mentions.py) —
+>   article-product mention extraction (used by any site)
+>
+> **When in doubt, build it in the framework.** Cost of unnecessary
+> abstraction: small (one extra file). Cost of duplicated site logic:
+> drift, fan-out bugs, broken priority across sites.
+>
+> **The contract with every site (aisleprompt, specpicks, future sites):**
+> sites are *config consumers*, never *code-fork targets*. A site repo
+> contributes a `manifest.json` + `site.yaml` + (optional) per-site
+> `prompts/*.md`. It does NOT contribute logic, branching, or
+> "site-specific overrides" embedded in framework code. If a feature
+> can't be expressed through (a) a storage config the framework reads,
+> (b) a manifest field, or (c) a `site.yaml` knob — STOP and add the
+> missing extension point to the framework before writing the feature.
+> This applies to EVERY change, not just obviously-shared ones — even
+> a fix for one site goes through the same gate. No site has special
+> status; aisleprompt and specpicks are reference deployments, not
+> privileged.
+
 ## What this repo is
 
 A self-hostable framework for running scheduled / triggered LLM agents.
@@ -215,6 +284,42 @@ Python core under `framework/core/`:
 | `email_codes.py` | Subject-tag encode/decode for routing replies |
 | `guardrails.py` | `Capability` declaration dataclass |
 | `mailer.py` | Outbound mailer interface (LogMailer + Graph + SMTP impls) |
+| `handoff.py` + `work_types.py` | Inter-agent handoff routing |
+| `resilience.py` | `safe_run`, `with_retry`, `notify_operator`, `invoke_doctor` |
+| `short_circuit.py` | Skip-LLM-when-inputs-unchanged primitives — `signal_hash`, `snapshot_hash`, `should_skip`, `partition_by_hash`, `merge_findings_cache`. **Any agent that fires on a cron and only sometimes has new work to do MUST use these** rather than re-rolling its own hashing logic. |
+| `ai_providers.py` | Provider/model registry — agents call `ai_client_for(agent_id)` and the framework resolves via overrides + defaults |
+
+## LLM efficiency — required patterns for every agent
+
+The framework provides primitives that EVERY new agent should use rather
+than reinventing. Failing to use them costs tokens AND introduces drift:
+
+1. **`framework.core.short_circuit.signal_hash` / `snapshot_hash`** —
+   hash an agent's inputs (excludes timestamps, rounds floats). Use
+   `should_skip(self.state, "last_signals_hash", sig)` at the top of
+   `run()` to skip the LLM call when nothing has changed since the last
+   successful run. Persist the hash to `next_state["last_signals_hash"]`.
+
+2. **`framework.core.short_circuit.partition_by_hash`** — for
+   per-page / per-product / per-row LLM analysis. Skips items whose
+   hash matches the prior run + replays prior findings via
+   `merge_findings_cache`.
+
+3. **`framework.core.resilience.safe_run`** — wrap any external call
+   (LLM, HTTP, DB) so the framework handles retries + operator-alert on
+   final failure. Don't roll your own try/except retry loops.
+
+4. **`framework.core.handoff.send_handoff`** — when your agent finds
+   work that belongs to a specialist (article generation, code edit, …),
+   send a handoff. Don't try to do work outside your role.
+
+5. **Always batch LLM calls when iterating over N items.** A single
+   structured-output prompt with N items is dramatically cheaper than N
+   individual prompts. See `competitor-research-agent._extract_features_batched`
+   for the canonical pattern.
+
+**Rule of thumb:** if you're about to add a `for item in items: client.chat(...)`
+loop, stop and ask whether you can do it in one batched call instead.
 
 API service: `framework/api/app/main.py` (FastAPI). 35 routes + 2 WS
 streams. Token auth via `FRAMEWORK_API_TOKEN`.
@@ -268,6 +373,69 @@ curl -sI https://<fqdn>/ | head -3
 
 If the user reports "the dashboard doesn't show my change," your first
 check should be: did this task include a deploy-azure.sh run?
+
+## Per-site app deployments — pick a recipe, edit the site.yaml
+
+When an agent commits **application code** (not just data), the
+framework's deployer chains into a 5-stage pipeline so the change
+ships without manual intervention:
+
+```
+test → build → push → deploy → smoke_check
+```
+
+Every stage is a shell command template. The deployer is cloud-agnostic
+— whatever `bash` can do, this can deploy.
+
+**To configure a site for deployment**:
+
+1. Pick a recipe from `examples/deployer/`:
+   - `azure-container-apps.yaml` — **active**, used by aisleprompt + specpicks
+   - `azure-app-service.yaml` — Azure App Service (sample)
+   - `azure-functions.yaml` — Azure Functions (sample)
+   - `aws-ecs-fargate.yaml` — AWS ECS Fargate + ECR (sample)
+   - `aws-lambda.yaml` — AWS Lambda container image + ECR (sample)
+   - `aws-app-runner.yaml` — AWS App Runner + ECR (sample)
+2. Drop the entire `deployer:` block from the recipe into the site's
+   `site.yaml` (under the same key).
+3. Edit `deploy.vars:` for the site (app name, resource group, image
+   URI, etc.). Every key here is expanded as `{key}` in any stage's
+   `cmd:`.
+4. Make sure the deployer host has the cloud CLI configured (az login
+   for Azure, aws configure for AWS, etc.) and docker reachable.
+
+**Where existing sites declare their deployer**:
+
+| Site         | Path                                                                                  |
+|--------------|---------------------------------------------------------------------------------------|
+| aisleprompt  | `nsc-assistant/agents/aisleprompt-seo-opportunity-agent/site.yaml`                   |
+| specpicks    | `specpicks/agents/seo-opportunity-agent/site.yaml`                                   |
+
+**When the deployer SKIPS itself** (intentional):
+
+| Dispatch kind     | Behavior  | Why |
+|-------------------|-----------|-----|
+| `article-author`  | skip      | articles ship via DB INSERT — no docker build needed |
+| `catalog-audit`   | skip      | DB-only fixes |
+| `h2h`             | skip      | DB-only |
+| `IMPLEMENTER_SKIP_DEPLOY=1`  | skip | env override (manual rollbacks, debug runs) |
+| anything else     | run       | the per-batch deployer fires |
+
+**To add a new cloud target**:
+
+1. Copy any of the dormant recipes in `examples/deployer/` as a starting
+   point.
+2. The framework's `agents/seo-deployer/deployer.py` does NOT need to
+   change — it just runs whatever shell commands you give it. So to
+   add Kubernetes, GCP Cloud Run, Cloudflare Workers, etc., you just
+   write the recipe.
+3. Add it to the recipe table in `examples/deployer/README.md` and the
+   table in this section.
+
+**Don't hardcode cloud-specific logic in `deployer.py`** — every site's
+target is config, not code. If you find yourself wanting a per-cloud
+branch in the framework, that's a sign the recipe is missing a knob.
+Add the knob to the recipe + README and keep the deployer dumb.
 
 ## Hosting note
 

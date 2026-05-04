@@ -1,0 +1,57 @@
+# Azure App Service (Linux Container) + ACR
+#
+# Status: dormant — sample only. Drop into any site's site.yaml when
+# ready to use.
+#
+# Differences vs. azure-container-apps:
+#   * App Service revisions are managed via `az webapp config container
+#     set` instead of `az containerapp update`.
+#   * Deploy completion is async — App Service pulls the image after
+#     the config update returns; the smoke_check below catches the
+#     warm-up window.
+#
+# Prereqs on the deployer host:
+#   * az CLI logged in
+#   * docker daemon reachable
+#   * The webapp + plan + resource group exist
+#   * The webapp's identity has AcrPull on the registry
+#
+# Substitution placeholders:
+#   {tag}    UTC timestamp
+#   {image}  vars.image
+#   {app}    vars.app (the webapp name)
+#   {rg}     vars.rg
+#   {plan}   vars.plan (App Service plan, optional reference)
+
+deployer:
+  test:
+    cwd: tests
+    cmd: TEST_URL=http://localhost:8080 npx playwright test --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile -t {image}:{tag} .
+
+  push:
+    cmd: az acr login --name {registry} && docker push {image}:{tag}
+
+  deploy:
+    cmd: |
+      az webapp config container set \
+        --name {app} --resource-group {rg} \
+        --container-image-name {image}:{tag} \
+        --container-registry-url https://{registry}.azurecr.io \
+        && az webapp restart --name {app} --resource-group {rg}
+    vars:
+      app: my-app
+      rg: my-rg
+      plan: my-plan
+      registry: myregistry
+      image: myregistry.azurecr.io/my-app
+
+  smoke_check:
+    base_url: https://my-app.azurewebsites.net
+    paths:
+      - /
+      - /healthz
+    timeout_seconds: 90        # App Service container pulls take longer

@@ -1,0 +1,78 @@
+# AWS ECS Fargate + ECR
+#
+# Status: dormant — sample only.
+#
+# Pattern:
+#   * Build container, tag with the run timestamp
+#   * Push to ECR
+#   * Update the ECS service to force a new task definition revision
+#     pointing at the new image, then `update-service` triggers a
+#     rolling deploy
+#
+# Prereqs on the deployer host:
+#   * aws CLI configured (env vars or profile)
+#   * docker daemon reachable
+#   * The cluster + service + task definition family exist
+#   * The IAM role used has ecr:* and ecs:UpdateService at minimum
+#
+# Substitution placeholders:
+#   {tag}        UTC timestamp
+#   {image}      vars.image (full ECR URI without tag)
+#   {cluster}    vars.cluster
+#   {service}    vars.service
+#   {task_family} vars.task_family
+#   {region}     vars.region
+#   {account_id} vars.account_id
+
+deployer:
+  test:
+    cwd: tests
+    cmd: TEST_URL=http://localhost:4001 npx playwright test --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile -t {image}:{tag} -t {image}:latest .
+
+  push:
+    cmd: |
+      aws ecr get-login-password --region {region} \
+        | docker login --username AWS --password-stdin \
+            {account_id}.dkr.ecr.{region}.amazonaws.com \
+        && docker push {image}:{tag} \
+        && docker push {image}:latest
+
+  deploy:
+    # Register a new task-definition revision with the new image, then
+    # update the service to use it. ECS does a rolling deploy honoring
+    # the service's deploymentConfiguration (min/max healthy %).
+    cmd: |
+      NEW_TASK_ARN=$(aws ecs register-task-definition \
+        --region {region} \
+        --cli-input-json "$(aws ecs describe-task-definition \
+          --task-definition {task_family} --region {region} \
+          --query 'taskDefinition' \
+          | jq --arg img '{image}:{tag}' \
+              '.containerDefinitions[0].image = $img
+               | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,
+                     .compatibilities,.registeredAt,.registeredBy)')" \
+        --query 'taskDefinition.taskDefinitionArn' --output text) \
+      && aws ecs update-service \
+           --region {region} \
+           --cluster {cluster} \
+           --service {service} \
+           --task-definition "$NEW_TASK_ARN" \
+           --force-new-deployment
+    vars:
+      region: us-east-1
+      account_id: "123456789012"
+      cluster: my-cluster
+      service: my-service
+      task_family: my-task
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app
+
+  smoke_check:
+    base_url: https://my-app.example.com
+    paths:
+      - /
+      - /healthz
+    timeout_seconds: 120       # ECS rolling deploys are slower than ACA

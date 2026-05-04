@@ -1,0 +1,48 @@
+# Azure Functions (consumption / premium plan, container deployment)
+#
+# Status: dormant — sample only.
+#
+# This recipe targets containerized Functions apps (custom Docker image)
+# rather than the zip-deploy code path. For zip deploys, replace the
+# build/push stages with `func azure functionapp publish ...`.
+#
+# Prereqs on the deployer host:
+#   * az CLI + Azure Functions Core Tools (`func`) installed
+#   * The functionapp + plan + resource group exist
+#   * The functionapp's identity has AcrPull on the registry
+#
+# Substitution placeholders:
+#   {tag}    UTC timestamp
+#   {image}  vars.image
+#   {app}    vars.app (functionapp name)
+#   {rg}     vars.rg
+
+deployer:
+  test:
+    cwd: .
+    cmd: npm test -- --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile -t {image}:{tag} .
+
+  push:
+    cmd: az acr login --name {registry} && docker push {image}:{tag}
+
+  deploy:
+    cmd: |
+      az functionapp config container set \
+        --name {app} --resource-group {rg} \
+        --image {image}:{tag} \
+        --registry-server https://{registry}.azurecr.io
+    vars:
+      app: my-functions
+      rg: my-rg
+      registry: myregistry
+      image: myregistry.azurecr.io/my-functions
+
+  smoke_check:
+    base_url: https://my-functions.azurewebsites.net
+    paths:
+      - /api/health
+    timeout_seconds: 120       # cold-start can be slow on consumption plan

@@ -1,0 +1,67 @@
+# AWS App Runner + ECR
+#
+# Status: dormant — sample only.
+#
+# App Runner is the closest AWS analog to Azure Container Apps:
+# managed compute, automatic HTTPS, pay-per-request scaling. This
+# recipe builds the image, pushes to ECR, and triggers the App Runner
+# service to redeploy with the new image.
+#
+# Prereqs on the deployer host:
+#   * aws CLI configured
+#   * docker daemon reachable
+#   * The App Runner service already exists, configured to deploy from
+#     ECR (set ImageRepositoryType=ECR with auto-deploy off — this
+#     recipe pushes the deploy explicitly so each tag is versioned)
+#
+# Placeholders:
+#   {tag}        UTC timestamp
+#   {image}      vars.image (ECR URI without tag)
+#   {service}    vars.service (App Runner service ARN OR name)
+#   {region}     vars.region
+#   {account_id} vars.account_id
+
+deployer:
+  test:
+    cwd: tests
+    cmd: TEST_URL=http://localhost:4001 npx playwright test --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile -t {image}:{tag} .
+
+  push:
+    cmd: |
+      aws ecr get-login-password --region {region} \
+        | docker login --username AWS --password-stdin \
+            {account_id}.dkr.ecr.{region}.amazonaws.com \
+        && docker push {image}:{tag}
+
+  deploy:
+    # Update App Runner to the new tag — start-deployment kicks off a
+    # rolling deploy that App Runner manages.
+    cmd: |
+      SERVICE_ARN=$(aws apprunner list-services \
+        --region {region} \
+        --query "ServiceSummaryList[?ServiceName=='{service}'].ServiceArn" \
+        --output text) \
+      && aws apprunner update-service \
+           --region {region} \
+           --service-arn "$SERVICE_ARN" \
+           --source-configuration "{\"ImageRepository\":{\"ImageIdentifier\":\"{image}:{tag}\",\"ImageRepositoryType\":\"ECR\"}}" \
+           > /dev/null \
+      && aws apprunner start-deployment \
+           --region {region} --service-arn "$SERVICE_ARN" \
+           --query 'OperationId' --output text
+    vars:
+      region: us-east-1
+      account_id: "123456789012"
+      service: my-app-runner-service
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app
+
+  smoke_check:
+    base_url: https://abcdef.us-east-1.awsapprunner.com
+    paths:
+      - /
+      - /healthz
+    timeout_seconds: 90

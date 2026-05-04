@@ -1,0 +1,63 @@
+# AWS Lambda (container-image deployment) + ECR
+#
+# Status: dormant — sample only.
+#
+# Lambda supports container images up to 10 GB. This recipe builds the
+# image, pushes to ECR, then updates the function to point at the new
+# image SHA. Cold-start latency is the trade-off for not running a
+# persistent service.
+#
+# Prereqs on the deployer host:
+#   * aws CLI configured
+#   * docker daemon reachable
+#   * The function exists (deploy stage updates it; doesn't create it)
+#   * The function's execution role has lambda:UpdateFunctionCode +
+#     ecr:* on the registry
+#
+# Placeholders:
+#   {tag}         UTC timestamp
+#   {image}       vars.image (ECR URI without tag)
+#   {function}    vars.function
+#   {region}      vars.region
+#   {account_id}  vars.account_id
+
+deployer:
+  test:
+    cwd: .
+    cmd: npm test -- --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile.lambda -t {image}:{tag} .
+
+  push:
+    cmd: |
+      aws ecr get-login-password --region {region} \
+        | docker login --username AWS --password-stdin \
+            {account_id}.dkr.ecr.{region}.amazonaws.com \
+        && docker push {image}:{tag}
+
+  deploy:
+    cmd: |
+      aws lambda update-function-code \
+        --region {region} \
+        --function-name {function} \
+        --image-uri {image}:{tag} \
+        --publish \
+        --query 'Version' --output text \
+      && aws lambda wait function-updated \
+           --region {region} --function-name {function}
+    vars:
+      region: us-east-1
+      account_id: "123456789012"
+      function: my-handler
+      image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-handler
+
+  smoke_check:
+    # If the Lambda is fronted by API Gateway / Function URL, point
+    # base_url at that endpoint. Lambda direct-invoke isn't HTTP, so
+    # this only works for HTTP-triggered functions.
+    base_url: https://abcdef.lambda-url.us-east-1.on.aws
+    paths:
+      - /
+    timeout_seconds: 60        # absorb first-invoke cold start

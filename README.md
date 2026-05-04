@@ -621,6 +621,66 @@ Messages persist in `shared/messages/` indefinitely — useful for analytics
   + `trigger_token_env`; the framework's trigger endpoint POSTs to
   Anthropic's `/fire` API instead of the host-worker queue.
 
+## Deploying applications the agents touch
+
+When an agent commits code (e.g., the SEO implementer applies a snippet
+fix to `frontend/src/pages/RecipePage.tsx`), the framework can chain
+straight into a 5-stage deploy pipeline so the change reaches
+production without manual intervention:
+
+```
+test → build → push → deploy → smoke_check
+```
+
+The deployer is **cloud-agnostic by design** — every stage is just a
+shell command template. Whatever you can express in `bash` (Azure CLI,
+AWS CLI, kubectl, Terraform, custom scripts), you can deploy.
+
+### Configuring per site
+
+Each site declares its own pipeline under `deployer:` in its
+`site.yaml`. Drop in any recipe from `examples/deployer/`:
+
+| Recipe                                                     | Target                            | Status |
+|------------------------------------------------------------|-----------------------------------|--------|
+| [`azure-container-apps.yaml`](examples/deployer/azure-container-apps.yaml) | Azure Container Apps + ACR       | **active** |
+| [`azure-app-service.yaml`](examples/deployer/azure-app-service.yaml)       | Azure App Service + ACR          | sample |
+| [`azure-functions.yaml`](examples/deployer/azure-functions.yaml)           | Azure Functions (consumption)    | sample |
+| [`aws-ecs-fargate.yaml`](examples/deployer/aws-ecs-fargate.yaml)           | AWS ECS Fargate + ECR            | sample |
+| [`aws-lambda.yaml`](examples/deployer/aws-lambda.yaml)                     | AWS Lambda + ECR                 | sample |
+| [`aws-app-runner.yaml`](examples/deployer/aws-app-runner.yaml)             | AWS App Runner + ECR             | sample |
+
+Sample recipes are valid YAML you can copy verbatim — they just aren't
+currently used by any production site, so they're shipped as
+documentation. The two active recipes are wired into aisleprompt and
+specpicks today.
+
+### When the deployer fires
+
+Per-batch — every successful implementer batch chains into deploy
+unless the dispatch is DB-only (article-author / catalog-audit / h2h)
+or `IMPLEMENTER_SKIP_DEPLOY=1` is in the environment.
+
+### Substitution variables
+
+Every stage's `cmd:` runs through a template substitution before exec:
+
+| Variable     | Source                                       |
+|--------------|----------------------------------------------|
+| `{tag}`      | UTC timestamp set at deploy start            |
+| `{image}`    | `deploy.vars.image`                          |
+| `{app}`      | `deploy.vars.app`                            |
+| `{rg}`       | `deploy.vars.rg` (or any other `vars:` key)  |
+| `{<custom>}` | any key under `deploy.vars:`                 |
+
+`{tag}` and `{image}` are top-level — every stage sees them. Anything
+else under `deploy.vars:` is also expanded everywhere via the same
+template substitution. So a Kubernetes recipe could set
+`cluster: prod-eks` and reference `{cluster}` in any stage.
+
+See [`examples/deployer/README.md`](examples/deployer/README.md) for
+recipe-by-recipe details.
+
 ## Operational rules
 
 - Never `--no-verify` on git commit — release-tagger fails the run if hooks fail.

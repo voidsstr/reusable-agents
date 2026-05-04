@@ -1,0 +1,47 @@
+# Azure Container Apps + Azure Container Registry
+#
+# Used by: aisleprompt, specpicks (production)
+#
+# Prereqs on the deployer host:
+#   * az CLI logged in: `az login` (or service-principal env)
+#   * docker daemon reachable
+#   * The container app + resource group already exist
+#   * The ACR registry already exists and the runtime has pull access
+#
+# Each {placeholder} is substituted at deploy time:
+#   {tag}    UTC timestamp set at deploy start
+#   {image}  vars.image
+#   {app}    vars.app
+#   {rg}     vars.rg
+#
+# Drop this whole block into a site's `site.yaml` under `deployer:`.
+
+deployer:
+  test:
+    cwd: tests
+    cmd: TEST_URL=http://localhost:4001 npx playwright test --config=pw.config.ts --reporter=line
+
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
+
+  push:
+    cmd: az acr login --name nscappsacr && docker push {image}:{tag}
+
+  deploy:
+    cmd: az containerapp update --name {app} --resource-group {rg} --image {image}:{tag}
+    vars:
+      app: aisleprompt
+      rg: nsc-apps
+      image: nscappsacr.azurecr.io/aisleprompt
+
+  smoke_check:
+    base_url: https://aisleprompt.com
+    paths:
+      - /
+      - /sitemap.xml
+      - /sitemap-collections.xml
+      - /recipes
+      - /meal-plan
+      - /shoppinglist
+    timeout_seconds: 30
