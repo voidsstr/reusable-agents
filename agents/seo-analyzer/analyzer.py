@@ -317,6 +317,34 @@ def find_prior_snapshot(cfg, latest_run_ts: str) -> Optional[Path]:
     return None
 
 
+def _snapshot_signature(snap: dict) -> str:
+    """Stable hash of a snapshot's MATERIAL inputs (excludes timestamps).
+    Two runs with the same signature produce the same recommendations, so
+    we can short-circuit the rule passes + LLM audit when nothing changed.
+
+    Delegates to the framework primitive in framework.core.short_circuit
+    so all agents use identical hashing semantics.
+    """
+    if not isinstance(snap, dict):
+        return ""
+    try:
+        # Use the LOSSY variant: GSC/GA4 deliver tiny metric drift every
+        # tick (one extra session, five extra impressions). The exact
+        # `snapshot_hash` would never short-circuit on a real production
+        # site because of that drift, even when downstream recommendations
+        # would be identical. `lossy_snapshot_hash` quantizes metrics
+        # into wide buckets and drops low-traffic per-URL entries so the
+        # signature only changes on materially-meaningful shifts.
+        from framework.core.short_circuit import lossy_snapshot_hash
+        return lossy_snapshot_hash(snap)
+    except Exception:
+        # Defensive fallback if the framework module isn't importable
+        # (e.g. legacy test harness without PYTHONPATH set).
+        import hashlib
+        blob = json.dumps(snap, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()[:24]
+
+
 def build_comparison(snap: dict, prior: dict) -> dict:
     def delta(now, then):
         if isinstance(now, (int, float)) and isinstance(then, (int, float)):
@@ -636,6 +664,100 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
                         ),
                     },
                     "sample_urls": _samples(no_h1 + many_h1, 5),
+                    "implemented": False,
+                })
+
+        # Canonical — missing or duplicate. Multi-canonical fires when an
+        # SSR layer injects a `<link rel=canonical>` on top of the SPA's
+        # default. Google flags it as a "Conflicting canonical" warning in
+        # GSC and may pick the wrong one.
+        if _budget():
+            no_canon = [p for p in ok_pages if int(p.get("canonical_count", 0) or 0) == 0]
+            many_canon = [p for p in ok_pages if int(p.get("canonical_count", 0) or 0) > 1]
+            if (no_canon or many_canon) and (len(no_canon) + len(many_canon)) >= 1:
+                rid = next_id()
+                recs.append({
+                    "id": rid, "type": "onpage-canonical-issue", "priority": "medium",
+                    "title": (
+                        f"Fix canonical on {len(no_canon) + len(many_canon)} page(s) — "
+                        f"exactly one <link rel='canonical'> per page"
+                    ),
+                    "rationale": (
+                        f"{len(no_canon)} page(s) have no canonical (Google self-canonicalizes "
+                        f"by URL — duplicates with tracking params get split rank signal). "
+                        f"{len(many_canon)} page(s) have multiple canonicals (GSC flags 'Conflicting "
+                        f"canonical', and Google picks one at random). Both states leak link equity. "
+                        f"Studio-supplies rule: SSR layer must REPLACE the index.html canonical, "
+                        f"not append a second one."
+                    ),
+                    "expected_impact": {"metric": "gsc.indexed_pages", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Audit the SSR layer's canonical injection. Replace the existing "
+                            "<link rel='canonical'> tag instead of appending — see seo-reporter's "
+                            "injectOgTags() for the canonical-replace pattern."
+                        ),
+                    },
+                    "sample_urls": _samples(no_canon + many_canon, 5),
+                    "implemented": False,
+                })
+
+        # Broken slug-only internal links — body anchor hrefs that are
+        # neither absolute (http://) nor root-relative (/foo) nor
+        # anchor/mailto/tel. They resolve relative to the current path,
+        # which 404s the moment the article is reached from anywhere
+        # other than the literal path the author imagined. Common when
+        # an LLM-driven implementer writes markdown like
+        # `[Recipe Title](recipe-slug)` and the SSR markdown renderer
+        # doesn't rewrite slug-only hrefs to `/recipes/<slug>`.
+        if _budget():
+            broken_link_pages = [
+                p for p in ok_pages
+                if int(p.get("body_relative_link_count", 0) or 0) > 0
+            ]
+            if len(broken_link_pages) >= 1:
+                rid = next_id()
+                # Build per-page evidence list with sample bad hrefs so
+                # the implementer rec ships actionable data.
+                evidence = []
+                for p in broken_link_pages[:10]:
+                    evidence.append({
+                        "url": p.get("url", ""),
+                        "broken_count": p.get("body_relative_link_count", 0),
+                        "samples": p.get("body_relative_link_samples") or [],
+                    })
+                total_broken = sum(int(p.get("body_relative_link_count", 0) or 0)
+                                   for p in broken_link_pages)
+                recs.append({
+                    "id": rid, "type": "broken-internal-link", "priority": "high",
+                    "title": (
+                        f"Rewrite {total_broken} slug-only internal link(s) on "
+                        f"{len(broken_link_pages)} page(s) — currently 404 for any reader "
+                        f"reaching them from a non-literal path"
+                    ),
+                    "rationale": (
+                        "Body anchors with hrefs like `classic-beef-stir-fry` (no leading /) "
+                        "resolve relative to the current URL — so `/blog/some-post` linking to "
+                        "`classic-beef-stir-fry` becomes `/blog/classic-beef-stir-fry` (404). "
+                        "Internal-link 404s deindex the source page over time and waste crawl "
+                        "budget. The fix is mechanical: SSR markdown renderer must rewrite "
+                        "slug-only hrefs to the canonical content path (`/recipes/<slug>` for "
+                        "recipe links, `/k/<slug>` for product links)."
+                    ),
+                    "expected_impact": {"metric": "gsc.indexed_pages", "horizon_weeks": 4},
+                    "data_refs": ["data/pages-by-type.jsonl"],
+                    "implementation_outline": {
+                        "approach": (
+                            "Find the SSR markdown→HTML helper for the affected page type "
+                            "(grep for `mdToHtml` or similar). In its link rule, when the href "
+                            "doesn't start with http://, https://, /, #, mailto:, or tel:, "
+                            "prepend the canonical content prefix. Also fix the article-author "
+                            "agent's runbook to instruct the LLM to write absolute paths."
+                        ),
+                        "evidence": evidence,
+                    },
+                    "sample_urls": _samples(broken_link_pages, 5),
                     "implemented": False,
                 })
 
@@ -3778,6 +3900,96 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
     (run_dir / "snapshot.json").write_text(json.dumps(snap, indent=2))
     print(f"  ✓ snapshot.json ({snap['gsc_90d']['num_queries']} queries, "
           f"{snap['gsc_90d']['total_impressions']:,} impressions)", file=sys.stderr)
+
+    # 1b. Short-circuit: if the input bundle is materially identical to the
+    # last successful run, skip the rule passes + LLM audit. The analyzer's
+    # output depends ~entirely on the snapshot (GSC + page-type counts +
+    # catalog stats), so when those don't change there's nothing new to
+    # recommend. At 2h cadence on a quiet site this skips ~10/12 daily
+    # runs. Disable with SEO_DISABLE_UNCHANGED_SHORTCIRCUIT=1.
+    if os.environ.get("SEO_DISABLE_UNCHANGED_SHORTCIRCUIT") != "1":
+        prior_path = find_prior_snapshot(cfg, run_ts)
+        if prior_path and prior_path.is_file():
+            try:
+                prior_snap = json.loads(prior_path.read_text())
+                # Two paths to short-circuit:
+                #   1. lossy snapshot signature matches (quiet-site case)
+                #   2. last successful run was < min_interval_hours ago
+                #      (active-site case where GSC drift busts the hash
+                #      every tick but data refreshes ~daily anyway)
+                hashes_match = (
+                    _snapshot_signature(snap) == _snapshot_signature(prior_snap)
+                )
+                from framework.core.short_circuit import too_soon_to_rerun
+                min_h = float(os.environ.get("SEO_MIN_RERUN_HOURS", "6"))
+                # Prior run timestamp from its run-dir name (UTC ISO-ish).
+                prior_ts = prior_path.parent.name  # e.g. 20260504T041500Z
+                prior_iso = (
+                    f"{prior_ts[:4]}-{prior_ts[4:6]}-{prior_ts[6:8]}T"
+                    f"{prior_ts[9:11]}:{prior_ts[11:13]}:{prior_ts[13:15]}Z"
+                ) if len(prior_ts) >= 15 and prior_ts[8] == "T" else None
+                too_soon, hours_ago = too_soon_to_rerun(
+                    prior_iso, min_interval_hours=min_h)
+                if hashes_match or too_soon:
+                    # Replay the prior run's recommendations.json so the
+                    # downstream reporter / responder still see a coherent
+                    # output, but we never touch the LLM. Mark as a no-op
+                    # so the digest can suppress duplicate emails.
+                    prior_recs_path = prior_path.parent / "recommendations.json"
+                    if prior_recs_path.is_file():
+                        prior_recs = json.loads(prior_recs_path.read_text())
+                    else:
+                        prior_recs = {"recommendations": []}
+                    md = prior_recs.setdefault("metadata", {}) if isinstance(prior_recs, dict) else {}
+                    if isinstance(md, dict):
+                        md["short_circuited"] = True
+                        if hashes_match:
+                            md["short_circuit_reason"] = (
+                                f"snapshot signature unchanged since "
+                                f"{prior_path.parent.name}; rule passes + "
+                                f"LLM audit skipped to save tokens"
+                            )
+                        else:
+                            md["short_circuit_reason"] = (
+                                f"prior run {prior_path.parent.name} was "
+                                f"{hours_ago:.1f}h ago < SEO_MIN_RERUN_HOURS="
+                                f"{min_h}h; GSC/GA4 refresh ~daily so a "
+                                f"sub-{int(min_h)}h re-run is wasted work"
+                            )
+                        md["short_circuit_mode"] = (
+                            "snapshot-unchanged" if hashes_match
+                            else "min-rerun-interval"
+                        )
+                        md["short_circuited_at"] = run_ts
+                        md["replayed_from_run"] = prior_path.parent.name
+                    (run_dir / "recommendations.json").write_text(
+                        json.dumps(prior_recs, indent=2)
+                    )
+                    # Also write an empty goals.json so downstream stages
+                    # don't crash on missing files.
+                    if not (run_dir / "goals.json").is_file():
+                        prior_goals = prior_path.parent / "goals.json"
+                        if prior_goals.is_file():
+                            (run_dir / "goals.json").write_text(prior_goals.read_text())
+                        else:
+                            (run_dir / "goals.json").write_text(
+                                json.dumps({"goals": [], "metadata": {"replayed": True}}, indent=2)
+                            )
+                    if hashes_match:
+                        print(f"  ⏭  short-circuit: snapshot unchanged since "
+                              f"{prior_path.parent.name} — replayed "
+                              f"{len((prior_recs or {}).get('recommendations',[]))} "
+                              f"recs, skipped rule passes + LLM audit",
+                              file=sys.stderr)
+                    else:
+                        print(f"  ⏭  short-circuit: prior run "
+                              f"{prior_path.parent.name} was {hours_ago:.1f}h "
+                              f"ago < {min_h}h min-rerun gate — replayed "
+                              f"{len((prior_recs or {}).get('recommendations',[]))} "
+                              f"recs", file=sys.stderr)
+                    return
+            except Exception as e:
+                print(f"  [warn] short-circuit check failed: {e}", file=sys.stderr)
 
     # 2. Compare to prior
     prior_snap_path = find_prior_snapshot(cfg, run_ts)

@@ -33,7 +33,10 @@ the rest of the outline.
 
 Hit `max(expected_word_count, 2000)`. **Articles under 2000 words MUST
 be expanded** — they look thin in the SERP, lose to longer competitors,
-and read as filler. If your draft is short, add:
+and read as filler. The SEO analyzer flags any shipped article whose
+`wordCount` JSON-LD value is below the site's `min_words` threshold;
+those get auto-queued back for expansion the same way as a fresh rec.
+If your draft is short, add:
 - A "Real-world numbers" or "Benchmark table" section with concrete
   measurements (FPS, watts, $, tokens/sec, RPS, etc.)
 - A "Common pitfalls" or "Gotchas" section with 3-5 specific failure
@@ -45,6 +48,37 @@ and read as filler. If your draft is short, add:
 A 2000-word article is ~3 pages at typical reading speed (220 wpm =
 ~9 min read). The site shows estimated_read_time prominently — readers
 expect substantive content for that signal.
+
+### Internal links — ABSOLUTE paths only (MANDATORY)
+
+Every internal link in `body_md` MUST be an absolute path starting with
+`/`. The site's SSR markdown renderer used to silently fall back to
+relative resolution, so a link like `[Title](classic-beef-stir-fry)`
+on `/blog/some-post` resolved to `/blog/classic-beef-stir-fry` (404)
+on first crawl. The renderer now rewrites slug-only hrefs to
+`/recipes/<slug>`, but you MUST still write the absolute path so the
+markdown source is correct in the DB and the analyzer's
+`broken-internal-link` detector stays clean.
+
+| Reference | Correct markdown |
+|---|---|
+| Recipe by slug | `[Classic Beef Stir Fry](/recipes/classic-beef-stir-fry)` |
+| Kitchen product by slug | `[Chef's Knife](/k/chefs-knife)` |
+| Other blog article | `[Mediterranean Meal Plan](/blog/complete-mediterranean-meal-plan)` |
+| Feature page | `[Meal Plan](/meal-plan)` |
+| External / outbound citation | `[Serious Eats — Knife Skills](https://www.seriouseats.com/...)` |
+
+**FORBIDDEN**:
+- `[Title](classic-beef-stir-fry)` — slug only, no leading slash
+- `[Title](recipes/classic-beef-stir-fry)` — relative path, no leading slash
+- `[Title](./recipes/classic-beef-stir-fry)` — explicit relative
+
+The reusable SEO analyzer ships a `broken-internal-link` rec type
+(reusable-agents/agents/seo-analyzer/analyzer.py) that flags any page
+with `body_relative_link_count > 0` — every relative-href occurrence
+on a published article is a high-priority rec the implementer would
+have to fix on the next run anyway. Save the cycle: write absolute
+paths from the start.
 
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial

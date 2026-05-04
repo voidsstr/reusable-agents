@@ -1000,6 +1000,10 @@ def _extract_page_meta(html: bytes) -> dict:
     title = _find(r"<title[^>]*>(.*?)</title>")
     description = _find(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']')
     canonical = _find(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']*)["\']')
+    # Count canonicals — duplicates are a soft-error in Google's eyes and
+    # often fire when an SSR layer injects one on top of the SPA's
+    # default. The analyzer flags `canonical_count > 1` as a regression.
+    canonical_count = len(re.findall(r'<link[^>]+rel=["\']canonical["\']', text, re.IGNORECASE))
     meta_robots = _find(r'<meta[^>]+name=["\']robots["\'][^>]+content=["\']([^"\']*)["\']')
     h1 = _find(r"<h1[^>]*>(.*?)</h1>")
     h1 = re.sub(r"<[^>]+>", "", h1).strip()
@@ -1101,6 +1105,33 @@ def _extract_page_meta(html: bytes) -> dict:
     )
     body_internal_links = len(re.findall(r'<a[^>]+href=["\']/[^"\']*["\']', main_html))
     body_external_links = len(re.findall(r'<a[^>]+href=["\']https?://[^"\']+["\']', main_html))
+    # Slug-only / relative anchor hrefs — neither absolute nor root-relative
+    # nor anchor/mailto. These break when the article is reached from any
+    # path other than the literal one the author imagined: e.g. a markdown
+    # link `[Title](classic-beef-stir-fry)` inside `/blog/some-slug` resolves
+    # to `/blog/classic-beef-stir-fry` (404). The article-author runbook
+    # lifted from a SpecPicks pattern produced these systematically. Flag
+    # any nonzero count so the analyzer can ship a `broken-internal-link`
+    # rec instead of waiting for Google to deindex 404s.
+    _all_main_hrefs = re.findall(r'<a[^>]+href=["\']([^"\']+)["\']', main_html)
+    body_relative_link_count = sum(
+        1 for h in _all_main_hrefs
+        if h
+        and not h.startswith('/')
+        and not h.startswith('#')
+        and not h.startswith('mailto:')
+        and not h.startswith('tel:')
+        and not re.match(r'^https?://', h, re.IGNORECASE)
+    )
+    body_relative_link_samples = [
+        h for h in _all_main_hrefs
+        if h
+        and not h.startswith('/')
+        and not h.startswith('#')
+        and not h.startswith('mailto:')
+        and not h.startswith('tel:')
+        and not re.match(r'^https?://', h, re.IGNORECASE)
+    ][:10]
 
     # Internal-link target list — distinct same-origin paths this page links
     # to from <main>/<article> body. Drives the topical-cluster graph
@@ -1385,6 +1416,7 @@ def _extract_page_meta(html: bytes) -> dict:
         "title": title,
         "description": description,
         "canonical": canonical,
+        "canonical_count": canonical_count,
         "meta_robots": meta_robots,
         "h1": h1,
         "h1_count": h1_count,
@@ -1404,6 +1436,8 @@ def _extract_page_meta(html: bytes) -> dict:
         "nofollow_links": nofollow_links,
         "body_internal_links": body_internal_links,
         "body_external_links": body_external_links,
+        "body_relative_link_count": body_relative_link_count,
+        "body_relative_link_samples": body_relative_link_samples,
         "internal_link_targets": internal_link_targets,
         "outbound_domains": outbound_domains,
         "outbound_domain_count": len(outbound_domains),
@@ -1877,6 +1911,18 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
 
     err(f"  rich-results: {len(urls_rrt)} pages → RRT,  {len(urls_smv)} pages → SMV")
 
+    # Per-call delay knobs — defaults are conservative because both
+    # endpoints rate-limit aggressively. Override via site.yaml:
+    #   rich_results_test:
+    #     rrt_delay_s: 2.0
+    #     smv_delay_s: 3.0
+    rrt_delay_s = float(rrt_cfg.get("rrt_delay_s", 2.0))
+    smv_delay_s = float(rrt_cfg.get("smv_delay_s", 3.0))
+    # Cap the loop's total wall-time so a long backoff sequence can't
+    # hold the orchestrator hostage. Tunable via cfg.
+    rrt_total_budget_s = float(rrt_cfg.get("rrt_total_budget_s", 240))
+    smv_total_budget_s = float(rrt_cfg.get("smv_total_budget_s", 240))
+
     # Accumulate per-URL results keyed by URL
     results: dict[str, dict] = {}
 
@@ -1892,7 +1938,13 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    rrt_started_at = time.time()
+    consecutive_429s = 0
     for entry in urls_rrt:
+        if (time.time() - rrt_started_at) > rrt_total_budget_s:
+            err(f"  rich-results: RRT budget {rrt_total_budget_s}s exceeded; "
+                f"skipping remaining {len(urls_rrt) - len(results)} URLs")
+            break
         url = entry["url"]
         rec = results.setdefault(url, {"url": url, "type": entry["type"]})
         try:
@@ -1903,6 +1955,7 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
                 retries=2,
                 base_delay=3.0,
             )
+            consecutive_429s = 0
             items = resp.get("richResultsItems") or []
             # Flatten to a compact summary: per rich-result-type → list of issues
             summary: list[dict] = []
@@ -1939,7 +1992,17 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
         except Exception as e:
             err(f"  rich-results: RRT failed for {url}: {str(e)[:120]}")
             rec["rich_results_test"] = {"error": str(e)[:200]}
-        time.sleep(0.5)
+            # 429-aware backoff: count the failure if it looks like
+            # rate-limiting, then escalate the per-call sleep so we
+            # don't hammer Google through the rest of the loop.
+            if "429" in str(e) or "Too Many" in str(e) or "rateLimit" in str(e):
+                consecutive_429s += 1
+                back = min(60.0, rrt_delay_s * (2 ** consecutive_429s))
+                err(f"  rich-results: 429 hit ({consecutive_429s} in a row); "
+                    f"backing off {back:.1f}s before next call")
+                time.sleep(back)
+                continue
+        time.sleep(rrt_delay_s)
 
     # ── 2. Schema Markup Validator (validator.schema.org) ───────────────
     # POST https://validator.schema.org/validate with form body url=<url>.
@@ -1947,7 +2010,13 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
     # Structural validation — property type mismatches, missing required fields,
     # malformed values. Uses the same schema.org vocabulary rules as Google.
     SMV_ENDPOINT = "https://validator.schema.org/validate"
+    smv_started_at = time.time()
+    smv_consecutive_429s = 0
     for entry in urls_smv:
+        if (time.time() - smv_started_at) > smv_total_budget_s:
+            err(f"  rich-results: SMV budget {smv_total_budget_s}s exceeded; "
+                f"skipping remaining URLs")
+            break
         url = entry["url"]
         rec = results.setdefault(url, {"url": url, "type": entry["type"]})
         try:
@@ -1993,10 +2062,18 @@ def pull_rich_results_test(token: str, data_dir: Path, cfg: dict) -> None:
                 "items": compact_items,
             }
             err(f"  rich-results: SMV {url} → {len(items)} types, {total_errors} errors, {total_warnings} warnings")
+            smv_consecutive_429s = 0
         except Exception as e:
             err(f"  rich-results: SMV failed for {url}: {str(e)[:120]}")
             rec.setdefault("schema_markup_validator", {})["error"] = str(e)[:200]
-        time.sleep(1.0)  # be polite to validator.schema.org
+            if "429" in str(e) or "Too Many" in str(e):
+                smv_consecutive_429s += 1
+                back = min(90.0, smv_delay_s * (2 ** smv_consecutive_429s))
+                err(f"  rich-results: SMV 429 hit ({smv_consecutive_429s}); "
+                    f"backing off {back:.1f}s")
+                time.sleep(back)
+                continue
+        time.sleep(smv_delay_s)  # be polite to validator.schema.org
 
     # Write output file
     out_path = data_dir / "rich-results-test.jsonl"
@@ -2066,7 +2143,7 @@ def main() -> None:
             run_dir = td
             data_dir = run_dir / "data"
             data_dir.mkdir(parents=True, exist_ok=True)
-            _do_pulls(cfg, token, run_dir, data_dir)
+            _do_pulls(cfg, token, run_dir, data_dir, run_dir_handle=rd)
         # Print stable handle the orchestrator captures.
         print(rd.handle)
         return
@@ -2087,9 +2164,22 @@ def main() -> None:
     print(str(run_dir))
 
 
-def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path) -> None:
+def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path,
+              run_dir_handle=None) -> None:
     """The actual data-pull body, factored out so both Azure-backed and
-    legacy local-FS paths share it."""
+    legacy local-FS paths share it.
+
+    `run_dir_handle` is an optional `framework.core.run_dir.RunDir`
+    instance — when supplied, the collector reuses outputs from a
+    recent prior run for expensive/rate-limited steps (rich-results-
+    test, page-inventory crawl, repo-scan). Skipped entirely on the
+    legacy local-FS path where there's no Azure-backed prior to consult.
+    """
+    # Reuse-window for the expensive/rate-limited steps. GSC + GA4
+    # always run live (cheap + fresh data matters); the heavy crawls
+    # and external API hits get reused from any prior <Nh ago.
+    reuse_h = float((cfg.get("collector_reuse_hours") or
+                     os.environ.get("SEO_COLLECTOR_REUSE_HOURS", "5")))
     pull_gsc(token, cfg["data_sources"]["gsc"]["site_url"],
              cfg["data_sources"]["gsc"].get("default_country_filter", "usa"),
              data_dir)
@@ -2118,22 +2208,48 @@ def _do_pulls(cfg, token: str, run_dir: Path, data_dir: Path) -> None:
         err(f"  site-signals: unhandled error {e}")
 
     # Optional: page-type inventory (config-driven)
+    # Try reusing the prior run's pages-by-type.jsonl first — sitemap
+    # crawls of 50k+ URLs take 60-120s and don't change tick-to-tick.
     if cfg.get("page_inventory"):
-        try:
-            crawl_page_inventory(cfg, data_dir)
-        except Exception as e:
-            err(f"  inventory: unhandled error {e}")
+        reused_inv = None
+        if run_dir_handle is not None:
+            reused_inv = run_dir_handle.reuse_artifact_from_recent_prior(
+                "data/pages-by-type.jsonl",
+                max_age_hours=reuse_h,
+                target_local_path=data_dir / "pages-by-type.jsonl",
+            )
+        if reused_inv:
+            err(f"  inventory: ⏭ reused pages-by-type.jsonl from prior run "
+                f"{reused_inv} (within {reuse_h}h reuse window) — "
+                f"skipped sitemap crawl")
+        else:
+            try:
+                crawl_page_inventory(cfg, data_dir)
+            except Exception as e:
+                err(f"  inventory: unhandled error {e}")
     else:
         err("  inventory: page_inventory not configured, skipping")
 
     # Rich Results Test + Schema Markup Validator.
-    # Runs after crawl_page_inventory so pages-by-type.jsonl exists.
-    # Falls back gracefully when pages-by-type.jsonl is absent (inventory
-    # not configured) by using only the homepage URL.
-    try:
-        pull_rich_results_test(token, data_dir, cfg)
-    except Exception as e:
-        err(f"  rich-results: unhandled error {e}")
+    # Heaviest external-API hit (rate-limited by Google + schema.org).
+    # Try reusing prior run's output first; fall back to live calls only
+    # when no recent prior is available. Saves ~60s + avoids 429 cascade
+    # on consecutive ticks.
+    reused_rrt = None
+    if run_dir_handle is not None:
+        reused_rrt = run_dir_handle.reuse_artifact_from_recent_prior(
+            "data/rich-results-test.jsonl",
+            max_age_hours=reuse_h,
+            target_local_path=data_dir / "rich-results-test.jsonl",
+        )
+    if reused_rrt:
+        err(f"  rich-results: ⏭ reused rich-results-test.jsonl from prior run "
+            f"{reused_rrt} (within {reuse_h}h) — skipped RRT + SMV API calls")
+    else:
+        try:
+            pull_rich_results_test(token, data_dir, cfg)
+        except Exception as e:
+            err(f"  rich-results: unhandled error {e}")
 
     # Optional: repo route scan (drives implementation_outline.files)
     try:

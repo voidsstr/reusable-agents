@@ -83,6 +83,13 @@
           "bulkSql": "SELECT cuisine AS slug FROM recipe_catalog WHERE is_active = TRUE AND cuisine IS NOT NULL GROUP BY cuisine HAVING COUNT(*) >= 10",
           "urlTemplate": "slugify:slug",
           "urlPrefix": "/recipes/cuisine/"
+        },
+        {
+          "name": "blog-articles",
+          "bulkSql": "SELECT slug FROM editorial_articles WHERE status = 'published' AND slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM editorial_articles WHERE status = 'published' AND slug IS NOT NULL AND (updated_at > $1 OR COALESCE(published_at, '1970-01-01'::timestamptz) > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/blog/"
         }
       ]
     },
