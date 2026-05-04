@@ -2005,6 +2005,164 @@ def _add_rich_results_api_recs(data: Path, recs: list, next_id, max_recs: int) -
         })
 
 
+def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int) -> None:
+    """Read GSC URL Inspection results from gsc-coverage-auditor and emit
+    recommendations to fix indexing-blocking states.
+
+    The auditor writes one JSONL row per inspection at
+    ~/.reusable-agents/gsc-coverage-auditor/<site>-coverage.jsonl. This
+    function picks the LATEST row per URL (the file is append-only with
+    rolling round-robin coverage, so older rows for a URL are stale)
+    and groups by coverageState.
+
+    Emits one rec per state-bucket with sample URLs:
+      - "Crawled - currently not indexed"  → likely thin/duplicate
+        content blocking indexation. Routes to article-author for rewrite.
+      - "Discovered - currently not indexed" → either crawl-budget pressure
+        or canonical pointing elsewhere. Routes to implementer.
+      - "Page with redirect"  → unintended canonical redirect chain.
+        Routes to implementer.
+      - "URL is unknown to Google"  → IndexNow/sitemap reachability gap.
+        Routes to indexnow-submitter (manual --bulk re-fire).
+      - "Submitted and indexed, but issues found"  → mobile / schema
+        partial-pass. Routes to implementer.
+    """
+    site_id = cfg.site_id if hasattr(cfg, "site_id") else cfg.get("site", {}).get("id", "")
+    if not site_id:
+        return
+    state_dir = Path(os.path.expanduser(
+        os.environ.get("GSC_INSPECT_STATE_DIR", "~/.reusable-agents/gsc-coverage-auditor")
+    ))
+    coverage_file = state_dir / f"{site_id}-coverage.jsonl"
+    if not coverage_file.is_file():
+        return
+
+    # Pick the latest row per URL (file is append-only).
+    latest: dict[str, dict] = {}
+    try:
+        with coverage_file.open() as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    row = json.loads(raw)
+                except Exception:
+                    continue
+                url = row.get("url")
+                if not url:
+                    continue
+                prev = latest.get(url)
+                if (not prev) or row.get("inspected_at", "") > prev.get("inspected_at", ""):
+                    latest[url] = row
+    except Exception as e:
+        print(f"  [index-coverage] read failed: {e}", file=sys.stderr)
+        return
+
+    if not latest:
+        return
+
+    # Bucket by coverageState (and a few other actionable signals).
+    buckets: dict[str, list[dict]] = {}
+    for url, row in latest.items():
+        cs = (row.get("coverageState") or "").strip()
+        if not cs:
+            continue
+        # Skip the happy path
+        if cs == "Submitted and indexed":
+            continue
+        buckets.setdefault(cs, []).append(row)
+
+    if not buckets:
+        return
+
+    # Map coverageState → (priority, type, handoff_target, summary fmt)
+    STATE_RULES: list[tuple[str, str, str, str, str]] = [
+        # match prefix         priority  type             handoff           rec_template
+        ("Crawled - currently not indexed",
+         "high", "indexing-fix", "article-author-agent",
+         "{n} URL(s) crawled but not indexed by Google — content quality blocking indexation"),
+        ("Crawled — currently not indexed",  # em-dash variant Google sometimes returns
+         "high", "indexing-fix", "article-author-agent",
+         "{n} URL(s) crawled but not indexed by Google — content quality blocking indexation"),
+        ("Discovered - currently not indexed",
+         "medium", "indexing-fix", "implementer",
+         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue"),
+        ("Discovered — currently not indexed",
+         "medium", "indexing-fix", "implementer",
+         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue"),
+        ("Page with redirect",
+         "medium", "ssr-fix", "implementer",
+         "{n} URL(s) returning a redirect — unintended canonical chain"),
+        ("URL is unknown to Google",
+         "low", "indexing-fix", "indexnow-submitter",
+         "{n} URL(s) unknown to Google — sitemap or IndexNow reachability gap"),
+        ("Submitted and indexed, but issues found",
+         "medium", "schema-markup", "implementer",
+         "{n} URL(s) indexed but flagged with mobile/schema/duplicate issues"),
+        ("Excluded by 'noindex' tag",
+         "low", "ssr-fix", "implementer",
+         "{n} URL(s) explicitly noindex'd — verify intent"),
+        ("Duplicate, Google chose different canonical than user",
+         "medium", "indexing-fix", "implementer",
+         "{n} URL(s) where Google chose a different canonical — fix canonical metadata"),
+        ("Soft 404",
+         "high", "ssr-fix", "implementer",
+         "{n} URL(s) returning soft 404 — content too thin or wrong status code"),
+    ]
+
+    seen_state_keys: set[str] = set()
+    for state_key, urls in buckets.items():
+        if state_key in seen_state_keys:
+            continue
+        seen_state_keys.add(state_key)
+        rule = next((r for r in STATE_RULES if state_key.startswith(r[0])), None)
+        if not rule:
+            continue
+        _, priority, rec_type, handoff, summary_tpl = rule
+        n = len(urls)
+        sample = sorted(urls, key=lambda r: r.get("lastCrawlTime") or "", reverse=True)[:8]
+        rid = next_id()
+        recs.append({
+            "id": rid,
+            "type": rec_type,
+            "priority": priority,
+            "title": summary_tpl.format(n=n),
+            "rationale": (
+                f"GSC URL Inspection (last 24h) shows {n} URL(s) in coverage state "
+                f"\"{state_key}\". This blocks organic search traffic to those pages — "
+                f"fixing the underlying cause (content quality, canonical metadata, "
+                f"redirects, or sitemap reachability) is required for them to rank."
+            ),
+            "evidence": (
+                f"State: {state_key}. Sample URLs (most-recently-crawled first): " +
+                ", ".join(r["url"] for r in sample)
+            ),
+            "fix": (
+                {
+                    "Crawled - currently not indexed": "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, then nudge with IndexNow + GSC's 'Request Indexing' button.",
+                    "Crawled — currently not indexed": "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, then nudge with IndexNow + GSC's 'Request Indexing' button.",
+                    "Discovered - currently not indexed": "Add stronger internal links from indexed pages; verify the canonical doesn't point elsewhere.",
+                    "Discovered — currently not indexed": "Add stronger internal links from indexed pages; verify the canonical doesn't point elsewhere.",
+                    "Page with redirect": "Audit the SSR canonical and 301 chain — page should land directly without a hop.",
+                    "URL is unknown to Google": "Manually re-fire IndexNow --bulk for this site; verify sitemap reachability with `curl -I sitemap.xml`.",
+                    "Submitted and indexed, but issues found": "Open GSC, look at 'Page indexing issues found' detail, fix flagged mobile / structured-data warnings.",
+                    "Excluded by 'noindex' tag": "Verify the noindex was intentional; otherwise remove the meta tag and request re-indexing.",
+                    "Duplicate, Google chose different canonical than user": "Update <link rel=canonical> on the user-canonical to point at Google's chosen canonical, OR vice versa if the user version is preferred.",
+                    "Soft 404": "Check pageFetchState — likely too-thin content or a render error returning empty body. Either expand the page or set a real 404 status.",
+                }.get(state_key, "Investigate via GSC URL Inspection UI.")
+            ),
+            "data_refs": [r["url"] for r in sample],
+            "sample_urls": [r["url"] for r in sample],
+            "metric_before": {"affected_urls": n, "coverage_state": state_key},
+            "handoff_target": {
+                "work_type": rec_type,
+                "handler": handoff,
+            },
+            "implemented": False,
+        })
+
+
 def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
     """Flag pages with outbound Amazon links that lack a `?tag=<id>` —
     direct affiliate revenue leak."""
@@ -3643,6 +3801,7 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
         (_add_amazon_tag_recs, "amazon-tag"),
         (lambda d, r, n, m: _add_revenue_focus_recs(cfg, d, r, n, m), "revenue-focus"),
         (_add_rich_results_api_recs, "rich-results-api"),
+        (lambda d, r, n, m: _add_index_coverage_recs(cfg, d, r, n, m), "index-coverage"),
         (_add_jsonld_field_completeness_recs, "jsonld-completeness"),
         (_add_article_template_recs, "article-template"),
         (_add_pros_cons_recs, "pros-cons"),
