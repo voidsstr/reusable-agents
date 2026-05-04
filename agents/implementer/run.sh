@@ -292,6 +292,19 @@ PY
     )
     [ -n "$IMPLEMENTER_REPO_PATH" ] && export IMPLEMENTER_REPO_PATH
 fi
+# Article-author / catalog-audit dispatches don't have an
+# implementer.repo_path in their site.yaml (they're DB-only operations).
+# Fall back to the canonical site repo location so the framework code-
+# editor chain has a CWD to run psql from. Keeps the framework primitive
+# generic — sites name their repo location once via the convention
+# /home/voidsstr/development/<site>.
+if [ -z "${IMPLEMENTER_REPO_PATH:-}" ] && [ -n "${RESPONDER_SITE:-}" ]; then
+    SITE_REPO_GUESS="/home/voidsstr/development/${RESPONDER_SITE}"
+    if [ -d "$SITE_REPO_GUESS" ]; then
+        export IMPLEMENTER_REPO_PATH="$SITE_REPO_GUESS"
+        echo "[implementer] derived IMPLEMENTER_REPO_PATH=$IMPLEMENTER_REPO_PATH from RESPONDER_SITE=$RESPONDER_SITE (no implementer.repo_path in site.yaml)"
+    fi
+fi
 # Use `git rev-parse` which walks up to find .git — the customer-app dir
 # may itself not be a git root (e.g. "Customer Applications/aisleprompt/v1.0"
 # is a subdir of the nsc-assistant repo, no .git of its own). The earlier
@@ -520,98 +533,586 @@ EOF
         # Max profiles are rate-limited, instead of sleeping for hours.
         # We catch that below + try the Copilot/aider fallback.
         export CLAUDE_POOL_FAIL_FAST="${CLAUDE_POOL_FAIL_FAST:-1}"
-        set +e
-        claude --dangerously-skip-permissions \
-               --print --output-format text \
-               --max-turns "$IMPLEMENTER_MAX_TURNS" \
-               < "$PROMPT_FILE"
-        rc=$?
-        set -e
+        # Test/validation knob: IMPLEMENTER_FORCE_FALLBACK=1 skips the
+        # claude-pool path entirely and goes straight to the framework
+        # code-editor chain. Used when validating the framework chain
+        # end-to-end on a real rec without burning Max profile quota.
+        if [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
+            echo "[implementer] IMPLEMENTER_FORCE_FALLBACK=1 — skipping claude, forcing framework code-editor chain" >&2
+            rc=75
+        else
+            set +e
+            claude --dangerously-skip-permissions \
+                   --print --output-format text \
+                   --max-turns "$IMPLEMENTER_MAX_TURNS" \
+                   < "$PROMPT_FILE"
+            rc=$?
+            set -e
+        fi
 
         # ── Pool-exhausted fallback path ─────────────────────────────────
         # rc=75 from claude-pool means "all Max profiles rate-limited".
-        # Try aider against the Copilot proxy as a fallback agentic editor.
-        # If that's also unavailable, mark the run as deferred (clean state,
-        # rc=0) so the host-worker doesn't keep retrying the same trigger.
+        # Hand off to framework.cli.code_edit, which walks a configured
+        # backend chain (aider via Copilot proxy / github_copilot native /
+        # Azure → goose via Azure → plandex if installed) and applies
+        # whichever wins. Chain is configurable via:
+        #   - config/code-editor-config.json (per-deployment)
+        #   - manifest.code_editor_chain (per-agent)
+        #   - site.yaml `code_editor.chain` (per-site)
+        # See framework/core/code_editor.py.
         if [ "$rc" -eq 75 ]; then
             echo "[implementer] claude-pool fail-fast: all Max profiles rate-limited" >&2
-            COPILOT_API_BASE="${COPILOT_API_BASE:-http://localhost:4141/v1}"
-            FALLBACK_MODEL="${IMPLEMENTER_FALLBACK_MODEL:-claude-sonnet-4.6}"
 
-            # Probe Copilot proxy + aider
-            COPILOT_OK=0
-            if curl -sf --max-time 5 "$COPILOT_API_BASE/models" >/dev/null 2>&1; then
-                COPILOT_OK=1
-            fi
-            AIDER_BIN=""
-            if command -v aider >/dev/null 2>&1; then
-                AIDER_BIN="$(command -v aider)"
+            # Per-rec build-out: produce a focused prompt + preload
+            # file list. This is what makes the framework backends
+            # actually do useful work (vs. handing them an abstract
+            # runbook + 'figure out which recs to apply').
+            CE_PROMPT=$(mktemp)
+            CE_FILES=$(mktemp)
+            CE_PRE_DIRTY=$(mktemp)
+            CE_RECS_JSON="$RESPONDER_RUN_DIR/recommendations.json"
+
+            # Pre-snapshot working tree (set diff at commit time keeps
+            # us from sweeping up concurrent changes).
+            if [ -d "${IMPLEMENTER_REPO_PATH:-}" ]; then
+                pushd "$IMPLEMENTER_REPO_PATH" >/dev/null 2>&1 || true
+                git status --porcelain 2>/dev/null \
+                    | awk '{print $NF}' | sort -u > "$CE_PRE_DIRTY" || true
+                popd >/dev/null 2>&1 || true
+                CE_PRE_COUNT=$(wc -l < "$CE_PRE_DIRTY" 2>/dev/null || echo 0)
+                echo "[implementer] pre-edit dirty file count: $CE_PRE_COUNT (excluded from commit)" >&2
             fi
 
-            # Aider is a code-editing tool — it has no DB / HTTP / Read /
-            # Bash tools. The article-author and h2h runbooks REQUIRE those
-            # tools (write to editorial_articles, fetch live URLs, run
-            # SQL). Falling back to aider on those dispatches produces
-            # rc=0 + zero work shipped (the LLM responds "I can't do this
-            # without DB access"). Defer cleanly instead so the next
-            # claude-pool reset retries with the proper toolchain.
+            # All dispatch kinds are eligible for the framework chain.
+            # Aider/opencode/crush have `/run` shell, which can invoke
+            # psql for DB writes when DATABASE_URL is in the env (the
+            # implementer wrapper already exports DATABASE_URL_<SITE>
+            # → DATABASE_URL above). h2h is the only kind that still
+            # requires speculative reasoning a code-editor can't do
+            # well, so it stays gated.
+            CE_AVAILABLE=1
             case "$DISPATCH_KIND" in
-                article-author|h2h|catalog-audit)
-                    echo "[implementer] $DISPATCH_KIND requires DB/Read/Bash tools — skipping aider fallback (defer until claude-pool reset)" >&2
-                    AIDER_BIN=""
+                h2h)
+                    echo "[implementer] h2h requires speculative product comparisons — skipping framework code-editor fallback (defer until claude-pool reset)" >&2
+                    CE_AVAILABLE=0
                     ;;
             esac
 
-            if [ "$COPILOT_OK" = "1" ] && [ -n "$AIDER_BIN" ]; then
-                echo "[implementer] falling back to aider via copilot-api ($FALLBACK_MODEL)" >&2
-                # Aider in --message mode: one-shot prompt, auto-edit,
-                # don't auto-commit (we'll let the implementer's existing
-                # post-processing decide). Auto-add files referenced in
-                # the prompt. CWD is the run dir but aider walks up to
-                # the git root automatically.
-                #
-                # We pass the ORIGINAL prompt so the runbook + rec context
-                # transfer over. Aider will tool-use file reads/edits
-                # against the codebase. Worst case, aider runs but doesn't
-                # produce ship-able output — implementer's verify regex
-                # below catches that and marks the run as not-shipped,
-                # which is better than wedging.
+            CE_DEFERRED_BY_ALLOWLIST=$(mktemp)
+            if [ "$CE_AVAILABLE" = "1" ] && [ -f "$CE_RECS_JSON" ]; then
+                # Build the per-rec focused prompt + preload file list.
                 set +e
-                # AIDER_* env vars are interpreted as the matching --flag by
-                # aider 0.86+, so AIDER_API_KEY="dummy" → "--api-key dummy",
-                # which fails the provider=key format check. Set ONLY
-                # OPENAI_API_KEY (the env var aider's openai provider reads
-                # directly). The copilot-api proxy on $COPILOT_API_BASE
-                # ignores the value, but aider needs *something* non-empty.
-                AIDER_OPENAI_KEY="${OPENAI_API_KEY:-${COPILOT_API_KEY:-dummy}}"
-                OPENAI_API_KEY="$AIDER_OPENAI_KEY" \
-                OPENAI_API_BASE="$COPILOT_API_BASE" \
-                "$AIDER_BIN" \
-                    --model "openai/$FALLBACK_MODEL" \
-                    --no-auto-commits \
-                    --yes-always \
-                    --no-show-model-warnings \
-                    --message-file "$PROMPT_FILE" \
-                    --no-pretty \
-                    2>&1
-                rc=$?
+                ALLOW_TYPES_ARG=()
+                if [ -n "${IMPLEMENTER_ALLOW_REC_TYPES:-}" ]; then
+                    ALLOW_TYPES_ARG=(--allow-rec-types "$IMPLEMENTER_ALLOW_REC_TYPES")
+                fi
+                python3 "$SCRIPT_DIR/build-aider-invocation.py" \
+                        --recs "$CE_RECS_JSON" \
+                        --rec-ids "$RESPONDER_REC_IDS" \
+                        --repo-path "$IMPLEMENTER_REPO_PATH" \
+                        --site "${RESPONDER_SITE:-}" \
+                        --dispatch-kind "$DISPATCH_KIND" \
+                        --pre-dirty-file "$CE_PRE_DIRTY" \
+                        --out-prompt "$CE_PROMPT" \
+                        --out-files "$CE_FILES" \
+                        --out-deferred "$CE_DEFERRED_BY_ALLOWLIST" \
+                        "${ALLOW_TYPES_ARG[@]}" 2>&1
+                BUILDER_RC=$?
                 set -e
-                if [ "$rc" -eq 0 ]; then
-                    echo "[implementer] aider fallback succeeded — continuing post-processing" >&2
+                if [ "$BUILDER_RC" -eq 3 ]; then
+                    # All recs deferred by the trusted-rec-types allowlist —
+                    # write a deferred.json with the per-rec reasons and exit
+                    # cleanly. The dashboard surfaces them as "deferred-by-
+                    # allowlist" rather than "failed".
+                    echo "[implementer] all recs deferred by allowlist; framework chain skipped" >&2
+                    if [ -d "$RESPONDER_RUN_DIR" ] && [ -s "$CE_DEFERRED_BY_ALLOWLIST" ]; then
+                        cp "$CE_DEFERRED_BY_ALLOWLIST" "$RESPONDER_RUN_DIR/deferred-by-allowlist.json"
+                        cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFERRED_EOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "all recs in this dispatch are not yet in TRUSTED_REC_TYPES allowlist (framework code-editor would hallucinate)",
+  "rec_ids": "$RESPONDER_REC_IDS",
+  "next_action": "wait for claude-pool reset, OR add the rec types to TRUSTED_REC_TYPES after one supervised validation run",
+  "details_path": "deferred-by-allowlist.json"
+}
+DEFERRED_EOF
+                    fi
+                    rm -f "$PROMPT_FILE" "$CE_PROMPT" "$CE_FILES" "$CE_DEFERRED_BY_ALLOWLIST" "$CE_PRE_DIRTY"
+                    exit 0
+                elif [ "$BUILDER_RC" -ne 0 ]; then
+                    echo "[implementer] build-aider-invocation failed rc=$BUILDER_RC — deferring" >&2
+                    CE_AVAILABLE=0
+                fi
+            else
+                CE_AVAILABLE=0
+            fi
+
+            if [ "$CE_AVAILABLE" = "1" ]; then
+                # Hand off to framework code-editor CLI. It walks the
+                # backend chain (aider / goose / plandex / ...) and
+                # returns rc=0 on first success.
+                set +e
+                CE_TIMEOUT="${IMPLEMENTER_CE_TIMEOUT:-900}"
+                CE_OUT=$(mktemp)
+                # Find reusable-agents repo for PYTHONPATH (run.sh sits
+                # at agents/implementer/, so REPO_ROOT is two up).
+                RA_FRAMEWORK_ROOT="${RA_REPO:-$REPO_ROOT}"
+                PYTHONPATH="$RA_FRAMEWORK_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                    python3 -m framework.cli.code_edit \
+                        --repo "$IMPLEMENTER_REPO_PATH" \
+                        --prompt-file "$CE_PROMPT" \
+                        --files-file "$CE_FILES" \
+                        --pre-dirty-file "$CE_PRE_DIRTY" \
+                        --agent-id "${RESPONDER_SOURCE_AGENT:-implementer}" \
+                        --site "${RESPONDER_SITE:-}" \
+                        --site-config "${SEO_AGENT_CONFIG:-}" \
+                        --timeout "$CE_TIMEOUT" \
+                        --json 2>&1 | tee "$CE_OUT"
+                rc=${PIPESTATUS[0]}
+                set -e
+
+                # Extract the winning backend id from the JSON for
+                # the commit-message tag.
+                CE_WINNER=$(python3 -c "
+import json, sys
+try:
+    raw = open('$CE_OUT').read()
+    # The JSON is the last { ... } block in stdout.
+    start = raw.rfind('{\\n  \"winner\"')
+    if start < 0:
+        start = raw.find('{\\n  \"winner\"')
+    if start >= 0:
+        d = json.loads(raw[start:])
+        print(d.get('winner') or 'none')
+except Exception:
+    pass
+" 2>/dev/null || echo "?")
+                rm -f "$CE_OUT"
+                echo "[implementer] code-editor winner=$CE_WINNER rc=$rc" >&2
+            else
+                rc=75  # unchanged — falls into the deferred path below
+            fi
+            rm -f "$CE_PROMPT" "$CE_FILES"
+
+            # ── Bulk-commit step (post/pre set diff) ─────────────────
+            # Only commit files that became dirty during the editor's
+            # run — never anything that was dirty beforehand.
+            if [ "$rc" -eq 0 ] && [ -d "${IMPLEMENTER_REPO_PATH:-}" ] \
+                    && [ -s "$CE_PRE_DIRTY" -o -f "$CE_PRE_DIRTY" ]; then
+                pushd "$IMPLEMENTER_REPO_PATH" >/dev/null 2>&1 || true
+                CE_POST_DIRTY=$(mktemp)
+                CE_NEW_FILES=$(mktemp)
+                git status --porcelain 2>/dev/null \
+                    | awk '{print $NF}' | sort -u > "$CE_POST_DIRTY" || true
+                comm -23 "$CE_POST_DIRTY" "$CE_PRE_DIRTY" \
+                    > "$CE_NEW_FILES" 2>/dev/null || true
+                CE_NEW_COUNT=$(wc -l < "$CE_NEW_FILES" 2>/dev/null || echo 0)
+                if [ "$CE_NEW_COUNT" -gt 0 ]; then
+                    set +e
+                    while IFS= read -r f; do
+                        [ -n "$f" ] && [ -e "$f" ] && git add "$f"
+                    done < "$CE_NEW_FILES"
+                    git commit -m "implementer (${CE_WINNER:-fallback}): apply ${RESPONDER_REC_IDS#,} for ${RESPONDER_AGENT_ID:-?}/${RESPONDER_RUN_TS:-?}
+
+Recs: $RESPONDER_REC_IDS
+Source: $SOURCE_AGENT_ID_FROM_RECS
+Run: $RESPONDER_RUN_TS
+Backend: ${CE_WINNER:-fallback}
+Mode: framework-code-editor (claude-pool rate-limited)
+Files staged: $CE_NEW_COUNT (set-diff of post-edit vs pre-edit)" 2>&1 | head -5
+                    set -e
+                    SHA=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
+                    echo "[implementer] code-editor commit: SHA=$SHA, files=$CE_NEW_COUNT, backend=${CE_WINNER:-?}" >&2
+                    # Mark each dispatched rec as implemented:true in
+                    # the run-dir's recommendations.json so the dash-
+                    # board sees it shipped (claude-mode does this via
+                    # the AGENT.md runbook; framework-chain mode bypasses
+                    # the LLM so we update from the wrapper). Sets
+                    # `implemented_via=framework-<backend>` for traceability.
+                    if [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+                        python3 - "$RESPONDER_RUN_DIR/recommendations.json" \
+                                  "$RESPONDER_REC_IDS" \
+                                  "${CE_WINNER:-framework}" \
+                                  "$SHA" \
+                                  "$RESPONDER_RUN_TS" <<'PY' 2>&1 | sed 's/^/[mark-implemented] /' >&2 || true
+import json, sys
+from datetime import datetime, timezone
+p, ids_csv, backend, sha, run_ts = sys.argv[1:6]
+ids = [s.strip() for s in ids_csv.split(',') if s.strip()]
+d = json.load(open(p))
+recs = d.get('recommendations', d) if isinstance(d, dict) else d
+if isinstance(d, dict): recs = d['recommendations']
+now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+hit = 0
+for r in recs:
+    if r.get('id') in ids:
+        r['implemented'] = True
+        r.setdefault('implemented_at', now)
+        r.setdefault('implemented_run_ts', run_ts)
+        r.setdefault('implemented_via', f'framework-{backend}')
+        r.setdefault('implementation_commit_sha', sha)
+        hit += 1
+open(p, 'w').write(json.dumps(d, indent=2))
+print(f'marked implemented={hit}/{len(ids)} via framework-{backend}')
+PY
+                    fi
                 else
-                    echo "[implementer] aider fallback also failed rc=$rc — marking run deferred" >&2
+                    echo "[implementer] code-editor rc=0 but produced 0 NEW files — nothing to ship" >&2
+                fi
+                rm -f "$CE_POST_DIRTY" "$CE_NEW_FILES"
+                popd >/dev/null 2>&1 || true
+            fi
+            rm -f "$CE_PRE_DIRTY"
+
+            # ── Article-author write-then-insert post-step ────────────
+            # The prompt builder told the LLM to write
+            # `changes/<rec>.body.md` + `changes/<rec>.meta.json` for
+            # any article-author rec instead of running psql itself.
+            # Here we materialize those into actual editorial_articles
+            # rows. This is the trust boundary: the wrapper VERIFIES
+            # the row exists before reporting success — no more "claimed
+            # success but never inserted" hallucinations.
+            # Look in the REPO's changes/ dir (where build-aider-
+            # invocation pre-stubs the body.md/meta.json files), NOT
+            # the run_dir's changes/ — aider can only write to files
+            # in its --file context, which are repo-relative.
+            ART_CHANGES_DIR=""
+            if [ -d "${IMPLEMENTER_REPO_PATH:-}/changes" ]; then
+                ART_CHANGES_DIR="$IMPLEMENTER_REPO_PATH/changes"
+            elif [ -d "${RESPONDER_RUN_DIR:-}/changes" ]; then
+                ART_CHANGES_DIR="$RESPONDER_RUN_DIR/changes"
+            fi
+            if [ "$rc" -eq 0 ] && [ -n "$ART_CHANGES_DIR" ]; then
+                CHANGES_DIR="$ART_CHANGES_DIR"
+                ART_INSERT_LOG=$(mktemp)
+                set +e
+                PYTHONPATH="${RA_FRAMEWORK_ROOT:-/home/voidsstr/development/reusable-agents}${PYTHONPATH:+:$PYTHONPATH}" \
+                    python3 - "$CHANGES_DIR" "$RESPONDER_RUN_DIR" \
+                             "${RESPONDER_REC_IDS}" \
+                             "${RESPONDER_SITE:-}" \
+                             "${RESPONDER_SOURCE_AGENT:-?}" \
+                             "${RESPONDER_RUN_TS:-?}" \
+                             "${CE_WINNER:-?}" \
+                             > "$ART_INSERT_LOG" 2>&1 <<'ART_PY'
+import json, os, sys
+from pathlib import Path
+changes_dir = Path(sys.argv[1])
+run_dir     = Path(sys.argv[2])
+rec_ids     = [s for s in sys.argv[3].split(',') if s.strip()]
+site        = sys.argv[4]
+source_agent = sys.argv[5]
+run_ts      = sys.argv[6]
+backend     = sys.argv[7]
+
+
+def _live_url(site_id: str, slug: str) -> str:
+    """Compose the canonical article URL for this site.
+
+    The framework historically hardcoded `/blog/{slug}` which works for
+    AislePrompt but 404s on SpecPicks (no /blog route — articles render
+    at /reviews/<slug>). Sites declare their canonical URL pattern via
+    `articles.url_template` in site.yaml, e.g.:
+        articles:
+          url_template: "https://specpicks.com/reviews/{slug}"
+    Falls back to the legacy `/blog/{slug}` shape if no template is set.
+    """
+    cfg_path = os.environ.get("SEO_AGENT_CONFIG", "")
+    if cfg_path and Path(cfg_path).is_file():
+        try:
+            import yaml as _yaml
+            cfg = _yaml.safe_load(open(cfg_path).read()) or {}
+            tmpl = ((cfg.get("articles") or {}).get("url_template") or "").strip()
+            if tmpl:
+                return tmpl.replace("{slug}", slug).replace("{site}", site_id)
+        except Exception:
+            pass
+    return f"https://{site_id}.com/blog/{slug}"
+
+# Locate per-rec body/meta files. The build-aider-invocation step
+# names them by SLUG (not rec_id) to prevent cross-run rec_id
+# collisions from leaking one article's body under another's slug.
+# We need to look up each rec's slug from recommendations.json BEFORE
+# we can find the matching files. Legacy fallback: if a slug-named
+# file isn't present but a rec_id-named one is, accept it (back-compat
+# for in-flight rundirs from before the rename).
+recs_doc = {}
+recs_p = run_dir / "recommendations.json"
+if recs_p.is_file():
+    raw = json.loads(recs_p.read_text())
+    if isinstance(raw, dict):
+        recs_doc = {r.get("id"): r for r in raw.get("recommendations", [])}
+    elif isinstance(raw, list):
+        recs_doc = {r.get("id"): r for r in raw}
+
+pairs = []
+for rid in rec_ids:
+    rec = recs_doc.get(rid) or {}
+    proposal = rec.get("proposal") or rec.get("article_proposal") or {}
+    slug = (proposal.get("slug") or "").strip()
+    body_p = meta_p = None
+    if slug:
+        sb = changes_dir / f"{slug}.body.md"
+        sm = changes_dir / f"{slug}.meta.json"
+        if sb.is_file() and sm.is_file():
+            body_p, meta_p = sb, sm
+    if body_p is None:  # legacy fallback
+        legacy_b = changes_dir / f"{rid}.body.md"
+        legacy_m = changes_dir / f"{rid}.meta.json"
+        if legacy_b.is_file() and legacy_m.is_file():
+            body_p, meta_p = legacy_b, legacy_m
+            print(f"[article-insert] {rid}: using legacy rec-id-named "
+                  f"files (pre-slug-rename)")
+    if body_p and meta_p:
+        pairs.append((rid, body_p, meta_p))
+if not pairs:
+    print(f"[article-insert] no body.md/meta.json pairs found for "
+          f"recs {rec_ids} — not an article dispatch, skipping")
+    sys.exit(0)
+
+dsn = os.environ.get("DATABASE_URL", "")
+if not dsn:
+    print(f"[article-insert] DATABASE_URL not set — cannot insert "
+          f"{len(pairs)} article(s); leaving body files in place "
+          f"for next retry", file=sys.stderr)
+    sys.exit(2)
+
+# recs_doc loaded above when resolving body/meta filenames; reuse it.
+
+import psycopg2
+conn = psycopg2.connect(dsn)
+inserted_ids: list[tuple[str, int, str]] = []
+errors: list[tuple[str, str]] = []
+for rid, body_p, meta_p in pairs:
+    try:
+        body_md = body_p.read_text()
+        # Anti-hallucination gate (lifted from leaked Claude Code prompt:
+        # "if you can't verify, say so explicitly rather than claiming
+        # success"). The LLM is instructed to write
+        # 'EDIT INCOMPLETE: under target' as the last line if it can't
+        # hit the word count; we honor that and skip the INSERT.
+        if "EDIT INCOMPLETE" in body_md.splitlines()[-3:][-1] \
+                if body_md.strip().splitlines() else False:
+            errors.append((rid, "LLM marked body as EDIT INCOMPLETE — "
+                                "skipping insert; will retry next tick"))
+            continue
+        word_count = len(body_md.split())
+        # Hard floor — even if the LLM didn't mark INCOMPLETE, refuse
+        # to insert articles below 400 words. Better to defer than ship
+        # a stub that hurts SEO.
+        if word_count < 400:
+            errors.append((rid, f"body too short ({word_count} words "
+                                "< 400 floor) — skipping insert"))
+            continue
+        # ── INTEGRITY CHECK: body H1 must match proposal title ──────
+        # Defends against the cross-run rec_id collision class that
+        # shipped 4 mismatched specpicks articles (wrong body content
+        # under correct title). If the body's first H1 doesn't share
+        # at least 30% of significant words with the proposal.title,
+        # the LLM either wrote the wrong topic or never overwrote the
+        # stub. SKIP the INSERT — the file stays in changes/ for a
+        # human to review.
+        import re as _re
+        rec = recs_doc.get(rid) or {}
+        proposal = rec.get("proposal") or rec.get("article_proposal") or {}
+        proposal_title = (proposal.get("title") or "").strip()
+        h1_match = _re.search(r"^#\s+(.+)$", body_md, _re.MULTILINE)
+        body_h1 = h1_match.group(1).strip() if h1_match else ""
+        def _kw(s):
+            return {w for w in _re.sub(r"[^a-z0-9 ]", " ",
+                                        (s or "").lower()).split()
+                    if len(w) > 3}
+        title_kw = _kw(proposal_title)
+        h1_kw = _kw(body_h1)
+        head_kw = _kw(body_md[:1500])
+        # The body must reflect the proposed topic SOMEWHERE in the
+        # H1 + first 1500 chars (covers cases where the LLM uses a
+        # paraphrased H1 but the body content is on-topic).
+        ref_kw = h1_kw | head_kw
+        overlap = title_kw & ref_kw
+        match_pct = len(overlap) / max(len(title_kw), 1)
+        if title_kw and match_pct < 0.3:
+            errors.append((rid,
+                f"INTEGRITY: body content does not match proposed title "
+                f"(overlap={match_pct:.0%}); proposed={proposal_title!r} "
+                f"body H1={body_h1[:60]!r} — refusing INSERT to prevent "
+                f"shipping wrong content under correct slug"))
+            print(f"[article-insert] {rid}: ✗ INTEGRITY mismatch "
+                  f"title='{proposal_title[:50]}' h1='{body_h1[:50]}' "
+                  f"overlap={match_pct:.0%} — SKIP", file=sys.stderr)
+            continue
+        # Tolerate malformed JSON — only subtitle/excerpt come from the
+        # LLM-written file. Everything else is wrapper-injected from
+        # the proposal in recommendations.json so the LLM can't break
+        # critical fields like slug/title/category.
+        try:
+            user_meta = json.loads(meta_p.read_text())
+            if not isinstance(user_meta, dict):
+                user_meta = {}
+        except json.JSONDecodeError as je:
+            print(f"[article-insert] {rid}: meta.json invalid JSON "
+                  f"({je}) — falling back to proposal-only meta")
+            user_meta = {}
+        rec = recs_doc.get(rid) or {}
+        proposal = rec.get("proposal") or rec.get("article_proposal") or {}
+        if not proposal.get("slug"):
+            errors.append((rid, "no proposal.slug — wrong dispatch type?"))
+            continue
+        meta = {
+            "slug":  proposal["slug"],
+            "title": proposal.get("title") or proposal["slug"],
+            "subtitle": user_meta.get("subtitle") or "",
+            "excerpt":  user_meta.get("excerpt") or "",
+            "category": proposal.get("bucket") or proposal.get("category") or "",
+            "tags":     proposal.get("tags") or [],
+            "primary_keyword": proposal.get("primary_keyword") or "",
+            "secondary_keywords": proposal.get("secondary_keywords") or [],
+            "related_hardware_slugs": proposal.get("related_hardware_slugs") or [],
+            "related_product_asins": proposal.get("related_product_asins") or [],
+        }
+        slug = meta["slug"]
+        title = meta["title"]
+        # Schema-aware INSERT: introspect the table once, build the
+        # column list dynamically, only include columns that exist.
+        # Lets the same wrapper handle aisleprompt's editorial_articles
+        # (has related_recipe_slugs, diet_tags, hero_image_url) and
+        # specpicks's editorial_articles (has related_hardware_slugs,
+        # related_product_asins) without per-site forks.
+        with conn.cursor() as cur:
+            table = meta.get("table") or "editorial_articles"
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s", (table,))
+            existing_cols = {row[0] for row in cur.fetchall()}
+            if not existing_cols:
+                errors.append((rid, f"table {table!r} not found"))
+                continue
+            # Map of (column_name → value) to INSERT. Only kept if
+            # column actually exists in the live schema.
+            candidate_values = {
+                "slug": slug,
+                "title": title,
+                "subtitle": meta.get("subtitle", ""),
+                "excerpt": meta.get("excerpt", ""),
+                "body_md": body_md,
+                "category": meta.get("category", ""),
+                "bucket":   meta.get("category", ""),  # aliased
+                "tags":     meta.get("tags") or [],
+                "primary_keyword": meta.get("primary_keyword", ""),
+                "secondary_keywords": meta.get("secondary_keywords") or [],
+                "related_recipe_slugs": (
+                    (rec.get("proposal") or {}).get("expected_recipe_slugs")
+                    or []),
+                "related_kitchen_slugs": (
+                    (rec.get("proposal") or {}).get("expected_kitchen_slugs")
+                    or []),
+                "related_hardware_slugs": meta.get("related_hardware_slugs") or [],
+                "related_product_asins":  meta.get("related_product_asins") or [],
+                "author": "Mike Perry",
+                "status": "published",
+                "written_by": f"framework-{backend}",
+            }
+            insert_cols = [c for c in candidate_values
+                           if c in existing_cols]
+            insert_vals = [candidate_values[c] for c in insert_cols]
+            # Add bookkeeping timestamps if those columns exist.
+            ts_cols = [c for c in ("published_at", "written_at",
+                                   "created_at", "updated_at")
+                       if c in existing_cols]
+            update_cols = [c for c in
+                           ("title", "subtitle", "excerpt", "body_md",
+                            "category", "bucket", "tags", "status")
+                           if c in insert_cols]
+            placeholders = ", ".join(["%s"] * len(insert_vals)
+                                     + ["now()"] * len(ts_cols))
+            update_clause = ", ".join(
+                [f"{c} = EXCLUDED.{c}" for c in update_cols] +
+                [f"{c} = now()" for c in ("updated_at", "written_at")
+                 if c in existing_cols])
+            sql = (
+                f"INSERT INTO {table} "
+                f"({', '.join(insert_cols + ts_cols)}) "
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT (slug) DO UPDATE SET {update_clause} "
+                f"RETURNING id")
+            cur.execute(sql, insert_vals)
+            row_id = cur.fetchone()[0]
+            conn.commit()
+            inserted_ids.append((rid, row_id, slug))
+            print(f"[article-insert] {rid}: INSERTed {table} "
+                  f"id={row_id} slug={slug} body_len={len(body_md)} "
+                  f"cols={len(insert_cols)}")
+    except Exception as e:
+        errors.append((rid, str(e)[:300]))
+        try: conn.rollback()
+        except: pass
+        print(f"[article-insert] {rid}: ERROR {e}", file=sys.stderr)
+
+# Summary doc per rec — overwrites whatever the LLM might have written
+# (which was prone to hallucinated "INSERTed id=42" claims).
+for rid, row_id, slug in inserted_ids:
+    s = changes_dir / f"{rid}.summary.md"
+    s.write_text(f"""# {rid} Summary
+
+## Status: SHIPPED (verified by wrapper)
+
+## INSERT Result
+- Table: editorial_articles
+- Row id: {row_id}
+- Slug: {slug}
+- Backend that wrote body_md: {backend}
+
+## Live URL
+{LIVE_URL}
+""".replace("{LIVE_URL}", _live_url(site, slug)))
+
+print(f"[article-insert] applied={len(inserted_ids)} errors={len(errors)}")
+if errors:
+    sys.exit(3)
+ART_PY
+                INSERT_RC=$?
+                set -e
+                cat "$ART_INSERT_LOG" >&2
+                rm -f "$ART_INSERT_LOG"
+                if [ "$INSERT_RC" -ne 0 ] && [ "$INSERT_RC" -ne 0 ]; then
+                    echo "[implementer] article-insert post-step rc=$INSERT_RC — body files preserved at $CHANGES_DIR/" >&2
+                fi
+
+                # Article link resolver: fix invented `/recipes/<slug>`
+                # links in any newly-INSERTed editorial_articles row by
+                # fuzzy-matching to recipe_catalog (real slugs include
+                # a trailing `-<id>`). Runs after every article-author
+                # dispatch so future articles ship with valid inner
+                # links. No-ops if there were no matches.
+                if [ -n "${DATABASE_URL:-}" ] && \
+                        [ -x "$SCRIPT_DIR/resolve-article-links.py" ]; then
+                    DATABASE_URL="$DATABASE_URL" \
+                        python3 "$SCRIPT_DIR/resolve-article-links.py" --apply \
+                        2>&1 | sed 's/^/[link-resolver] /' >&2 || true
+                fi
+
+                # Shipped-flag reconciler: walks every article-author
+                # rundir's recommendations.json and flips shipped:true
+                # for any rec whose proposal.slug now exists in
+                # editorial_articles. Closes the gap where the INSERT
+                # step succeeds but the JSON file (which the dashboard
+                # + future implementer runs read as authority) never
+                # learns about it.
+                if [ -x "$SCRIPT_DIR/reconcile-shipped.py" ]; then
+                    DATABASE_URL_AISLEPROMPT="${DATABASE_URL_AISLEPROMPT:-}" \
+                        DATABASE_URL_SPECPICKS="${DATABASE_URL_SPECPICKS:-}" \
+                        python3 "$SCRIPT_DIR/reconcile-shipped.py" \
+                        2>&1 | sed 's/^/[reconcile-shipped] /' >&2 || true
                 fi
             fi
 
-            # If still failing, defer cleanly.
+            # If the framework chain failed too, defer cleanly.
             if [ "$rc" -ne 0 ]; then
-                echo "[implementer] graceful defer: pool exhausted + no working fallback" >&2
-                # Write a clean "deferred" marker the host-worker + dashboard understand.
+                echo "[implementer] graceful defer: pool exhausted + no working code-editor backend (rc=$rc)" >&2
                 if [ -d "$RESPONDER_RUN_DIR" ]; then
                     cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFERRED_EOF
 {
   "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "reason": "claude-pool exhausted (all Max profiles rate-limited) and no fallback succeeded",
+  "reason": "claude-pool exhausted (all Max profiles rate-limited) and no framework code-editor backend succeeded",
   "rec_ids": "$RESPONDER_REC_IDS",
   "soonest_pool_reset": "see /api/agents/responder-agent/status.json or claude-pool state.json",
   "next_action": "host-worker will NOT auto-retry; next cron tick of the source agent re-emits the recs if still relevant"
@@ -675,15 +1176,22 @@ EOF
 esac
 
 # ── Deploy gating ───────────────────────────────────────────────────────────
-# The seo-deployer (build + tests + Azure push) runs ONLY when the entire
-# batch chain is finished — i.e. this is the last batch, AND every prior
-# batch terminated. Otherwise we'd deploy partial work after each batch,
-# which (a) wastes CI cycles, (b) can ship code that the next batch will
-# rewrite, and (c) makes test failures unattributable.
+# Per-batch deployment: every successful implementer batch chains
+# straight to the seo-deployer (build + tests + Azure push). Smaller
+# blast radius per ship, faster feedback if a batch breaks tests, and
+# avoids the "uncommitted work locked behind a never-completing chain"
+# failure mode of per-chain deploys.
 #
-# A run that's NOT batched (no dispatch-batches.json) is implicitly the
-# whole chain — deploy as before.
-DEPLOYER_SCRIPT="$REPO_ROOT/seo-deployer/run.sh"
+# Skipped automatically for DB-only dispatches (article-author, h2h,
+# catalog-audit) since those don't need a docker build.
+#
+# Path note: post agents/ consolidation the deployer lives at
+# agents/seo-deployer/run.sh, not the old top-level seo-deployer/.
+# Keep both paths checked so legacy installs still work.
+DEPLOYER_SCRIPT="$REPO_ROOT/agents/seo-deployer/run.sh"
+if [ ! -x "$DEPLOYER_SCRIPT" ] && [ -x "$REPO_ROOT/seo-deployer/run.sh" ]; then
+    DEPLOYER_SCRIPT="$REPO_ROOT/seo-deployer/run.sh"
+fi
 
 _is_last_batch_in_chain() {
     local mf="$RESPONDER_RUN_DIR/dispatch-batches.json"
@@ -719,17 +1227,16 @@ elif [ "$DISPATCH_KIND" = "article-author" ]; then
 elif [ "$DISPATCH_KIND" = "catalog-audit" ]; then
     echo "[implementer] catalog-audit dispatch — skipping deployer chain (DB-only fixes, no build)"
 elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
-    if _is_last_batch_in_chain; then
-        echo "[implementer] last batch in chain — chaining to seo-deployer"
-        SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
-            bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
-                rc=$?
-                echo "[implementer] deployer failed rc=$rc" >&2
-                exit $rc
-            }
-    else
-        echo "[implementer] more batches pending — deferring deployer until chain end" >&2
-    fi
+    # Per-batch deploy — fire after every batch, not waiting for chain
+    # end. The _is_last_batch_in_chain helper is preserved (still used
+    # by the legacy per-chain gate) but no longer required here.
+    echo "[implementer] batch complete — chaining to seo-deployer (per-batch deploy)"
+    SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
+        bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
+            rc=$?
+            echo "[implementer] deployer failed rc=$rc" >&2
+            exit $rc
+        }
 fi
 
 
@@ -873,6 +1380,7 @@ fi
 if [ "$COMPLETION_STATUS" = "completed" ] && [ -n "$EMAIL_REC_IDS" ] \
         && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
     PYTHONPATH="$REPO_ROOT" \
+        REPO_ROOT="$REPO_ROOT" \
         SHIPPED_REC_IDS="$EMAIL_REC_IDS" \
         RECS_JSON="$RESPONDER_RUN_DIR/recommendations.json" \
         DOWNSTREAM_RUN_TS="${RESPONDER_RUN_TS:-}" \
