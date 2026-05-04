@@ -41,24 +41,85 @@ def _entry_to_summary(agent_id: str, d: dict) -> RunSummary:
 
 
 def _list_runs_legacy(agent_id: str, limit: int, offset: int) -> list[RunSummary]:
-    """Fallback: list runs by scanning the runs/ prefix and reading
-    each progress.json. Used when run-index.json is missing (agents
-    that haven't run since the perf upgrade)."""
+    """Fallback: list runs by scanning the runs/ prefix.
+
+    Handles two run-dir shapes:
+      • AgentBase shape: <ts>/progress.json  (PI, article-author, etc.)
+      • SEO orchestrator shape: <ts>/recommendations.json + goals.json
+        + snapshot.json + run-summary.md  (no progress.json — the
+        SEO pipeline is multi-step and doesn't go through AgentBase)
+
+    Both encode the same canonical timestamp pattern (<8d>T<6d>Z) as
+    the dir name, so we discover by listing canonical-shaped dirs +
+    fetching whichever marker file each one has.
+    """
+    import re as _re
     s = get_storage()
     prefix = f"agents/{agent_id}/runs/"
-    keys = sorted(
-        (k for k in s.list_prefix(prefix) if k.endswith("/progress.json")),
-        reverse=True,
-    )[offset:offset + limit]
-    # Parallel read — Azure blob client is thread-safe.
-    out: list[RunSummary] = []
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = list(ex.map(lambda k: (k, s.read_json(k)), keys))
-    for _key, d in results:
-        if not d:
+    ts_re = _re.compile(r"^\d{8}T\d{6}Z$")
+
+    # Collect canonical run timestamps (filter out implementer dispatch
+    # tempdirs named `rundir-<agent>-<ts>-<rand>` — those are downstream
+    # work, not original agent runs).
+    ts_set: set[str] = set()
+    for k in s.list_prefix(prefix):
+        rest = k[len(prefix):]
+        if "/" not in rest:
             continue
-        out.append(_entry_to_summary(agent_id, d))
-    return out
+        first = rest.split("/", 1)[0]
+        if ts_re.match(first):
+            ts_set.add(first)
+    sorted_ts = sorted(ts_set, reverse=True)
+    page = sorted_ts[offset:offset + limit]
+    if not page:
+        return []
+
+    # For each ts, try progress.json first (AgentBase), fall back to
+    # recommendations.json + run-summary.md (SEO/orchestrator). Synthesize
+    # a RunSummary that the dashboard can render.
+    def _fetch(ts: str) -> "RunSummary | None":
+        # Fast path: AgentBase shape
+        d = s.read_json(f"{prefix}{ts}/progress.json")
+        if d:
+            return _entry_to_summary(agent_id, d)
+        # SEO/orchestrator shape — synthesize from recommendations.json
+        rd = s.read_json(f"{prefix}{ts}/recommendations.json") or {}
+        recs = rd.get("recommendations") or []
+        n_recs = len(recs) if isinstance(recs, list) else 0
+        meta = rd.get("metadata") or {}
+        short_circuited = bool(meta.get("short_circuited"))
+        summary = (
+            f"short-circuit: replayed {n_recs} recs from "
+            f"{meta.get('replayed_from_run','prior run')}"
+            if short_circuited else
+            f"{n_recs} recommendations"
+        )
+        # status: best effort — if a deploy.json exists with success,
+        # we know it shipped; else success-by-default for a run that
+        # produced output.
+        deploy = s.read_json(f"{prefix}{ts}/deploy.json") or {}
+        status = "success"
+        if deploy.get("status") == "failure":
+            status = "failure"
+        # Infer started_at from the run-ts itself (canonical UTC stamp).
+        started_iso = ""
+        try:
+            started_iso = (
+                f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}T"
+                f"{ts[9:11]}:{ts[11:13]}:{ts[13:15]}+00:00"
+            )
+        except Exception:
+            pass
+        return RunSummary(
+            agent_id=agent_id, run_ts=ts,
+            status=status, started_at=started_iso,
+            ended_at=None, summary=summary,
+            iteration_count=0, progress=1.0,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(_fetch, page))
+    return [r for r in results if r]
 
 
 @router.get("/{agent_id}/runs", response_model=list[RunSummary])
@@ -67,11 +128,67 @@ def list_runs(agent_id: str, limit: int = Query(20, le=200), offset: int = 0):
     # Fast path: run-index.json — last 50 summaries pre-aggregated by
     # AgentBase.post_run(). One blob read replaces 1 list + N reads.
     idx = s.read_json(f"agents/{agent_id}/run-index.json")
-    if idx and idx.get("recent"):
-        slice_ = idx["recent"][offset:offset + limit]
-        return [_entry_to_summary(agent_id, e) for e in slice_]
+    if idx is not None and isinstance(idx.get("recent"), list):
+        # Trust the index even when `recent` is empty AS LONG AS the
+        # index reports total_runs > 0. An empty recent + total>0 means
+        # the index is stale (older than the actual runs); fall through
+        # to legacy + best-effort rebuild on the side.
+        recent = idx["recent"]
+        total = int(idx.get("total_runs") or 0)
+        if recent or (total == 0):
+            slice_ = recent[offset:offset + limit]
+            return [_entry_to_summary(agent_id, e) for e in slice_]
+        # Empty recent but agent has runs → index is stale; fall through.
     # Fallback: legacy list_prefix + parallel read.
-    return _list_runs_legacy(agent_id, limit, offset)
+    out = _list_runs_legacy(agent_id, limit, offset)
+    # Self-heal: if we just walked the prefix and got real summaries,
+    # rebuild the run-index.json for next time. Best-effort, never block.
+    # Only fires when the existing index was stale or missing — so the
+    # cost of rebuilding amortizes across many subsequent fast-path
+    # responses.
+    if out and (idx is None or not idx.get("recent")):
+        try:
+            _rebuild_run_index_async(agent_id, out)
+        except Exception:
+            pass
+    return out
+
+
+def _rebuild_run_index_async(agent_id: str, recent: list) -> None:
+    """Best-effort: write a fresh run-index.json with the legacy-path
+    summaries we just computed. Done in a daemon thread so the user-
+    facing response doesn't wait on the write. The next list_runs call
+    hits the fast path."""
+    import threading as _t
+    s = get_storage()
+
+    def _do():
+        try:
+            recent_dicts = [_entry_to_dict(r) for r in recent[:50]]
+            s.write_json(f"agents/{agent_id}/run-index.json", {
+                "total_runs": len(recent),
+                "recent": recent_dicts,
+                "updated_at_iso": "",
+                "rebuilt_by": "api-list_runs-fallback",
+            })
+        except Exception:
+            pass
+
+    th = _t.Thread(target=_do, daemon=True, name=f"run-index-rebuild-{agent_id}")
+    th.start()
+
+
+def _entry_to_dict(r: "RunSummary") -> dict:
+    """RunSummary → dict in the shape AgentBase writes to run-index.json."""
+    return {
+        "run_ts": r.run_ts,
+        "status": r.status,
+        "started_at": r.started_at,
+        "ended_at": r.ended_at,
+        "summary": r.summary,
+        "iteration_count": r.iteration_count,
+        "progress": r.progress,
+    }
 
 
 @router.get("/{agent_id}/runs/{run_ts}")
