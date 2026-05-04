@@ -516,15 +516,104 @@ EOF
         # NOTE: removed --no-session-persistence — older claude builds reject
         # this flag. Session files are written to ~/.claude regardless.
         IMPLEMENTER_MAX_TURNS="${IMPLEMENTER_MAX_TURNS:-200}"
+        # FAIL_FAST tells claude-pool to exit rc=75 (EX_TEMPFAIL) when ALL
+        # Max profiles are rate-limited, instead of sleeping for hours.
+        # We catch that below + try the Copilot/aider fallback.
+        export CLAUDE_POOL_FAIL_FAST="${CLAUDE_POOL_FAIL_FAST:-1}"
+        set +e
         claude --dangerously-skip-permissions \
                --print --output-format text \
                --max-turns "$IMPLEMENTER_MAX_TURNS" \
-               < "$PROMPT_FILE" || {
-            rc=$?
+               < "$PROMPT_FILE"
+        rc=$?
+        set -e
+
+        # ── Pool-exhausted fallback path ─────────────────────────────────
+        # rc=75 from claude-pool means "all Max profiles rate-limited".
+        # Try aider against the Copilot proxy as a fallback agentic editor.
+        # If that's also unavailable, mark the run as deferred (clean state,
+        # rc=0) so the host-worker doesn't keep retrying the same trigger.
+        if [ "$rc" -eq 75 ]; then
+            echo "[implementer] claude-pool fail-fast: all Max profiles rate-limited" >&2
+            COPILOT_API_BASE="${COPILOT_API_BASE:-http://localhost:4141/v1}"
+            FALLBACK_MODEL="${IMPLEMENTER_FALLBACK_MODEL:-claude-sonnet-4.6}"
+
+            # Probe Copilot proxy + aider
+            COPILOT_OK=0
+            if curl -sf --max-time 5 "$COPILOT_API_BASE/models" >/dev/null 2>&1; then
+                COPILOT_OK=1
+            fi
+            AIDER_BIN=""
+            if command -v aider >/dev/null 2>&1; then
+                AIDER_BIN="$(command -v aider)"
+            fi
+
+            if [ "$COPILOT_OK" = "1" ] && [ -n "$AIDER_BIN" ]; then
+                echo "[implementer] falling back to aider via copilot-api ($FALLBACK_MODEL)" >&2
+                # Aider in --message mode: one-shot prompt, auto-edit,
+                # don't auto-commit (we'll let the implementer's existing
+                # post-processing decide). Auto-add files referenced in
+                # the prompt. CWD is the run dir but aider walks up to
+                # the git root automatically.
+                #
+                # We pass the ORIGINAL prompt so the runbook + rec context
+                # transfer over. Aider will tool-use file reads/edits
+                # against the codebase. Worst case, aider runs but doesn't
+                # produce ship-able output — implementer's verify regex
+                # below catches that and marks the run as not-shipped,
+                # which is better than wedging.
+                set +e
+                # AIDER_* env vars are interpreted as the matching --flag by
+                # aider 0.86+, so AIDER_API_KEY="dummy" → "--api-key dummy",
+                # which fails the provider=key format check. Set ONLY
+                # OPENAI_API_KEY (the env var aider's openai provider reads
+                # directly). The copilot-api proxy on $COPILOT_API_BASE
+                # ignores the value, but aider needs *something* non-empty.
+                AIDER_OPENAI_KEY="${OPENAI_API_KEY:-${COPILOT_API_KEY:-dummy}}"
+                OPENAI_API_KEY="$AIDER_OPENAI_KEY" \
+                OPENAI_API_BASE="$COPILOT_API_BASE" \
+                "$AIDER_BIN" \
+                    --model "openai/$FALLBACK_MODEL" \
+                    --no-auto-commits \
+                    --yes-always \
+                    --no-show-model-warnings \
+                    --message-file "$PROMPT_FILE" \
+                    --no-pretty \
+                    2>&1
+                rc=$?
+                set -e
+                if [ "$rc" -eq 0 ]; then
+                    echo "[implementer] aider fallback succeeded — continuing post-processing" >&2
+                else
+                    echo "[implementer] aider fallback also failed rc=$rc — marking run deferred" >&2
+                fi
+            fi
+
+            # If still failing, defer cleanly.
+            if [ "$rc" -ne 0 ]; then
+                echo "[implementer] graceful defer: pool exhausted + no working fallback" >&2
+                # Write a clean "deferred" marker the host-worker + dashboard understand.
+                if [ -d "$RESPONDER_RUN_DIR" ]; then
+                    cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFERRED_EOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "claude-pool exhausted (all Max profiles rate-limited) and no fallback succeeded",
+  "rec_ids": "$RESPONDER_REC_IDS",
+  "soonest_pool_reset": "see /api/agents/responder-agent/status.json or claude-pool state.json",
+  "next_action": "host-worker will NOT auto-retry; next cron tick of the source agent re-emits the recs if still relevant"
+}
+DEFERRED_EOF
+                fi
+                rm -f "$PROMPT_FILE"
+                # Exit 0 so host-worker doesn't infinite-retry. The
+                # source agent's next cron tick re-emits any unshipped recs.
+                exit 0
+            fi
+        elif [ "$rc" -ne 0 ]; then
             echo "[implementer] claude exited rc=$rc" >&2
             rm -f "$PROMPT_FILE"
             exit $rc
-        }
+        fi
         rm -f "$PROMPT_FILE"
         ;;
     framework)
