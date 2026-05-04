@@ -383,6 +383,7 @@ TRUSTED_REC_TYPES: set[str] = {
     "onpage-title-length",          # static template title tweak
     "onpage-low-internal-linking",  # add anchor to existing template
     "article-orphan-boost",         # internal-link addition (sitemap + cross-link)
+    "catalog-audit-criterion",      # DB-only fix: SQL migration OR DEFERRED summary
     # Add more here as each rec-type proves out. KEEP THIS CONSERVATIVE.
     # Adding a type means: at least one production run committed clean,
     # surgical work that survived a `git diff` review. Promotion log:
@@ -469,6 +470,15 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
         if rt and rt in TRUSTED_REC_TYPES:
             eligible_recs.append(r)
             continue
+        # Catalog-audit recs ship with empty `type`. Detect by the
+        # canonical "Catalog audit found ... criterion" rationale and
+        # promote them as if they were `catalog-audit-criterion` recs
+        # so the dedicated prompt block kicks in.
+        rationale_lc = (r.get("rationale") or "").lower()
+        if rationale_lc.startswith("catalog audit found"):
+            r["type"] = "catalog-audit-criterion"
+            eligible_recs.append(r)
+            continue
         # Unknown / not-yet-validated rec types defer cleanly.
         deferred.append({
             "rec_id": r.get("id"),
@@ -517,6 +527,24 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                     or "/articles/" in u
                     for u, _ in _urls_from_rec(r))
         )
+        # Catalog-audit recs: type often empty (the agent emits them
+        # without a `type` field), distinguished by rationale wording
+        # "Catalog audit found N rows failing the '<criterion>' criterion".
+        # The fix shape is ALWAYS a SQL migration (or a noop+defer-to-
+        # other-job summary). Aider's default mode treats them like code
+        # recs and goes hunting for non-existent source files; surface
+        # the criterion + evidence rows + a pointer to the audit script
+        # so the model has enough to write a real migration.
+        is_catalog_audit_rec = (
+            rec_type == "catalog-audit-criterion"
+            or rationale.lower().startswith("catalog audit found")
+        )
+        catalog_criterion = ""
+        if is_catalog_audit_rec:
+            import re as _re
+            m = _re.search(r"'([a-z][a-z0-9-]+)'", rationale)
+            if m:
+                catalog_criterion = m.group(1)
         # Article-author / catalog-audit dispatches: the rec carries a
         # `proposal` (article-author) or `audit_findings` (catalog-audit)
         # block that the LLM should turn into a real `INSERT` against
@@ -571,6 +599,62 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                 "INSERT verification — it doesn't trust your claim.\n"
                 "  d. Do NOT run psql. Do NOT modify code files outside "
                 "`changes/`. The wrapper handles the DB INSERT.\n")
+        elif is_catalog_audit_rec:
+            # Surface the evidence rows + criterion verbatim. The audit
+            # script (`scripts/catalog-quality-audit.ts`) is the source
+            # of truth for what the criterion checks — preload it so
+            # the model can read the SQL the criterion actually runs.
+            evidence_rows = r.get("evidence") or []
+            ev_text = "\n".join(
+                f"  - id={e.get('ref_id','?')}  "
+                f"{(e.get('snippet') or '')[:90]}"
+                for e in evidence_rows[:30]
+            )
+            audit_script_path = "scripts/catalog-quality-audit.ts"
+            audit_script_full = repo_path / audit_script_path
+            if audit_script_full.is_file():
+                rel = str(audit_script_full.relative_to(repo_path))
+                if rel not in seen_files:
+                    seen_files.add(rel)
+                    all_files.append(rel)
+                    files = files + [rel]
+            block.append(
+                f"CATALOG-AUDIT REC — criterion `{catalog_criterion or '?'}`. "
+                f"This is a DB-only fix; the change is a SQL migration "
+                f"or a noop+defer summary, NOT a code edit.\n\n"
+                f"Concrete evidence rows (first 30 — there may be more "
+                f"matching the criterion):\n{ev_text or '  (no evidence rows)'}\n\n"
+                f"Reference: `{audit_script_path}` (preloaded). Read the "
+                f"criterion's `check` SQL to understand exactly what "
+                f"condition flagged these rows. The DETAIL field on the "
+                f"criterion explains the right fix shape — it may say:\n"
+                f"  • 'defer to <name>.py daily backfill' → write a "
+                f"DEFERRED summary, do not edit the DB. Specifically: "
+                f"recipe-image-present + product-image-present should "
+                f"defer to the existing image-backfill jobs.\n"
+                f"  • 'canonical mapping' → write a `db/migrations/"
+                f"<UTC-ts>_catalog-audit-{catalog_criterion or 'fix'}.sql` "
+                f"that UPDATEs the offending rows to the canonical "
+                f"value. Use only the ref_ids listed above + a WHERE "
+                f"clause that's safe (no destructive blanket UPDATEs).\n"
+                f"  • 'deactivate' → UPDATE the row to is_active=false "
+                f"with a reason in a comment column if one exists.\n\n"
+                f"REQUIRED OUTPUT:\n"
+                f"  EITHER: a NEW SQL migration file at db/migrations/<ts>_<criterion>.sql "
+                f"that includes a header comment naming the criterion + "
+                f"the row ids it targets, then the UPDATE/DELETE statements, "
+                f"then a one-line VERIFY comment showing how to re-run "
+                f"the criterion's check.\n"
+                f"  OR: a `changes/{rid}.summary.md` whose first line is "
+                f"`# {rid} — {catalog_criterion or 'catalog-audit'}` and "
+                f"second-line `**Status:** DEFERRED — <one-sentence "
+                f"reason>` (e.g. \"row counts deferred to the "
+                f"image-backfill cron job\"). The wrapper picks up "
+                f"either form.\n\n"
+                f"Do NOT execute SQL via psql/pg/sqlite-CLI. The "
+                f"deployer's migration runner applies the SQL on "
+                f"deploy. Hand-execution against the live DB skips "
+                f"the audit trail.")
         elif is_db_snippet_rec:
             block.append(
                 "DB-backed page: the URL above is rendered from a "
