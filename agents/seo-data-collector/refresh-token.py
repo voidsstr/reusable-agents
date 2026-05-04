@@ -23,7 +23,12 @@ import urllib.request
 DEFAULT_OAUTH_PATH = os.path.expanduser("~/.reusable-agents/seo/.oauth.json")
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
-    "https://www.googleapis.com/auth/webmasters.readonly",
+    # 'webmasters' is the WRITE scope — superset of 'webmasters.readonly'.
+    # Needed for Sitemaps.submit (used by gsc-coverage-auditor on deploys
+    # to register sitemaps with GSC and accelerate URL discovery on
+    # young/low-authority domains where 96%+ of URLs come back as
+    # "URL is unknown to Google" otherwise).
+    "https://www.googleapis.com/auth/webmasters",
     # adwords scope is requested too so a single OAuth bootstrap covers
     # Google Ads in addition to GSC + GA4. Existing oauth.json files
     # without this scope still work for GSC/GA4; pull_google_ads will

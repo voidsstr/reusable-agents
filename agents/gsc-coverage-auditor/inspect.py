@@ -260,6 +260,33 @@ def main() -> None:
     site = load_site(site_name)
     err(f"[gsc-coverage] site={site_name} host={site['host']} limit={DEFAULT_LIMIT} dry={DRY_RUN}")
 
+    # Step 0: re-register the sitemap with GSC (idempotent — refreshes
+    # the lastSubmitted timestamp). Cheap insurance: most cost-effective
+    # nudge to bump up Google's crawl priority on young domains. Skipped
+    # silently if the OAuth token doesn't have the webmasters write scope.
+    if not DRY_RUN and os.environ.get("GSC_INSPECT_SKIP_SITEMAP_SUBMIT") != "1":
+        try:
+            token_for_sm = get_access_token()
+            site_url = site.get("gscSiteUrl") or f"sc-domain:{site['host']}"
+            for sm in (site.get("sitemapUrls") or [f"https://{site['host']}/sitemap.xml"]):
+                site_enc = urllib.parse.quote(site_url, safe="")
+                feed_enc = urllib.parse.quote(sm, safe="")
+                api = (
+                    f"https://searchconsole.googleapis.com/webmasters/v3/sites/"
+                    f"{site_enc}/sitemaps/{feed_enc}"
+                )
+                req = urllib.request.Request(api, method="PUT", headers={"Authorization": f"Bearer {token_for_sm}"})
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        err(f"[gsc-sitemap-submit] ✓ {sm}  HTTP {r.status}")
+                except urllib.request.HTTPError as e:
+                    if e.code in (401, 403):
+                        err(f"[gsc-sitemap-submit] skipped: {e.code} (token lacks webmasters write scope — re-bootstrap to enable)")
+                        break
+                    err(f"[gsc-sitemap-submit] ✗ {sm}  HTTP {e.code}")
+        except Exception as e:
+            err(f"[gsc-sitemap-submit] error: {e}")
+
     err(f"[gsc-coverage] building URL universe from DB + sitemap…")
     universe = collect_urls_from_db(site)
     err(f"[gsc-coverage] universe size: {len(universe)} URLs")
