@@ -3,16 +3,24 @@
 // keeps nav reachable with a thumb).
 
 import { BrowserRouter, NavLink, Outlet, Route, Routes, useLocation } from 'react-router-dom'
-import { useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { setToken } from './api/client'
+
+// Code-splitting: every route page becomes its own chunk so the initial
+// bundle is just the shell + the landing route. AgentList is loaded
+// eagerly because it's the default route and avoids a Suspense flash on
+// the most common entry point. The rest defer until the user navigates
+// to them, which on a typical session means most chunks are never
+// downloaded at all.
 import AgentList from './pages/AgentList'
-import AgentDetail from './pages/AgentDetail'
-import Confirmations from './pages/Confirmations'
-import Events from './pages/Events'
-import ImplementerQueue from './pages/ImplementerQueue'
-import Providers from './pages/Providers'
-import Graph from './pages/Graph'
-import Goals from './pages/Goals'
+const AgentDetail       = lazy(() => import('./pages/AgentDetail'))
+const Confirmations     = lazy(() => import('./pages/Confirmations'))
+const Events            = lazy(() => import('./pages/Events'))
+const ImplementerQueue  = lazy(() => import('./pages/ImplementerQueue'))
+const Providers         = lazy(() => import('./pages/Providers'))
+const Graph             = lazy(() => import('./pages/Graph'))
+const Goals             = lazy(() => import('./pages/Goals'))
+const Settings          = lazy(() => import('./pages/Settings'))
 
 type NavItem = { to: string; label: string; icon: string; mobile?: boolean }
 
@@ -24,6 +32,7 @@ const NAV: NavItem[] = [
   { to: '/implementer-queue',  label: 'Queue',         icon: '⚒', mobile: true },
   { to: '/providers',          label: 'AI',            icon: '🧠' },
   { to: '/events',             label: 'Events',        icon: '⏱' },
+  { to: '/settings',           label: 'Settings',      icon: '⚙' },
 ]
 
 const MOBILE_NAV = NAV.filter(n => n.mobile)
@@ -34,17 +43,29 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route path="/"                    element={<AgentList />} />
-          <Route path="/agents/:id"          element={<AgentDetail />} />
-          <Route path="/goals"               element={<Goals />} />
-          <Route path="/goals/:agentId"      element={<Goals />} />
-          <Route path="/graph"               element={<Graph />} />
-          <Route path="/confirmations"       element={<Confirmations />} />
-          <Route path="/implementer-queue"   element={<ImplementerQueue />} />
-          <Route path="/providers"           element={<Providers />} />
-          <Route path="/events"              element={<Events />} />
+          <Route path="/agents/:id"          element={<Suspense fallback={<RouteSpinner />}><AgentDetail /></Suspense>} />
+          <Route path="/goals"               element={<Suspense fallback={<RouteSpinner />}><Goals /></Suspense>} />
+          <Route path="/goals/:agentId"      element={<Suspense fallback={<RouteSpinner />}><Goals /></Suspense>} />
+          <Route path="/graph"               element={<Suspense fallback={<RouteSpinner />}><Graph /></Suspense>} />
+          <Route path="/confirmations"       element={<Suspense fallback={<RouteSpinner />}><Confirmations /></Suspense>} />
+          <Route path="/implementer-queue"   element={<Suspense fallback={<RouteSpinner />}><ImplementerQueue /></Suspense>} />
+          <Route path="/providers"           element={<Suspense fallback={<RouteSpinner />}><Providers /></Suspense>} />
+          <Route path="/events"              element={<Suspense fallback={<RouteSpinner />}><Events /></Suspense>} />
+          <Route path="/settings"            element={<Suspense fallback={<RouteSpinner />}><Settings /></Suspense>} />
         </Route>
       </Routes>
     </BrowserRouter>
+  )
+}
+
+function RouteSpinner() {
+  // Minimal placeholder shown only during the few hundred ms while a
+  // route's chunk is fetched + parsed on first navigation to it.
+  // No content shift — same vertical-space as the page header.
+  return (
+    <div className="flex items-center justify-center py-12 text-ink-400 text-sm" aria-live="polite">
+      <span className="animate-pulse">Loading…</span>
+    </div>
   )
 }
 

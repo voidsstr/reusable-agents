@@ -12,6 +12,24 @@ server {
     listen 80;
     server_name _;
 
+    # ── Compression ───────────────────────────────────────────────────────
+    # Drops the ~2 MB main JS bundle to ~500 KB gzip. Compression is
+    # CPU-cheap relative to the network round-trip on Azure Container
+    # Apps cold-start scenarios (~1.5s saved per first paint).
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_comp_level 5;
+    gzip_types
+        application/javascript application/x-javascript text/javascript
+        application/json
+        text/css
+        text/plain text/xml application/xml application/xml+rss
+        image/svg+xml
+        application/wasm
+        font/ttf font/otf application/font-woff application/font-woff2;
+
     # ── API REST ──────────────────────────────────────────────────────────
     location /api/ {
         proxy_pass http://agent_api;

@@ -236,6 +236,58 @@ def _start_batches_warmer():
 _LIFETIME_CACHE: dict = {"data": None, "ts": 0.0}
 _LIFETIME_TTL_S = 60.0  # cheap-ish to recompute, but daily-traffic patterns
                         # don't need second-by-second freshness
+_LIFETIME_WARM_INTERVAL_S = 50.0   # refresh just before TTL expires
+_LIFETIME_WARMER_STARTED = False
+_LIFETIME_REFRESH_LOCK = _threading.Lock()
+
+
+def _start_lifetime_warmer():
+    """Background thread that refreshes the lifetime-stats cache just
+    before TTL expiry. The endpoint takes 13-15s on cold cache (one
+    list_prefix + recommendations.json read per agent × 8 agents);
+    without warming, that 15s lands on whichever user opens the page
+    once a minute. With warming, every request is a cache hit (~50ms).
+    """
+    global _LIFETIME_WARMER_STARTED
+    if _LIFETIME_WARMER_STARTED:
+        return
+    _LIFETIME_WARMER_STARTED = True
+    import time as _time
+
+    def _loop():
+        # Stagger the first refresh by a few seconds so we don't fight
+        # the batches-warmer for connection bandwidth at startup.
+        _time.sleep(8.0)
+        while True:
+            try:
+                _refresh_lifetime_cache()
+            except Exception:
+                pass
+            _time.sleep(_LIFETIME_WARM_INTERVAL_S)
+
+    t = _threading.Thread(target=_loop, daemon=True, name="lifetime-warmer")
+    t.start()
+
+
+def _refresh_lifetime_cache() -> dict:
+    """Build the lifetime-stats payload + cache it. Used by both the
+    HTTP handler (cold path) and the warmer.
+
+    Holds a lock so concurrent callers don't duplicate the 13s of
+    Azure work. Lock-contended callers fall through to whatever the
+    cache currently has (stale acceptable here — better than blocking).
+    """
+    if not _LIFETIME_REFRESH_LOCK.acquire(blocking=False):
+        # Another thread is refreshing; return what we have.
+        return _LIFETIME_CACHE.get("data") or {}
+    try:
+        import time as _time
+        data = _compute_lifetime_stats()
+        _LIFETIME_CACHE["data"] = data
+        _LIFETIME_CACHE["ts"] = _time.monotonic()
+        return data
+    finally:
+        _LIFETIME_REFRESH_LOCK.release()
 
 
 @router.get("/lifetime-stats")
@@ -259,14 +311,24 @@ def get_lifetime_stats(force_refresh: bool = Query(False)):
                        was deferred-by-allowlist
       pending        — auto-queue trigger exists, no dispatch yet
       total          — every rec the implementer has ever seen
+
+    Cached 60s + warmed by a background thread so user requests are
+    always cache hits (~50ms). Cold compute is 13-15s — never hits
+    the user except at startup.
     """
     import time
+    _start_lifetime_warmer()
     now = time.monotonic()
     cached = _LIFETIME_CACHE["data"]
     if cached is not None and not force_refresh \
             and (now - _LIFETIME_CACHE["ts"]) < _LIFETIME_TTL_S:
         return cached
+    return _refresh_lifetime_cache()
 
+
+def _compute_lifetime_stats():
+    """Inner: actually walk storage and aggregate. Always called via
+    `_refresh_lifetime_cache` (which holds the dedup lock)."""
     s = get_storage()
     counts = {
         "shipped": 0, "implemented": 0, "deferred": 0,
@@ -382,8 +444,6 @@ def get_lifetime_stats(force_refresh: bool = Query(False)):
             agent_counts["pending"] += 1
             counts["pending"] += 1
 
-    _LIFETIME_CACHE["data"] = counts
-    _LIFETIME_CACHE["ts"] = now
     return counts
 
 
