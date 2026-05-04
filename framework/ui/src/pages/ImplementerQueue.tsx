@@ -909,6 +909,13 @@ function FilteredRecList({
 
 export default function ImplementerQueue() {
   const [chains, setChains] = useState<Chain[] | null>(null)
+  // Lifetime aggregate counts — independent of the windowed `chains`
+  // so the top-of-page stats stay accurate as older chains roll off
+  // the latest-N page.
+  const [lifetime, setLifetime] = useState<{
+    shipped: number; implemented: number; deferred: number;
+    pending: number; total: number;
+  } | null>(null)
   const [error, setError] = useState('')
   const [refreshedAt, setRefreshedAt] = useState('')
   const [pickedRec, setPickedRec] = useState<{ runDirBasename: string; recId: string } | null>(null)
@@ -916,8 +923,15 @@ export default function ImplementerQueue() {
 
   const refresh = async () => {
     try {
-      const r = await api.implementerBatches(20)
+      const [r, lt] = await Promise.all([
+        api.implementerBatches(20),
+        api.implementerLifetimeStats().catch(() => null),
+      ])
       setChains(r.chains)
+      if (lt) setLifetime({
+        shipped: lt.shipped, implemented: lt.implemented,
+        deferred: lt.deferred, pending: lt.pending, total: lt.total,
+      })
       setRefreshedAt(new Date().toLocaleTimeString())
       setError('')
     } catch (e: unknown) {
@@ -954,18 +968,37 @@ export default function ImplementerQueue() {
   }
 
   // Aggregate counters — single bucket per rec (no double-counting).
+  // Running + Queued come from the windowed chains (those are
+  // inherently in-flight states only present in active dispatches).
+  // Shipped + Implemented + Deferred are LIFETIME totals from a
+  // separate API endpoint that walks every recommendations.json once
+  // and caches — so they don't shrink when older chains roll off the
+  // page-N window. Falls back to windowed counts if /lifetime-stats
+  // hasn't loaded yet.
   const totals = useMemo(() => {
-    const t = { shipped: 0, implemented: 0, deferred: 0, queued: 0, running: 0, untouched: 0 }
+    const windowed = { shipped: 0, implemented: 0, deferred: 0,
+                       queued: 0, running: 0, untouched: 0 }
     for (const c of (chains || [])) {
       for (const b of c.batches) {
         for (const r of b.rec_items) {
           const cat = classifyRec(r, b.status)
-          t[cat as keyof typeof t]++
+          windowed[cat as keyof typeof windowed]++
         }
       }
     }
-    return t
-  }, [chains])
+    return {
+      // In-flight: window is authoritative (these states only exist
+      // during an active dispatch, which is always within the page).
+      running: windowed.running,
+      queued:  windowed.queued,
+      // Terminal states: lifetime totals (when available) so older
+      // history doesn't drop off as new chains push it out.
+      shipped:     lifetime ? lifetime.shipped     : windowed.shipped,
+      implemented: lifetime ? lifetime.implemented : windowed.implemented,
+      deferred:    lifetime ? lifetime.deferred    : windowed.deferred,
+      untouched:   windowed.untouched,
+    }
+  }, [chains, lifetime])
 
   // Flatten all recs across chains/batches with rich metadata for the
   // filtered drill-down view.

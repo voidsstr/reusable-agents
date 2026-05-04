@@ -233,6 +233,160 @@ def _start_batches_warmer():
     t.start()
 
 
+_LIFETIME_CACHE: dict = {"data": None, "ts": 0.0}
+_LIFETIME_TTL_S = 60.0  # cheap-ish to recompute, but daily-traffic patterns
+                        # don't need second-by-second freshness
+
+
+@router.get("/lifetime-stats")
+def get_lifetime_stats(force_refresh: bool = Query(False)):
+    """Aggregate counts across the FULL history of recommendations.
+
+    The /batches endpoint serves a windowed view (latest N chains) for
+    drill-down. The UI's top-of-page stats cards used to source from
+    that same windowed list, which made the 'Shipped' counter shrink
+    every time a new dispatch pushed an older one off the page —
+    going 120s → 100s → 8 over a session as more chains arrived.
+    Lifetime stats need a single sweep over every recommendations.json
+    in storage, not the page window.
+
+    Counts each rec exactly once with the same semantics the per-rec
+    UI uses:
+      shipped        — rec.shipped == True   (live in production)
+      implemented    — rec.implemented == True AND NOT shipped
+                       (committed, not yet deployed)
+      deferred       — rec has a DEFERRED/SKIPPED summary OR the rec
+                       was deferred-by-allowlist
+      pending        — auto-queue trigger exists, no dispatch yet
+      total          — every rec the implementer has ever seen
+    """
+    import time
+    now = time.monotonic()
+    cached = _LIFETIME_CACHE["data"]
+    if cached is not None and not force_refresh \
+            and (now - _LIFETIME_CACHE["ts"]) < _LIFETIME_TTL_S:
+        return cached
+
+    s = get_storage()
+    counts = {
+        "shipped": 0, "implemented": 0, "deferred": 0,
+        "pending": 0, "total": 0,
+        "by_agent": {},  # {agent_id: {shipped, implemented, ...}}
+    }
+
+    # Walk every rundir under agents/*/runs/*/recommendations.json. Use
+    # list_prefix per known dispatch-producing agent + the article-
+    # author/seo-opportunity/progressive-improvement instances, since
+    # those are the ones that emit recs. Avoids scanning every blob in
+    # the container.
+    rec_emitting_agents: set[str] = set()
+    rec_emitting_agents |= set(_QUEUE_AGENT_IDS)
+    rec_emitting_agents |= set(_DISPATCH_AGENTS)
+    # Discovery via list_prefix("agents/") truncates / times out on large
+    # containers. Use the registry instead — every registered agent
+    # appears there and the data is small (~100 entries).
+    try:
+        registry = s.read_json("registry/agents.json") or {}
+        agent_list = registry.get("agents") if isinstance(registry, dict) else None
+        if isinstance(agent_list, list):
+            for entry in agent_list:
+                if not isinstance(entry, dict):
+                    continue
+                aid = entry.get("id") or entry.get("agent_id") or ""
+                if any(suffix in aid for suffix in (
+                    "-seo-opportunity-agent",
+                    "-progressive-improvement-agent",
+                    "-article-author-agent",
+                    "-catalog-audit-agent",
+                )):
+                    rec_emitting_agents.add(aid)
+    except Exception:
+        pass
+    # Belt-and-suspenders: explicitly include the production agent ids
+    # so a missing/empty registry doesn't drop them.
+    for aid in (
+        "aisleprompt-seo-opportunity-agent",
+        "aisleprompt-article-author-agent",
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-catalog-audit-agent",
+        "specpicks-seo-opportunity-agent",
+        "specpicks-article-author-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-catalog-audit-agent",
+    ):
+        rec_emitting_agents.add(aid)
+
+    # Collect the union of states for each (agent_id, rec_id) across
+    # ALL rundirs first. Recs are propagated across runs by the
+    # propagator step, so the SAME rec_id appears in many rundirs'
+    # recommendations.json — sometimes with shipped=False (older
+    # snapshot) and sometimes with shipped=True (after the deployer
+    # ran). We need ANY True to win for that rec.
+    rec_state: dict[tuple[str, str], dict] = {}  # (agent_id, rid) → flags
+
+    for agent_id in sorted(rec_emitting_agents):
+        try:
+            keys = s.list_prefix(f"agents/{agent_id}/runs/")
+        except Exception:
+            continue
+        recs_keys = [k for k in keys if k.endswith("/recommendations.json")]
+        for rk in recs_keys:
+            try:
+                rd = s.read_json(rk) or {}
+            except Exception:
+                continue
+            if not isinstance(rd, dict):
+                continue
+            recs = rd.get("recommendations") or []
+            if not isinstance(recs, list):
+                continue
+            for r in recs:
+                if not isinstance(r, dict):
+                    continue
+                rid = r.get("id") or r.get("rec_id") or ""
+                if not rid:
+                    continue
+                key = (agent_id, rid)
+                cur_state = rec_state.get(key) or {
+                    "shipped": False, "implemented": False, "deferred": False,
+                }
+                # OR across all rundirs — once a rec is shipped, it's
+                # shipped lifetime, even if an older rundir's snapshot
+                # of the same rec shows shipped=False.
+                if r.get("shipped"):     cur_state["shipped"] = True
+                if r.get("implemented"): cur_state["implemented"] = True
+                if r.get("deferred") or \
+                   "deferred" in str(r.get("status", "")).lower():
+                    cur_state["deferred"] = True
+                rec_state[key] = cur_state
+
+    # Bucket each rec exactly once — same precedence as the UI's
+    # classifyRec(): shipped > implemented > deferred > pending.
+    for (agent_id, _rid), state in rec_state.items():
+        agent_counts = counts["by_agent"].setdefault(agent_id, {
+            "shipped": 0, "implemented": 0, "deferred": 0,
+            "pending": 0, "total": 0,
+        })
+        agent_counts["total"] += 1
+        counts["total"] += 1
+        if state["shipped"]:
+            agent_counts["shipped"] += 1
+            counts["shipped"] += 1
+        elif state["implemented"]:
+            agent_counts["implemented"] += 1
+            counts["implemented"] += 1
+        elif state["deferred"]:
+            agent_counts["deferred"] += 1
+            counts["deferred"] += 1
+        else:
+            agent_counts["pending"] += 1
+            counts["pending"] += 1
+
+    _LIFETIME_CACHE["data"] = counts
+    _LIFETIME_CACHE["ts"] = now
+    return counts
+
+
 @router.get("/batches")
 def list_batches(limit: int = Query(20, le=50)):
     """List active + recent batched dispatch chains.

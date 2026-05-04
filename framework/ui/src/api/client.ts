@@ -205,6 +205,23 @@ export const api = {
       }[]
     }[]
   }>(`/api/implementer/batches?limit=${limit}`),
+
+  // Lifetime aggregate counts — independent of the windowed /batches
+  // endpoint. Used for the top-of-page stats cards so they don't
+  // shrink when older chains roll off the page.
+  implementerLifetimeStats: () =>
+    http<{
+      shipped: number
+      implemented: number
+      deferred: number
+      pending: number
+      total: number
+      by_agent: Record<string, {
+        shipped: number; implemented: number; deferred: number;
+        pending: number; total: number
+      }>
+    }>(`/api/implementer/lifetime-stats`),
+
   getRecVerificationScript: (runDirBasename: string, recId: string) =>
     http<{
       rec_id: string
