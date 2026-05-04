@@ -68,8 +68,46 @@ const BATCH_SIZE = 10_000;
 const SITEMAP_FETCH_TIMEOUT_MS = 30_000;
 
 function loadSites(): SiteConfig[] {
-  const raw = fs.readFileSync(path.join(__dirname, 'sites.json'), 'utf-8');
-  return JSON.parse(raw).sites as SiteConfig[];
+  // Site-specific configs live in each site's repo:
+  //   $SITE_CONFIG_PATHS (comma-sep) — explicit list, used by per-site wrappers
+  //   ~/development/<site>/agents/seo-config/site-indexnow.json — fallback discovery
+  //   ./sites.json — legacy multi-site config in this dir (deprecated, kept as last-resort fallback)
+  // Each file is { "sites": [...] }; we merge.
+  const out: SiteConfig[] = [];
+  const explicit = process.env.SITE_CONFIG_PATHS;
+  if (explicit) {
+    for (const p of explicit.split(',').map(s => s.trim()).filter(Boolean)) {
+      try {
+        const raw = fs.readFileSync(p, 'utf-8');
+        out.push(...(JSON.parse(raw).sites as SiteConfig[]));
+      } catch (e) {
+        console.error(`[indexnow] could not load site config ${p}: ${e}`);
+      }
+    }
+    if (out.length) return out;
+  }
+  // Auto-discover per-site configs in standard locations
+  const homeDev = process.env.HOME ? path.join(process.env.HOME, 'development') : '';
+  const siteRepos = ['aisleprompt', 'specpicks'];
+  for (const site of siteRepos) {
+    const candidate = path.join(homeDev, site, 'agents', 'seo-config', 'site-indexnow.json');
+    if (fs.existsSync(candidate)) {
+      try {
+        const raw = fs.readFileSync(candidate, 'utf-8');
+        out.push(...(JSON.parse(raw).sites as SiteConfig[]));
+      } catch (e) {
+        console.error(`[indexnow] could not load ${candidate}: ${e}`);
+      }
+    }
+  }
+  if (out.length) return out;
+  // Last-resort fallback to in-repo legacy sites.json
+  const legacy = path.join(__dirname, 'sites.json');
+  if (fs.existsSync(legacy)) {
+    const raw = fs.readFileSync(legacy, 'utf-8');
+    return JSON.parse(raw).sites as SiteConfig[];
+  }
+  return [];
 }
 
 function readWatermark(file: string): string {

@@ -56,6 +56,10 @@ from typing import Any, Optional
 import psycopg2
 
 HERE = Path(__file__).resolve().parent
+# Site-specific configs live in each site's repo at
+# ~/development/<site>/agents/seo-config/site-indexnow.json. Override with
+# SITE_CONFIG_PATHS=<path1>,<path2> to use explicit files. Last-resort
+# fallback: the legacy sites.json in this dir (symlinked to indexnow's).
 SITES_JSON = HERE / "sites.json"
 REFRESH_SCRIPT = (HERE.parent / "seo-data-collector" / "refresh-token.py").resolve()
 OAUTH_FILE = Path(os.path.expanduser(
@@ -86,11 +90,28 @@ def get_access_token() -> str:
 
 
 def load_site(site_name: str) -> dict:
-    sites = json.loads(SITES_JSON.read_text())
-    for s in sites["sites"]:
-        if s["name"] == site_name:
-            return s
-    raise SystemExit(f"site {site_name!r} not in sites.json")
+    """Load site config — search per-site repos first, fall back to legacy."""
+    candidates = []
+    explicit = os.environ.get("SITE_CONFIG_PATHS")
+    if explicit:
+        candidates.extend(p.strip() for p in explicit.split(",") if p.strip())
+    home = os.path.expanduser("~/development")
+    for site in ("aisleprompt", "specpicks"):
+        candidates.append(f"{home}/{site}/agents/seo-config/site-indexnow.json")
+    candidates.append(str(SITES_JSON))
+    seen = set()
+    for path_ in candidates:
+        if path_ in seen or not Path(path_).is_file():
+            continue
+        seen.add(path_)
+        try:
+            doc = json.loads(Path(path_).read_text())
+        except Exception:
+            continue
+        for s in doc.get("sites", []):
+            if s.get("name") == site_name:
+                return s
+    raise SystemExit(f"site {site_name!r} not found in any site config")
 
 
 def slugify(s: str) -> str:
@@ -340,6 +361,72 @@ def main() -> None:
     for cs, n in sorted(counts.items(), key=lambda x: -x[1]):
         err(f"  {n:>4}  {cs}")
     err(f"[gsc-coverage] appended to {out_path}")
+
+    # Record metrics to the framework's goals system. Each per-site
+    # auditor agent has goals defined: goal-urls-inspected-7d (rolling
+    # 7d count from coverage.jsonl), goal-indexed-pct, goal-unknown-pct.
+    try:
+        sys.path.insert(0, str(HERE.parent.parent))
+        from framework.core import metric_helper
+        agent_id = f"{site_name}-gsc-coverage-auditor"
+
+        # 7d rolling URL count from the jsonl
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        n_recent = 0
+        latest_state: dict[str, str] = {}
+        try:
+            with out_path.open() as fh:
+                for raw in fh:
+                    try:
+                        row = json.loads(raw)
+                    except Exception:
+                        continue
+                    ts = row.get("inspected_at", "")
+                    if ts >= cutoff:
+                        n_recent += 1
+                    cs = row.get("coverageState") or ""
+                    if cs:
+                        url = row.get("url", "")
+                        if url and (url not in latest_state or ts > latest_state.get(url, ("", ""))[1] if False else True):
+                            latest_state[url] = (cs, ts)
+        except Exception:
+            pass
+        # Simpler latest-state pass (the above was over-engineered)
+        latest_state = {}
+        try:
+            with out_path.open() as fh:
+                for raw in fh:
+                    try:
+                        row = json.loads(raw)
+                    except Exception:
+                        continue
+                    url = row.get("url")
+                    if not url:
+                        continue
+                    cs = row.get("coverageState") or ""
+                    ts = row.get("inspected_at", "")
+                    prev = latest_state.get(url, ("", ""))
+                    if ts > prev[1]:
+                        latest_state[url] = (cs, ts)
+        except Exception:
+            pass
+        total_urls = len(latest_state) or 1
+        n_indexed = sum(1 for cs, _ in latest_state.values() if cs == "Submitted and indexed")
+        n_unknown = sum(1 for cs, _ in latest_state.values() if cs == "URL is unknown to Google")
+        metrics = {
+            "goal-urls-inspected-7d": float(n_recent),
+            "goal-indexed-pct": round(100.0 * n_indexed / total_urls, 2),
+            "goal-unknown-pct": round(100.0 * n_unknown / total_urls, 2),
+        }
+        metric_helper.record_many(
+            agent_id, metrics,
+            run_ts=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+            note=f"auto: ok={n_ok} fail={n_fail} latest_urls={total_urls}",
+        )
+        err(f"[gsc-coverage] recorded metrics: {metrics}")
+    except Exception as e:
+        err(f"[gsc-coverage] metric recording failed: {e}")
 
 
 if __name__ == "__main__":

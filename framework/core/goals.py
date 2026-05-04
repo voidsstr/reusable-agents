@@ -102,6 +102,10 @@ def init_goals(
                     k: v for k, v in g["metric"].items()
                     if k in ("target", "direction", "unit", "horizon_weeks", "name")
                 })
+                # Ensure 'current' is a number (schema requires it). Use the
+                # incoming default if cur_metric.current is null/missing.
+                if cur_metric.get("current") is None:
+                    cur_metric["current"] = g["metric"].get("current", 0)
                 cur["metric"] = cur_metric
             merged.append(cur)
         else:
@@ -109,11 +113,20 @@ def init_goals(
             seeded.setdefault("status", "active")
             seeded.setdefault("created_at", _now())
             seeded.setdefault("progress_history", [])
+            # Same null-guard for new goals
+            sm = seeded.get("metric")
+            if isinstance(sm, dict) and sm.get("current") is None:
+                sm["current"] = 0
             merged.append(seeded)
     # Preserve any existing goals not mentioned in the new seed list
     seeded_ids = {g["id"] for g in goals}
     for gid, g in by_id.items():
         if gid not in seeded_ids:
+            # Ensure metric.current is a valid number (schema requires it).
+            # Some legacy rows had null currents that block re-validation.
+            gm = g.get("metric")
+            if isinstance(gm, dict) and gm.get("current") is None:
+                gm["current"] = 0
             merged.append(g)
     return write_goals_doc(agent_id, merged, storage=s)
 

@@ -114,11 +114,55 @@ class GoalChangePost(BaseModel):
     user_feedback: Optional[str] = None
 
 
+@router.get("/{agent_id}/goals/cache")
+def get_goal_cache(agent_id: str):
+    """Fast goals-page read. Returns the pre-aggregated timeseries cache
+    that metric_helper maintains. Single storage call instead of walking
+    every run dir.
+
+    Falls back to the legacy /goals/timeseries scan if no cache exists
+    yet — first-run agents won't have a cache file written until they
+    record their first metric.
+    """
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    from framework.core import metric_helper
+    cache = metric_helper.read_cache(agent_id)
+    if cache.get("goals"):
+        return cache
+    # Empty cache — return the active.json so dashboard at least shows the goal definitions
+    s = get_storage()
+    active = s.read_json(goals_mod.goals_key(agent_id)) or {"goals": []}
+    return {
+        "agent_id": agent_id,
+        "updated_at": active.get("updated_at", ""),
+        "goals": {
+            g["id"]: {"points": [], "latest_value": (g.get("metric") or {}).get("current")}
+            for g in active.get("goals", []) if g.get("id")
+        },
+        "definitions_only": True,
+    }
+
+
+@router.get("/{agent_id}/goals/{goal_id}/progress")
+def get_goal_progress(agent_id: str, goal_id: str, limit: int = 500):
+    """High-resolution progress timeseries for one goal — used when
+    rendering the per-goal chart on click."""
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail="unknown agent")
+    from framework.core import metric_helper
+    return {
+        "agent_id": agent_id,
+        "goal_id": goal_id,
+        "points": metric_helper.read_goal_progress(agent_id, goal_id, limit=limit),
+    }
+
+
 @router.get("/{agent_id}/goals/timeseries")
 def get_goal_timeseries(agent_id: str, limit_runs: int = 60):
-    """Aggregate goal-progress.json across the last N runs into a
-    time-series per goal_id. Each goal returns a list of measurements
-    (ts, run_ts, current, baseline, target, progress_pct, status).
+    """[Slow legacy endpoint] Aggregate goal-progress.json across the last
+    N runs into a time-series per goal_id. Prefer /goals/cache for fast
+    reads. This endpoint is kept for backward compatibility.
 
     The dashboard's Goals tab uses this to plot trend lines and overlay
     rec-shipped dates so you can see what each shipped change moved.
@@ -126,6 +170,50 @@ def get_goal_timeseries(agent_id: str, limit_runs: int = 60):
     if get_agent(agent_id) is None:
         raise HTTPException(status_code=404, detail="unknown agent")
     s = get_storage()
+
+    # Fast path: return the metric_helper cache if it exists. Skip the
+    # per-run-dir scan entirely. Cache is updated incrementally on each
+    # metric record() so it's already up to date.
+    from framework.core import metric_helper as _mh
+    cache = _mh.read_cache(agent_id)
+    if cache.get("goals"):
+        # Also need the goal definitions (title/description/baseline/target)
+        # since the cache only stores points. Read active.json.
+        active = s.read_json(goals_mod.goals_key(agent_id)) or {"goals": []}
+        active_by_id = {g["id"]: g for g in active.get("goals", []) if g.get("id")}
+        out_goals: list[dict[str, Any]] = []
+        for gid, entry in cache["goals"].items():
+            adef = active_by_id.get(gid, {})
+            m = adef.get("metric") or {}
+            pts = entry.get("points") or []
+            out_goals.append({
+                "goal_id": gid,
+                "description": adef.get("description") or adef.get("title") or "",
+                "target_metric": m.get("name") or "",
+                "baseline": m.get("baseline"),
+                "target": m.get("target"),
+                "from_rec": adef.get("from_rec", ""),
+                "is_top5_goal": adef.get("is_top5_goal", False),
+                "is_revenue_goal": adef.get("is_revenue_goal", False),
+                "rationale": adef.get("rationale", ""),
+                "check_by": adef.get("check_by", ""),
+                "points": [
+                    {"ts": p.get("ts", ""), "run_ts": p.get("run_ts", ""),
+                     "current": p.get("value"), "progress_pct": None,
+                     "status": adef.get("status", "active")}
+                    for p in pts
+                ],
+            })
+        return {
+            "agent_id": agent_id,
+            "runs_scanned": 0,  # not applicable for cache path
+            "goal_count": len(out_goals),
+            "goals": out_goals,
+            "annotations": [],
+            "_source": "cache",
+        }
+
+    # Slow path (no cache yet) — original per-run-dir scan
     runs_prefix = f"agents/{agent_id}/runs/"
     # List all run dir basenames; sort desc by name (run-ts is sortable)
     seen_runs: set[str] = set()
