@@ -1,0 +1,193 @@
+{
+  "sites": [
+    {
+      "name": "aisleprompt",
+      "host": "aisleprompt.com",
+      "key": "fdae54f621e3caa4f5d2822a66955dcc",
+      "databaseUrlEnv": "AISLEPROMPT_DATABASE_URL",
+      "databaseUrlFallback": "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require",
+      "watermarkFile": "/home/voidsstr/.reusable-agents/indexnow-submitter/aisleprompt-watermark.txt",
+      "sitemapUrls": [
+        "https://aisleprompt.com/sitemap.xml"
+      ],
+      "staticPaths": [
+        "/",
+        "/features",
+        "/how-it-works",
+        "/faq",
+        "/blog",
+        "/recipes",
+        "/recipes/all",
+        "/best",
+        "/kitchen",
+        "/ai-instacart-meal-planner",
+        "/ai-grocery-list-generator",
+        "/recipe-importer",
+        "/ai-pantry-scanner",
+        "/cook-with-what-you-have",
+        "/vs/mealime",
+        "/vs/paprika",
+        "/vs/hellofresh",
+        "/recipes/q/cube-steak-recipes",
+        "/recipes/q/chocolate-chip-cookie-recipe",
+        "/recipes/q/chicken-breast",
+        "/recipes/q/chicken-thigh-recipes",
+        "/recipes/q/chicken",
+        "/best/best-chicken-recipes",
+        "/best/best-pasta-recipes",
+        "/best/best-quick-dinners",
+        "/best/best-one-pot-meals",
+        "/best/best-seafood-recipes",
+        "/best/best-vegetarian-recipes",
+        "/best/best-keto-recipes",
+        "/best/best-air-fryer-recipes",
+        "/best/best-healthy-recipes",
+        "/best/best-beef-recipes",
+        "/best/best-stir-fry-veggies",
+        "/best/best-low-carb-dinner-recipes-for-weekdays",
+        "/best/best-recipes-for-picky-eaters",
+        "/best/best-tacos"
+      ],
+      "querySets": [
+        {
+          "name": "recipes",
+          "bulkSql": "SELECT id, title FROM recipe_catalog WHERE (is_active IS NULL OR is_active = true) AND title IS NOT NULL",
+          "incrementalSql": "SELECT id, title FROM recipe_catalog WHERE (is_active IS NULL OR is_active = true) AND title IS NOT NULL AND created_at > $1",
+          "urlTemplate": "slugify:title|-|id",
+          "urlPrefix": "/recipes/"
+        },
+        {
+          "name": "kitchen-products",
+          "bulkSql": "SELECT slug FROM kitchen_products WHERE is_active = true AND slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM kitchen_products WHERE is_active = true AND slug IS NOT NULL AND (updated_at > $1 OR created_at > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/kitchen/"
+        },
+        {
+          "name": "kitchen-categories",
+          "bulkOnly": true,
+          "bulkSql": "SELECT slug FROM kitchen_categories WHERE COALESCE(is_active, TRUE) = TRUE AND slug IS NOT NULL",
+          "urlTemplate": "slug",
+          "urlPrefix": "/kitchen/category/"
+        },
+        {
+          "name": "recipe-categories",
+          "bulkOnly": true,
+          "bulkSql": "SELECT DISTINCT category AS slug FROM recipe_catalog WHERE category IS NOT NULL AND category != '' AND is_active = TRUE",
+          "urlTemplate": "slugify:slug",
+          "urlPrefix": "/recipes/category/"
+        },
+        {
+          "name": "recipe-cuisines",
+          "bulkOnly": true,
+          "bulkSql": "SELECT cuisine AS slug FROM recipe_catalog WHERE is_active = TRUE AND cuisine IS NOT NULL GROUP BY cuisine HAVING COUNT(*) >= 10",
+          "urlTemplate": "slugify:slug",
+          "urlPrefix": "/recipes/cuisine/"
+        }
+      ]
+    },
+    {
+      "name": "specpicks",
+      "host": "specpicks.com",
+      "key": "549c4d17dad4b4906b0323e6cd6b1e6e",
+      "databaseUrlEnv": "SPECPICKS_DATABASE_URL",
+      "databaseUrlFallback": "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require",
+      "watermarkFile": "/home/voidsstr/.reusable-agents/indexnow-submitter/specpicks-watermark.txt",
+      "siteIds": ["retro-gaming", "pc-hardware", "retro-pc-building"],
+      "sitemapUrls": [
+        "https://specpicks.com/sitemap.xml"
+      ],
+      "staticPaths": [
+        "/",
+        "/products",
+        "/categories",
+        "/buying-guides",
+        "/articles",
+        "/benchmarks",
+        "/ai-rigs",
+        "/ai-news",
+        "/reviews",
+        "/pc-gaming",
+        "/retro-gaming",
+        "/hardware",
+        "/makers",
+        "/retro/marketplace",
+        "/compare",
+        "/brands",
+        "/search",
+        "/about",
+        "/authors/mike-perry",
+        "/affiliate-disclosure",
+        "/privacy",
+        "/terms",
+        "/contact"
+      ],
+      "querySets": [
+        {
+          "name": "products",
+          "bulkSql": "SELECT asin AS slug FROM products WHERE site_id IN ($SITE_IDS) AND is_active = true AND COALESCE(category_confidence, 0) >= 0.5 AND asin IS NOT NULL",
+          "incrementalSql": "SELECT asin AS slug FROM products WHERE site_id IN ($SITE_IDS) AND is_active = true AND COALESCE(category_confidence, 0) >= 0.5 AND asin IS NOT NULL AND (updated_at > $1 OR created_at > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/product/"
+        },
+        {
+          "name": "articles",
+          "bulkSql": "SELECT slug FROM articles WHERE site_id IN ($SITE_IDS) AND is_published = true AND slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM articles WHERE site_id IN ($SITE_IDS) AND is_published = true AND slug IS NOT NULL AND (updated_at > $1 OR created_at > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/articles/"
+        },
+        {
+          "name": "categories",
+          "bulkOnly": true,
+          "bulkSql": "SELECT DISTINCT slug FROM categories WHERE site_id IN ($SITE_IDS) AND is_active = true AND slug IS NOT NULL",
+          "urlTemplate": "slug",
+          "urlPrefix": "/category/"
+        },
+        {
+          "name": "buying-guides",
+          "bulkOnly": true,
+          "bulkSql": "SELECT DISTINCT slug FROM categories WHERE site_id IN ($SITE_IDS) AND is_active = true AND slug IS NOT NULL",
+          "urlTemplate": "slug",
+          "urlPrefix": "/buying-guide/"
+        },
+        {
+          "name": "brands",
+          "bulkSql": "SELECT slug FROM brands WHERE site_id IN ($SITE_IDS) AND product_count > 0 AND slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM brands WHERE site_id IN ($SITE_IDS) AND product_count > 0 AND slug IS NOT NULL AND (updated_at > $1 OR created_at > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/brand/"
+        },
+        {
+          "name": "reviews",
+          "bulkSql": "SELECT slug FROM editorial_articles WHERE status = 'published' AND slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM editorial_articles WHERE status = 'published' AND slug IS NOT NULL AND (updated_at > $1 OR COALESCE(published_at, '1970-01-01'::timestamptz) > $1)",
+          "urlTemplate": "slug",
+          "urlPrefix": "/reviews/"
+        },
+        {
+          "name": "benchmarks",
+          "bulkSql": "SELECT slug FROM hardware_specs WHERE slug IS NOT NULL",
+          "incrementalSql": "SELECT slug FROM hardware_specs WHERE slug IS NOT NULL AND updated_at > $1",
+          "urlTemplate": "slug",
+          "urlPrefix": "/benchmarks/"
+        },
+        {
+          "name": "trending-comparisons",
+          "bulkSql": "SELECT left_ref, right_ref FROM trending_comparisons WHERE is_active = true AND kind = 'product'",
+          "incrementalSql": "SELECT left_ref, right_ref FROM trending_comparisons WHERE is_active = true AND kind = 'product' AND last_seen_at > $1",
+          "_comment": "URL is /compare/<left>-vs-<right> (matches sitemap canonical). The /vs/<left>/<right> alias also serves 200 but its canonical points to homepage, so Bing/Google would discard those submissions.",
+          "urlTemplate": "compose:left_ref|-vs-|right_ref",
+          "urlPrefix": "/compare/"
+        },
+        {
+          "name": "retro-marketplace-categories",
+          "bulkOnly": true,
+          "bulkSql": "SELECT DISTINCT slug FROM categories WHERE site_id = 'retro-gaming' AND is_active = true AND slug IS NOT NULL",
+          "urlTemplate": "slug",
+          "urlPrefix": "/retro/marketplace/"
+        }
+      ]
+    }
+  ]
+}
