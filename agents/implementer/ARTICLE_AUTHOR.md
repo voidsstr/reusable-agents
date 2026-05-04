@@ -67,7 +67,7 @@ expect substantive content for that signal.
   table (from `expected_products_or_hardware` if present)
 - `related_product_asins` — array of ASINs (same source)
 - `primary_keyword` / `secondary_keywords` — copy from the proposal
-- `author` — `"specpicks-article-author-agent"`
+- `author` — **always `"Mike Perry"`**. The agent is a writing assistant, not the byline — every article on the site is published under Mike Perry's name. Do NOT use the agent id, "SpecPicks Editorial", or any other placeholder.
 - `status` — `"published"` (we're going live)
 - `published_at` / `written_at` — `now()`
 - `written_by` — `"claude-cli"`
@@ -106,6 +106,13 @@ all the standard editorial columns, and set `category='buying-guide'`
 so the dashboard / SEO analyzer can distinguish them.
 
 ## Picking the hero image (MANDATORY before INSERT)
+
+**First, check the proposal.** If the rec carries
+`implementation_outline.hero_image_url` (or `proposal.hero_image_url`)
+already populated by the proposer, **use that value verbatim**. The
+proposer ran an image search at proposal time using the same SearxNG
+allow-list the recipe scraper uses, so the URL is already vetted. Only
+run the queries below if the proposal field is empty.
 
 The article's `hero_image_url` must be a real photo of one of the
 hardware items the article is about. Run this query against the DB
@@ -176,7 +183,7 @@ cur.execute("""
       category, tags, difficulty, read_time,
       related_hw, related_asins,
       primary_kw, secondary_kw,
-      'specpicks-article-author-agent', 'published', 'claude-cli'))
+      'Mike Perry', 'published', 'claude-cli'))
 article_id = cur.fetchone()[0]
 conn.commit()
 ```
@@ -185,6 +192,49 @@ Do an upsert (`ON CONFLICT (slug) DO UPDATE`) so re-runs don't error.
 
 For `buying_guides`, the `slug` column is unique too — same pattern,
 different columns.
+
+### MANDATORY: queue eBay fetch for any hardware product mentions
+
+After a successful INSERT/UPDATE on `editorial_articles` (or `buying_guides`),
+extract any **hardware product mentions** from the article body and queue
+an on-demand eBay fetch via the framework handoff primitive. This makes
+sure the just-published article has fresh listings rendered inline by the
+testbench API on the next eBay tick (instead of waiting up to 30 min for
+the rotation seed pool to come around).
+
+For each ASIN, product slug, or hardware spec the article references:
+
+```python
+import sys
+sys.path.insert(0, "/home/voidsstr/development/reusable-agents")
+from framework.core.handoff import send_handoff
+
+for mention in product_mentions:   # the same list you wrote into
+                                   # `related_product_asins` /
+                                   # `related_hardware_slugs` above
+    send_handoff(
+        from_agent="seo-implementer",
+        to_agent="ebay-product-sync-agent",
+        work_type="ebay_fetch_for_product",
+        rec_id=rec_id,
+        rec={
+            "product_query":    mention["query_text"],   # eBay search query
+                                                          # (e.g. "GeForce 4 Ti 4600")
+            "product_category": mention.get("category_slug"),  # e.g. "retro-gpus"
+            "asin":             mention.get("asin", ""),
+            "hardware_slug":    mention.get("hardware_slug", ""),
+            "source_article_slug": slug,
+        },
+        source_run_ts=os.environ.get("RESPONDER_RUN_TS", ""),
+        source_agent="article-author",
+        rationale=f"article '{slug}' published — fetch fresh eBay listings "
+                  f"for inline product cards",
+    )
+```
+
+If the article has zero hardware mentions, skip this step. The eBay
+agent's run loop reads handoffs into `self.inbound_handoffs` and injects
+them at the head of its priority seed queue.
 
 ## Per-rec output you MUST write
 
