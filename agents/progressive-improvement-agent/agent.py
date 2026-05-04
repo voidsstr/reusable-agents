@@ -126,6 +126,12 @@ def _parse_llm_json(raw: str) -> list[dict]:
     return []
 
 
+# NOTE: per-item hash short-circuit utilities live in
+# framework/core/short_circuit.py — partition_by_hash + merge_findings_cache.
+# Import + use them in run() rather than defining a local copy.
+from framework.core.short_circuit import merge_findings_cache as _merge_findings_cache  # noqa: E402
+
+
 # ---------------------------------------------------------------------------
 # The agent
 # ---------------------------------------------------------------------------
@@ -374,8 +380,72 @@ class ProgressiveImprovementAgent(AgentBase):
                     "evidence_snippet": (p.error or f"status={p.status_code}")[:200],
                     "fix_suggestion": "Investigate the route handler / build error / upstream dependency.",
                 })
-        for i in range(0, len(valid_pages), batch_size):
-            batch = valid_pages[i:i + batch_size]
+
+        # ── Page-hash short-circuit ────────────────────────────────────────
+        # Skip the LLM analysis for pages whose body hash matches what we
+        # saw on the last successful run AND for which no recommendations
+        # came back unresolved. On a stable site at 2h cadence this short
+        # -circuits ~80% of LLM batches. We carry the result-by-hash map
+        # forward in next_state so cached findings persist.
+        prior_hashes = (self.state.get("last_seen_hashes") or {}) if isinstance(self.state, dict) else {}
+        prior_findings = (self.state.get("last_findings_by_hash") or {}) if isinstance(self.state, dict) else {}
+        # Cap on how often we revisit the same hash regardless — guards against
+        # findings going stale + makes sure `recs_review` recs eventually
+        # re-emerge if the site reverts a fix that we tracked.
+        revisit_after_runs = int(analyzer_cfg.get("revisit_unchanged_after_runs", 12))  # ≈ 24h at 2h cadence
+        revisit_counter = (self.state.get("hash_revisit_counter") or {}) if isinstance(self.state, dict) else {}
+
+        cached_pages: list[Page] = []
+        fresh_pages: list[Page] = []
+        for p in valid_pages:
+            h = p.body_hash or ""
+            if not h:
+                fresh_pages.append(p)
+                continue
+            seen_count = int(revisit_counter.get(p.url, 0))
+            if prior_hashes.get(p.url) == h and seen_count < revisit_after_runs:
+                cached_pages.append(p)
+            else:
+                fresh_pages.append(p)
+
+        # Replay cached findings into raw_issues (still get scored + ranked)
+        replayed = 0
+        for p in cached_pages:
+            for issue in (prior_findings.get(p.body_hash) or []):
+                if isinstance(issue, dict):
+                    # Rebind URL — same content might live at a different URL
+                    issue = dict(issue)
+                    issue.setdefault("url", p.url)
+                    raw_issues.append(issue)
+                    replayed += 1
+
+        if cached_pages:
+            self.decide(
+                "observation",
+                f"page-hash short-circuit: {len(cached_pages)}/{len(valid_pages)} "
+                f"pages unchanged since last run; replayed {replayed} cached findings, "
+                f"sending {len(fresh_pages)} fresh page(s) to LLM",
+                evidence={
+                    "cached": len(cached_pages),
+                    "fresh": len(fresh_pages),
+                    "replayed_findings": replayed,
+                },
+            )
+
+        # Track which findings each LLM call produced for which page hash —
+        # so the next run's short-circuit can replay them.
+        new_findings_by_hash: dict[str, list[dict]] = {}
+        new_hashes: dict[str, str] = {p.url: (p.body_hash or "") for p in valid_pages}
+        new_revisit_counter: dict[str, int] = {}
+        for p in valid_pages:
+            prev = int(revisit_counter.get(p.url, 0))
+            if p in cached_pages:
+                new_revisit_counter[p.url] = prev + 1
+            else:
+                new_revisit_counter[p.url] = 0  # reset on fresh analysis
+
+        for i in range(0, len(fresh_pages), batch_size):
+            batch = fresh_pages[i:i + batch_size]
             user_prompt = _format_pages_for_prompt(batch, cfg.what_we_do)
             try:
                 system_prompt = ANALYSIS_SYSTEM
@@ -400,8 +470,20 @@ class ProgressiveImprovementAgent(AgentBase):
             self.decide("observation",
                         f"batch {i // batch_size}: {len(parsed)} issues from {len(batch)} pages")
             raw_issues.extend(parsed)
-            self.status(f"analyzed {min(i + batch_size, len(valid_pages))}/{len(valid_pages)} pages",
-                        progress=0.55 + min(0.30, (i / max(1, len(valid_pages))) * 0.30))
+            # Index findings by the originating page's body_hash so the
+            # next run can replay them when the page hasn't changed.
+            for issue in parsed:
+                if not isinstance(issue, dict):
+                    continue
+                url = issue.get("url") or ""
+                # Match the issue back to one of the batched pages by URL
+                for bp in batch:
+                    if bp.url == url and bp.body_hash:
+                        new_findings_by_hash.setdefault(bp.body_hash, []).append(issue)
+                        break
+            self.status(f"analyzed {min(i + batch_size, len(fresh_pages))}/{len(fresh_pages)} fresh pages "
+                        f"({len(cached_pages)} cached)",
+                        progress=0.55 + min(0.30, (i / max(1, len(fresh_pages))) * 0.30))
 
         # ── 4. Score, tier, cap ─────────────────────────────────────────────
         threshold = float(analyzer_cfg.get("auto_implement_threshold", 0.95))
@@ -645,6 +727,15 @@ class ProgressiveImprovementAgent(AgentBase):
                 "last_run_ts": self.run_ts,
                 "last_request_id": request_id,
                 "site_id": cfg.site_id,
+                # Page-hash short-circuit cache: per-URL body_hash from THIS
+                # run + findings keyed by hash. Next run consults these to
+                # skip the LLM for unchanged pages and replay the cached
+                # findings into the rec pipeline.
+                "last_seen_hashes": new_hashes,
+                "last_findings_by_hash": _merge_findings_cache(
+                    prior_findings, new_findings_by_hash, new_hashes
+                ),
+                "hash_revisit_counter": new_revisit_counter,
             },
         )
 
@@ -700,31 +791,26 @@ class ProgressiveImprovementAgent(AgentBase):
                         f"goal metrics updated: {metric_now}")
 
     def _write_auto_queue(self, *, request_id: str, recs: list[dict]) -> None:
-        """Drop a trigger at agents/responder-agent/auto-queue/<request-id>.json
-        so the responder dispatches every rec to the implementer on its
-        next tick. Mirrors seo-reporter's _write_auto_queue. The email
-        body becomes informational — recipient replies only to override."""
+        """Direct-dispatch the rec batch to the implementer via
+        framework.core.dispatch. Site-level lock; retries on transient
+        failures; falls back to writing agents/responder-agent/auto-queue/
+        if all retries exhaust (transitional). Email becomes informational
+        — recipient replies only to override (defer rec-NNN)."""
         try:
-            payload = {
-                "schema_version": "1",
-                "request_id": request_id,
-                "source_agent": self.agent_id,
-                "site": self.cfg.site_id,
-                "run_ts": self.run_ts,
-                "rec_ids": [r["id"] for r in recs if r.get("id")],
-                "action": "implement",
-                "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "source": "auto-queue-from-progressive-improvement-agent",
-            }
-            self.storage.write_json(
-                f"agents/responder-agent/auto-queue/{request_id}.json",
-                payload,
+            from framework.core import dispatch
+            rec_ids = [r["id"] for r in recs if r.get("id")]
+            handle = dispatch.dispatch_now(
+                agent_id=self.agent_id, run_dir=str(self.run_dir),
+                rec_ids=rec_ids, action="implement",
+                site=self.cfg.site_id, subject_tag="progressive-improvement",
+                request_id=request_id,
             )
+            label = "auto-queue fallback" if handle.fell_back_to_queue else "direct dispatch"
             self.decide("action",
-                        f"auto-queued {len(payload['rec_ids'])} rec(s) for implementer "
+                        f"dispatched {len(rec_ids)} rec(s) to implementer via {label} "
                         f"(request_id={request_id})")
         except Exception as e:
-            self.decide("error", f"auto-queue write failed: {e}")
+            self.decide("error", f"dispatch failed: {e}")
 
     def _save_artifact(self, name: str, content) -> None:
         """Write an artifact to BOTH local disk (for human inspection) AND

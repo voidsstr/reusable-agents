@@ -1261,6 +1261,48 @@ def drain_auto_queue(cfg: dict) -> int:
         return 0
     if not keys:
         return 0
+
+    # ── Priority sort: framework primitive ─────────────────────────────
+    # Tier rules + per-deployment overrides live in
+    # framework.core.priority + config/priority-config.json (storage).
+    # This call is REUSABLE — any agent that drains a queue should use
+    # it, not re-implement tier logic inline.
+    # Re-evaluated on every drain tick — newly-arrived high-tier items
+    # always jump ahead of waiting low-tier items.
+    try:
+        from framework.core.priority import (
+            tier_for_agent, load_priority_config,
+        )
+        prio_cfg = load_priority_config(storage=s)
+    except Exception as e:
+        print(f"[responder] priority config load failed ({e}); "
+              f"falling back to FIFO", file=sys.stderr)
+        tier_for_agent = None
+        prio_cfg = None
+
+    keys_with_meta: list[tuple[int, str, str]] = []
+    for key in keys:
+        try:
+            payload_peek = s.read_json(key) or {}
+            src = payload_peek.get("source_agent", "")
+            run_ts = payload_peek.get("run_ts", "") or ""
+            if tier_for_agent is not None:
+                tier = tier_for_agent(src, config=prio_cfg)
+            else:
+                tier = 5
+            keys_with_meta.append((tier, run_ts, key))
+        except Exception:
+            keys_with_meta.append((5, "", key))
+    keys_with_meta.sort(key=lambda x: (x[0], x[1], x[2]))
+    keys = [k for _, _, k in keys_with_meta]
+    if keys_with_meta:
+        # Quick visibility into the order so dashboard logs show tier mix
+        tier_counts: dict[int, int] = {}
+        for t, _, _ in keys_with_meta:
+            tier_counts[t] = tier_counts.get(t, 0) + 1
+        order_str = ", ".join(f"T{t}={n}" for t, n in sorted(tier_counts.items()))
+        print(f"[responder] auto-queue priority order: {order_str}", file=sys.stderr)
+
     print(f"[responder] auto-queue: {len(keys)} pending trigger(s)", file=sys.stderr)
     routes = cfg.get("routes", [])
     processed = 0
@@ -1402,8 +1444,13 @@ def tick(cfg: dict, state: dict) -> dict:
     network blips, SSL renegotiation, server hiccups). After exhausting
     retries, emails the operator and bails — the next timer firing will
     try again. Per-message processing failures don't block other messages."""
-    # Drain reporter-written auto-queue triggers BEFORE IMAP. These are
-    # synthetic "implement all" actions queued without an email reply.
+    # Drain ANY auto-queue items that producers wrote as a fallback when
+    # their direct dispatch failed. As of 2026-05-04 producer agents call
+    # framework.core.dispatch.dispatch_now() at end-of-run instead of
+    # writing here — this drain is now strictly a safety net for the
+    # transitional period while we verify direct dispatch is reliable.
+    # Slated for removal in a future cleanup once the auto-queue dir
+    # stays empty for a couple of weeks.
     try:
         drain_auto_queue(cfg)
     except Exception as e:

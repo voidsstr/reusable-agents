@@ -437,31 +437,26 @@ class CatalogAuditAgent(AgentBase):
         )
 
     def _write_auto_queue(self, *, request_id: str, recs: list[dict]) -> None:
-        """Drop a trigger at agents/responder-agent/auto-queue/<request-id>.json
-        so the responder dispatches every rec to the implementer on its
-        next tick. Mirrors PI + seo-reporter. The email becomes
-        informational — recipient replies only to override (defer rec-NNN)."""
+        """Direct-dispatch the rec batch to the implementer via
+        framework.core.dispatch. Site-level lock; retries on transient
+        failures; falls back to writing agents/responder-agent/auto-queue/
+        if all retries exhaust (transitional). Email becomes informational
+        — recipient replies only to override (defer rec-NNN)."""
         try:
-            payload = {
-                "schema_version": "1",
-                "request_id": request_id,
-                "source_agent": self.agent_id,
-                "site": self.cfg.site_id,
-                "run_ts": self.run_ts,
-                "rec_ids": [r["id"] for r in recs if r.get("id")],
-                "action": "implement",
-                "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "source": "auto-queue-from-catalog-audit-agent",
-            }
-            self.storage.write_json(
-                f"agents/responder-agent/auto-queue/{request_id}.json",
-                payload,
+            from framework.core import dispatch
+            rec_ids = [r["id"] for r in recs if r.get("id")]
+            handle = dispatch.dispatch_now(
+                agent_id=self.agent_id, run_dir=str(self.run_dir),
+                rec_ids=rec_ids, action="implement",
+                site=self.cfg.site_id, subject_tag="catalog-audit",
+                request_id=request_id,
             )
+            label = "auto-queue fallback" if handle.fell_back_to_queue else "direct dispatch"
             self.decide("action",
-                        f"auto-queued {len(payload['rec_ids'])} rec(s) for implementer "
+                        f"dispatched {len(rec_ids)} rec(s) to implementer via {label} "
                         f"(request_id={request_id})")
         except Exception as e:
-            self.decide("error", f"auto-queue write failed: {e}")
+            self.decide("error", f"dispatch failed: {e}")
 
     def _most_recent_recs_path(self) -> Path | None:
         """Find the most recent prior run's recommendations.json for this site."""
