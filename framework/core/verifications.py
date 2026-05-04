@@ -420,6 +420,95 @@ def _build_progressive_improvement(rec: dict, ctx: dict) -> tuple[str, str]:
     return explanation, js
 
 
+def _build_catalog_audit(rec: dict, ctx: dict) -> tuple[str, str]:
+    """Verify a catalog-audit rec by re-fetching the public page for
+    each evidence ref_id and confirming it loads (i.e. wasn't broken
+    by a bad UPDATE/DELETE). For DEFERRED recs (which write only a
+    summary), reports the criterion + deferred-to job so the operator
+    can confirm the real fix landed where it was deferred to.
+
+    Catalog-audit semantics: the rec's `evidence[]` carries the row
+    ids that originally failed the criterion. After the fix lands,
+    those ids should either:
+      • re-fetch successfully with the fixed property (UPDATE case)
+      • return 404 (DELETE/deactivate case)
+    The default URL-fetch builder gets this wrong because catalog-
+    audit evidence is `{ref_id, snippet}` (row ids, not URLs).
+
+    Site mapping for ref_id → public URL:
+      aisleprompt:
+        recipe-*  criteria → /recipes/{ref_id}
+        product-* criteria → /kitchen/{ref_id}
+      specpicks:
+        recipe-*  criteria → unused
+        product-* criteria → /products/{ref_id}    (asin-keyed)
+    """
+    import re as _re
+    site = ctx.get("site", "") or ""
+    domain = "aisleprompt.com" if site == "aisleprompt" else "specpicks.com"
+
+    # Extract criterion from rationale
+    rationale = rec.get("rationale", "") or ""
+    m = _re.search(r"'([a-z][a-z0-9-]+)'", rationale)
+    criterion = m.group(1) if m else "(unknown)"
+
+    # Extract evidence ref_ids
+    evidence = rec.get("evidence") or []
+    ref_ids = [
+        str(e.get("ref_id", ""))
+        for e in evidence
+        if isinstance(e, dict) and e.get("ref_id")
+    ][:10]   # cap at 10 to keep verifier wall-clock reasonable
+
+    # Pick path template based on criterion prefix
+    if criterion.startswith("recipe-"):
+        path_template = "/recipes/{id}"
+    elif criterion.startswith("product-"):
+        # aisleprompt and specpicks both use different paths — pick the
+        # one that actually serves rendered product pages on each site.
+        path_template = "/kitchen/{id}" if site == "aisleprompt" else "/products/{id}"
+    else:
+        path_template = "/{id}"  # last-resort
+
+    explanation = (
+        f"Re-fetches the public page for each of {len(ref_ids)} "
+        f"row ids that originally failed the `{criterion}` audit "
+        f"criterion. After the fix lands, each page should either "
+        f"(a) load 200 with the fixed property, or (b) return 404 if "
+        f"the row was deactivated. If a page still 200s but with the "
+        f"original broken property, the fix didn't ship. "
+        f"Limited to first 10 evidence rows for wall-clock; full "
+        f"verification is the next catalog-quality-audit run."
+    )
+    urls = [
+        f"https://{domain}{path_template.replace('{id}', rid)}"
+        for rid in ref_ids
+    ]
+    js = (
+        "async function verify({ proxyFetch }) {\n"
+        f"  const urls = {json.dumps(urls)};\n"
+        f"  const criterion = {_js_string(criterion)};\n"
+        "  if (urls.length === 0) {\n"
+        "    return { ok: false, evidence: { reason: 'rec has no evidence ref_ids — verifier cannot pick which rows to check', criterion } };\n"
+        "  }\n"
+        "  const results = [];\n"
+        "  for (const url of urls) {\n"
+        "    try {\n"
+        "      const r = await proxyFetch(url);\n"
+        "      results.push({ url, status: r.status, ok: r.ok, body_chars: (r.body||'').length });\n"
+        "    } catch (e) {\n"
+        "      results.push({ url, error: String(e).slice(0, 200) });\n"
+        "    }\n"
+        "  }\n"
+        "  // Pass = every row resolves to a 200 (fixed in place) OR a 404 (deactivated/deleted).\n"
+        "  // Fail = any row 200s with EMPTY body (template still renders blank state) or returns 5xx.\n"
+        "  const ok = results.every(r => (r.status === 200 && r.body_chars > 100) || r.status === 404);\n"
+        "  return { ok, evidence: { criterion, checked: results.length, results } };\n"
+        "}"
+    )
+    return explanation, js
+
+
 def _build_default(rec: dict, ctx: dict) -> tuple[str, str]:
     """Fallback for any rec_type without a specialized builder. Best-
     effort: if rec carries any URL field or evidence, check 200 + body."""
@@ -471,6 +560,7 @@ _BUILDERS = {
     "indexing-fix": _build_indexing_fix,
     "conversion-path": _build_conversion_path,
     "robots-no-ai-allow": _build_robots_no_ai_allow,
+    "catalog-audit-criterion": _build_catalog_audit,
 }
 
 
@@ -479,9 +569,11 @@ def build_for_rec(rec: dict, *, site: str = "") -> tuple[str, str]:
       1. Exact match on rec.type
       2. H2H detection (compare_url / left_ref + right_ref) — h2h
          recs ship with no type field
-      3. Progressive-improvement detection (rec.category + evidence
+      3. Catalog-audit detection (rationale starts with "Catalog
+         audit found ...") — ship with empty type
+      4. Progressive-improvement detection (rec.category + evidence
          array — PI recs ship with category but no type)
-      4. Default URL-fetch fallback
+      5. Default URL-fetch fallback
     """
     rt = rec.get("type") or ""
     ctx = {"site": site}
@@ -491,6 +583,11 @@ def build_for_rec(rec: dict, *, site: str = "") -> tuple[str, str]:
     # H2H recs lack a `type` but always carry compare_url
     if rec.get("compare_url") or (rec.get("left_ref") and rec.get("right_ref")):
         return _build_h2h(rec, ctx)
+    # Catalog-audit recs lack a `type` but always carry the canonical
+    # "Catalog audit found N rows failing the '<criterion>' criterion"
+    # rationale + evidence rows keyed by ref_id.
+    if (rec.get("rationale") or "").lower().startswith("catalog audit found"):
+        return _build_catalog_audit(rec, ctx)
     # PI agent recs lack a `type` but always carry `category` +
     # `evidence` array with the URL the issue was found on.
     if rec.get("category") and rec.get("evidence"):
