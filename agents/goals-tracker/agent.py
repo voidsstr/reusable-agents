@@ -40,12 +40,14 @@ from framework.core.storage import get_storage
 
 # Config
 TO_EMAIL = os.environ.get("GOALS_TRACKER_TO", "mperry@northernsoftwareconsulting.com")
-# automation@nsc XOAUTH2 was disabled at the M365 tenant level (SmtpClientAuthentication
-# is off — error 535 5.7.139). Falling back to the personal Gmail account
-# which is reliable. Override via GOALS_TRACKER_FROM + GOALS_TRACKER_MSMTP_ACCOUNT
-# if the automation account gets re-enabled.
-FROM_EMAIL = os.environ.get("GOALS_TRACKER_FROM", "perrymb@gmail.com")
-MSMTP_ACCOUNT = os.environ.get("GOALS_TRACKER_MSMTP_ACCOUNT", "personal")
+FROM_EMAIL = os.environ.get("GOALS_TRACKER_FROM", "automation@northernsoftwareconsulting.com")
+# Send path: prefer Microsoft Graph /sendMail (works through tenant SMTP-auth
+# disable), fall back to msmtp[automation] if Graph fails, then msmtp[personal].
+GRAPH_OAUTH_FILE = os.environ.get(
+    "GOALS_TRACKER_OAUTH_FILE",
+    os.path.expanduser("~/.reusable-agents/responder/.oauth.json"),
+)
+MSMTP_ACCOUNT = os.environ.get("GOALS_TRACKER_MSMTP_ACCOUNT", "automation")
 STALE_HOURS = int(os.environ.get("GOALS_TRACKER_STALE_HOURS", "30"))
 SUBJECT_TPL = os.environ.get("GOALS_TRACKER_SUBJECT", "[Goals Tracker] {date} — {n_agents} agents, {n_goals} goals, {n_stale} stale")
 
@@ -63,11 +65,15 @@ def now() -> datetime:
 # ---------------------------------------------------------------------------
 
 def collect_all_agents() -> list[dict]:
-    """Pull every registered agent + its goal data into a unified shape."""
+    """Pull every registered + ENABLED agent's goal data into a unified shape.
+    Disabled agents are filtered out — their goals don't represent active
+    work and would otherwise pile up in the stale-agents alert."""
     storage = get_storage()
     agents = registry.list_agents(storage=storage)
     out: list[dict] = []
     for a in agents:
+        if not getattr(a, "enabled", True):
+            continue
         agent_id = a.id
         active = storage.read_json(goals_mod.goals_key(agent_id)) or {}
         goals = active.get("goals", []) or []
@@ -454,6 +460,72 @@ def render_agent_block(ag: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def send_email(html: str, to_addr: str, from_addr: str, subject: str) -> bool:
+    """Send via Microsoft Graph API (preferred — tenant-level SMTP auth is
+    disabled). Falls back to msmtp[automation] if Graph fails, then
+    msmtp[personal] if that also fails. Each path tries to send AS the
+    configured FROM_EMAIL (automation@nsc).
+    """
+    # Path 1: Graph /users/{mailbox}/sendMail with shared-mailbox scope
+    if Path(GRAPH_OAUTH_FILE).is_file():
+        try:
+            return _send_via_graph(html, to_addr, from_addr, subject)
+        except Exception as e:
+            err(f"[goals-tracker] Graph send failed: {e} — falling back to msmtp")
+
+    # Path 2: msmtp[automation] (XOAUTH2 — broken at the M365 tenant level today
+    # but kept as a fallback in case it gets re-enabled)
+    if _send_via_msmtp(html, to_addr, from_addr, subject, account=MSMTP_ACCOUNT):
+        return True
+
+    # Path 3: last-resort personal Gmail (visible reroute — From: header
+    # still says automation@nsc but envelope sender is perrymb@gmail.com)
+    err("[goals-tracker] falling back to msmtp[personal] — From header preserved as automation@nsc")
+    return _send_via_msmtp(html, to_addr, from_addr, subject, account="personal")
+
+
+def _send_via_graph(html: str, to_addr: str, from_addr: str, subject: str) -> bool:
+    """POST /users/{from_addr}/sendMail with the digest as HTML body."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "mint_token",
+        str(REPO / "agents" / "responder-agent" / "mint-token.py"),
+    )
+    mt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mt)
+    token, _user, _prov = mt.mint_access_token(
+        Path(GRAPH_OAUTH_FILE),
+        scope_override="offline_access https://graph.microsoft.com/Mail.Send.Shared",
+    )
+    import json as _j, urllib.request as _ur
+    body = {
+        "message": {
+            "subject": subject,
+            "body": {"contentType": "HTML", "content": html},
+            "toRecipients": [{"emailAddress": {"address": to_addr}}],
+            "from": {"emailAddress": {"address": from_addr}},
+            "sender": {"emailAddress": {"address": from_addr}},
+        },
+        "saveToSentItems": "false",
+    }
+    url = (
+        f"https://graph.microsoft.com/v1.0/users/"
+        f"{urllib_quote(from_addr)}/sendMail"
+    )
+    req = _ur.Request(
+        url, method="POST", data=_j.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    _ur.urlopen(req, timeout=30).read()
+    err(f"[goals-tracker] sent to {to_addr} as {from_addr} via Graph API")
+    return True
+
+
+def urllib_quote(s: str) -> str:
+    import urllib.parse
+    return urllib.parse.quote(s, safe="")
+
+
+def _send_via_msmtp(html: str, to_addr: str, from_addr: str, subject: str, *, account: str) -> bool:
     import email.message, uuid
     msg = email.message.EmailMessage()
     msg["From"] = from_addr
@@ -464,16 +536,17 @@ def send_email(html: str, to_addr: str, from_addr: str, subject: str) -> bool:
     msg.add_alternative(html, subtype="html")
     try:
         proc = subprocess.run(
-            ["msmtp", "-a", MSMTP_ACCOUNT, to_addr],
+            ["msmtp", "-a", account, to_addr],
             input=msg.as_bytes(), capture_output=True, timeout=60,
         )
         if proc.returncode != 0:
-            err(f"[goals-tracker] msmtp failed (rc={proc.returncode}): {proc.stderr.decode('utf-8','replace')[:300]}")
+            err(f"[goals-tracker] msmtp[{account}] failed (rc={proc.returncode}): "
+                f"{proc.stderr.decode('utf-8','replace')[:200]}")
             return False
-        err(f"[goals-tracker] sent to {to_addr} via msmtp[{MSMTP_ACCOUNT}]")
+        err(f"[goals-tracker] sent to {to_addr} via msmtp[{account}]")
         return True
     except FileNotFoundError:
-        err("[goals-tracker] msmtp not installed — install msmtp to send")
+        err("[goals-tracker] msmtp not installed")
         return False
 
 
