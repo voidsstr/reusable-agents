@@ -74,6 +74,41 @@ to the configured site repo.
      benefit phrase.
    - For indexing-fix recs: diagnose the regression, restore the
      missing/broken element.
+   - **For `gsc-coverage-*` recs** (emitted by gsc-coverage-auditor when
+     GSC URL Inspection flags pages with indexing problems): each rec's
+     `fix` field has specific instructions for that coverageState. The
+     `data_refs` / `sample_urls` fields list the affected URLs. Scope
+     of fix per type:
+       - `gsc-coverage-redirect` — find the route handler in the SSR
+         layer (`src/services/ssrRender.ts` + `src/index.ts`), trace
+         why it returns 30x, fix it to serve 200 directly. Common
+         causes: `/vs/` aliases redirecting to `/compare/`, trailing-
+         slash mismatch, www→apex 301s. The canonical URL in the
+         sitemap should match what the route serves.
+       - `gsc-coverage-soft-404` — open one of the sample URLs locally,
+         look at the rendered body. If it's blank or near-blank with
+         200 OK, either expand the page content (DB row, template) or
+         set the route to return 404 status. Soft 404s come from SSR
+         routes that swallow exceptions and serve empty templates.
+       - `gsc-coverage-canonical-mismatch` — read the `googleCanonical`
+         vs `userCanonical` from the rec's data. Update the
+         `<link rel="canonical">` in the SSR head builder
+         (`src/services/ssrHead.ts`) to point at Google's choice OR
+         strengthen the user-canonical with internal links.
+       - `gsc-coverage-discovered` — these URLs need MORE internal
+         links from indexed pages. Find a relevant hub/index page and
+         add anchors. Verify the canonical isn't pointing elsewhere.
+       - `gsc-coverage-noindex` — grep the SSR head builder for
+         `noindex`. If conditional, check the predicate. If unconditional
+         and unintentional, remove it.
+       - `gsc-coverage-issues` — these pages indexed but with warnings.
+         Open one URL in GSC's URL Inspection UI, read the specific
+         issue, fix in the template/SSR layer (most common: missing
+         required Recipe/Article schema fields, missing image alt).
+       - `gsc-coverage-not-indexed` is routed to article-author-agent
+         (content rewrite, not your job).
+       - `gsc-coverage-unknown` is routed to indexnow-submitter (re-fire,
+         not your job).
    - Write `<run-dir>/changes/<rec_id>.diff` (the git diff) and
      `<run-dir>/changes/<rec_id>.summary.md` (1-2 paragraphs explaining
      what you changed and why).

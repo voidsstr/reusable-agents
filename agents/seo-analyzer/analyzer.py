@@ -2076,39 +2076,53 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
     if not buckets:
         return
 
-    # Map coverageState → (priority, type, handoff_target, summary fmt)
+    # Map coverageState → (priority, rec_type, summary fmt, fix instructions).
+    # rec.type values are registered in framework.core.work_types so the
+    # post-processor (line ~4380 of analyzer.py) sets handoff_target
+    # automatically. All these default to the implementer except
+    # gsc-coverage-unknown which routes to indexnow-submitter (re-fire bulk).
     STATE_RULES: list[tuple[str, str, str, str, str]] = [
-        # match prefix         priority  type             handoff           rec_template
+        # match prefix                              priority  rec_type                              summary_template                                                                                            fix
         ("Crawled - currently not indexed",
-         "high", "indexing-fix", "article-author-agent",
-         "{n} URL(s) crawled but not indexed by Google — content quality blocking indexation"),
-        ("Crawled — currently not indexed",  # em-dash variant Google sometimes returns
-         "high", "indexing-fix", "article-author-agent",
-         "{n} URL(s) crawled but not indexed by Google — content quality blocking indexation"),
+         "high", "gsc-coverage-not-indexed",
+         "{n} URL(s) crawled but not indexed by Google — content quality is blocking indexation",
+         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC."),
+        ("Crawled — currently not indexed",  # em-dash variant
+         "high", "gsc-coverage-not-indexed",
+         "{n} URL(s) crawled but not indexed by Google — content quality is blocking indexation",
+         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC."),
         ("Discovered - currently not indexed",
-         "medium", "indexing-fix", "implementer",
-         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue"),
+         "medium", "gsc-coverage-discovered",
+         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue",
+         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects."),
         ("Discovered — currently not indexed",
-         "medium", "indexing-fix", "implementer",
-         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue"),
+         "medium", "gsc-coverage-discovered",
+         "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue",
+         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects."),
         ("Page with redirect",
-         "medium", "ssr-fix", "implementer",
-         "{n} URL(s) returning a redirect — unintended canonical chain"),
+         "medium", "gsc-coverage-redirect",
+         "{n} URL(s) returning a redirect — unintended canonical chain",
+         "Audit the SSR route handler for these URLs. The page should serve 200 OK at the canonical URL, not 301/302 to a different one. Common causes: trailing-slash mismatch, www→apex redirects, /vs/ → /compare/ aliases. Fix the route to serve content directly, or update the sitemap to use the redirect target as the canonical."),
         ("URL is unknown to Google",
-         "low", "indexing-fix", "indexnow-submitter",
-         "{n} URL(s) unknown to Google — sitemap or IndexNow reachability gap"),
+         "low", "gsc-coverage-unknown",
+         "{n} URL(s) unknown to Google — sitemap or IndexNow reachability gap",
+         "Re-fire IndexNow --bulk for the affected site (manually trigger {site}-indexnow-bulk via the framework). Verify sitemap.xml is reachable from public internet (curl -I https://{host}/sitemap.xml — must return 200). Check that the URL pattern is included in sites.json's querySets so the bulk run picks it up. Confirm the URLs return 200 (not 4xx/5xx) when fetched."),
         ("Submitted and indexed, but issues found",
-         "medium", "schema-markup", "implementer",
-         "{n} URL(s) indexed but flagged with mobile/schema/duplicate issues"),
+         "medium", "gsc-coverage-issues",
+         "{n} URL(s) indexed but flagged with mobile/schema/duplicate issues",
+         "Open GSC's URL Inspection on a sample URL, read the 'Page indexing' panel for the specific issue (e.g. 'Mobile usability error', 'Structured data invalid'). Fix the issue in the page template/SSR layer (most common: missing required Recipe/Article schema fields, mobile viewport meta tag, or image alt attributes)."),
         ("Excluded by 'noindex' tag",
-         "low", "ssr-fix", "implementer",
-         "{n} URL(s) explicitly noindex'd — verify intent"),
+         "low", "gsc-coverage-noindex",
+         "{n} URL(s) explicitly noindex'd — verify intent",
+         "Inspect the SSR head/meta output for these URLs. If the noindex is intentional (admin/login/search pages), no action needed. If unintentional, remove `<meta name=robots content=noindex>` from the route's head builder and request re-indexing in GSC."),
         ("Duplicate, Google chose different canonical than user",
-         "medium", "indexing-fix", "implementer",
-         "{n} URL(s) where Google chose a different canonical — fix canonical metadata"),
+         "medium", "gsc-coverage-canonical-mismatch",
+         "{n} URL(s) where Google chose a different canonical than the user",
+         "Compare userCanonical vs googleCanonical in the inspection result. Either: (a) update <link rel=canonical> on the user-canonical to point at Google's choice (Google found stronger signals there), or (b) strengthen the user-canonical with more internal links + content depth so Google reverses its choice on next crawl."),
         ("Soft 404",
-         "high", "ssr-fix", "implementer",
-         "{n} URL(s) returning soft 404 — content too thin or wrong status code"),
+         "high", "gsc-coverage-soft-404",
+         "{n} URL(s) returning soft 404",
+         "Check pageFetchState — likely too-thin content or an SSR error returning a blank/near-blank body with HTTP 200. Either: (a) expand the content to be substantive (>500 words, unique value), or (b) set a real HTTP 404 status when the page legitimately has no content (e.g. legacy slug for a deleted product)."),
     ]
 
     seen_state_keys: set[str] = set()
@@ -2119,46 +2133,37 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
         rule = next((r for r in STATE_RULES if state_key.startswith(r[0])), None)
         if not rule:
             continue
-        _, priority, rec_type, handoff, summary_tpl = rule
+        _, priority, rec_type, summary_tpl, fix_text = rule
         n = len(urls)
         sample = sorted(urls, key=lambda r: r.get("lastCrawlTime") or "", reverse=True)[:8]
         rid = next_id()
+        site_host = ""
+        try:
+            # cfg in the analyzer is a SiteConfig-like wrapper; .get('site') often returns a dict
+            site_block = cfg.get("site") if hasattr(cfg, "get") else None
+            site_host = (site_block or {}).get("domain", "") if isinstance(site_block, dict) else ""
+        except Exception:
+            site_host = ""
         recs.append({
             "id": rid,
             "type": rec_type,
             "priority": priority,
             "title": summary_tpl.format(n=n),
             "rationale": (
-                f"GSC URL Inspection (last 24h) shows {n} URL(s) in coverage state "
+                f"GSC URL Inspection shows {n} URL(s) in coverage state "
                 f"\"{state_key}\". This blocks organic search traffic to those pages — "
-                f"fixing the underlying cause (content quality, canonical metadata, "
-                f"redirects, or sitemap reachability) is required for them to rank."
+                f"fixing the underlying cause is required for them to rank in Google."
             ),
             "evidence": (
                 f"State: {state_key}. Sample URLs (most-recently-crawled first): " +
                 ", ".join(r["url"] for r in sample)
             ),
-            "fix": (
-                {
-                    "Crawled - currently not indexed": "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, then nudge with IndexNow + GSC's 'Request Indexing' button.",
-                    "Crawled — currently not indexed": "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, then nudge with IndexNow + GSC's 'Request Indexing' button.",
-                    "Discovered - currently not indexed": "Add stronger internal links from indexed pages; verify the canonical doesn't point elsewhere.",
-                    "Discovered — currently not indexed": "Add stronger internal links from indexed pages; verify the canonical doesn't point elsewhere.",
-                    "Page with redirect": "Audit the SSR canonical and 301 chain — page should land directly without a hop.",
-                    "URL is unknown to Google": "Manually re-fire IndexNow --bulk for this site; verify sitemap reachability with `curl -I sitemap.xml`.",
-                    "Submitted and indexed, but issues found": "Open GSC, look at 'Page indexing issues found' detail, fix flagged mobile / structured-data warnings.",
-                    "Excluded by 'noindex' tag": "Verify the noindex was intentional; otherwise remove the meta tag and request re-indexing.",
-                    "Duplicate, Google chose different canonical than user": "Update <link rel=canonical> on the user-canonical to point at Google's chosen canonical, OR vice versa if the user version is preferred.",
-                    "Soft 404": "Check pageFetchState — likely too-thin content or a render error returning empty body. Either expand the page or set a real 404 status.",
-                }.get(state_key, "Investigate via GSC URL Inspection UI.")
-            ),
+            "fix": fix_text.replace("{site}", site_id).replace("{host}", site_host or site_id),
             "data_refs": [r["url"] for r in sample],
             "sample_urls": [r["url"] for r in sample],
             "metric_before": {"affected_urls": n, "coverage_state": state_key},
-            "handoff_target": {
-                "work_type": rec_type,
-                "handler": handoff,
-            },
+            # handoff_target is set by the post-processor below using
+            # framework.core.work_types — don't set it inline.
             "implemented": False,
         })
 
