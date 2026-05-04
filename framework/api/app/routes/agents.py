@@ -484,34 +484,63 @@ def get_one(agent_id: str):
     # Configs come from the module-level 60s TTL cache.
     providers_cache, defaults_cache = _get_config_caches()
 
-    status = s.read_json(f"agents/{agent_id}/status.json")
-    runs = []
-    runs_prefix = f"agents/{agent_id}/runs/"
-    # Only fetch the 5 most recent runs in the detail load. The Runs tab
-    # has its own listRuns endpoint for the full history. Cuts 15
-    # sequential Azure reads — the page's biggest latency source.
-    run_keys = sorted(
-        (k for k in s.list_prefix(runs_prefix) if k.endswith("/progress.json")),
-        reverse=True,
-    )[:5]
-    for key in run_keys:
-        rd = s.read_json(key)
-        if rd:
-            runs.append(rd)
+    # Parallelize the independent Azure reads. The endpoint was 5+
+    # seconds because each of these blob reads serialized into ~200ms
+    # of round-trip. Pool=8 covers the 7-9 reads we issue and matches
+    # the storage backend's connection-pool size.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _read_json_safe(key: str):
+        try: return s.read_json(key)
+        except Exception: return None
+
+    def _read_text_safe(key: str) -> Optional[str]:
+        try: return s.read_text(key)
+        except Exception: return None
 
     # Markdown content: prefer storage (embedded at register-time) over
     # host filesystem (only works when API isn't containerized).
     def _load_md(storage_key: str, host_path: str) -> Optional[str]:
-        v = s.read_text(storage_key)
+        v = _read_text_safe(storage_key)
         if v: return v
         if host_path and Path(host_path).is_file():
             try: return Path(host_path).read_text()
             except Exception: return None
         return None
 
-    runbook_body = _load_md(f"agents/{m.id}/runbook.md", m.runbook_path)
-    skill_body   = _load_md(f"agents/{m.id}/skill.md", m.skill_path)
-    readme_body  = _load_md(f"agents/{m.id}/readme.md", "")
+    # Fast path for recent runs: agents/<id>/run-index.json is a single
+    # blob written by AgentBase.post_run() that contains the last ~50
+    # run summaries. One read replaces a list_prefix + 5 progress.json
+    # reads. Falls back to the legacy walk when the index is missing.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        f_status   = ex.submit(_read_json_safe, f"agents/{agent_id}/status.json")
+        f_runidx   = ex.submit(_read_json_safe, f"agents/{agent_id}/run-index.json")
+        f_runbook  = ex.submit(_load_md, f"agents/{m.id}/runbook.md", m.runbook_path)
+        f_skill    = ex.submit(_load_md, f"agents/{m.id}/skill.md", m.skill_path)
+        f_readme   = ex.submit(_load_md, f"agents/{m.id}/readme.md", "")
+        status       = f_status.result() or {}
+        run_index    = f_runidx.result() or {}
+        runbook_body = f_runbook.result()
+        skill_body   = f_skill.result()
+        readme_body  = f_readme.result()
+
+    # Recent-runs from run-index (preferred) or fall through to legacy
+    # list_prefix path (only on agents that haven't yet written an
+    # index — older PI/CR runs from before the AgentBase upgrade).
+    runs: list = []
+    recent = run_index.get("recent") if isinstance(run_index, dict) else None
+    if isinstance(recent, list) and recent:
+        runs = recent[:5]
+    else:
+        runs_prefix = f"agents/{agent_id}/runs/"
+        run_keys = sorted(
+            (k for k in s.list_prefix(runs_prefix) if k.endswith("/progress.json")),
+            reverse=True,
+        )[:5]
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            for rd in ex.map(_read_json_safe, run_keys):
+                if rd:
+                    runs.append(rd)
 
     # Resolve confirmation_flow current state — for schema-mapping-approval
     # kind, look up the agent's mapping doc to detect whether the schema
