@@ -200,14 +200,25 @@ def render_sparkline(points: list[dict], width: int = 120, height: int = 30,
 
 
 def fmt_value(v: Optional[float], unit: str = "") -> str:
+    """Format a metric value with proper spacing between number and unit.
+    Examples:  75, "clicks"  → "75 clicks"   (space before word units)
+               99.5, "%"     → "99.5%"        (no space before %)
+               1234, ""      → "1,234"        (thousands separator, no unit)
+    """
     if v is None:
         return "—"
-    # Integer if value is integer-valued; else 2 decimals
+    # Compact short numbers; thousands-separated for >= 1000
     if abs(v - round(v)) < 0.001:
-        s = f"{int(round(v)):,}"
+        n = int(round(v))
+        s = f"{n:,}" if abs(n) >= 1000 else f"{n}"
     else:
         s = f"{v:,.2f}"
-    return f"{s}{unit}" if unit and unit not in ("%", "") else (f"{s}%" if unit == "%" else s)
+    if not unit:
+        return s
+    if unit == "%":
+        return f"{s}%"
+    # Word unit — space (use non-breaking so number+unit don't wrap)
+    return f"{s} {unit}"
 
 
 def fmt_trend(trend_pct: Optional[float], direction: str) -> str:
@@ -238,76 +249,315 @@ def fmt_progress(current: Optional[float], target: Optional[float], direction: s
 
 
 def render_email_html(agents: list[dict]) -> str:
-    """Render the full HTML digest."""
-    today = now().strftime("%Y-%m-%d")
+    """Render the full HTML digest. Responsive design — single column on
+    mobile (<600px), 2-column site cards on desktop. Email-client safe:
+    inline styles only, table-based layout for Outlook compat, font stack
+    falls through to system fonts, numbers use tabular-nums for alignment.
+    """
+    today = now().strftime("%A, %B %d, %Y")
+    today_short = now().strftime("%Y-%m-%d")
 
-    # ─── Top: site KPI rollup ──────────────────────────────────────────────
-    site_rollup_html = render_site_kpi_rollup(agents)
-
-    # ─── Mid: every agent + goals ──────────────────────────────────────────
     n_total = len(agents)
     n_stale_agents = sum(1 for a in agents if a["agent_stale"])
     n_total_goals = sum(a["n_goals"] for a in agents)
     n_stale_goals = sum(a["n_stale_goals"] for a in agents)
     n_accomplished = sum(a["n_accomplished"] for a in agents)
+    n_revenue = sum(a["n_revenue_goals"] for a in agents)
 
-    summary = f"""
-    <p style="margin:0 0 12px;color:#475569;font-size:.9rem">
-        <b style="color:#0f172a">{n_total}</b> agents tracked,
-        <b style="color:#0f172a">{n_total_goals}</b> goals defined,
-        <b style="color:#16a34a">{n_accomplished}</b> accomplished,
-        <b style="color:{'#dc2626' if n_stale_agents else '#16a34a'}">{n_stale_agents}</b> agents stale,
-        <b style="color:{'#dc2626' if n_stale_goals else '#16a34a'}">{n_stale_goals}</b> goals stale.
-    </p>
-    """
-
-    # ─── Bottom: stale agents ──────────────────────────────────────────────
-    stale_html = render_stale_section(agents)
-
-    # Per-agent sections grouped by site
+    # Per-site agent grouping
     agents_by_site: dict[str, list[dict]] = {}
     for a in agents:
-        agents_by_site.setdefault(a["site"] or "(no site)", []).append(a)
-
-    site_sections: list[str] = []
-    for site_name in sorted(agents_by_site.keys()):
-        site_agents = sorted(agents_by_site[site_name], key=lambda x: (-x["n_revenue_goals"], x["id"]))
-        rows: list[str] = []
-        for ag in site_agents:
-            rows.append(render_agent_block(ag))
-        site_sections.append(f"""
-        <h2 style="margin:32px 0 8px;font-size:1.1rem;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:6px">
-            {site_name.upper()} <span style="font-weight:400;color:#94a3b8;font-size:.85rem">({len(site_agents)} agents)</span>
-        </h2>
-        {''.join(rows)}
-        """)
+        site = a["site"] or "shared"
+        agents_by_site.setdefault(site, []).append(a)
 
     return f"""<!doctype html>
-<html><head>
+<html lang="en">
+<head>
 <meta charset="utf-8">
-<title>Goals Tracker — {today}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<title>Goals Tracker — {today_short}</title>
+<style>
+@media only screen and (max-width:640px) {{
+  .gt-container {{ width:100% !important; padding:16px !important; }}
+  .gt-kpi-grid {{ display:block !important; }}
+  .gt-kpi-card {{ display:block !important; width:100% !important; margin-bottom:12px !important; }}
+  .gt-summary-stats td {{ display:block !important; width:100% !important; padding:8px 0 !important; border:none !important; }}
+  .gt-agent-table {{ font-size:13px !important; }}
+  .gt-hide-mobile {{ display:none !important; }}
+  .gt-stack-mobile {{ display:block !important; }}
+}}
+</style>
 </head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:#f8fafc;padding:24px;color:#0f172a;margin:0">
-<div style="max-width:920px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(15,23,42,.06);padding:32px">
-    <h1 style="margin:0 0 4px;font-size:1.5rem;color:#0f172a">Goals Tracker — {today}</h1>
-    <p style="margin:0 0 24px;color:#64748b;font-size:.92rem">
-        Daily digest of every agent's goals + metrics. Sent each morning at 7am ET.
-    </p>
-    {summary}
-    {site_rollup_html}
-    {stale_html}
-    {''.join(site_sections)}
-    <hr style="margin:40px 0 16px;border:none;border-top:1px solid #e2e8f0">
-    <p style="color:#94a3b8;font-size:.78rem;margin:0">
-        Generated {now().isoformat(timespec='minutes')} UTC ·
-        <a href="https://agents.happysky-24190067.eastus.azurecontainerapps.io" style="color:#475569">Dashboard</a> ·
-        Edit this digest at <code style="background:#f1f5f9;padding:1px 6px;border-radius:4px">reusable-agents/agents/goals-tracker/agent.py</code>
-    </p>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;color:#0f172a;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%">
+<div style="display:none;max-height:0;overflow:hidden">
+  Goals Tracker · {today_short} · {n_total} agents · {n_total_goals} goals · {n_stale_agents} need attention
 </div>
-</body></html>"""
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f1f5f9;padding:32px 16px">
+<tr><td align="center">
+
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" class="gt-container" style="width:680px;max-width:680px;background:#ffffff;border-radius:12px;box-shadow:0 1px 3px rgba(15,23,42,0.06),0 4px 12px rgba(15,23,42,0.04)">
+
+<!-- HEADER -->
+<tr><td style="padding:32px 40px 8px">
+  <div style="font-size:13px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;font-weight:600;margin-bottom:8px">Goals Tracker</div>
+  <h1 style="margin:0 0 4px;font-size:24px;line-height:1.25;color:#0f172a;font-weight:700;letter-spacing:-0.01em">{today}</h1>
+  <p style="margin:4px 0 0;color:#64748b;font-size:14px;line-height:1.5">
+    Daily snapshot of every active agent's goals and metrics.
+  </p>
+</td></tr>
+
+<!-- SUMMARY STATS BAR -->
+<tr><td style="padding:24px 40px 0">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="gt-summary-stats" style="width:100%;border-collapse:collapse;background:#f8fafc;border-radius:10px">
+    <tr>
+      <td style="padding:16px;text-align:center;border-right:1px solid #e2e8f0">
+        <div style="font-size:24px;font-weight:700;color:#0f172a;line-height:1.2">{n_total}</div>
+        <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;margin-top:2px">Agents</div>
+      </td>
+      <td style="padding:16px;text-align:center;border-right:1px solid #e2e8f0">
+        <div style="font-size:24px;font-weight:700;color:#0f172a;line-height:1.2">{n_total_goals}</div>
+        <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;margin-top:2px">Goals</div>
+      </td>
+      <td style="padding:16px;text-align:center;border-right:1px solid #e2e8f0">
+        <div style="font-size:24px;font-weight:700;color:#16a34a;line-height:1.2">{n_accomplished}</div>
+        <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;margin-top:2px">Accomplished</div>
+      </td>
+      <td style="padding:16px;text-align:center;border-right:1px solid #e2e8f0">
+        <div style="font-size:24px;font-weight:700;color:#f59e0b;line-height:1.2">{n_revenue}</div>
+        <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;margin-top:2px">Revenue Goals</div>
+      </td>
+      <td style="padding:16px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:{'#dc2626' if n_stale_agents else '#16a34a'};line-height:1.2">{n_stale_agents}</div>
+        <div style="font-size:11px;color:#64748b;letter-spacing:0.04em;text-transform:uppercase;margin-top:2px">Need Attention</div>
+      </td>
+    </tr>
+  </table>
+</td></tr>
+
+<!-- SITE KPI CARDS -->
+{render_site_kpi_cards(agents)}
+
+<!-- STALE ALERT -->
+{render_stale_alert(agents)}
+
+<!-- AGENT GROUPS -->
+{''.join(render_site_section(site, agents_by_site[site]) for site in sorted(agents_by_site.keys()))}
+
+<!-- FOOTER -->
+<tr><td style="padding:24px 40px 32px;border-top:1px solid #f1f5f9">
+  <p style="margin:0;color:#94a3b8;font-size:12px;line-height:1.6">
+    Generated {now().strftime('%Y-%m-%d %H:%M UTC')} ·
+    <a href="https://agents.happysky-24190067.eastus.azurecontainerapps.io" style="color:#475569;text-decoration:none">View dashboard</a>
+    <br>
+    <span style="color:#cbd5e1">Sent daily at 7:00 AM Detroit · automation@northernsoftwareconsulting.com</span>
+  </p>
+</td></tr>
+
+</table>
+
+</td></tr>
+</table>
+</body>
+</html>"""
 
 
-def render_site_kpi_rollup(agents: list[dict]) -> str:
+def render_site_kpi_cards(agents: list[dict]) -> str:
+    """Two big cards (one per site) showing the headline conversion + traffic
+    metrics. Stack on mobile via class gt-kpi-card. Numbers are big, units
+    are small + grey, sparklines underneath."""
+    SITE_TRACKERS = {
+        "aisleprompt-site-goals-tracker": {"label": "AislePrompt", "accent": "#4f46e5", "kpi_goal_id": "goal-instacart-cart-30d", "kpi_label": "Instacart cart creates"},
+        "specpicks-site-goals-tracker":   {"label": "SpecPicks", "accent": "#f59e0b", "kpi_goal_id": "goal-amazon-clicks-30d", "kpi_label": "Amazon clicks"},
+    }
+    HEADLINE = [
+        ("goal-organic-clicks-30d",      "Organic clicks (30d)"),
+        ("goal-organic-impressions-30d", "Organic impressions (30d)"),
+        ("goal-total-conversions-30d",   "Total conversions (30d)"),
+        ("goal-indexed-pages-pct",       "Pages indexed by Google"),
+    ]
+    cards = []
+    for agent_id, meta in SITE_TRACKERS.items():
+        ag = next((a for a in agents if a["id"] == agent_id), None)
+        if not ag:
+            continue
+        # Hero KPI (the big number at the top of the card)
+        hero = next((g for g in ag["goals"] if g["id"] == meta["kpi_goal_id"]), None)
+        hero_html = ""
+        if hero:
+            hero_value = fmt_value(hero["current"], hero["unit"])
+            hero_html = f"""
+            <div style="margin-bottom:16px">
+              <div style="font-size:13px;color:#64748b;font-weight:500">{meta['kpi_label']} (30d)</div>
+              <div style="font-size:32px;font-weight:700;color:#0f172a;line-height:1.1;margin-top:4px;letter-spacing:-0.02em">{hero_value}</div>
+              <div style="margin-top:6px;font-size:13px">
+                {fmt_trend(hero['trend_pct'], hero['direction'])} &nbsp;·&nbsp;
+                <span style="color:#94a3b8">target {fmt_value(hero['target'], hero['unit'])}</span>
+              </div>
+            </div>"""
+        # Smaller stats
+        rows = []
+        for gid, label in HEADLINE:
+            g = next((g for g in ag["goals"] if g["id"] == gid), None)
+            if not g:
+                continue
+            spark = render_sparkline(g["points"], width=88, height=24, direction=g["direction"])
+            current_html = fmt_value(g['current'], g['unit'])
+            rows.append(f"""
+            <tr>
+              <td style="padding:8px 0;border-top:1px solid #e2e8f0;color:#64748b;font-size:13px;width:55%">{label}</td>
+              <td style="padding:8px 0;border-top:1px solid #e2e8f0;font-size:13px;font-weight:600;color:#0f172a;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">{current_html}</td>
+              <td style="padding:8px 0 8px 12px;border-top:1px solid #e2e8f0;text-align:right;width:90px">{spark}</td>
+            </tr>""")
+        cards.append(f"""
+        <td valign="top" class="gt-kpi-card" style="width:50%;padding:0 6px">
+          <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:20px 22px;border-top:3px solid {meta['accent']}">
+            <div style="font-size:11px;color:{meta['accent']};font-weight:700;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:10px">{meta['label']}</div>
+            {hero_html}
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse">
+              {''.join(rows)}
+            </table>
+          </div>
+        </td>""")
+    if not cards:
+        return ""
+    return f"""
+<tr><td style="padding:24px 40px 0">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="gt-kpi-grid" style="width:100%;border-collapse:separate;border-spacing:0">
+    <tr>{''.join(cards)}</tr>
+  </table>
+</td></tr>"""
+
+
+def render_stale_alert(agents: list[dict]) -> str:
+    """Compact alert above the agent list. Dismisses to a green "all good"
+    box if nothing's stale."""
+    stale = [a for a in agents if a["agent_stale"]]
+    if not stale:
+        return f"""
+<tr><td style="padding:24px 40px 0">
+  <div style="background:#f0fdf4;border-left:3px solid #16a34a;padding:14px 18px;border-radius:6px">
+    <div style="font-size:14px;color:#15803d;font-weight:600">All agents reporting fresh metrics</div>
+    <div style="font-size:13px;color:#475569;margin-top:2px">No agents older than {STALE_HOURS}h.</div>
+  </div>
+</td></tr>"""
+    rows = []
+    for a in sorted(stale, key=lambda x: x["latest_ts_overall"] or ""):
+        last_short = a["latest_ts_overall"][:10] if a["latest_ts_overall"] else "never"
+        rows.append(f"""
+        <tr>
+          <td style="padding:6px 12px 6px 0;font-size:13px;color:#7c2d12;font-family:'SF Mono',Menlo,Consolas,monospace;font-weight:500">{a['id']}</td>
+          <td style="padding:6px 12px;font-size:12px;color:#7c2d12;font-family:'SF Mono',Menlo,Consolas,monospace">{a['cron_expr'] or '—'}</td>
+          <td style="padding:6px 0;font-size:12px;color:#7c2d12;text-align:right;white-space:nowrap">last: {last_short}</td>
+        </tr>""")
+    return f"""
+<tr><td style="padding:24px 40px 0">
+  <div style="background:#fef2f2;border-left:3px solid #dc2626;padding:16px 20px;border-radius:6px">
+    <div style="font-size:14px;color:#991b1b;font-weight:600;margin-bottom:4px">{len(stale)} agent{'s' if len(stale)!=1 else ''} need investigation</div>
+    <div style="font-size:13px;color:#475569;margin-bottom:12px">Latest metric older than {STALE_HOURS} hours — expected daily updates.</div>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse">
+      {''.join(rows)}
+    </table>
+  </div>
+</td></tr>"""
+
+
+def render_site_section(site: str, site_agents: list[dict]) -> str:
+    """One section per site (specpicks / aisleprompt / shared). Heading with
+    site name + count, then each agent as a row card."""
+    site_agents = sorted(site_agents, key=lambda x: (not x["agent_stale"] is False,  # stale first? no — fresh first
+                                                       -x["n_revenue_goals"], x["id"]))
+    blocks = [render_agent_card(a) for a in site_agents]
+    site_label = {"aisleprompt": "AislePrompt", "specpicks": "SpecPicks", "shared": "Shared / Cross-site"}.get(site, site.title())
+    return f"""
+<tr><td style="padding:32px 40px 0">
+  <h2 style="margin:0 0 4px;font-size:13px;color:#64748b;letter-spacing:0.06em;text-transform:uppercase;font-weight:700">{site_label}</h2>
+  <div style="margin:0 0 16px;font-size:13px;color:#94a3b8">{len(site_agents)} agent{'s' if len(site_agents)!=1 else ''}</div>
+  {''.join(blocks)}
+</td></tr>"""
+
+
+def render_agent_card(ag: dict) -> str:
+    """Per-agent card: header row (id, badges, summary) + goals table."""
+    badge_color = {
+        "seo": "#4f46e5", "research": "#0891b2", "fleet": "#16a34a",
+        "personal": "#a855f7", "ops": "#f59e0b", "misc": "#64748b",
+    }.get(ag["category"] or "misc", "#64748b")
+
+    # Status pill
+    if ag["agent_stale"]:
+        last = ag["latest_ts_overall"][:10] if ag["latest_ts_overall"] else "never"
+        status_pill = f'<span style="background:#fef2f2;color:#991b1b;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;border:1px solid #fecaca;letter-spacing:0.02em">stale · last {last}</span>'
+        bg_color = "#fffbfb"
+        border_color = "#fecaca"
+    else:
+        status_pill = ''
+        bg_color = "#ffffff"
+        border_color = "#e2e8f0"
+
+    cat_badge = f'<span style="background:{badge_color};color:#fff;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase">{ag["category"] or "misc"}</span>'
+
+    # Goal rows — sort revenue/accomplishment first
+    goals_sorted = sorted(ag["goals"], key=lambda g: (not g["is_revenue_goal"], g["status"] != "active", g["id"]))
+    goal_rows = []
+    for i, g in enumerate(goals_sorted):
+        spark = render_sparkline(g["points"], width=110, height=24, direction=g["direction"])
+        title = g["title"]
+        markers = []
+        if g["is_revenue_goal"]:
+            markers.append('<span style="color:#f59e0b;font-size:11px;margin-right:4px;font-weight:600" title="Revenue goal">★</span>')
+        if g["status"] == "accomplished":
+            title = f'<span style="text-decoration:line-through;color:#94a3b8">{title}</span>'
+            markers.append('<span style="color:#16a34a;margin-left:4px;font-size:13px" title="Accomplished">✓</span>')
+
+        # Color-code current value: bold dark; stale = grey
+        current_str = fmt_value(g['current'], g['unit'])
+        baseline_str = fmt_value(g['baseline'], g['unit']) if g['baseline'] is not None else '<span style="color:#cbd5e1">—</span>'
+        target_str = fmt_value(g['target'], g['unit']) if g['target'] is not None else '<span style="color:#cbd5e1">—</span>'
+
+        border_top = "border-top:1px solid #f1f5f9;" if i > 0 else ""
+        goal_rows.append(f"""
+        <tr>
+          <td style="padding:10px 12px 10px 0;{border_top}font-size:13px;line-height:1.4;color:#0f172a;vertical-align:top">
+            {''.join(markers)}{title}
+          </td>
+          <td style="padding:10px 8px;{border_top}font-size:13px;color:#64748b;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:top">{baseline_str}</td>
+          <td style="padding:10px 8px;{border_top}font-size:13px;font-weight:600;color:#0f172a;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:top">{current_str}</td>
+          <td class="gt-hide-mobile" style="padding:10px 8px;{border_top}font-size:13px;color:#64748b;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:top">{target_str}</td>
+          <td class="gt-hide-mobile" style="padding:10px 8px;{border_top}font-size:13px;text-align:right;white-space:nowrap;vertical-align:top">{fmt_trend(g['trend_pct'], g['direction'])}</td>
+          <td class="gt-hide-mobile" style="padding:10px 0 10px 8px;{border_top}text-align:right;vertical-align:top">{spark}</td>
+        </tr>""")
+
+    return f"""
+<div style="background:{bg_color};border:1px solid {border_color};border-radius:10px;padding:18px 22px;margin-bottom:14px">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;margin-bottom:10px">
+    <tr>
+      <td style="vertical-align:middle">
+        <span style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:14px;font-weight:600;color:#0f172a">{ag['id']}</span>
+      </td>
+      <td style="vertical-align:middle;text-align:right;white-space:nowrap">
+        {status_pill} {cat_badge}
+      </td>
+    </tr>
+  </table>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="gt-agent-table" style="width:100%;border-collapse:collapse">
+    <thead>
+      <tr>
+        <th style="padding:6px 12px 6px 0;text-align:left;font-size:11px;color:#94a3b8;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">Goal</th>
+        <th style="padding:6px 8px;text-align:right;font-size:11px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">Baseline</th>
+        <th style="padding:6px 8px;text-align:right;font-size:11px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">Current</th>
+        <th class="gt-hide-mobile" style="padding:6px 8px;text-align:right;font-size:11px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">Target</th>
+        <th class="gt-hide-mobile" style="padding:6px 8px;text-align:right;font-size:11px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">Trend</th>
+        <th class="gt-hide-mobile" style="padding:6px 0 6px 8px;text-align:right;font-size:11px;color:#94a3b8;letter-spacing:0.04em;text-transform:uppercase;font-weight:600">30d</th>
+      </tr>
+    </thead>
+    <tbody>{''.join(goal_rows)}</tbody>
+  </table>
+</div>"""
+
+
+def _UNUSED_render_site_kpi_rollup(agents: list[dict]) -> str:
     """Highlight the top site-level KPI metrics across both sites' site-goals-tracker agents."""
     SITE_TRACKERS = {
         "aisleprompt-site-goals-tracker": "AislePrompt",
@@ -357,7 +607,7 @@ def render_site_kpi_rollup(agents: list[dict]) -> str:
     </div>"""
 
 
-def render_stale_section(agents: list[dict]) -> str:
+def _UNUSED_render_stale_section(agents: list[dict]) -> str:
     stale = [a for a in agents if a["agent_stale"]]
     if not stale:
         return f"""
@@ -394,7 +644,7 @@ def render_stale_section(agents: list[dict]) -> str:
     </div>"""
 
 
-def render_agent_block(ag: dict) -> str:
+def _UNUSED_render_agent_block(ag: dict) -> str:
     badge_color = {"seo": "#4f46e5", "research": "#0891b2", "fleet": "#16a34a",
                    "personal": "#a855f7", "ops": "#f59e0b", "misc": "#64748b"}.get(ag["category"] or "misc", "#64748b")
     badge = f'<span style="background:{badge_color};color:#fff;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em">{ag["category"] or "misc"}</span>'
