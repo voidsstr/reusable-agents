@@ -39,6 +39,7 @@ from .routes import (
     dispatch as dispatch_routes,
     goals as goals_routes,
     events as events_routes,
+    llm_usage as llm_usage_routes,
     messages as messages_routes,
     oauth as oauth_routes,
     providers as providers_routes,
@@ -261,6 +262,7 @@ for r in (
     scripts_routes.router,
     confirmations_routes.router,
     events_routes.router,
+    llm_usage_routes.router,
     storage_routes.router,
     ws_router,
 ):

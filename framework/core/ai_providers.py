@@ -253,11 +253,29 @@ class AIClient:
         self.provider = provider
         self.model = model or provider.default_model
 
+    # OpenAI-shape providers (azure_openai, copilot, openai) support
+    # tool-calling through this base hook. Set True on the subclass.
+    supports_tools: bool = False
+
     def chat(self, messages: list[dict], *, model: str = "",
              temperature: float = 0.0, max_tokens: int = 1024,
+             tools: Optional[list[dict]] = None,
+             tool_runner: Optional[callable] = None,
+             max_tool_iterations: int = 12,
              **kwargs) -> str:
         """Public entry. Wraps the provider-specific _chat() with
-        framework-level live LLM stream capture."""
+        framework-level live LLM stream capture.
+
+        When `tools` is provided AND the subclass advertises
+        `supports_tools = True`, the request is dispatched through
+        `_chat_with_tools()` which runs an iterative tool-calling loop
+        (model → tool_calls → execute → re-call → repeat). Subclasses
+        that don't support tools (claude-cli, ollama, anthropic via
+        text completions) ignore the parameter — claude-cli has its own
+        tools natively, ollama lacks function-calling at the HTTP level
+        in our minimal client, and the anthropic SDK has a different
+        tool shape we'd need a separate path for.
+        """
         from . import llm_stream  # avoid circular import at module load
         import time as _time
         chosen_model = model or self.model
@@ -272,11 +290,36 @@ class AIClient:
             )
         t0 = _time.time()
         try:
-            text = self._chat(messages, model=model, temperature=temperature,
-                              max_tokens=max_tokens, **kwargs)
+            if tools and self.supports_tools:
+                text = self._chat_with_tools(
+                    messages, model=model, temperature=temperature,
+                    max_tokens=max_tokens, tools=tools,
+                    tool_runner=tool_runner,
+                    max_iterations=max_tool_iterations,
+                    stream=stream, **kwargs,
+                )
+            else:
+                text = self._chat(messages, model=model, temperature=temperature,
+                                  max_tokens=max_tokens, **kwargs)
         except Exception as e:
             if stream:
                 stream.error(str(e), duration_s=_time.time() - t0)
+            try:
+                from . import llm_usage
+                input_text = "\n".join(
+                    (m.get("content") if isinstance(m.get("content"), str) else "")
+                    for m in messages or []
+                )
+                agent_id = getattr(stream, "agent_id", "") if stream else ""
+                run_ts = getattr(stream, "run_ts", "") if stream else ""
+                llm_usage.record_call(
+                    agent_id=agent_id, run_ts=run_ts,
+                    provider=self.provider.name, kind_provider=self.provider.kind,
+                    model=chosen_model, input_text=input_text,
+                    output_text="", duration_s=_time.time() - t0, is_error=True,
+                )
+            except Exception:
+                pass
             raise
         if stream:
             stream.response(
@@ -285,7 +328,42 @@ class AIClient:
                 kind_provider=self.provider.kind,
                 model=chosen_model,
             )
+
+        # Framework-level usage tracking — append a row to the monthly
+        # llm-usage JSONL so the dashboard can aggregate cost+calls per
+        # provider/model. Best-effort: never break the agent if logging
+        # fails. Concatenate user+system from messages for the input
+        # estimate; subclasses don't expose a separate prompt object.
+        try:
+            from . import llm_usage  # avoid circular at module load
+            input_text = "\n".join(
+                (m.get("content") if isinstance(m.get("content"), str) else "")
+                for m in messages or []
+            )
+            agent_id = ""
+            run_ts = ""
+            if stream:
+                agent_id = getattr(stream, "agent_id", "") or ""
+                run_ts = getattr(stream, "run_ts", "") or ""
+            llm_usage.record_call(
+                agent_id=agent_id, run_ts=run_ts,
+                provider=self.provider.name, kind_provider=self.provider.kind,
+                model=chosen_model, input_text=input_text,
+                output_text=text or "",
+                duration_s=_time.time() - t0,
+                is_error=False,
+            )
+        except Exception as _e:
+            pass
+
         return text
+
+    def _chat_with_tools(self, messages, *, model, temperature, max_tokens,
+                          tools, tool_runner, max_iterations, stream, **kwargs):
+        """Default no-op — subclasses that support tools override this.
+        Falls back to `_chat()` if a subclass forgets to override."""
+        return self._chat(messages, model=model, temperature=temperature,
+                          max_tokens=max_tokens, **kwargs)
 
     def _chat(self, messages: list[dict], *, model: str = "",
               temperature: float = 0.0, max_tokens: int = 1024,
@@ -299,15 +377,99 @@ class AIClient:
         return f"<AIClient provider={self.provider.name} kind={self.provider.kind} model={self.model}>"
 
 
+def _openai_tool_loop(create_completion, *, messages, tools, tool_runner,
+                       max_iterations, stream):
+    """Shared tool-calling loop for OpenAI-shape providers.
+
+    `create_completion(messages, tools)` is a callable the caller binds
+    to its provider-specific SDK client. It must return an
+    OpenAI-style ChatCompletion object with `.choices[0].message`
+    (carrying optional `.tool_calls`). We append the assistant's
+    response and any tool result messages into a working copy of
+    `messages` and re-call until the model stops requesting tools or
+    we hit `max_iterations`.
+
+    Why a hard iteration cap: stuck loops happen — a model can
+    repeatedly retry a failing search. The cap prevents an agent from
+    burning its entire wall-clock budget in tool calls. 12 is enough
+    for typical research (1 search + 4-6 fetches).
+    """
+    from . import llm_stream as _ls
+    import json as _json
+
+    runner = tool_runner or __import__(
+        "framework.core.tools", fromlist=["default_runner"]
+    ).default_runner
+
+    working: list[dict] = list(messages)
+    for iteration in range(max_iterations):
+        resp = create_completion(working, tools)
+        msg = resp.choices[0].message
+        # `tool_calls` may be None or empty list — both mean "done"
+        tcs = getattr(msg, "tool_calls", None) or []
+        if not tcs:
+            return msg.content or ""
+
+        # Append the assistant's message verbatim. The OpenAI SDK
+        # returns Pydantic objects; convert to dict for the next call.
+        # `model_dump()` is openai-python v1+; fallback to .dict().
+        try:
+            assistant_dump = msg.model_dump(exclude_unset=True)
+        except AttributeError:
+            assistant_dump = msg.dict(exclude_unset=True)  # type: ignore[attr-defined]
+        # Strip None content if present — some servers reject it.
+        if assistant_dump.get("content") is None and assistant_dump.get("tool_calls"):
+            assistant_dump["content"] = ""
+        working.append(assistant_dump)
+
+        # Execute every tool call sequentially. Could parallelize but
+        # research workloads are small; sequential keeps logging
+        # readable and rate-limits one call at a time.
+        for tc in tcs:
+            name = tc.function.name
+            try:
+                args = _json.loads(tc.function.arguments or "{}")
+            except _json.JSONDecodeError:
+                args = {}
+            if stream:
+                try:
+                    stream.chunk(f"\n[tool_call {iteration+1}/{max_iterations}] "
+                                 f"{name}({_json.dumps(args)[:300]})\n")
+                except Exception:
+                    pass
+            output = runner(name, args)
+            if stream:
+                try:
+                    preview = output[:400] + ("…" if len(output) > 400 else "")
+                    stream.chunk(f"[tool_result] {preview}\n")
+                except Exception:
+                    pass
+            working.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": name,
+                "content": output,
+            })
+
+    # Out of iterations — return whatever the last assistant text was,
+    # or a clear signal so the caller can detect truncation.
+    return ("[ERROR] max_tool_iterations reached without final answer. "
+            "Last assistant content: " + (msg.content or "(none)"))
+
+
 class _AzureOpenAIClient(AIClient):
-    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    supports_tools = True
+
+    def _client(self):
         from openai import AzureOpenAI  # type: ignore
-        client = AzureOpenAI(
+        return AzureOpenAI(
             api_key=self.provider.resolve_key(),
             azure_endpoint=self.provider.base_url,
             api_version=self.provider.api_version or "2024-08-01-preview",
         )
-        # Azure uses deployment name as the model id
+
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+        client = self._client()
         resp = client.chat.completions.create(
             model=self.provider.deployment or model or self.model,
             messages=messages,
@@ -315,6 +477,20 @@ class _AzureOpenAIClient(AIClient):
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
+
+    def _chat_with_tools(self, messages, *, model, temperature, max_tokens,
+                          tools, tool_runner, max_iterations, stream, **kwargs):
+        client = self._client()
+        deploy = self.provider.deployment or model or self.model
+        def _do(working, tools_):
+            return client.chat.completions.create(
+                model=deploy, messages=working,
+                temperature=temperature, max_tokens=max_tokens,
+                tools=tools_, tool_choice="auto",
+            )
+        return _openai_tool_loop(_do, messages=messages, tools=tools,
+                                  tool_runner=tool_runner,
+                                  max_iterations=max_iterations, stream=stream)
 
 
 class _AnthropicClient(AIClient):
@@ -362,12 +538,17 @@ class _OllamaClient(AIClient):
 class _CopilotClient(AIClient):
     """Talks to a copilot-api proxy (OpenAI-compatible) — typical setup is
     `npx copilot-api` running on localhost:4141."""
-    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    supports_tools = True
+
+    def _client(self):
         from openai import OpenAI  # type: ignore
-        client = OpenAI(
+        return OpenAI(
             api_key=self.provider.resolve_key() or "dummy",
             base_url=self.provider.base_url or "http://localhost:4141/v1",
         )
+
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+        client = self._client()
         resp = client.chat.completions.create(
             model=model or self.model or "gpt-4o-mini",
             messages=messages,
@@ -375,12 +556,31 @@ class _CopilotClient(AIClient):
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
+
+    def _chat_with_tools(self, messages, *, model, temperature, max_tokens,
+                          tools, tool_runner, max_iterations, stream, **kwargs):
+        client = self._client()
+        chosen = model or self.model or "gpt-4o-mini"
+        def _do(working, tools_):
+            return client.chat.completions.create(
+                model=chosen, messages=working,
+                temperature=temperature, max_tokens=max_tokens,
+                tools=tools_, tool_choice="auto",
+            )
+        return _openai_tool_loop(_do, messages=messages, tools=tools,
+                                  tool_runner=tool_runner,
+                                  max_iterations=max_iterations, stream=stream)
 
 
 class _OpenAIClient(AIClient):
-    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+    supports_tools = True
+
+    def _client(self):
         from openai import OpenAI  # type: ignore
-        client = OpenAI(api_key=self.provider.resolve_key())
+        return OpenAI(api_key=self.provider.resolve_key())
+
+    def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
+        client = self._client()
         resp = client.chat.completions.create(
             model=model or self.model or "gpt-4o-mini",
             messages=messages,
@@ -388,6 +588,20 @@ class _OpenAIClient(AIClient):
             max_tokens=max_tokens,
         )
         return resp.choices[0].message.content or ""
+
+    def _chat_with_tools(self, messages, *, model, temperature, max_tokens,
+                          tools, tool_runner, max_iterations, stream, **kwargs):
+        client = self._client()
+        chosen = model or self.model or "gpt-4o-mini"
+        def _do(working, tools_):
+            return client.chat.completions.create(
+                model=chosen, messages=working,
+                temperature=temperature, max_tokens=max_tokens,
+                tools=tools_, tool_choice="auto",
+            )
+        return _openai_tool_loop(_do, messages=messages, tools=tools,
+                                  tool_runner=tool_runner,
+                                  max_iterations=max_iterations, stream=stream)
 
 
 class _ClaudeCliClient(AIClient):
@@ -553,6 +767,137 @@ _CLIENT_CLASSES = {
     "openai":       _OpenAIClient,
     "claude-cli":   _ClaudeCliClient,
 }
+
+
+# ---------------------------------------------------------------------------
+# Fallback chain
+# ---------------------------------------------------------------------------
+
+# When the primary provider raises one of these, fall back. We match on
+# strings because each backend raises its own typed errors and we don't
+# want to import every SDK at the module level just for isinstance checks.
+_FALLBACK_TRIGGER_SUBSTRINGS = (
+    "rate limit", "rate-limit", "rate_limit",
+    "timed out", "timeout", "timedout",
+    "429", "503", "502", "504",
+    "claude cli timed out",
+    "all 3 profile(s) rate-limited",
+    "no auth", "rc=1:", "rc=124:",  # claude-cli wrapper exit codes
+    "exhausted", "quota", "overloaded",
+)
+
+# Kinds we consider for fallback, in preference order. Skipped if no
+# provider of that kind is registered or if the registered one has no
+# usable credentials.
+DEFAULT_FALLBACK_KINDS = ("copilot", "azure_openai", "openai", "anthropic", "ollama")
+
+
+def _is_fallback_trigger(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return any(sub in s for sub in _FALLBACK_TRIGGER_SUBSTRINGS)
+
+
+def _build_fallback_chain(primary: "AIClient",
+                           storage: Optional[StorageBackend] = None) -> list["AIClient"]:
+    """Return [primary] + any registered providers of a different kind
+    that have credentials, in DEFAULT_FALLBACK_KINDS order. We exclude
+    other providers of the SAME kind as primary because if claude-cli is
+    rate-limited, another claude-cli provider would hit the same pool."""
+    chain: list[AIClient] = [primary]
+    seen_kinds = {primary.provider.kind}
+    seen_names = {primary.provider.name}
+    s = storage or get_storage()
+    all_providers = list_providers(s)
+    for kind in DEFAULT_FALLBACK_KINDS:
+        if kind in seen_kinds:
+            continue
+        for p in all_providers:
+            if p.name in seen_names or p.kind != kind:
+                continue
+            # Skip providers that need credentials and don't have them.
+            if p.kind in {"openai", "azure_openai", "anthropic"} and not p.has_key():
+                continue
+            cls = _CLIENT_CLASSES.get(p.kind)
+            if cls is None:
+                continue
+            chain.append(cls(p, model=p.default_model))
+            seen_kinds.add(p.kind)
+            seen_names.add(p.name)
+            break
+    return chain
+
+
+def chat_with_fallback(agent_id: str,
+                        messages: list[dict],
+                        *,
+                        tools: Optional[list[dict]] = None,
+                        tool_runner: Optional[callable] = None,
+                        max_tool_iterations: int = 12,
+                        max_tokens: int = 2000,
+                        temperature: float = 0.0,
+                        max_attempts: Optional[int] = None,
+                        storage: Optional[StorageBackend] = None,
+                        override_provider: Optional[str] = None,
+                        override_model: Optional[str] = None,
+                        **kwargs) -> tuple[str, "AIClient"]:
+    """Call the agent's primary provider; on rate-limit/timeout, fall back
+    to other registered providers of different kinds in
+    DEFAULT_FALLBACK_KINDS order. Returns (text, client_used) so the
+    caller can record which provider actually produced the answer.
+
+    Tools are passed to every client in the chain. Clients that don't
+    advertise `supports_tools` ignore them (text-only behavior); clients
+    that do (copilot/openai/azure_openai) drive the tool loop.
+
+    On hard non-recoverable errors (auth failure, bad request) the call
+    re-raises immediately rather than burning through the chain — those
+    won't get better by switching providers.
+    """
+    primary = ai_client_for(agent_id, storage=storage,
+                             override_provider=override_provider,
+                             override_model=override_model)
+    chain = _build_fallback_chain(primary, storage=storage)
+    if max_attempts is not None:
+        chain = chain[: max(1, max_attempts)]
+
+    last_err: Optional[BaseException] = None
+    for i, client in enumerate(chain):
+        try:
+            text = client.chat(
+                messages,
+                tools=tools,
+                tool_runner=tool_runner,
+                max_tool_iterations=max_tool_iterations,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
+            if i > 0:
+                logger.warning(
+                    "ai-fallback: agent=%s recovered on attempt %d/%d "
+                    "(provider=%s kind=%s) after primary=%s failed: %s",
+                    agent_id, i + 1, len(chain),
+                    client.provider.name, client.provider.kind,
+                    primary.provider.name, last_err,
+                )
+            return text, client
+        except Exception as e:  # noqa: BLE001 — we re-raise for non-fallback cases
+            if not _is_fallback_trigger(e):
+                # Hard error — don't burn the chain on a bad prompt.
+                raise
+            last_err = e
+            logger.warning(
+                "ai-fallback: agent=%s provider=%s kind=%s failed (%s): %s",
+                agent_id, client.provider.name, client.provider.kind,
+                type(e).__name__, str(e)[:300],
+            )
+            continue
+
+    # All clients exhausted.
+    raise RuntimeError(
+        f"ai-fallback exhausted: tried {len(chain)} providers; "
+        f"last error: {last_err}"
+    )
 
 
 def ai_client_for(agent_id: str,

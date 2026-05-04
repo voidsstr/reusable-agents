@@ -177,6 +177,42 @@ export const api = {
     points: { ts: string; value: number; run_ts?: string; note?: string }[]
   }>(`/api/agents/${encodeURIComponent(id)}/goals/${encodeURIComponent(goalId)}/progress?limit=${limit}`),
 
+  // LLM usage — aggregate across all agents
+  llmUsage: (days?: number) => http<{
+    as_of: string
+    filtered_days: number | null
+    by_provider_model: {
+      provider: string
+      kind_provider: string
+      model: string
+      calls: number
+      input_tokens: number
+      output_tokens: number
+      est_cost_usd: number
+      agents: string[]
+      first_ts: string
+      last_ts: string
+      is_zero_billed: boolean
+    }[]
+    by_agent: {
+      agent_id: string
+      calls: number
+      input_tokens: number
+      output_tokens: number
+      est_cost_usd: number
+    }[]
+    by_day: {
+      date: string
+      calls: number
+      input_tokens: number
+      output_tokens: number
+      est_cost_usd: number
+    }[]
+    totals: { calls: number; input_tokens: number; output_tokens: number; est_cost_usd: number }
+  }>(`/api/llm/usage${days ? `?days=${days}` : ''}`),
+
+  llmUsageRefresh: () => http<unknown>('/api/llm/usage/refresh', { method: 'POST' }),
+
   // implementer dispatch queue
   implementerQueue: (limit = 20) => http<{
     pending: { agent_id: string; request_id?: string; site?: string; from_run?: string; rec_ids?: string[]; action?: string; ts?: string; _key?: string }[];

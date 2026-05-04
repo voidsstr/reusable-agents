@@ -346,10 +346,22 @@ export default function AgentLLMs() {
                   </td>
                   <td className="px-3 py-2 hidden md:table-cell text-xs text-ink-500">{r.agent.application || '—'}</td>
                   <td className="px-3 py-2 font-mono text-xs">
-                    {r.effectiveProvider || <span className="text-ink-400 italic">unset</span>}
+                    {r.effectiveProvider ? (
+                      <a
+                        href={`#usage-${slugifyKey(r.effectiveProvider, r.effectiveModel)}`}
+                        className="text-accent-700 hover:underline"
+                        title="Jump to usage stats for this provider+model"
+                      >{r.effectiveProvider}</a>
+                    ) : <span className="text-ink-400 italic">unset</span>}
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">
-                    {r.effectiveModel || <span className="text-ink-400">—</span>}
+                    {r.effectiveModel ? (
+                      <a
+                        href={`#usage-${slugifyKey(r.effectiveProvider, r.effectiveModel)}`}
+                        className="text-accent-700 hover:underline"
+                        title="Jump to usage stats for this provider+model"
+                      >{r.effectiveModel}</a>
+                    ) : <span className="text-ink-400">—</span>}
                   </td>
                   <td className="px-3 py-2 hidden lg:table-cell">
                     <SourceBadge source={r.source} />
@@ -395,6 +407,320 @@ export default function AgentLLMs() {
           }}
         />
       )}
+
+      <UsageSection />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Usage Section — call counts + token + cost estimates per provider/model
+// ---------------------------------------------------------------------------
+
+function slugifyKey(provider: string, model: string): string {
+  return `${provider}-${model}`.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase()
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return n.toLocaleString()
+}
+
+function fmtCost(usd: number, isZero: boolean): JSX.Element {
+  if (isZero) {
+    return <span className="text-ink-400 italic" title="Subscription / local — no per-call cost">subscription</span>
+  }
+  if (usd === 0) return <span className="text-ink-400">$0.00</span>
+  if (usd < 0.01) return <span>{`<$0.01`}</span>
+  return <span>${usd.toFixed(2)}</span>
+}
+
+interface UsagePM {
+  provider: string
+  kind_provider: string
+  model: string
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  est_cost_usd: number
+  agents: string[]
+  first_ts: string
+  last_ts: string
+  is_zero_billed: boolean
+}
+
+interface UsageDay {
+  date: string
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  est_cost_usd: number
+}
+
+function Sparkline({ values, width = 280, height = 50, color = '#4f46e5' }: {
+  values: number[]; width?: number; height?: number; color?: string
+}) {
+  if (values.length === 0) {
+    return <div className="text-xs text-ink-400">no data</div>
+  }
+  if (values.length === 1) {
+    return (
+      <svg width={width} height={height}>
+        <circle cx={width / 2} cy={height / 2} r={3} fill={color} />
+      </svg>
+    )
+  }
+  const vmax = Math.max(...values, 1)
+  const pad = 6
+  const innerW = width - 2 * pad
+  const innerH = height - 2 * pad
+  const points = values.map((v, i) => {
+    const x = pad + (innerW * i) / (values.length - 1)
+    const y = (height - pad) - innerH * (v / vmax)
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  // Area fill for prettier viz
+  const areaPoints = `${pad},${height - pad} ${points} ${width - pad},${height - pad}`
+  return (
+    <svg width={width} height={height} style={{ verticalAlign: 'middle' }}>
+      <polygon points={areaPoints} fill={color} fillOpacity={0.12} />
+      <polyline points={points} fill="none" stroke={color} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+      {/* dots */}
+      {values.map((v, i) => {
+        const x = pad + (innerW * i) / Math.max(values.length - 1, 1)
+        const y = (height - pad) - innerH * (v / vmax)
+        return <circle key={i} cx={x} cy={y} r={1.6} fill={color} opacity={i === values.length - 1 ? 1 : 0.5} />
+      })}
+    </svg>
+  )
+}
+
+function UsageSection() {
+  const [data, setData] = useState<{
+    by_provider_model: UsagePM[]
+    by_agent: { agent_id: string; calls: number; input_tokens: number; output_tokens: number; est_cost_usd: number }[]
+    by_day: UsageDay[]
+    totals: { calls: number; input_tokens: number; output_tokens: number; est_cost_usd: number }
+    as_of: string
+  } | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [err, setErr] = useState('')
+
+  const load = async () => {
+    setLoading(true); setErr('')
+    try {
+      const d = await api.llmUsage()
+      setData(d)
+    } catch (e: any) {
+      setErr(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const refresh = async () => {
+    setRefreshing(true)
+    try {
+      await api.llmUsageRefresh()
+      await load()
+    } catch (e: any) {
+      setErr(e?.message || String(e))
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  if (loading) return <div className="mt-12 text-ink-500">Loading LLM usage…</div>
+  if (err || !data) return <div className="mt-12 text-status-failure-fg">Usage unavailable: {err || 'no data'}</div>
+
+  // Daily totals — last 30 days max
+  const dailyValues = data.by_day.slice(-30).map(d => d.calls)
+  const dailyCost = data.by_day.slice(-30).map(d => d.est_cost_usd)
+  const dailyInTokens = data.by_day.slice(-30).map(d => d.input_tokens)
+  const dailyOutTokens = data.by_day.slice(-30).map(d => d.output_tokens)
+  const totalEstCost = data.totals.est_cost_usd
+
+  return (
+    <div className="mt-16">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="text-lg font-semibold text-ink-900">LLM Usage</h2>
+          <p className="text-xs text-ink-500 mt-0.5">
+            All-time call counts + token + cost estimates across {data.by_provider_model.length} provider/model
+            combination{data.by_provider_model.length === 1 ? '' : 's'} ·
+            {' '}as of {new Date(data.as_of).toLocaleString()}
+          </p>
+        </div>
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          className="px-3 py-1 bg-surface-subtle hover:bg-ink-200 rounded text-xs"
+          title="Recompute aggregates from JSONL partitions"
+        >{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+      </div>
+
+      {/* Totals card row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <StatCard label="Total calls" value={fmtNum(data.totals.calls)} />
+        <StatCard label="Input tokens" value={fmtNum(data.totals.input_tokens)} />
+        <StatCard label="Output tokens" value={fmtNum(data.totals.output_tokens)} />
+        <StatCard label="Est. cost" value={totalEstCost === 0 ? 'subscription' : `$${totalEstCost.toFixed(2)}`}
+                  hint={totalEstCost === 0 ? 'all calls via flat-fee plans' : ''} />
+      </div>
+
+      {/* Daily volume graph */}
+      <div className="bg-surface rounded-lg border border-surface-divider p-4 mb-6">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm font-medium text-ink-700">Daily volume — calls (last 30d)</div>
+          <div className="text-xs text-ink-400">
+            peak {fmtNum(Math.max(...dailyValues, 0))} · today {fmtNum(dailyValues[dailyValues.length - 1] || 0)}
+          </div>
+        </div>
+        <Sparkline values={dailyValues} width={840} height={70} color="#4f46e5" />
+        <div className="mt-3 flex items-center justify-between text-[11px] text-ink-400">
+          {data.by_day.slice(-30).filter((_, i, a) => i === 0 || i === a.length - 1 || i === Math.floor(a.length / 2)).map(d => (
+            <span key={d.date}>{d.date}</span>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4 mb-6">
+        <div className="bg-surface rounded-lg border border-surface-divider p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium text-ink-700">Input tokens / day</div>
+            <div className="text-xs text-ink-400">
+              {fmtNum(dailyInTokens[dailyInTokens.length - 1] || 0)} today
+            </div>
+          </div>
+          <Sparkline values={dailyInTokens} width={400} height={50} color="#0891b2" />
+        </div>
+        <div className="bg-surface rounded-lg border border-surface-divider p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium text-ink-700">Output tokens / day</div>
+            <div className="text-xs text-ink-400">
+              {fmtNum(dailyOutTokens[dailyOutTokens.length - 1] || 0)} today
+            </div>
+          </div>
+          <Sparkline values={dailyOutTokens} width={400} height={50} color="#16a34a" />
+        </div>
+      </div>
+
+      {/* Per provider+model */}
+      <h3 className="text-sm font-semibold text-ink-700 mb-2 uppercase tracking-wide">By provider × model</h3>
+      <div className="space-y-4 mb-8">
+        {data.by_provider_model.map(pm => {
+          const slug = slugifyKey(pm.provider, pm.model)
+          // Per-pm daily series — derived from data.by_day filtered. Since
+          // by_day is global, for now we show the global trend with the
+          // pm summary stats. (A per-pm timeseries would need a separate
+          // group-by in the API.)
+          return (
+            <div key={slug} id={`usage-${slug}`}
+                 className="bg-surface rounded-lg border border-surface-divider p-4 scroll-mt-4">
+              <div className="flex items-start justify-between mb-3 gap-4 flex-wrap">
+                <div>
+                  <div className="font-mono text-sm text-ink-900">
+                    <span className="text-accent-700">{pm.provider}</span>
+                    {' / '}
+                    <span>{pm.model}</span>
+                    {pm.is_zero_billed && (
+                      <span className="ml-2 px-2 py-0.5 bg-status-running-bg text-status-running-fg rounded text-[10px] font-sans">
+                        flat-fee
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-ink-400 mt-1">
+                    {pm.agents.length} agent{pm.agents.length === 1 ? '' : 's'} ·
+                    {' '}first call {pm.first_ts ? new Date(pm.first_ts).toLocaleDateString() : '—'} ·
+                    {' '}most recent {pm.last_ts ? new Date(pm.last_ts).toLocaleDateString() : '—'}
+                  </div>
+                </div>
+                <div className="text-right">
+                  <div className="text-2xl font-semibold text-ink-900 leading-none">{fmtNum(pm.calls)}</div>
+                  <div className="text-[11px] text-ink-400 mt-1">calls</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                <PMStat label="Input tokens" value={fmtNum(pm.input_tokens)} />
+                <PMStat label="Output tokens" value={fmtNum(pm.output_tokens)} />
+                <PMStat label="Est. total cost" value={pm.is_zero_billed ? 'subscription' : (pm.est_cost_usd === 0 ? '$0' : `$${pm.est_cost_usd.toFixed(4)}`)} />
+                <PMStat label="Avg / call" value={
+                  pm.calls > 0 ? fmtNum(Math.round((pm.input_tokens + pm.output_tokens) / pm.calls)) : '—'
+                } sub="tokens" />
+              </div>
+              {pm.agents.length > 0 && (
+                <div className="text-[11px] text-ink-500 border-t border-surface-divider pt-2">
+                  <span className="text-ink-400">Used by:</span>{' '}
+                  {pm.agents.map((a, i) => (
+                    <span key={a}>
+                      <code className="font-mono">{a}</code>
+                      {i < pm.agents.length - 1 ? ', ' : ''}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Per-agent usage */}
+      <h3 className="text-sm font-semibold text-ink-700 mb-2 uppercase tracking-wide">By agent</h3>
+      <div className="bg-surface rounded-lg border border-surface-divider overflow-hidden mb-4">
+        <table className="w-full text-sm">
+          <thead className="bg-surface-subtle text-[11px] uppercase tracking-wide text-ink-500">
+            <tr>
+              <th className="px-3 py-2 text-left">Agent</th>
+              <th className="px-3 py-2 text-right">Calls</th>
+              <th className="px-3 py-2 text-right">Input tokens</th>
+              <th className="px-3 py-2 text-right">Output tokens</th>
+              <th className="px-3 py-2 text-right">Est. cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.by_agent.map(a => (
+              <tr key={a.agent_id} className="border-t border-surface-divider hover:bg-surface-subtle/40">
+                <td className="px-3 py-2 font-mono text-xs text-ink-900">{a.agent_id}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{fmtNum(a.calls)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.input_tokens)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.output_tokens)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">
+                  {a.est_cost_usd === 0 ? <span className="text-ink-400">—</span> : `$${a.est_cost_usd.toFixed(4)}`}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-[11px] text-ink-400">
+        Token counts are estimates (chars/4). Cost estimates apply only to per-token-billed providers
+        (Anthropic API, Azure OpenAI). Calls via Claude Max CLI (claude-cli), GitHub Copilot, and local
+        Ollama show as <em>subscription</em> — flat-fee plans with no per-call charge.
+      </p>
+    </div>
+  )
+}
+
+function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="bg-surface rounded-lg border border-surface-divider p-4">
+      <div className="text-[11px] text-ink-500 uppercase tracking-wide">{label}</div>
+      <div className="text-2xl font-semibold text-ink-900 mt-1 leading-none">{value}</div>
+      {hint && <div className="text-[10px] text-ink-400 mt-1">{hint}</div>}
+    </div>
+  )
+}
+
+function PMStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] text-ink-500 uppercase tracking-wide">{label}</div>
+      <div className="text-base font-semibold text-ink-900 leading-tight">{value}</div>
+      {sub && <div className="text-[10px] text-ink-400">{sub}</div>}
     </div>
   )
 }
