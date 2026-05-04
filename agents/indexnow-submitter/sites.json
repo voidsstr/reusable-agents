@@ -8,7 +8,12 @@
       "databaseUrlFallback": "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require",
       "watermarkFile": "/home/voidsstr/.reusable-agents/indexnow-submitter/aisleprompt-watermark.txt",
       "sitemapUrls": [
-        "https://aisleprompt.com/sitemap.xml"
+        "https://aisleprompt.com/sitemap.xml",
+        "https://aisleprompt.com/sitemap-core.xml",
+        "https://aisleprompt.com/sitemap-recipes.xml",
+        "https://aisleprompt.com/sitemap-cuisines.xml",
+        "https://aisleprompt.com/sitemap-shop.xml",
+        "https://aisleprompt.com/sitemap-blog.xml"
       ],
       "staticPaths": [
         "/",
