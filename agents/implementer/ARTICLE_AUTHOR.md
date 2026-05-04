@@ -90,12 +90,49 @@ paths from the start.
   (anandtech.com, techpowerup.com, official manufacturer docs).
 - No marketing fluff. No "in today's fast-paced world" intros.
 
-### Frontmatter / metadata you fill on the row
-- `subtitle` — one-line tease (≤120 chars)
-- `excerpt` — ~250-char summary for SERP + cards
-- `tags` — 3-6 short topic tags
-- `difficulty` — one of: `beginner`, `intermediate`, `advanced`
-- `estimated_read_time` — integer minutes (assume 220 wpm)
+### SEO-completion checklist — every column must be populated
+
+Every analyzer rule that fires on article pages keys off a column on
+the row. Leaving any blank trips an auto-queue rec on the next 3-hour
+SEO tick. The proposal carries most of these — COPY them into the
+INSERT verbatim; do NOT re-derive.
+
+| Column | Source | Why it matters |
+|---|---|---|
+| `title` | proposal | analyzer.title-length 30-70 |
+| `subtitle` | runbook (you write) | shown in lede + meta fallback |
+| `excerpt` | runbook (you write) | meta description 120-165 chars; **NEVER** dupe the title |
+| `body_md` | runbook (you write) | thin-content + word-count + internal-link + outbound-citation rules |
+| `hero_image_url` | proposal (preferred) → product-link query (fallback) | OG image + JSON-LD image |
+| `bucket` / `category` | proposal | analyzer's article-rule selectors |
+| `tags` | **proposal** | tag-cluster graph; copy verbatim |
+| `difficulty` | **proposal** | JSON-LD audience tier |
+| `estimated_read_time` | runbook (derive: words / 220) | meta strip + JSON-LD timeRequired |
+| `primary_keyword` / `secondary_keywords` | proposal | JSON-LD keywords + analyzer tracks ranking |
+| `related_recipe_slugs` / `related_kitchen_slugs` / `related_hardware_slugs` / `related_product_asins` | proposal | inline featured-product autolink |
+| `related_article_slugs` | runbook (pick from sitemap) | drives related-articles rail + cluster graph |
+| `faqs` | **proposal — 5 Q/A pairs, ≥40 words each** | drives FAQPage JSON-LD; analyzer.faq-quality-thin |
+| `outbound_citations` | **proposal — 3 authoritative URLs** | analyzer.eeat-outbound-citation-count; you MUST also link to each inside body_md |
+| `author` | always `"Mike Perry"` (SpecPicks) or `"AislePrompt Team"` (AislePrompt) | E-E-A-T |
+| `status` | `"published"` | filter |
+| `published_at` / `written_at` | `now()` | dateModified ≥30% |
+
+**Hard constraints, repeated for emphasis:**
+- `excerpt` MUST be a hand-written 145-160-char summary, **NOT** the
+  title verbatim. The 4-30 mediterranean-meal-plan article had
+  `excerpt = title` and lost every SERP comparison vs longer competitors.
+- `faqs` MUST contain ≥3 entries (5 preferred), each `answer` ≥40
+  words, distinct questions. The proposal carries them; copy verbatim
+  unless you need to fact-check a specific claim against the article
+  body.
+- `outbound_citations` is an array of URLs the body actually links to.
+  After you finish writing, audit body_md to confirm each URL appears
+  inline as `[Source name](https://...)` markdown — not just listed
+  in this column.
+- All internal links use absolute paths starting with `/` — the
+  "Internal links" section above is non-negotiable.
+
+### Other frontmatter notes
 - `hero_image_url` — **MANDATORY: set this BEFORE the INSERT** (see "Picking the hero image" below). Leaving it NULL forces the SSR fallback, which used to pick HDMI cables / PSUs that were marketed "for RTX 5090". Set the right image at write-time so the article never depends on the fallback.
 - `related_hardware_slugs` — array of hardware slugs from the products
   table (from `expected_products_or_hardware` if present)
@@ -176,6 +213,38 @@ gemma-4 hero-image incident was exactly this: hero_image_url was NULL,
 the broken fallback picked an HDMI cable from product_hardware_links
 because it was marketed "for RTX 5090". Setting hero_image_url at
 write-time avoids the fallback entirely.
+
+### Image must match the SUBJECT, not just the era / category
+
+**A correct hero shows the actual hardware/product the article is
+about.** Common-mode failures we've found and rolled back:
+
+- ❌ "ATI Radeon 9700 Pro install guide" used an RTX 9070 XT photo
+  (wrong product, just because the model number contained "9070")
+- ❌ Pentium III Tualatin guide used a Pentium Pro logo (wrong product)
+- ❌ "Best 4K monitor under $700" used an NVIDIA Titan GPU photo
+- ❌ Sim-racing wheel buying guide used Hot Wheels Unleashed game art
+- ❌ Raspberry Pi LLM article used a Midjourney AI artwork
+- ❌ Many articles used `Golden_ratio_logo_design_technique.jpg` from
+  Wikipedia commons as a generic "tech-ish" placeholder. Never do this.
+
+If the SQL query above returns no rows, **DO NOT** substitute a
+generic Wikipedia image as a placeholder. Acceptable fallbacks
+(in order):
+
+1. Search products by article-keyword title match — same query but
+   replacing the `h.slug = ANY(...)` predicate with
+   `lower(p.title) LIKE '%<primary_keyword>%'`.
+2. eBay listing image for any related product (use
+   `i.ebayimg.com/.../s-l1600.<ext>` — that token gets the largest
+   reliable size).
+3. Leave `hero_image_url = NULL`. The SSR layer renders a clean
+   no-image card; that's strictly better than a misleading photo.
+
+After you've INSERTed the article, the cron job
+`scripts/refresh-article-hero-images.py --all-published` runs and
+will only IMPROVE — never replace — a correctly-set image. So get it
+right at write-time.
 
 ## How to write to the DB
 
