@@ -96,6 +96,13 @@ def init_goals(
             cur["title"] = g.get("title", cur.get("title"))
             cur["description"] = g.get("description", cur.get("description"))
             cur["directives"] = g.get("directives", cur.get("directives", []))
+            # Top-level fields read by agent_base auto-tracking + UI;
+            # update them on re-seed so wiring changes actually stick.
+            for _k in ("target_metric", "baseline", "target", "direction",
+                       "from_rec", "rationale", "check_by", "is_top5_goal",
+                       "is_revenue_goal"):
+                if _k in g:
+                    cur[_k] = g[_k]
             if "metric" in g:
                 cur_metric = cur.get("metric", {})
                 cur_metric.update({

@@ -392,7 +392,7 @@ class ProgressiveImprovementAgent(AgentBase):
         # Cap on how often we revisit the same hash regardless — guards against
         # findings going stale + makes sure `recs_review` recs eventually
         # re-emerge if the site reverts a fix that we tracked.
-        revisit_after_runs = int(analyzer_cfg.get("revisit_unchanged_after_runs", 12))  # ≈ 24h at 2h cadence
+        revisit_after_runs = int(analyzer_cfg.get("revisit_unchanged_after_runs", 6))  # ≈ 12h at 2h cadence — surfaces regressions faster
         revisit_counter = (self.state.get("hash_revisit_counter") or {}) if isinstance(self.state, dict) else {}
 
         cached_pages: list[Page] = []

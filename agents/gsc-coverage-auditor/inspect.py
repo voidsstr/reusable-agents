@@ -71,7 +71,12 @@ STATE_DIR = Path(os.path.expanduser(
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_LIMIT = int(os.environ.get("GSC_INSPECT_LIMIT", "500"))
-DEFAULT_QPS = float(os.environ.get("GSC_INSPECT_QPS", "1.0"))
+# GSC URL Inspection quota is 2,000/day per property. 2 RPS ≈ 7,200/hour
+# burst capacity, but a single run is capped at DEFAULT_LIMIT (500 by
+# default) so daily volume stays at ~25% of quota with one run, leaving
+# room for ad-hoc usage. The 1.0 RPS we ran with previously was leaving
+# huge unused capacity on the table.
+DEFAULT_QPS = float(os.environ.get("GSC_INSPECT_QPS", "2.0"))
 DRY_RUN = os.environ.get("GSC_INSPECT_DRY_RUN", "0") == "1"
 
 
@@ -239,20 +244,29 @@ def inspect_url(token: str, site_url: str, target_url: str) -> Optional[dict]:
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.request.HTTPError as e:
-        body_txt = ""
+    # Retry once on 429 (rate-limit) with a 60s backoff. GSC's quota is
+    # per-day not per-second so a 429 mid-run usually means we briefly
+    # outpaced the burst window, not that we exhausted the daily cap.
+    for attempt in range(2):
         try:
-            body_txt = e.read().decode("utf-8", "replace")[:200]
-        except Exception:
-            pass
-        err(f"  HTTP {e.code}: {target_url}  {body_txt}")
-        return None
-    except Exception as e:
-        err(f"  request failed: {target_url}  {e}")
-        return None
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.request.HTTPError as e:
+            body_txt = ""
+            try:
+                body_txt = e.read().decode("utf-8", "replace")[:200]
+            except Exception:
+                pass
+            if e.code == 429 and attempt == 0:
+                err(f"  HTTP 429 on {target_url} — sleeping 60s then retrying")
+                time.sleep(60)
+                continue
+            err(f"  HTTP {e.code}: {target_url}  {body_txt}")
+            return None
+        except Exception as e:
+            err(f"  request failed: {target_url}  {e}")
+            return None
+    return None
 
 
 def flatten_inspection(target_url: str, response: dict) -> dict:
