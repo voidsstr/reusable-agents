@@ -1,5 +1,148 @@
 # Claude Instructions — reusable-agents framework
 
+> ## 🎯 NORTH STAR — READ EVERY SESSION 🎯
+>
+> **Everything we build here exists to drive user usage of the
+> configured websites.** Today that's aisleprompt.com and
+> specpicks.com; new sites slot in via per-site config. We measure
+> success by site-side metrics — DAU, organic clicks, indexed
+> pages, conversions, returning users — *not* by code shipped, runs
+> completed, or LLM tokens consumed.
+>
+> **Goals are the prioritization lens, not decoration.** Every agent
+> declares 3–7 long-running goals at registration. Each goal has a
+> `target_metric` that points at a key in `RunResult.metrics` so the
+> framework auto-records progress on every run. The Goals tab in the
+> dashboard is the single pane of glass for "is this agent moving the
+> needle?"
+>
+> **The decision procedure for any new feature, refactor, or bugfix:**
+>
+> 1. Open the Goals tab (or `GET /api/agents/<id>/goals` and
+>    `/api/agents/<id>/goals/cache`).
+> 2. Find a stalled goal — target gap large, recent progress flat.
+>    Bias toward goals that map directly to user-facing site metrics
+>    (organic clicks, DAU, conversions, indexed pages).
+> 3. Trace that goal back to the agent that owns its `target_metric`.
+>    Read its `run()` and find the bottleneck — under-batching,
+>    missing handoff, low cap, no LLM short-circuit, etc.
+> 4. Make the smallest change that moves the metric. Verify the
+>    metric actually moved on the next 1–3 runs before declaring it
+>    done. **A change that doesn't tick a goal didn't happen.**
+>
+> **Anti-patterns to refuse on sight:**
+>
+> - "Refactor for cleanliness" without a specific goal it unblocks.
+> - "Add a feature the user might want" without a metric it serves.
+> - "Wire a new agent" before declaring goals + `target_metric`
+>   bindings. (No goals → no legibility → won't survive review.)
+> - "Fix a bug" by adding an `if site == "x": …` branch in framework
+>   code. Lift to config; see the Framework-First Policy below.
+>
+> See **[`README.md` → "Goals & metrics — the north star"](README.md)**
+> for the goals pipeline architecture, layer A vs layer B metric
+> capture, and how `init_goals` merges work.
+
+> ## ⚠️ AGENTBASE IS MANDATORY — READ EVERY SESSION ⚠️
+>
+> **Every registered agent MUST subclass
+> `framework.core.agent_base.AgentBase`.** Bash-driven multi-stage
+> pipelines, scripts that write `status.json` directly via
+> `framework.cli.status`, and ad-hoc shapes (synthesizing run
+> summaries from work-product files instead of `progress.json`) are
+> forbidden.
+>
+> **Why this matters:** non-AgentBase agents create silent
+> inconsistencies — runs invisible in the dashboard's Runs tab, no
+> `run-index.json` for fast list endpoints, no per-run heartbeat,
+> no auto goal-progress tracking, no auto-generated verification
+> scripts. Past workarounds (e.g. `framework.cli.status` writing a
+> synthetic `progress.json` on terminal states; `_list_runs_legacy`
+> reading both `progress.json` and `recommendations.json`) were
+> retired on 2026-05-04 once every active SEO agent moved to
+> AgentBase. Don't reintroduce them.
+>
+> **Decision tree (apply to EVERY new agent or refactor):**
+>
+> 1. **"Is this work an agent?"** If it has a cron schedule, run
+>    history, status, or queueable triggers → AgentBase. If it's a
+>    one-shot CLI tool (e.g. `agent/tools/wake_on_lan.py`) → not an
+>    agent, no manifest, doesn't go in `agents/`.
+> 2. **"Is it multi-stage?"** Stages are phases inside one agent's
+>    `run()` method, NOT separate registered agents. They share one
+>    `run_ts`, one `progress.json`, one `run-index` entry. If the
+>    cross-stage state is too coarse for one agent, lift the contract
+>    into `framework/core/` as a primitive (see
+>    `implementation_queue.py`, `digest_queue.py`,
+>    `outbound_email.py` for examples).
+> 3. **"Does my entry_command invoke `bash`?"** Only acceptable if
+>    the bash is a thin env-setup wrapper that ends in
+>    `exec python3 .../agent.py` (an AgentBase entrypoint). Bash
+>    that orchestrates pipeline stages, writes status, or shells out
+>    to multiple python scripts is the anti-pattern this rule bans.
+> 4. **"Am I about to write `if has_progress_json else
+>    synthesize_from_other_files`?"** STOP. The producer should
+>    write `progress.json` via `AgentBase.post_run()` — fix the
+>    producer, don't add a synthesis branch in the consumer.
+>
+> **Reference implementation — collapsed pipeline pattern.** The SEO
+> opportunity agent (`agents/seo-opportunity-agent/`) is the canonical
+> example of converting a bash-orchestrated pipeline to AgentBase.
+> Three former agents (`seo-data-collector`, `seo-analyzer`,
+> `seo-reporter`) and a per-site `run.sh` collapsed into one
+> `AgentBase` subclass with three internal phases (collect → analyze
+> → finalize). Their script bodies became internal modules under
+> `agents/seo-opportunity-agent/lib/{collector,analyzer,reporter}/`
+> (still subprocess-called by `_run_phase()` to avoid rewriting 7,500
+> LOC, but no longer registered as separate agents). Read
+> `agents/seo-opportunity-agent/agent.py` + `finalizer.py` before
+> refactoring any other bash pipeline.
+>
+> **Cross-agent contracts live in `framework/core/`.** When agent A's
+> output flows to agent B, the file format / queue location belongs
+> in a framework primitive, not inline JSON-shape conventions:
+>
+> - `framework/core/implementation_queue.py` — `queue_recs()` writes
+>   `agents/responder-agent/auto-queue/<request-id>.json`
+> - `framework/core/digest_queue.py` — `queue()` writes
+>   `digest-queue/<ts>-<hash>.json` for the digest rollup
+> - `framework/core/outbound_email.py` — `record()` writes
+>   `agents/<id>/outbound-emails/<request-id>.json` for the
+>   Confirmations page
+> - `framework/core/handoff.py` — typed inter-agent handoffs
+> - `framework/core/short_circuit.py` — snapshot hashing + replay
+>
+> AgentBase exposes shorthand wrappers: `self.queue_recs(...)`,
+> `self.queue_for_digest(...)`, `self.record_outbound(...)`. Use
+> these. If you find yourself writing `self.storage.write_json(
+> "agents/responder-agent/auto-queue/...", ...)` inline, you're
+> bypassing the contract — call the wrapper.
+>
+> **Conversion backlog (must convert when next touched).** As of
+> 2026-05-04 the following agents still drive work outside AgentBase
+> and need to be lifted on the next change. (`responder-agent`,
+> `implementer`, `seo-deployer` were converted on 2026-05-04 in the
+> same session as the SEO collapse — they're AgentBase wrappers
+> around their existing scripts/run.sh now. The implementer's
+> `run.sh` is still the heavy-lifter inside; rewriting it is its
+> own follow-up.)
+>
+> - `gsc-coverage-auditor` (and per-site `aisleprompt-` /
+>   `specpicks-` instances)
+> - `daily-briefing-calendar-agent`, `daily-status-briefing`,
+>   `fix-submission-agent`, `retro-agent-orchestrator`
+> - `indexnow-submitter` (and per-site instances), `aisleprompt-indexnow-bulk`,
+>   `specpicks-indexnow-bulk`
+> - `external-game-cataloger`, `game-library-scanner`,
+>   `market-research-pipeline`, `real-estate-agent`,
+>   `retro-multiplayer-refresh`, `security-scanner-pipeline`
+> - `web-search`, `product-hydration-agent`, `scraper-watchdog`
+>
+> Pick one of these only when its functionality is being changed —
+> don't open a side-quest. The framework primitives needed already
+> exist; if you find a gap, add the primitive to `framework/core/`
+> first, never inline.
+
 > ## ⚠️ FRAMEWORK-FIRST POLICY — READ EVERY SESSION ⚠️
 >
 > **Every change MUST be evaluated for framework abstraction BEFORE
@@ -256,6 +399,78 @@ Read it before scaffolding.
         -H "Authorization: Bearer $FRAMEWORK_API_TOKEN"
    ```
 
+## When the user asks to edit a per-site `site.yaml` (SEO + revenue agents)
+
+Per-site SEO instances (`specpicks-seo-opportunity-agent`,
+`aisleprompt-seo-opportunity-agent`, future sites) all share **one
+JSON schema**: `shared/schemas/site-config.schema.json`. Every block
+that has `additionalProperties: false` rejects unknown keys at startup.
+The agent calls `load_config_from_env()` first thing and **exits
+status 1 within ~1 second** when validation fails — silently in
+systemd-journal terms (only "Main process exited, code=exited,
+status=1/FAILURE" shows up).
+
+**Failure signature you've seen before (2026-05-04):** commit added
+`articles.url_template` to `specpicks/agents/seo-opportunity-agent/site.yaml`
+without updating the schema. Both SEO agents (specpicks + aisleprompt)
+broke for ~2 hours until the schema was extended. The error only
+appears when running the entry command manually:
+
+```
+Config validation failed for .../site.yaml:
+  Additional properties are not allowed ('url_template' was unexpected)
+  at: articles
+```
+
+**Hard rule when adding any `site.yaml` field:**
+
+1. **Add it to the schema first.** Open
+   `shared/schemas/site-config.schema.json`, find the right block
+   (`articles`, `data_sources`, `analyzer`, `reporter`, `implementer`,
+   `deployer`, `coverage_targets`, `page_inventory`, etc.), and add
+   the property under `properties` with a real `description`.
+2. **Pre-commit-test by running the agent locally** before pushing:
+   ```bash
+   AGENT_ID=specpicks-seo-opportunity-agent \
+   SEO_AGENT_CONFIG=/home/voidsstr/development/specpicks/agents/seo-opportunity-agent/site.yaml \
+   DATABASE_URL='postgresql://...' \
+   PYTHONPATH=/home/voidsstr/development/reusable-agents \
+   python3 /home/voidsstr/development/reusable-agents/agents/seo-opportunity-agent/agent.py
+   ```
+   Validation errors print to stderr in the first second of output.
+3. **Update both per-site `site.yaml` files at once** if the field is
+   shared semantics — schema changes apply to every site instance.
+4. **Update `agents/seo-opportunity-agent/README.md`** if the field
+   adds a user-visible capability (link it in the
+   "Configuration → most-used optional blocks" table).
+5. **Re-register the manifest** only if the manifest itself changed
+   (`bash <site-repo>/agents/register-with-framework.sh`). Editing
+   `site.yaml` alone doesn't require re-registration — the next cron
+   tick or manual trigger picks it up.
+
+**Cron scheduling discipline.** The two SEO instances run on a
+2-hour cycle with a `:15` offset between them
+(`specpicks-seo-opportunity-agent: 0 */2 * * *`,
+`aisleprompt-seo-opportunity-agent: 15 */2 * * *`) so they don't
+race for the same LLM provider quota. **Don't put a third site at
+:00 or :15.** Pick :30 or :45 when adding a new site.
+
+**Documentation map (where to put what):**
+
+| Change | Update |
+|---|---|
+| New phase rule in collector / analyzer / reporter | The phase's `lib/<phase>/README.md` + the engine's [`agents/seo-opportunity-agent/README.md`](agents/seo-opportunity-agent/README.md) (rec-type catalog) |
+| New `site.yaml` field | The schema + the engine README + (if onboarding-relevant) `docs/seo-onboard-new-site.md` |
+| New rec type | The rec-type catalog table in the engine README |
+| New troubleshooting failure mode | Engine README's Troubleshooting section + this CLAUDE.md if it's a recurring class of mistake |
+| Architecture-level change to the pipeline | `docs/agents-catalog.md` SEO section + the engine README |
+
+**Per-site app-deploy recipes** (Azure Container Apps, Vercel,
+Cloudflare Workers, Netlify) are documented in the
+[`agents/seo-deployer/README.md`](agents/seo-deployer/README.md)
+example sections — copy from there into a new site's `site.yaml`
+under `deployer:`.
+
 ## When the user asks to inspect / debug an agent
 
 - `curl http://localhost:8090/api/agents/<id>` — full detail
@@ -320,6 +535,49 @@ than reinventing. Failing to use them costs tokens AND introduces drift:
 
 **Rule of thumb:** if you're about to add a `for item in items: client.chat(...)`
 loop, stop and ask whether you can do it in one batched call instead.
+
+## LLM provider routing — chat vs code-editor
+
+The framework has TWO independent LLM systems. Don't conflate them:
+
+1. **Chat** — `framework.core.ai_providers`. Used by anything that
+   calls `self.ai_client()` or `chat_with_fallback(...)`. Provider
+   kinds: `copilot` (GitHub Copilot proxy, subscription billing — the
+   default), `claude-cli` (Claude Max session), `anthropic`/`openai`/
+   `azure_openai` (per-token API), `ollama` (free local).
+   Defaults + per-agent overrides live at
+   `config/ai-defaults.json` in storage; edit via the dashboard
+   `/providers` page or `POST /api/providers/defaults/{set,agent-override}`.
+   `chat_with_fallback` auto-walks `('copilot', 'azure_openai',
+   'openai', 'anthropic', 'ollama')` on rate-limit/timeout/quota
+   errors.
+
+2. **Code editor** — `framework.core.code_editor`. Used by the
+   implementer + any `llm-code-editor` blueprint. A chain of editor
+   binaries (`aider`, `opencode`, `crush`, `codex`, `plandex`) each
+   paired with a model (claude-sonnet-4.6 via copilot proxy is top of
+   chain; gpt-4.1-mini via Azure is fallback). Configured at
+   `config/code-editor-config.json` in storage. The chain runs *after*
+   any agent-specific editor logic (e.g. the implementer's claude-pool
+   path).
+
+**When the user says "switch from claude to copilot/aider":**
+- Chat agents → change the provider in
+  `config/ai-defaults.json` (global default or per-agent override).
+- Implementer → set `IMPLEMENTER_FORCE_FALLBACK=1` in its env, or
+  `IMPLEMENTER_LLM=framework`, to skip the claude-pool path and go
+  straight to the framework code-editor chain (which uses aider).
+
+**Don't shell out to `claude` / `aider` / `gh copilot` directly** from
+new agent code — both systems above already wrap those binaries with
+live LLM stream capture, usage tracking (`config/llm-usage-*.jsonl`),
+fallback chains, and dashboard visibility. Direct shell invocations
+bypass all of that and create yet another duplicated provider chain.
+
+**Where the docs are:**
+- `README.md` → "LLM provider chain — chat agents + code editor" (operator-facing tables of providers, backends, env knobs)
+- `agents/implementer/AGENT.md` → "## LLM driver" (implementer's specific claude-pool → framework-chain path)
+- This file → routing rules + when to switch what
 
 API service: `framework/api/app/main.py` (FastAPI). 35 routes + 2 WS
 streams. Token auth via `FRAMEWORK_API_TOKEN`.

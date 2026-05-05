@@ -59,6 +59,88 @@ several of your repos (this codebase already does — `nsc-assistant`,
 `specpicks`, etc. all register with the same instance), or fork it for
 production deployments.
 
+## Goals & metrics — the north star
+
+Every agent in this framework exists to drive **user usage of the
+configured websites** (currently aisleprompt.com, specpicks.com; new
+sites slot in via per-site config). Code volume, fancy LLM pipelines,
+and run frequency are not goals — usage on the live site is. Every
+new agent and every change to an existing agent must answer: *what
+declared goal does this advance, by how much per run?*
+
+### The pipeline
+
+```
+   ┌─────────────┐                ┌──────────────────┐
+   │ agent.run() │ → returns →   │ RunResult.metrics │
+   └─────────────┘                │ {key: float, …}  │
+                                  └────────┬─────────┘
+                                           │ (auto-tracked by AgentBase.post_run)
+                                           ▼
+   ┌─────────────────────┐   key matches   ┌────────────────────┐
+   │ goal.target_metric  │ ◄────────────── │ active goal set    │
+   │ "key"               │                 │ /api/agents/<id>/  │
+   └─────────────────────┘                 │   goals            │
+                                           └────────┬───────────┘
+                                                    │
+                                                    ▼
+                                  framework.core.goals.record_goal_progress()
+                                                    │
+                       ┌────────────────────────────┼────────────────────┐
+                       ▼                            ▼                    ▼
+       progress_history (last N)      goal-progress.json/run     goals/cache
+       in active.json                 (per-run snapshot)         (fast UI reads,
+       drives % to target             fed to dashboard           via metric_helper)
+                                      time-series chart
+```
+
+### The contract every agent honours
+
+1. **Declare 3–7 goals** at registration via `PUT /api/agents/<id>/goals`
+   (or seed via `install/seed-default-goals.sh`). Each goal has:
+   - `id` (kebab-case, stable, never reused)
+   - `title` + `description`
+   - `metric: {name, current, target, direction, unit, horizon_weeks}`
+   - `target_metric` (top-level): the **key in `RunResult.metrics`** that
+     advances this goal each run. Without this, the goal can't auto-tick.
+   - `directives: list[str]` — what the agent should DO each run to
+     advance this goal. Read by the agent's LLM at run start.
+2. **Emit a numeric `metrics` dict** on `RunResult`. Every key the
+   declared goals reference must appear here. Non-AgentBase scripts must
+   POST to `/api/agents/<id>/goals/<goal_id>/progress` directly.
+3. **Stay legible.** The dashboard's Goals tab is the single pane of
+   glass for "is this agent moving the needle?" Fancy work that doesn't
+   move a metric is invisible — and effectively didn't happen.
+
+### Layers of metric capture
+
+- **Layer A — explicit per-run scoring** (`runs/<ts>/goal-progress.json`).
+  Used by SEO analyzer-style agents that compute a multi-dimensional
+  score. Wins over Layer B when both fire.
+- **Layer B — implicit auto-track** from `RunResult.metrics`. Walks the
+  agent's active goals, looks up `target_metric` in metrics, records.
+  This is the default path; *use this unless you have a reason not to.*
+- **Cache layer** (`framework/core/metric_helper.py`) maintains a
+  pre-aggregated time-series so the Goals tab loads in one storage call
+  instead of walking every run dir.
+
+### When goals drift
+
+Goals stick around forever; that's deliberate (so progress is
+comparable across months). But if a goal's `target_metric` no longer
+maps to a real metric — or a metric was renamed — re-`PUT` the goal
+set. As of `framework/core/goals.py` the merge updates top-level fields
+(target_metric, baseline, target, direction…) on existing IDs, so
+re-seeding actually persists.
+
+### The prioritization rule
+
+When choosing what to build next, scan the Goals tab first. **Stalled
+goals are the work.** Pick the goal whose target gap × user impact is
+largest, then trace it backward: which agent owns the metric? what's
+its bottleneck? *That* is the next change. The
+[review session 2026-05-04](docs/architecture.md) is a worked example.
+
 ## Documentation
 
 | Doc | What you read it for |
@@ -402,6 +484,109 @@ typically points back at a reusable agent body in this repo:
 | Responder log | `/tmp/reusable-agents-logs/agent-responder-agent.log` |
 | AI provider for an agent | dashboard `/providers`, or `GET /api/providers/resolve/<id>` |
 | Storage browser | dashboard `/agents/<id>` → "Storage" tab |
+
+## LLM provider chain — chat agents + code editor
+
+There are two parallel routing systems, used by different agent shapes.
+Both are configurable from the dashboard or storage; you don't edit
+agent code to switch models.
+
+### Chat-style agents — `framework.core.ai_providers`
+
+Any agent that calls `self.ai_client(...)` or
+`framework.core.ai_providers.chat_with_fallback(...)` (analyzers,
+authors, audits, recommenders) routes through this.
+
+| Provider kind | Backed by | Auth | When to pick |
+|---|---|---|---|
+| `copilot` | GitHub Copilot proxy (e.g. `copilot-api` on `:4141`) | Copilot Pro/Business subscription, no API key | **Default**. Includes claude-sonnet-4.6, gpt-4o. Subscription billing — no per-call cost. |
+| `anthropic` | Anthropic API (`claude-opus-4-7`, `claude-sonnet-4-6`, …) | `ANTHROPIC_API_KEY` | Highest-quality per-token. Pay-per-call. |
+| `claude-cli` | Local `claude` CLI in `--print` mode | Claude Max session token (`claude setup-token`) | Subscription billing under Claude Max. **Per-account 5h rate-limit** — share via `claude-pool` for multi-account round-robin. |
+| `azure_openai` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` + endpoint | Enterprise-billed OpenAI access, Responses-API for codex. |
+| `openai` | api.openai.com | `OPENAI_API_KEY` | Direct OpenAI billing. |
+| `ollama` | Local Ollama (`:11434`) | none | Free local inference (qwen3:8b/32b on a GPU host). Privacy + zero cost. |
+
+**Resolution order** for `ai_client_for(agent_id)`:
+1. Per-call `override_provider` arg
+2. Manifest `metadata.ai.{provider, model}`
+3. `config/ai-defaults.json` `agent_overrides[<id>]`
+4. `config/ai-defaults.json` `default_provider` / `default_model`
+
+**Automatic fallback** via `chat_with_fallback(agent_id, messages, …)`:
+on rate-limit / timeout / 429 / 502-504 / quota errors the framework
+walks `DEFAULT_FALLBACK_KINDS = ('copilot', 'azure_openai', 'openai',
+'anthropic', 'ollama')`, skipping kinds without credentials. Returns
+`(text, client_used)` so the agent records which provider answered.
+
+Switch providers from the dashboard at `/providers`, or via the API:
+
+```bash
+TOK=$FRAMEWORK_API_TOKEN
+API=http://localhost:8093
+
+# Make copilot the new global default
+curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+    "$API/api/providers/defaults/set" \
+    -d '{"provider_name":"copilot","model":"claude-sonnet-4.6"}'
+
+# Pin one agent to a specific provider/model
+curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+    "$API/api/providers/defaults/agent-override" \
+    -d '{"agent_id":"daily-briefing-calendar-agent","provider":"copilot","model":"claude-sonnet-4.6"}'
+
+# See what's resolved for an agent
+curl -s -H "Authorization: Bearer $TOK" "$API/api/providers/resolve/<agent-id>"
+```
+
+### Code-editor agents — `framework.core.code_editor`
+
+The implementer (and any `llm-code-editor` blueprint instance) edits
+files via headless coding tools, not via `chat()`. Configured at
+`config/code-editor-config.json` in storage; ships with sensible
+defaults so a fresh install works without a config file.
+
+The chain is a list of *editor backends*, tried in order until one
+succeeds. Each backend pairs an editor binary with an LLM model:
+
+| Backend id | Editor | Model | Notes |
+|---|---|---|---|
+| `aider-copilot-proxy` | aider | `openai/claude-sonnet-4.6` via `:4141` | **Default top of chain.** Free under existing Copilot subscription. Surgical whole-edit format, byte-stable diffs. |
+| `aider-github-copilot` | aider | `github_copilot/claude-sonnet-4` (litellm native) | Same model, no proxy — needs `~/.config/litellm/github_copilot/api-key.json`. |
+| `opencode-azure` | sst/opencode | `azure/chat` (gpt-4.1-mini) | Modern provider-agnostic agent. Constrained editor harness — slower but disciplined. |
+| `crush-azure` | charmbracelet/crush | `azure/<deployment>` | BYO model via `~/.config/crush/crush.json`. |
+| `aider-azure` | aider | `azure/<deployment>` (gpt-4.1-mini) | Looser whole-edit format on gpt-4.1-mini occasionally rewrites entire files; demoted to last-resort. |
+| `codex-azure` | OpenAI Codex CLI | `${AZURE_OPENAI_DEPLOYMENT}` via Responses API | **Requires Responses-API-enabled Azure deployment** — skips otherwise. |
+| `plandex-azure` | plandex | `azure/gpt-4.1-mini` | Pluggable; activates when an operator wires up plandex auth. |
+
+**Implementer specifically** has its own front-of-chain Claude path
+that's tried *before* the framework chain:
+
+```
+claude-pool (round-robin Claude Max accounts)
+  └─ on rc=75 (all accounts rate-limited) or IMPLEMENTER_FORCE_FALLBACK=1
+     └─ framework code-editor chain (aider via copilot proxy → … → plandex)
+```
+
+Env knobs (read by `agents/implementer/run.sh`):
+
+- `IMPLEMENTER_LLM` — `claude` (default) | `framework` (skip claude entirely, use framework chain) | `noop` (dry-run)
+- `IMPLEMENTER_FORCE_FALLBACK=1` — bypass claude for this run only; same effect as `IMPLEMENTER_LLM=framework` but reversible per-invocation
+- `CLAUDE_POOL=0` — disable claude-pool round-robin, use the user's default `claude` account
+- `CLAUDE_POOL_FAIL_FAST=1` — exit rc=75 on rate-limit instead of waiting (default on for the implementer so the framework chain takes over fast)
+
+### Picking between the two systems
+
+| Use case | System |
+|---|---|
+| One-shot text generation (analysis, audit, summary, JSON extraction) | `ai_providers` — `self.ai_client()` |
+| Iterative tool-using research (web search + fetch loop) | `ai_providers` — `chat_with_fallback(..., tools=…)` |
+| Editing files in a repo (apply a rec, generate an article into the codebase) | `code_editor` — `run_with_fallback(EditRequest(...))` |
+| Inter-agent handoff (recommender → editor) | Both — recommender uses `ai_providers`, editor receives the handoff and uses `code_editor` |
+
+Don't shell out to `claude` / `aider` / `gh copilot` directly from a
+new agent — both systems above already wrap those binaries with live
+LLM stream capture, usage tracking, fallback chains, and dashboard
+visibility. Calling them directly bypasses all of that.
 
 ## Creating a new agent (the standard flow)
 
