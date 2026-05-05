@@ -797,6 +797,38 @@ def _is_fallback_trigger(exc: BaseException) -> bool:
     return any(sub in s for sub in _FALLBACK_TRIGGER_SUBSTRINGS)
 
 
+def _retry_after_seconds(exc: BaseException) -> Optional[float]:
+    """Best-effort extraction of a server-suggested retry-after delay from
+    a rate-limit exception. Azure OpenAI surfaces this through the
+    response headers as the `Retry-After` field (seconds) and the SDK
+    embeds the message in the exception string. Returns None if we can't
+    find a usable hint, in which case the caller picks its own backoff."""
+    s = str(exc)
+    import re as _re
+    # openai SDK: "Please retry after 23 seconds"
+    m = _re.search(r"retry after\s+(\d+)\s*second", s, _re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    # generic "Retry-After: 23" headers (some providers echo the header)
+    m = _re.search(r"retry[- ]after[:\s]+(\d+)", s, _re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    # Azure throttle message: "Try again in 12 seconds"
+    m = _re.search(r"try again in\s+(\d+)\s*second", s, _re.IGNORECASE)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
 def _build_fallback_chain(primary: "AIClient",
                            storage: Optional[StorageBackend] = None) -> list["AIClient"]:
     """Return [primary] + any registered providers of a different kind
@@ -861,37 +893,56 @@ def chat_with_fallback(agent_id: str,
         chain = chain[: max(1, max_attempts)]
 
     last_err: Optional[BaseException] = None
+    import time as _time
     for i, client in enumerate(chain):
-        try:
-            text = client.chat(
-                messages,
-                tools=tools,
-                tool_runner=tool_runner,
-                max_tool_iterations=max_tool_iterations,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                **kwargs,
-            )
-            if i > 0:
-                logger.warning(
-                    "ai-fallback: agent=%s recovered on attempt %d/%d "
-                    "(provider=%s kind=%s) after primary=%s failed: %s",
-                    agent_id, i + 1, len(chain),
-                    client.provider.name, client.provider.kind,
-                    primary.provider.name, last_err,
+        # Up to 2 attempts on the same provider before falling over: the
+        # first call, then one retry honouring any server-suggested
+        # Retry-After. Azure 429s are typically window-bounded and clear
+        # within a few seconds — falling straight to a different model
+        # (different quality + cost profile) on a transient throttle is
+        # worse than a brief wait. Retry only on rate-limit-shaped
+        # errors and only when the suggested wait is short (< 30s) so
+        # we don't sit on long quota exhaustions.
+        for attempt in range(2):
+            try:
+                text = client.chat(
+                    messages,
+                    tools=tools,
+                    tool_runner=tool_runner,
+                    max_tool_iterations=max_tool_iterations,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    **kwargs,
                 )
-            return text, client
-        except Exception as e:  # noqa: BLE001 — we re-raise for non-fallback cases
-            if not _is_fallback_trigger(e):
-                # Hard error — don't burn the chain on a bad prompt.
-                raise
-            last_err = e
-            logger.warning(
-                "ai-fallback: agent=%s provider=%s kind=%s failed (%s): %s",
-                agent_id, client.provider.name, client.provider.kind,
-                type(e).__name__, str(e)[:300],
-            )
-            continue
+                if i > 0 or attempt > 0:
+                    logger.warning(
+                        "ai-fallback: agent=%s recovered on chain[%d] attempt=%d "
+                        "(provider=%s kind=%s) after primary=%s failed: %s",
+                        agent_id, i + 1, attempt + 1,
+                        client.provider.name, client.provider.kind,
+                        primary.provider.name, last_err,
+                    )
+                return text, client
+            except Exception as e:  # noqa: BLE001 — we re-raise for non-fallback cases
+                if not _is_fallback_trigger(e):
+                    # Hard error — don't burn the chain on a bad prompt.
+                    raise
+                last_err = e
+                wait = _retry_after_seconds(e)
+                if attempt == 0 and wait is not None and 0 < wait <= 30:
+                    logger.warning(
+                        "ai-fallback: agent=%s provider=%s rate-limited; "
+                        "honouring Retry-After=%.1fs before retrying same provider",
+                        agent_id, client.provider.name, wait,
+                    )
+                    _time.sleep(wait + 0.5)
+                    continue
+                logger.warning(
+                    "ai-fallback: agent=%s provider=%s kind=%s failed (%s): %s",
+                    agent_id, client.provider.name, client.provider.kind,
+                    type(e).__name__, str(e)[:300],
+                )
+                break  # fall over to next provider in chain
 
     # All clients exhausted.
     raise RuntimeError(
