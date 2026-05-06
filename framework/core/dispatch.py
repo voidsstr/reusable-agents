@@ -204,12 +204,45 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                        script: str) -> DispatchHandle:
     """Spawn the implementer in a detached systemd-run --scope.
     Returns DispatchHandle on successful spawn. Raises DispatchTransient
-    on retryable failures."""
+    on retryable failures.
+
+    Run-dir lifecycle: callers like the SEO opportunity agent dispatch
+    while still inside their own RunDir context manager — when the
+    agent exits, that context manager runs `shutil.rmtree(run_dir)`,
+    which races against the just-spawned (and detached) implementer.
+    Symptom: implementer crashes mid-run with FileNotFoundError on
+    something like `<run_dir>/handoffs-sent.json` because the parent
+    dir vanished. We defend by copying the inputs to a separate,
+    persistent dispatch-rundir under LOG_DIR — that copy outlives the
+    caller's tempdir, the implementer owns its lifecycle, and we keep
+    it on disk for debugging just like the log file.
+    """
     env = os.environ.copy()
     env["RESPONDER_ACTION"] = action
     env["RESPONDER_REC_IDS"] = ",".join(rec_ids)
     env["RESPONDER_SITE"] = site
     env["RESPONDER_RUN_TS"] = _extract_run_ts(run_dir) or ""
+    # Decouple the implementer's run-dir from the caller's tempdir so
+    # the caller's RunDir.__exit__ shutil.rmtree doesn't pull files out
+    # from under us. Each dispatch gets its own persistent copy.
+    try:
+        import tempfile, shutil as _shutil
+        src_run_ts = _extract_run_ts(run_dir) or "unknown"
+        dispatch_rundir_root = LOG_DIR / "dispatch-rundirs"
+        dispatch_rundir_root.mkdir(parents=True, exist_ok=True)
+        persisted = Path(tempfile.mkdtemp(
+            prefix=f"rundir-{agent_id}-{src_run_ts}-",
+            dir=str(dispatch_rundir_root),
+        ))
+        _shutil.copytree(run_dir, persisted, dirs_exist_ok=True)
+        run_dir = str(persisted)
+        _log(f"[dispatch] persisted run_dir copy → {run_dir}")
+    except Exception as _e:
+        # Copy is best-effort — if it fails (disk full, permission), fall
+        # back to the original tempdir and accept the race risk. Logging
+        # so an operator can see why we degraded.
+        _log(f"[dispatch] run_dir copy failed ({_e}); using caller's "
+             f"tempdir directly — implementer may race with caller cleanup")
     env["RESPONDER_RUN_DIR"] = str(run_dir)
     env["RESPONDER_REQUEST_ID"] = request_id
     env["RESPONDER_AGENT_ID"] = agent_id
