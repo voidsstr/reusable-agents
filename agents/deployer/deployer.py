@@ -545,9 +545,28 @@ def main() -> None:
         if recs_path.is_file():
             try:
                 rd = json.loads(recs_path.read_text())
+                # recommendations.json ships in two shapes across producers:
+                #   - bare list: `[ {rec}, ... ]` (manual dispatches, some
+                #     PI/SEO agents)
+                #   - dict wrapper: `{ "recommendations": [ {rec}, ... ] }`
+                #     (article-author, others)
+                # Handle both — the previous code did `rd.get(...)` which
+                # blew up on the list shape with
+                # "'list' object has no attribute 'get'" and dropped every
+                # shipped-marker write on those runs.
+                if isinstance(rd, list):
+                    rec_list = rd
+                elif isinstance(rd, dict):
+                    rec_list = rd.get("recommendations", [])
+                    if not isinstance(rec_list, list):
+                        rec_list = []
+                else:
+                    rec_list = []
                 shipped_at = _now_iso()
                 shipped_n = 0
-                for r in rd.get("recommendations", []):
+                for r in rec_list:
+                    if not isinstance(r, dict):
+                        continue
                     if r.get("implemented") is True and not r.get("shipped"):
                         r["shipped"] = True
                         r["shipped_at"] = shipped_at
