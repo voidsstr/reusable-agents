@@ -8,7 +8,7 @@ strictly the IMAP-reply path (user confirmations) and runs on demand.
 Architecture:
     Producer agent → dispatch_now() → site lock → systemd-run scope
                                                   → implementer
-                                                  → seo-deployer (per site)
+                                                  → deployer (per site)
 
 Resilience:
   - Retries on transient failures (script-not-found, permission errors,
@@ -222,12 +222,25 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = LOG_DIR / f"dispatch-implementer-{site or 'shared'}-{ts}.log"
     env["DISPATCH_LOG_PATH"] = str(log_path)
+    # Stable run_ts for the implementer's own progress.json + run-index
+    # entry (so each dispatch shows up as a row in the dashboard's
+    # implementer Runs tab). Same value as the systemd unit suffix —
+    # makes log → run mapping trivial.
+    env["IMPLEMENTER_RUN_TS"] = ts
 
     use_systemd_run = bool(shutil.which("systemd-run"))
     try:
         log_f = open(log_path, "ab")
     except OSError as e:
         raise DispatchTransient(f"cannot open log {log_path}: {e}")
+
+    # Pick interpreter from the script's extension. Default path is now the
+    # python AgentBase entry point (agent.py) so the dispatched run flips
+    # the implementer's status.json to running/success and shows up in the
+    # dashboard's Runs tab + "Working now" hero. Fallback to bash for
+    # legacy callers that still hand us run.sh directly.
+    is_python = script.endswith(".py")
+    interp = [sys.executable] if is_python else ["bash"]
 
     try:
         if use_systemd_run:
@@ -237,7 +250,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                 f"--unit={unit_name}",
                 "--property=KillMode=process",
                 "--property=TimeoutStopSec=0",
-                "bash", script,
+                *interp, script,
             ]
             try:
                 proc = subprocess.Popen(
@@ -257,11 +270,11 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
         else:
             try:
                 proc = subprocess.Popen(
-                    ["bash", script], env=env, start_new_session=True,
+                    [*interp, script], env=env, start_new_session=True,
                     stdout=log_f, stderr=log_f,
                 )
             except (OSError, FileNotFoundError) as e:
-                raise DispatchTransient(f"bash spawn failed: {e}")
+                raise DispatchTransient(f"{interp[0]} spawn failed: {e}")
             _log(
                 f"[dispatch] spawned {script} pid={proc.pid} action={action} "
                 f"recs={rec_ids} log={log_path} (no systemd-run)"
@@ -282,15 +295,27 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
 
 
 def _resolve_implementer_script() -> Optional[str]:
-    """Return the path to the implementer's run.sh. Looks in standard
-    locations + an env override."""
+    """Return the path to the implementer's entry point.
+
+    Defaults to `agents/implementer/agent.py` (the AgentBase wrapper) so the
+    dispatched run goes through AgentBase's status/run-index lifecycle —
+    `state=running` shows up on the dashboard "Working now" hero, and the
+    dispatch lands in the implementer's Runs tab. agent.py invokes the
+    legacy run.sh as a subprocess so the heavy bash logic still runs.
+
+    Override with FRAMEWORK_IMPLEMENTER_SCRIPT — the spawn picks the
+    interpreter from the file extension (.py → python, otherwise bash).
+    """
     explicit = os.environ.get("FRAMEWORK_IMPLEMENTER_SCRIPT")
     if explicit and Path(explicit).is_file():
         return explicit
     here = Path(__file__).resolve()
-    candidate = here.parent.parent.parent / "agents" / "implementer" / "run.sh"
-    if candidate.is_file():
-        return str(candidate)
+    py = here.parent.parent.parent / "agents" / "implementer" / "agent.py"
+    if py.is_file():
+        return str(py)
+    sh = here.parent.parent.parent / "agents" / "implementer" / "run.sh"
+    if sh.is_file():
+        return str(sh)
     return None
 
 
