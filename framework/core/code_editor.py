@@ -238,12 +238,20 @@ DEFAULT_CONFIG: dict = {
         "jcode-ollama": {
             "kind": "jcode",
             # Native ollama provider — no profile needed, just `jcode
-            # login --provider ollama` once. Model is the strongest
-            # coder available on the user's box that fits the GPU
-            # (RTX 5090 / 32 GB VRAM): qwen3-coder:30b is MoE and
-            # leaves plenty of headroom.
+            # login --provider ollama` once.
+            #
+            # Model selection (validated 2026-05-06 on RTX 5090 / 32 GB VRAM):
+            #   • qwen3-coder:30b — strong on benchmarks but in jcode's
+            #     `run` harness it explores instead of converging; rc=0
+            #     with zero file changes after 60s on a focused
+            #     single-line edit. Doesn't reliably engage the Edit tool.
+            #   • devstral-small-2:24b — Mistral's purpose-built agent-
+            #     coding model. Engages the Edit tool, makes surgical
+            #     1-line edits cleanly. ~15 GB VRAM. PRIMARY CHOICE.
+            # Override per-deployment via storage `config/code-editor-config.json`
+            # if a future model proves out better.
             "native_provider": "ollama",
-            "model": "qwen3-coder:30b",
+            "model": "devstral-small-2:24b",
         },
     },
 }
