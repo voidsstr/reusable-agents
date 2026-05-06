@@ -472,8 +472,46 @@ def main() -> None:
                       f"sleeping {wait_s}s before retry. stderr_tail={stderr[-200:]!r}",
                       file=sys.stderr)
                 time.sleep(wait_s)
-            deploy_meta["deploy"] = {"rc": rc, "skipped": False, "stderr_tail": stderr[-1000:]}
+            # Post-flight active-revision check. Even when `az containerapp
+            # update` returns rc!=0 — most often a CLI timeout that fired
+            # AFTER Azure already accepted the revision swap — the new
+            # image may still be live. Query the active revision; if its
+            # image tag matches what we just tried to deploy, treat the
+            # deploy as a success despite the CLI error code. This stops
+            # the "5 implemented, 0 deployed" UI artifact when the recs
+            # are actually live but Azure timed out the response.
+            verified_via_revision = False
             if rc != 0:
+                app = deploy_vars.get("app", "")
+                rg = deploy_vars.get("rg", "")
+                if app and rg:
+                    target_tag_suffix = f":{tag}"
+                    try:
+                        check = subprocess.run(
+                            ["az", "containerapp", "revision", "list",
+                             "-g", rg, "-n", app,
+                             "--query",
+                             "[?properties.active]|[0].properties.template.containers[0].image",
+                             "-o", "tsv"],
+                            capture_output=True, text=True, timeout=60,
+                        )
+                        active_image = (check.stdout or "").strip()
+                        if active_image and active_image.endswith(target_tag_suffix):
+                            print(
+                                f"[deployer] az returned rc={rc} but active "
+                                f"revision image is {active_image!r} matching "
+                                f"target tag {tag} — treating as success",
+                                file=sys.stderr,
+                            )
+                            verified_via_revision = True
+                    except Exception as _e:
+                        print(f"[deployer] post-flight revision check failed: {_e}",
+                              file=sys.stderr)
+            deploy_meta["deploy"] = {
+                "rc": rc, "skipped": False, "stderr_tail": stderr[-1000:],
+                "verified_via_revision": verified_via_revision,
+            }
+            if rc != 0 and not verified_via_revision:
                 deploy_meta["status"] = "failure"; _save()
                 sys.exit(1)
         else:
