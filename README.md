@@ -59,6 +59,20 @@ several of your repos (this codebase already does — `nsc-assistant`,
 `specpicks`, etc. all register with the same instance), or fork it for
 production deployments.
 
+## Live deployments
+
+This framework is currently running in production for **🛒 [aisleprompt.com](https://aisleprompt.com)** —
+an AI meal planner that builds your Instacart cart. The site's entire
+content + SEO + per-batch deploy pipeline is driven by agents in this repo:
+agents curate recipes, optimize SEO, generate articles, and ship code edits
+to the Vite/React frontend on a 2-hour cron cycle.
+
+The deployment runs on a single dev box with a host-worker process that
+subscribes to the framework's job stream and dispatches each agent into a
+per-run `systemd-run --scope` so individual runs can crash without affecting
+the rest. The Container App that serves the dashboard is self-deployed via
+`install/deploy-azure.sh`.
+
 ## Goals & metrics — the north star
 
 Every agent in this framework exists to drive **user usage of the
