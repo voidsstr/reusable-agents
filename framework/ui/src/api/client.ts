@@ -19,14 +19,27 @@ export function setToken(token: string) {
   else localStorage.removeItem('framework_api_token')
 }
 
-async function http<T>(path: string, opts?: RequestInit): Promise<T> {
+async function http<T>(path: string, opts?: (RequestInit & { timeoutMs?: number })): Promise<T> {
   const token = getToken()
   const headers = new Headers(opts?.headers)
   headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
+  // Per-request timeout — POSTs that wait on a Container App cold-start can
+  // take up to 60s on the first request after idle. Default 90s; callers
+  // pass opts.timeoutMs to override.
+  const timeoutMs = opts?.timeoutMs ?? 90_000
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), timeoutMs)
   // credentials:'include' so the OAuth session cookie is sent on cross-origin
   // dev (UI on :8091, API on :8090). Same-origin (prod) is unaffected.
-  const res = await fetch(`${API_BASE}${path}`, { ...opts, headers, credentials: 'include' })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...opts, headers, credentials: 'include', signal: ac.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
   if (res.status === 401) {
     // Browser flow: bounce to Google login. Skip if we're already on the
     // login page or this is the /me probe (handled by caller).
@@ -66,6 +79,19 @@ export const api = {
 
   // runs
   listRuns:          (id: string, limit = 20) => http<RunSummary[]>(`/api/agents/${encodeURIComponent(id)}/runs?limit=${limit}`),
+  listAllRuns:       (params: { limit?: number; offset?: number; agent_id?: string; status?: string; application?: string; category?: string; since?: string; q?: string } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.limit !== undefined)   qs.set('limit',   String(params.limit))
+    if (params.offset !== undefined)  qs.set('offset',  String(params.offset))
+    if (params.agent_id)              qs.set('agent_id', params.agent_id)
+    if (params.status)                qs.set('status', params.status)
+    if (params.application)           qs.set('application', params.application)
+    if (params.category)              qs.set('category', params.category)
+    if (params.since)                 qs.set('since', params.since)
+    if (params.q)                     qs.set('q', params.q)
+    const s = qs.toString()
+    return http<{ total: number; limit: number; offset: number; runs: (RunSummary & { agent_name?: string; application?: string; category?: string })[] }>(`/api/runs${s ? '?' + s : ''}`)
+  },
   getRun:            (id: string, runTs: string) => http<RunDetail>(`/api/agents/${encodeURIComponent(id)}/runs/${runTs}`),
   runArtifacts:      (id: string, runTs: string) => http<{ agent_id: string; run_ts: string; artifacts: { key: string; name: string; ext: string; kind: 'json' | 'jsonl' | 'html' | 'markdown' | 'text' }[] }>(`/api/agents/${encodeURIComponent(id)}/runs/${runTs}/artifacts`),
   changelog:         (id: string, limit = 50) => http<ChangelogEntry[]>(`/api/agents/${encodeURIComponent(id)}/changelog?limit=${limit}`),
@@ -258,6 +284,25 @@ export const api = {
           shipped_via?: string
         }[]
       }[]
+      // Deployer outcome for chains that chained into the deployer
+      // (currently only `seo` dispatch_kind). Empty object when this
+      // chain didn't run a deploy stage (catalog-audit, h2h, article-
+      // author all skip deploy because they're DB-only).
+      deploy?: {
+        status?: string        // 'success' | 'failure' | 'dry-run' | ''
+        tag?: string           // e.g. '20260506-0326'
+        image?: string         // e.g. 'nscappsacr.azurecr.io/specpicks'
+        site?: string
+        started_at?: string
+        ended_at?: string
+        test_rc?: number | null
+        build_rc?: number | null
+        push_rc?: number | null
+        deploy_rc?: number | null
+        smoke_ok?: boolean | null
+        failed_stage?: string  // 'test' | 'build' | 'push' | 'deploy' | 'smoke' | ''
+        stderr_tail?: string   // truncated to ~400 chars; full text on /api/agents/<src>/runs/<ts>/
+      }
     }[]
   }>(`/api/implementer/batches?limit=${limit}`),
 

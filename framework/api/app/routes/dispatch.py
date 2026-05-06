@@ -621,6 +621,58 @@ def _refresh_batches_cache() -> list[dict]:
                 chain_status = "queued"
             elif "paused" in statuses and "completed" not in statuses:
                 chain_status = "paused"
+
+            # Deploy info — the deployer (chained from the implementer for
+            # `seo` dispatch_kind) writes deploy.json into the run-dir,
+            # which the implementer's sync_back step copies to
+            # agents/<source>/runs/<source_run_ts>/. Surface its top-level
+            # outcome on the chain so the Queue page can show "Deployed
+            # tag X" / "Deploy failed at <stage>" without the operator
+            # having to drill into the source-agent's run record.
+            deploy_info: dict[str, Any] = {}
+            for read_run_ts in (source_run_ts, dispatch_run_ts):
+                if not read_run_ts:
+                    continue
+                try:
+                    dj = s.read_json(
+                        f"agents/{source_agent}/runs/{read_run_ts}/deploy.json"
+                    )
+                    if isinstance(dj, dict):
+                        deploy_info = {
+                            "status":     dj.get("status", ""),
+                            "tag":        dj.get("tag", ""),
+                            "image":      dj.get("image", ""),
+                            "site":       dj.get("site", ""),
+                            "started_at": dj.get("started_at", ""),
+                            "ended_at":   dj.get("ended_at", ""),
+                            "test_rc":    (dj.get("test")   or {}).get("rc"),
+                            "build_rc":   (dj.get("build")  or {}).get("rc"),
+                            "push_rc":    (dj.get("push")   or {}).get("rc"),
+                            "deploy_rc":  (dj.get("deploy") or {}).get("rc"),
+                            "smoke_ok":   (dj.get("smoke")  or {}).get("ok"),
+                            # Capture which stage failed (if any) so the
+                            # UI can render a one-line failure summary.
+                            "failed_stage": next(
+                                (k for k in ("test", "build", "push", "deploy", "smoke")
+                                 if (dj.get(k) or {}).get("rc") not in (0, None)
+                                 or (k == "smoke" and (dj.get("smoke") or {}).get("ok") is False)),
+                                "",
+                            ),
+                            # Truncate stderr_tail per stage to ~400 chars so
+                            # the chain payload stays small. Full text remains
+                            # on /api/agents/<source>/runs/<ts>/ → deploy.
+                            "stderr_tail": (
+                                ((dj.get("deploy") or {}).get("stderr_tail")
+                                 or (dj.get("smoke") or {}).get("stderr_tail")
+                                 or (dj.get("push")  or {}).get("stderr_tail")
+                                 or (dj.get("build") or {}).get("stderr_tail")
+                                 or (dj.get("test")  or {}).get("stderr_tail")
+                                 or "")[:400]
+                            ),
+                        }
+                        break
+                except Exception:
+                    pass
             site = ""
             for suffix in ("-seo-opportunity-agent", "-progressive-improvement-agent",
                             "-competitor-research-agent", "-catalog-audit-agent",
@@ -646,6 +698,7 @@ def _refresh_batches_cache() -> list[dict]:
                 "mtime": 0.0,
                 "mtime_iso": ts_for_sort,
                 "batches": batches_out,
+                "deploy": deploy_info,
             }
 
         # Parallel-stitch — 16 workers process the head keys concurrently.

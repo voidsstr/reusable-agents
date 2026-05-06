@@ -72,7 +72,8 @@ class DispatchHandle:
 
     def __init__(self, *, pid: int, unit: str, log_path: Path,
                  site: str, agent_id: str, rec_ids: list[str],
-                 fell_back_to_queue: bool = False):
+                 fell_back_to_queue: bool = False,
+                 request_id: str = ""):
         self.pid = pid
         self.unit = unit
         self.log_path = log_path
@@ -80,6 +81,11 @@ class DispatchHandle:
         self.agent_id = agent_id
         self.rec_ids = list(rec_ids)
         self.fell_back_to_queue = fell_back_to_queue
+        # Stable per-dispatch id used by the source agent to attribute
+        # downstream rec lifecycle events back to this dispatch. The
+        # finalizer logs this in its decision trail; the responder also
+        # echoes it on email-reply confirmations.
+        self.request_id = request_id
 
     def __repr__(self) -> str:
         return (
@@ -133,6 +139,14 @@ def dispatch_now(
     script = implementer_script or _resolve_implementer_script()
     if not script or not Path(script).is_file():
         raise DispatchError(f"implementer script not found at {script}")
+
+    # The minimal dispatch-batches.json is written by _spawn_implementer
+    # AFTER the run_dir is copied to the persistent dispatch-rundir.
+    # Writing it here would land it in the caller's tempdir which gets
+    # rmtree'd when the caller's RunDir context manager exits — racing
+    # against the implementer (now decoupled by the persistent copy)
+    # AND against the queue endpoint (which scans Azure blob storage,
+    # so anything written only to the local tempdir is invisible).
 
     last_err: Optional[Exception] = None
     with site_dispatch_lock(site or "shared", timeout_s=lock_timeout_s):
@@ -192,7 +206,8 @@ def dispatch_now(
     if fallback_ok:
         return DispatchHandle(pid=0, unit="", log_path=LOG_DIR,
                               site=site, agent_id=agent_id, rec_ids=rec_ids,
-                              fell_back_to_queue=True)
+                              fell_back_to_queue=True,
+                              request_id=request_id)
     raise DispatchError(msg)
 
 
@@ -243,6 +258,19 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
         # so an operator can see why we degraded.
         _log(f"[dispatch] run_dir copy failed ({_e}); using caller's "
              f"tempdir directly — implementer may race with caller cleanup")
+    # Write the minimal dispatch-batches.json into the persistent rundir
+    # so the dashboard's Queue page (/api/implementer/batches → list of
+    # blobs ending in /dispatch-batches.json) discovers this dispatch.
+    # Done AFTER the copy so the file lands in the right rundir; doing
+    # it before would write to the caller's tempdir which gets cleaned
+    # up immediately after _spawn_implementer returns.
+    try:
+        _write_minimal_dispatch_manifest(
+            run_dir=run_dir, rec_ids=rec_ids,
+            request_id=request_id, agent_id=agent_id,
+        )
+    except Exception as _e:
+        _log(f"[dispatch] failed to write dispatch-batches.json: {_e}")
     env["RESPONDER_RUN_DIR"] = str(run_dir)
     env["RESPONDER_REQUEST_ID"] = request_id
     env["RESPONDER_AGENT_ID"] = agent_id
@@ -299,6 +327,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
             return DispatchHandle(
                 pid=proc.pid, unit=unit_name, log_path=log_path,
                 site=site, agent_id=agent_id, rec_ids=rec_ids,
+                request_id=request_id,
             )
         else:
             try:
@@ -315,6 +344,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
             return DispatchHandle(
                 pid=proc.pid, unit="", log_path=log_path,
                 site=site, agent_id=agent_id, rec_ids=rec_ids,
+                request_id=request_id,
             )
     finally:
         # Don't close the log_f — Popen has it as stdout/stderr. Decrement
@@ -482,3 +512,50 @@ def _log(msg: str) -> None:
     except Exception:
         pass
     print(line, file=sys.stderr)
+
+
+def _write_minimal_dispatch_manifest(
+    *,
+    run_dir: str,
+    rec_ids: list[str],
+    request_id: str,
+    agent_id: str,
+) -> None:
+    """Write a single-batch dispatch-batches.json so the dashboard's
+    Queue page sees direct dispatch_now() invocations.
+
+    The responder's _write_batch_manifest writes this when it splits a
+    multi-rec auto-queue payload into smaller chunks. Producers that
+    call dispatch_now() directly (catalog-audit, PI, SEO finalizer,
+    competitor-research) skipped it, which made their work invisible
+    on /api/implementer/batches.
+
+    Idempotent: if the file already exists (e.g. responder already wrote
+    one), don't overwrite — preserve whatever batching plan is in place.
+    """
+    import json as _json
+    rd = Path(run_dir)
+    if not rd.is_dir():
+        return
+    manifest_path = rd / "dispatch-batches.json"
+    if manifest_path.is_file():
+        return
+    manifest = {
+        "schema_version": "1",
+        "source_agent_id": agent_id,
+        "request_id": request_id,
+        "batch_size": len(rec_ids),
+        "total_recs": len(rec_ids),
+        "batches": [
+            {
+                "index": 1,
+                "rec_ids": list(rec_ids),
+                "rec_count": len(rec_ids),
+                "status": "pending",
+                "started_at": "",
+                "completed_at": "",
+                "completion_status": "",
+            },
+        ],
+    }
+    manifest_path.write_text(_json.dumps(manifest, indent=2))

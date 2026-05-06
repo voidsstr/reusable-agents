@@ -50,6 +50,21 @@ type Chain = {
   chain_status: string
   mtime_iso: string
   batches: Batch[]
+  deploy?: {
+    status?: string
+    tag?: string
+    image?: string
+    site?: string
+    started_at?: string
+    ended_at?: string
+    test_rc?: number | null
+    build_rc?: number | null
+    push_rc?: number | null
+    deploy_rc?: number | null
+    smoke_ok?: boolean | null
+    failed_stage?: string
+    stderr_tail?: string
+  }
 }
 
 function fmtTs(ts?: string): string {
@@ -533,6 +548,15 @@ function ChainCard({
         </div>
       </header>
 
+      {/* Deploy outcome — only present when this chain ran the deployer
+          (seo dispatch_kind). Shows tag, image, status, smoke result,
+          and the failed stage with a stderr tail when something blew
+          up. Catalog-audit / h2h / article-author chains skip deploy
+          (DB-only) and won't render this row. */}
+      {chain.deploy && chain.deploy.status && (
+        <DeployRow d={chain.deploy} />
+      )}
+
       <div className="space-y-2">
         {chain.batches.map(b => (
           <BatchCard
@@ -544,6 +568,75 @@ function ChainCard({
           />
         ))}
       </div>
+    </div>
+  )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Deploy outcome row — rendered under the chain header when the chain
+// chained into the deployer (seo dispatch_kind). Shows the deploy
+// status, tag, image, per-stage rc, and a stderr tail when failed.
+// Empty chain.deploy or empty status means "no deploy stage" (catalog
+// audit / h2h / article-author all skip deploy).
+
+function DeployRow({ d }: { d: NonNullable<Chain['deploy']> }) {
+  const ok = d.status === 'success'
+  const failed = d.status === 'failure'
+  const tag = d.tag || ''
+  const stages: Array<[string, number | null | undefined, boolean]> = [
+    ['test',   d.test_rc,   d.test_rc === 0],
+    ['build',  d.build_rc,  d.build_rc === 0],
+    ['push',   d.push_rc,   d.push_rc === 0],
+    ['deploy', d.deploy_rc, d.deploy_rc === 0],
+    ['smoke',  d.smoke_ok === null ? null : (d.smoke_ok ? 0 : 1), d.smoke_ok === true],
+  ]
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-xs ${
+      ok    ? 'border-emerald-200 bg-emerald-50/40' :
+      failed ? 'border-red-200 bg-red-50/40' :
+              'border-ink-200 bg-ink-50/40'
+    }`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`font-semibold ${ok ? 'text-emerald-700' : failed ? 'text-red-700' : 'text-ink-700'}`}>
+          {ok ? '🚀 Deployed' : failed ? '✗ Deploy failed' : `· ${d.status}`}
+        </span>
+        {tag && (
+          <span className="font-mono text-ink-700 bg-white px-1.5 py-0.5 rounded ring-1 ring-ink-200">
+            {tag}
+          </span>
+        )}
+        {d.image && (
+          <span className="text-ink-500 font-mono truncate max-w-[420px]" title={d.image}>
+            {d.image}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1">
+          {stages.map(([name, rc, isOk]) => (
+            <span
+              key={name}
+              title={`${name} rc=${rc === null ? 'n/a' : rc}`}
+              className={`px-1.5 py-0.5 rounded font-mono ${
+                rc === null         ? 'bg-ink-100   text-ink-500' :
+                isOk                ? 'bg-emerald-100 text-emerald-700' :
+                                      'bg-red-100   text-red-700'
+              }`}
+            >
+              {name}
+              {failed && d.failed_stage === name && ' ✗'}
+            </span>
+          ))}
+        </span>
+      </div>
+      {failed && d.stderr_tail && (
+        <pre className="mt-2 whitespace-pre-wrap break-all text-[10px] text-red-700 bg-red-50 p-2 rounded ring-1 ring-red-200 max-h-32 overflow-y-auto">
+          {d.stderr_tail}
+        </pre>
+      )}
+      {d.started_at && (
+        <div className="text-[10px] text-ink-500 mt-1">
+          {fmtTs(d.started_at)}{d.ended_at ? ` → ${fmtTs(d.ended_at)}` : ''}
+        </div>
+      )}
     </div>
   )
 }
