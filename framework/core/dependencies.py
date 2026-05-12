@@ -44,73 +44,56 @@ from .storage import StorageBackend
 # ---------------------------------------------------------------------------
 
 _DEFAULT_EDGES: list[dict] = [
-    # --- SEO pipeline ---
-    {"from": "seo-data-collector", "to": "seo-analyzer",
-     "kind": "feeds-run-dir",
-     "description": "Collector writes raw GSC + GA4 + DB data; analyzer reads it."},
-    {"from": "seo-analyzer", "to": "seo-reporter",
-     "kind": "feeds-run-dir",
-     "description": "Analyzer writes recommendations.json; reporter reads + emails."},
-    {"from": "seo-reporter", "to": "responder-agent",
-     "kind": "sends-email-via",
-     "description": "Reporter emails the recipient; responder polls the inbox for replies."},
+    # --- SEO pipeline (collapsed into seo-opportunity-agent — collector,
+    # analyzer, finalizer are now internal phases under
+    # agents/seo-opportunity-agent/lib/{collector,analyzer,reporter}/) ---
+    {"from": "seo-opportunity-agent", "to": "responder-agent",
+     "kind": "queues-recs-to",
+     "description": "Auto-queues each rec to responder-agent's auto-queue/ dir (via framework.core.implementation_queue)."},
     {"from": "responder-agent", "to": "implementer",
      "kind": "routes-replies-to",
-     "description": "Responder parses 'implement rec-NNN' replies and dispatches to the implementer."},
-    {"from": "implementer", "to": "seo-deployer",
+     "description": "Responder parses replies + drains auto-queue, dispatching to the implementer."},
+    {"from": "implementer", "to": "deployer",
      "kind": "triggers",
      "description": "Implementer commits + tests; deployer ships if site config has a deployer block."},
 
-    # --- SEO orchestrator ---
-    {"from": "seo-opportunity-agent", "to": "seo-data-collector",
-     "kind": "triggers",
-     "description": "Daily orchestrator chains the full SEO pipeline."},
-    {"from": "seo-opportunity-agent", "to": "seo-analyzer",
-     "kind": "triggers", "description": "Pipeline stage."},
-    {"from": "seo-opportunity-agent", "to": "seo-reporter",
-     "kind": "triggers", "description": "Pipeline stage."},
-
-    # --- progressive-improvement-agent (per-site instances) ---
-    {"from": "aisleprompt-progressive-improvement-agent", "to": "responder-agent",
-     "kind": "sends-email-via",
+    # --- Per-site agent edge TEMPLATES ---
+    # 2026-05-12 decoupling: replaced hardcoded "aisleprompt-*" and
+    # "specpicks-*" entries with `*-<suffix>` templates. build_dependency_graph
+    # expands `*` against every registered agent whose id matches the
+    # suffix, so the framework no longer knows about specific sites by
+    # name. Add new site simply by registering its `<site>-<suffix>`
+    # agent — the dashboard picks up the edges automatically. Templates
+    # are marked `_template: True` so the expander knows to walk them.
+    {"from": "*-progressive-improvement-agent", "to": "responder-agent",
+     "kind": "sends-email-via", "_template": True,
      "description": "Sends ranked recs email; responder routes 'implement rec-NNN' replies back."},
-    {"from": "responder-agent", "to": "aisleprompt-progressive-improvement-agent",
-     "kind": "routes-replies-to",
+    {"from": "responder-agent", "to": "*-progressive-improvement-agent",
+     "kind": "routes-replies-to", "_template": True,
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "aisleprompt-progressive-improvement-agent", "to": "implementer",
-     "kind": "dispatches-to",
+    {"from": "*-progressive-improvement-agent", "to": "implementer",
+     "kind": "dispatches-to", "_template": True,
      "description": "Auto-tier recs (only when site config opts into auto_implement) dispatch to the implementer."},
 
-    {"from": "specpicks-progressive-improvement-agent", "to": "responder-agent",
-     "kind": "sends-email-via",
-     "description": "Sends ranked recs email; responder routes 'implement rec-NNN' replies back."},
-    {"from": "responder-agent", "to": "specpicks-progressive-improvement-agent",
-     "kind": "routes-replies-to",
+    {"from": "*-competitor-research-agent", "to": "responder-agent",
+     "kind": "sends-email-via", "_template": True,
+     "description": "Sends ranked recs email; responder routes replies back."},
+    {"from": "responder-agent", "to": "*-competitor-research-agent",
+     "kind": "routes-replies-to", "_template": True,
      "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "specpicks-progressive-improvement-agent", "to": "implementer",
-     "kind": "dispatches-to",
+    {"from": "*-competitor-research-agent", "to": "implementer",
+     "kind": "dispatches-to", "_template": True,
      "description": "Auto-tier recs dispatch to the implementer."},
 
-    # --- competitor-research-agent (per-site instances) ---
-    {"from": "aisleprompt-competitor-research-agent", "to": "responder-agent",
-     "kind": "sends-email-via",
-     "description": "Sends ranked recs email; responder routes replies back."},
-    {"from": "responder-agent", "to": "aisleprompt-competitor-research-agent",
-     "kind": "routes-replies-to",
-     "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "aisleprompt-competitor-research-agent", "to": "implementer",
-     "kind": "dispatches-to",
-     "description": "Auto-tier recs dispatch to the implementer (rare for competitor recs by design)."},
-
-    {"from": "specpicks-competitor-research-agent", "to": "responder-agent",
-     "kind": "sends-email-via",
-     "description": "Sends ranked recs email; responder routes replies back."},
-    {"from": "responder-agent", "to": "specpicks-competitor-research-agent",
-     "kind": "routes-replies-to",
-     "description": "Drops parsed replies in the agent's response queue."},
-    {"from": "specpicks-competitor-research-agent", "to": "implementer",
-     "kind": "dispatches-to",
-     "description": "Auto-tier recs dispatch to the implementer."},
+    {"from": "*-catalog-audit-agent", "to": "implementer",
+     "kind": "dispatches-to", "_template": True,
+     "description": "Catalog-audit migrations dispatch to the implementer for ship."},
+    {"from": "*-seo-opportunity-agent", "to": "implementer",
+     "kind": "dispatches-to", "_template": True,
+     "description": "SEO opportunity recs dispatch to the implementer."},
+    {"from": "*-article-author-agent", "to": "implementer",
+     "kind": "dispatches-to", "_template": True,
+     "description": "Article-author proposals dispatch to the implementer for body write + DB insert."},
 
     # --- Daily-briefing chain ---
     {"from": "daily-briefing-calendar-agent", "to": "email-monitor",
@@ -157,8 +140,35 @@ def build_dependency_graph(
     edges: list[dict] = []
     seen_keys: set[tuple[str, str, str]] = set()
 
-    # 1. Defaults — only include if both endpoints exist
+    # 1. Defaults — only include if both endpoints exist. Templates
+    # (entries with _template=True) expand "*-suffix" into every
+    # registered agent whose id ends with "-suffix". This is how the
+    # graph picks up per-site agents (aisleprompt-progressive-..., etc.)
+    # without the framework knowing those sites by name.
+    def _expand(side: str, agent_ids: list[str]) -> list[str]:
+        if not side.startswith("*-"):
+            return [side]
+        suffix = side[2:]  # everything after "*-"
+        return sorted(aid for aid in agent_ids if aid.endswith("-" + suffix))
+
+    registered_ids = list(by_id.keys())
     for e in _DEFAULT_EDGES:
+        if e.get("_template"):
+            for f in _expand(e["from"], registered_ids):
+                for t in _expand(e["to"], registered_ids):
+                    if f not in by_id or t not in by_id or f == t:
+                        continue
+                    k = e["kind"]
+                    key = (f, t, k)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    edges.append({
+                        "from": f, "to": t, "kind": k,
+                        "description": e.get("description", ""),
+                        "default": True,
+                    })
+            continue
         f, t, k = e["from"], e["to"], e["kind"]
         if f not in by_id or t not in by_id:
             continue

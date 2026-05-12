@@ -226,6 +226,11 @@ codebase.
 - [`docs/architecture.md`](docs/architecture.md) — three-tier model
   (customer repos → framework → blob storage), agent lifecycle,
   storage layout, dispatch graph, end-to-end trace of one rec
+- [`install/glitchtip/README.md`](install/glitchtip/README.md) —
+  optional self-hosted error tracker (Sentry-API-compatible) + the
+  `crash-watcher-agent` companion that closes the crash → fix → ship
+  loop. Includes the mobile-SDK wiring checklist with aisleprompt as
+  the worked example.
 - [`docs/agents-catalog.md`](docs/agents-catalog.md) — every agent across
   every repo, categorized, with code path + manifest path + schedule
 - [`docs/repo-boundaries.md`](docs/repo-boundaries.md) — **read this
@@ -381,6 +386,125 @@ Read it before scaffolding.
   recorder living in nsc-assistant). New agents use AgentBase, which
   writes status + runs to the framework's storage backend directly.
 
+### Outbound-email recipient policy (HARD RULE)
+
+Every agent that sends operator email — comp-research, SEO opportunity,
+PI, article-author, h2h, catalog-audit, deployer alerts, completion
+emails — uses ONE address pair across the whole fleet:
+
+```yaml
+reporter:
+  email:
+    to: [mperry@northernsoftwareconsulting.com]
+    from: automation@northernsoftwareconsulting.com
+    msmtp_account: automation
+```
+
+- ❌ Do NOT add personal addresses (`perrymb@gmail.com`, etc.) to any
+  agent's `reporter.email.to` list, even if the user mentions a personal
+  email in conversation. The owner field on the manifest is for ownership
+  attribution; outbound mail still goes to `mperry@nsc...com` only.
+- ❌ Do NOT use a different `from:` (e.g. `perrymb@...`) — msmtp's
+  `automation` account is the only one configured to relay through the
+  framework host. Other senders fail silently.
+- ✅ When you scaffold a new email-sending agent, copy the block above
+  verbatim. Don't ask the user for an inbox.
+
+This rule was set 2026-05-07 after a recipient-list expansion got
+reverted — keep it tight to one canonical operator inbox.
+
+## Implementer path-scope — keep agents in their lane
+
+> ## ⚠️ THE IMPLEMENTER WILL ROAM IF YOU LET IT — READ EVERY SESSION ⚠️
+>
+> The implementer agent runs aider / claude-cli / copilot against the
+> entire site repo. Without an explicit path-scope policy in the site's
+> `site.yaml`, the LLM will follow whatever loose interpretation of the
+> rec it has, drift into unrelated areas, and commit. Historical hit:
+> SEO recs ("zero Instacart clicks last 30d — investigate funnel")
+> caused the implementer to rewrite the AislePrompt **mobile** app
+> (220-line ScreenHeader.tsx, 223-line auth.ts refactor) because the
+> rec had no concrete `target_files` and aider chose what to "improve."
+>
+> **Every per-site agent's `site.yaml` MUST declare an implementer
+> path-scope.** Block format:
+>
+> ```yaml
+> implementer:
+>   agent_id: seo-implementer
+>   repo_path: /home/voidsstr/development/<site>
+>   branch: master
+>   allowed_paths:
+>     - "src/**"
+>     - "frontend/**"
+>     - "db/migrations/**"
+>     - "scripts/**"
+>     - "changes/**"
+>     - "*.md"
+>   excluded_paths:
+>     - "mobile/**"
+>     - "ios-extensions/**"
+>     - "android/**"
+>   post_apply:
+>     kick_mobile_build: false
+>     kick_backend_deploy: true
+> ```
+>
+> **Two enforcement checkpoints:**
+>
+> 1. **Pre-LLM** (in `agents/implementer/build-aider-invocation.py`) —
+>    any rec whose `target_files` fall outside `allowed_paths` (or hit
+>    `excluded_paths`) is deferred with reason
+>    `out-of-scope per site policy` and never reaches the LLM.
+> 2. **Post-LLM** (in `agents/implementer/run.sh` just before
+>    `git add`) — after aider finishes, every newly-touched file is
+>    filtered again. Files that violate scope are `git checkout`-ed (or
+>    deleted if newly created) and dropped from the commit. Catches
+>    LLM drift where an in-scope rec edits an out-of-scope file as a
+>    side effect.
+>
+> Primitive: [`framework/core/implementer_scope.py`](framework/core/implementer_scope.py).
+> `ScopePolicy.from_site_config(cfg)` → `is_path_allowed()`,
+> `filter_files()`, `is_rec_in_scope()`. fnmatch glob syntax, `**`
+> matches any number of segments.
+>
+> **`post_apply` hooks** (all default `true` for back-compat):
+> - `kick_mobile_build` — set `false` to refuse triggering EAS builds
+>   even if mobile/ paths slipped through.
+> - `kick_backend_deploy` — set `false` to require manual
+>   `install/deploy-azure.sh` after backend edits.
+>
+> **Anti-patterns to refuse on sight:**
+>
+> - A new per-site agent's `site.yaml` ships without an `allowed_paths`
+>   block. Default behavior (no policy) is "implementer may touch
+>   anything." That's the bug that caused the mobile drift.
+> - Adding a path to `allowed_paths` because "this one rec needs it"
+>   without considering what else aider might do with that permission.
+> - Site-specific `if site == "x"` branches inside `implementer_scope.py`.
+>   The policy is data — the primitive stays generic.
+>
+> Schema: [`shared/schemas/site-quality-config.schema.json`](shared/schemas/site-quality-config.schema.json)
+> → `implementer.{allowed_paths, excluded_paths, post_apply}`.
+
+## Site-name literals in framework code — disallowed
+
+The framework must not name specific sites (`aisleprompt`, `specpicks`,
+…) anywhere in `framework/` or shipped agents. Per-site behavior flows
+through three extension points:
+
+1. **Storage configs** (`config/<feature>-config.json` in the storage
+   backend) for cross-cutting overrides like priority tiers.
+2. **`manifest.depends_on`** for per-agent graph edges.
+3. **Wildcard templates** (`*-progressive-improvement-agent`,
+   `*-competitor-research-agent`, …) in `framework/core/dependencies.py`
+   that expand at query time against the registered-agents list.
+
+If you find yourself typing `"aisleprompt-..."` in `framework/`, stop
+and write a template or config knob instead. There's a regression test
+([`framework/tests/test_dependencies.py::test_no_site_specific_literals_in_default_edges`](framework/tests/test_dependencies.py))
+that fails CI if any site name leaks back in.
+
 ## When the user asks to edit an existing agent's behavior
 
 1. Find the agent's home repo (check the registry: `curl
@@ -470,6 +594,68 @@ Cloudflare Workers, Netlify) are documented in the
 [`agents/seo-deployer/README.md`](agents/seo-deployer/README.md)
 example sections — copy from there into a new site's `site.yaml`
 under `deployer:`.
+
+## Auto short-circuit — opt EVERY cron-driven agent in
+
+`AgentBase.signals()` is the framework's universal short-circuit hook
+(added 2026-05-11 after a retro found 16 of 18 agents were re-running
+LLM-touching work on every cron tick with no input change).
+
+**Override `signals()` on any agent that wakes on a schedule and
+*sometimes* has nothing new to do.** Three lines, no risk:
+
+```python
+class MyAgent(AgentBase):
+    def signals(self) -> dict | None:
+        return {
+            "queue_keys": sorted(self.storage.list_prefix("queue/") or []),
+            "last_event_ts": (self.storage.read_json("events.json") or {}).get("ts"),
+        }
+```
+
+When the hash matches the prior successful run, the framework returns
+a `RunResult(short_circuited=True)` and **`run()` is never called** —
+no LLM call, no API hits, no Azure list/read traffic.
+
+Rules:
+- Only include INPUTS the agent reads. Never include `now`, a tick
+  count, a UUID, or anything else that changes every tick.
+- Stable serialization: sort lists, round floats. (The framework calls
+  `signal_hash()` which already does these for you.)
+- Returning `None` opts out (default behavior — preserves status quo
+  for un-converted agents).
+- If you can't compute a stable hash without doing the expensive work,
+  use `framework.core.short_circuit.partition_by_hash` instead and
+  short-circuit per-item inside `run()`.
+
+**Conversion status** (2026-05-11):
+
+| Agent | signals() | Notes |
+|---|---|---|
+| `seo-opportunity-agent` | ✅ in-run via `should_skip` | Pre-dates the hook |
+| `progressive-improvement-agent` | ✅ in-run via `should_skip` | Pre-dates the hook |
+| `crash-watcher-agent` | ✅ via `signals()` | Hash = (issue_id, lastSeen) tuple list |
+| `digest-rollup-agent` | ✅ via `signals()` | Hash = digest-queue file list |
+| `catalog-audit-shipped-backfill` | ✅ via `signals()` | Hash = recent recommendations.json filenames |
+| `catalog-audit-agent` | ✅ via `signals()` | Hash = latest findings file name + size + mtime |
+| `competitor-research-agent` | ⚠️ wrong pattern | NOT signals() — competitor pages change anytime, we can't tell without crawling. Needs `partition_by_hash` INSIDE run() after the crawl, to skip LLM compare for unchanged competitor HTMLs. Separate refactor. |
+| `app-store-opportunity-agent` | ⚠️ wrong pattern | Exploration agent — LLM picks new countries/queries each tick, time IS the signal. Short-circuit would freeze it. Skip. |
+| `ebay-product-sync-agent` | ⚠️ needs eBay-cursor | Signal needs the eBay shop revision-id from a HEAD request. Domain-specific work; not adopting until next time the file is touched. |
+| `product-hydration-agent` | ⚠️ batch-processor | Designed to do incremental batch work each tick. Better fix is to use `partition_by_hash` per-product inside run() so the LLM only runs on products whose content changed. |
+| `gsc-coverage-auditor` | n/a | bash/script agent — in the AgentBase conversion backlog above |
+| `indexnow-submitter` | n/a | bash agent — conversion backlog |
+| `agent-metrics-collector` | n/a | script-style (no AgentBase class) — conversion backlog |
+| `goals-tracker` | n/a | script-style — conversion backlog |
+| `site-goals-tracker` | n/a | script-style — conversion backlog |
+| `responder-agent` | n/a | Inbox-poll agent; IMAP cursor *is* the signal |
+| `deployer` | n/a | Reactive dispatch, never cron-fires alone |
+| `implementer` | n/a | Same |
+| `agent-doctor` | n/a | Only fires on operator-incident dispatch |
+| `jcode-agent` | n/a | Reactive |
+
+**Each TODO is ~10 minutes of work.** Pick whichever you're already
+touching — never open a side-quest just for short-circuit, but always
+do it when you're in the file for another reason.
 
 ## When the user asks to inspect / debug an agent
 

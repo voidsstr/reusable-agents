@@ -18,14 +18,14 @@ def test_empty_registry_returns_empty_graph(storage):
 
 
 def test_default_edges_only_appear_when_endpoints_registered(storage):
-    # Register only collector + analyzer — no reporter
-    register_agent(AgentManifest(id="seo-data-collector", name="Collector", category="seo"), storage=storage)
-    register_agent(AgentManifest(id="seo-analyzer", name="Analyzer", category="seo"), storage=storage)
+    # Register only seo-opportunity-agent + responder — no implementer
+    register_agent(AgentManifest(id="seo-opportunity-agent", name="SEO", category="seo"), storage=storage)
+    register_agent(AgentManifest(id="responder-agent", name="Responder", category="ops"), storage=storage)
     g = build_dependency_graph(storage=storage)
     sources = {(e["from"], e["to"]) for e in g["edges"]}
-    assert ("seo-data-collector", "seo-analyzer") in sources
-    # The reporter edges shouldn't be in the graph
-    assert ("seo-analyzer", "seo-reporter") not in sources
+    assert ("seo-opportunity-agent", "responder-agent") in sources
+    # The implementer edges shouldn't be in the graph
+    assert ("responder-agent", "implementer") not in sources
 
 
 def test_blueprints_excluded_by_default(storage):
@@ -83,15 +83,15 @@ def test_manifest_depends_on_skips_unknown_target(storage):
 
 def test_default_and_override_dedupe(storage):
     """If a manifest declares the same edge as a default, we don't double-emit."""
-    register_agent(AgentManifest(id="seo-data-collector", name="Collector", category="seo"), storage=storage)
+    register_agent(AgentManifest(id="seo-opportunity-agent", name="SEO", category="seo"), storage=storage)
     register_agent(AgentManifest(
-        id="seo-analyzer", name="Analyzer", category="seo",
-        depends_on=[{"agent_id": "seo-data-collector", "kind": "feeds-run-dir", "description": "dup"}],
+        id="responder-agent", name="Responder", category="ops",
+        depends_on=[{"agent_id": "seo-opportunity-agent", "kind": "queues-recs-to", "description": "dup"}],
     ), storage=storage)
     g = build_dependency_graph(storage=storage)
     matches = [e for e in g["edges"]
-               if e["from"] == "seo-data-collector" and e["to"] == "seo-analyzer"
-               and e["kind"] == "feeds-run-dir"]
+               if e["from"] == "seo-opportunity-agent" and e["to"] == "responder-agent"
+               and e["kind"] == "queues-recs-to"]
     assert len(matches) == 1
 
 
@@ -101,16 +101,41 @@ def test_default_and_override_dedupe(storage):
 
 def test_seo_pipeline_default_chain():
     sources = {(e["from"], e["to"]) for e in _DEFAULT_EDGES}
-    assert ("seo-data-collector", "seo-analyzer") in sources
-    assert ("seo-analyzer", "seo-reporter") in sources
-    assert ("seo-reporter", "responder-agent") in sources
+    assert ("seo-opportunity-agent", "responder-agent") in sources
     assert ("responder-agent", "implementer") in sources
-    assert ("implementer", "seo-deployer") in sources
+    assert ("implementer", "deployer") in sources
 
 
 def test_progressive_improvement_default_edges():
+    # Post-decoupling (2026-05-12): per-site agents like
+    # `aisleprompt-progressive-improvement-agent` are NOT hardcoded in
+    # _DEFAULT_EDGES anymore. The framework ships `*-progressive-
+    # improvement-agent` templates that expand against the registered
+    # agent list at query time. Verify the template entries exist; the
+    # end-to-end expansion is covered by
+    # test_template_expansion_against_registered below.
     sources = {(e["from"], e["to"]) for e in _DEFAULT_EDGES}
-    # PI agents send email + receive responses + dispatch auto recs
-    assert ("aisleprompt-progressive-improvement-agent", "responder-agent") in sources
-    assert ("responder-agent", "aisleprompt-progressive-improvement-agent") in sources
-    assert ("aisleprompt-progressive-improvement-agent", "implementer") in sources
+    assert ("*-progressive-improvement-agent", "responder-agent") in sources
+    assert ("responder-agent", "*-progressive-improvement-agent") in sources
+    assert ("*-progressive-improvement-agent", "implementer") in sources
+    # And confirm those entries are flagged as templates (otherwise the
+    # expander silently treats them as literal agent ids).
+    templates = [e for e in _DEFAULT_EDGES if e.get("_template")]
+    template_pairs = {(e["from"], e["to"]) for e in templates}
+    assert ("*-progressive-improvement-agent", "implementer") in template_pairs
+
+
+def test_no_site_specific_literals_in_default_edges():
+    """The framework must not hardcode any site name in its default
+    graph. Per-site agents flow through wildcard templates so adding
+    a new site doesn't require a framework patch."""
+    for e in _DEFAULT_EDGES:
+        for side in (e["from"], e["to"]):
+            assert "aisleprompt" not in side, (
+                f"site-specific literal {side!r} in framework defaults — "
+                f"convert to '*-<suffix>' template"
+            )
+            assert "specpicks" not in side, (
+                f"site-specific literal {side!r} in framework defaults — "
+                f"convert to '*-<suffix>' template"
+            )

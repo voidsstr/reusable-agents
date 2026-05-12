@@ -80,6 +80,44 @@ echo "[implementer] run_dir=$RESPONDER_RUN_DIR"
 echo "[implementer] agent_id=${RESPONDER_AGENT_ID:-${RESPONDER_SOURCE_AGENT:-?}}"
 echo "[implementer] run_ts=${RESPONDER_RUN_TS:-?}"
 
+# ── Implementer-side run record (dashboard visibility) ──────────────────────
+# Each dispatch is a first-class implementer run. Write progress.json +
+# run-index entry at agents/implementer/runs/<IMPLEMENTER_RUN_TS>/ so the
+# dashboard's implementer Runs tab shows every dispatched batch. Falls back
+# to a fresh ts if dispatch.py didn't supply one (e.g. manual invocation).
+IMPLEMENTER_RUN_TS="${IMPLEMENTER_RUN_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
+export IMPLEMENTER_RUN_TS
+
+_record_implementer_start() {
+    PYTHONPATH="$REPO_ROOT" python3 -m framework.cli.dispatch_run_record start \
+        --run-ts        "$IMPLEMENTER_RUN_TS" \
+        --source-agent  "${RESPONDER_AGENT_ID:-${RESPONDER_SOURCE_AGENT:-}}" \
+        --source-run-ts "${RESPONDER_RUN_TS:-}" \
+        --site          "${RESPONDER_SITE:-}" \
+        --request-id    "${RESPONDER_REQUEST_ID:-}" \
+        --subject-tag   "${RESPONDER_SUBJECT_TAG:-}" \
+        --rec-ids       "${RESPONDER_REC_IDS:-}" \
+        --log-path      "${DISPATCH_LOG_PATH:-}" \
+        2>&1 | sed 's/^/[run-record] /' || true
+}
+
+_record_implementer_end() {
+    local rc=$1
+    PYTHONPATH="$REPO_ROOT" python3 -m framework.cli.dispatch_run_record end \
+        --rc            "$rc" \
+        --run-ts        "$IMPLEMENTER_RUN_TS" \
+        --source-agent  "${RESPONDER_AGENT_ID:-${RESPONDER_SOURCE_AGENT:-}}" \
+        --source-run-ts "${RESPONDER_RUN_TS:-}" \
+        --site          "${RESPONDER_SITE:-}" \
+        --request-id    "${RESPONDER_REQUEST_ID:-}" \
+        --subject-tag   "${RESPONDER_SUBJECT_TAG:-}" \
+        --rec-ids       "${RESPONDER_REC_IDS:-}" \
+        --log-path      "${DISPATCH_LOG_PATH:-}" \
+        2>&1 | sed 's/^/[run-record] /' || true
+}
+
+_record_implementer_start
+
 # Validate the run dir exists and has recommendations.json
 if [ ! -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
     echo "ERROR: $RESPONDER_RUN_DIR/recommendations.json not found" >&2
@@ -348,7 +386,7 @@ print(f"synced {n} files to agents/{agent_id}/runs/{run_ts}/")
 PY
 }
 
-trap _sync_back_to_azure EXIT
+trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure' EXIT
 
 # ── Live LLM output sidecar ─────────────────────────────────────────────────
 # Push the tail of our dispatch log to agents/<RESPONDER_AGENT_ID>/live-llm-output.txt
@@ -386,7 +424,7 @@ _stop_llm_flush_sidecar() {
     [ -n "$LLM_FLUSH_SIDECAR_PID" ] && kill -TERM "$LLM_FLUSH_SIDECAR_PID" 2>/dev/null || true
     [ -n "$LLM_FLUSH_SIDECAR_PID" ] && wait "$LLM_FLUSH_SIDECAR_PID" 2>/dev/null || true
 }
-trap '_sync_back_to_azure; _stop_llm_flush_sidecar' EXIT
+trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure; _stop_llm_flush_sidecar' EXIT
 
 # LLM driver:
 #   IMPLEMENTER_LLM=claude     Claude Code CLI (default — uses the user's
@@ -537,16 +575,45 @@ EOF
         # claude-pool path entirely and goes straight to the framework
         # code-editor chain. Used when validating the framework chain
         # end-to-end on a real rec without burning Max profile quota.
+        # Default: 0 (use claude pool first; fall back automatically on
+        # rc=75 = all Max profiles rate-limited).
         if [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
             echo "[implementer] IMPLEMENTER_FORCE_FALLBACK=1 — skipping claude, forcing framework code-editor chain" >&2
             rc=75
         else
+            # 2026-05-11: Smart model-tier auto-switch. Anthropic enforces
+            # PER-MODEL seven-day caps (seven_day_sonnet / seven_day_opus /
+            # seven_day_haiku — separate quota pools). Start with Sonnet
+            # (price/quality sweet spot), auto-downgrade to Opus if Sonnet
+            # is family-capped, then Haiku as last claude resort, then fall
+            # through to the framework chain (rc=75). The claude-pool shim
+            # picks the right profile per family on each call. Override the
+            # start tier via IMPLEMENTER_CLAUDE_MODEL.
+            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-sonnet-4-6}"
+            TIER_ORDER=("$START_MODEL")
+            case "$START_MODEL" in
+                *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;
+                *opus*)   TIER_ORDER+=("claude-sonnet-4-6" "claude-haiku-4-5") ;;
+                *haiku*)  TIER_ORDER+=("claude-opus-4-7" "claude-sonnet-4-6") ;;
+            esac
             set +e
-            claude --dangerously-skip-permissions \
-                   --print --output-format text \
-                   --max-turns "$IMPLEMENTER_MAX_TURNS" \
-                   < "$PROMPT_FILE"
-            rc=$?
+            rc=75
+            for IMPL_MODEL in "${TIER_ORDER[@]}"; do
+                echo "[implementer] trying $IMPL_MODEL" >&2
+                claude --dangerously-skip-permissions \
+                       --print --output-format text \
+                       --model "$IMPL_MODEL" \
+                       --max-turns "$IMPLEMENTER_MAX_TURNS" \
+                       < "$PROMPT_FILE"
+                rc=$?
+                # rc=0 → success, stop. Otherwise (75 rate-limit, 1
+                # transient pool error, 2 bad-prompt, etc.) try the
+                # next tier — the auto-tier is a robustness device, not
+                # a smart router. If claude itself can't run at all, the
+                # framework chain catches it after we fall through.
+                [ "$rc" -eq 0 ] && break
+                echo "[implementer] $IMPL_MODEL rc=$rc; trying next tier" >&2
+            done
             set -e
         fi
 
@@ -570,17 +637,28 @@ EOF
             CE_PROMPT=$(mktemp)
             CE_FILES=$(mktemp)
             CE_PRE_DIRTY=$(mktemp)
+            CE_PRE_HASHES=$(mktemp)
             CE_RECS_JSON="$RESPONDER_RUN_DIR/recommendations.json"
 
-            # Pre-snapshot working tree (set diff at commit time keeps
-            # us from sweeping up concurrent changes).
+            # Pre-snapshot working tree. We capture both the file LIST
+            # (for set-diff) and per-file CONTENT HASHES (so files that
+            # were already dirty pre-run but whose content the editor
+            # legitimately advanced still get committed — fixes the
+            # systemic "stranded work" bug where pre-dirty files were
+            # blanket-excluded).
             if [ -d "${IMPLEMENTER_REPO_PATH:-}" ]; then
                 pushd "$IMPLEMENTER_REPO_PATH" >/dev/null 2>&1 || true
                 git status --porcelain 2>/dev/null \
                     | awk '{print $NF}' | sort -u > "$CE_PRE_DIRTY" || true
+                # Hash each pre-dirty file's CURRENT content (working tree)
+                # so we can detect editor-driven modifications later.
+                while IFS= read -r f; do
+                    [ -n "$f" ] && [ -f "$f" ] \
+                        && printf "%s  %s\n" "$(sha1sum "$f" 2>/dev/null | awk '{print $1}')" "$f"
+                done < "$CE_PRE_DIRTY" > "$CE_PRE_HASHES" 2>/dev/null || true
                 popd >/dev/null 2>&1 || true
                 CE_PRE_COUNT=$(wc -l < "$CE_PRE_DIRTY" 2>/dev/null || echo 0)
-                echo "[implementer] pre-edit dirty file count: $CE_PRE_COUNT (excluded from commit)" >&2
+                echo "[implementer] pre-edit dirty file count: $CE_PRE_COUNT (will commit if content advances)" >&2
             fi
 
             # All dispatch kinds are eligible for the framework chain.
@@ -611,6 +689,7 @@ EOF
                         --rec-ids "$RESPONDER_REC_IDS" \
                         --repo-path "$IMPLEMENTER_REPO_PATH" \
                         --site "${RESPONDER_SITE:-}" \
+                        --site-config "${SEO_AGENT_CONFIG:-}" \
                         --dispatch-kind "$DISPATCH_KIND" \
                         --pre-dirty-file "$CE_PRE_DIRTY" \
                         --out-prompt "$CE_PROMPT" \
@@ -637,7 +716,7 @@ EOF
 }
 DEFERRED_EOF
                     fi
-                    rm -f "$PROMPT_FILE" "$CE_PROMPT" "$CE_FILES" "$CE_DEFERRED_BY_ALLOWLIST" "$CE_PRE_DIRTY"
+                    rm -f "$PROMPT_FILE" "$CE_PROMPT" "$CE_FILES" "$CE_DEFERRED_BY_ALLOWLIST" "$CE_PRE_DIRTY" "$CE_PRE_HASHES"
                     exit 0
                 elif [ "$BUILDER_RC" -ne 0 ]; then
                     echo "[implementer] build-aider-invocation failed rc=$BUILDER_RC — deferring" >&2
@@ -652,43 +731,220 @@ DEFERRED_EOF
                 # backend chain (aider / goose / plandex / ...) and
                 # returns rc=0 on first success.
                 set +e
-                CE_TIMEOUT="${IMPLEMENTER_CE_TIMEOUT:-900}"
-                CE_OUT=$(mktemp)
+                # 2026-05-12: lowered from 900s → 300s after diagnosing the
+                # slow dispatches. jcode-ollama frequently hit the 900s ceiling
+                # producing no files (rc=124), gating the next backend from
+                # trying. With 5 backends in the chain × 900s = 75 min worst-
+                # case. Most successful runs complete a single backend in
+                # 20-60s; 300s is plenty of headroom for the slowest
+                # legitimate path (claude-cli multi-step reasoning).
+                CE_TIMEOUT="${IMPLEMENTER_CE_TIMEOUT:-300}"
                 # Find reusable-agents repo for PYTHONPATH (run.sh sits
                 # at agents/implementer/, so REPO_ROOT is two up).
                 RA_FRAMEWORK_ROOT="${RA_REPO:-$REPO_ROOT}"
-                PYTHONPATH="$RA_FRAMEWORK_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-                    python3 -m framework.cli.code_edit \
-                        --repo "$IMPLEMENTER_REPO_PATH" \
-                        --prompt-file "$CE_PROMPT" \
-                        --files-file "$CE_FILES" \
-                        --pre-dirty-file "$CE_PRE_DIRTY" \
-                        --agent-id "${RESPONDER_SOURCE_AGENT:-implementer}" \
-                        --site "${RESPONDER_SITE:-}" \
-                        --site-config "${SEO_AGENT_CONFIG:-}" \
-                        --timeout "$CE_TIMEOUT" \
-                        --json 2>&1 | tee "$CE_OUT"
-                rc=${PIPESTATUS[0]}
-                set -e
+                # Two-phase chain (when multi-rec dispatch + ollama-first):
+                #
+                #   Phase 1 — per-rec ollama-only pass: ollama is slow
+                #     (qwen3-coder-next at 30-60 tok/s on the 5090) and
+                #     rarely converges on multi-rec batches inside its
+                #     15-min cap. Run ollama PER REC instead — each rec
+                #     has 1/N the work and finishes in 2-3 min if ollama
+                #     can ship it.
+                #   Phase 2 — classic multi-rec batch on remaining recs:
+                #     copilot/claude handle multi-rec efficiently (one
+                #     prompt, big context). Send all recs ollama didn't
+                #     ship to copilot→claude as a single batch.
+                #
+                # Disable via IMPLEMENTER_PER_REC_SPLIT=0 (everything
+                # runs as one classic chain with full ollama→copilot→claude).
+                # Default OFF: try paid subscriptions (claude Max, copilot)
+                # and Azure first because those are already-paid quota.
+                # Ollama stays in the chain at the tail. To opt INTO the
+                # per-rec ollama-first pass for specific dispatch kinds
+                # (e.g. quality-tolerant work), set IMPLEMENTER_PER_REC_SPLIT=1.
+                PER_REC_SPLIT="${IMPLEMENTER_PER_REC_SPLIT:-0}"
+                REC_LIST=$(echo "$RESPONDER_REC_IDS" | tr ',' '\n' | sed '/^$/d')
+                REC_COUNT=$(echo "$REC_LIST" | wc -l)
+                CE_WINNERS_AGG=""
+                SHIPPED_RECS=""
+                REMAINING_RECS="$RESPONDER_REC_IDS"
+                rc=1
 
-                # Extract the winning backend id from the JSON for
-                # the commit-message tag.
-                CE_WINNER=$(python3 -c "
-import json, sys
+                if [ "$PER_REC_SPLIT" = "1" ] && [ "$REC_COUNT" -gt 1 ]; then
+                    # ── Phase 1: ollama-only per-rec pass ──────────────
+                    echo "[implementer] phase-1: per-rec ollama pass on $REC_COUNT recs" >&2
+                    PHASE1_OK=0
+                    while IFS= read -r single_rec; do
+                        [ -z "$single_rec" ] && continue
+                        echo "[implementer] phase-1: rec=$single_rec" >&2
+                        SUB_PROMPT=$(mktemp); SUB_FILES=$(mktemp); SUB_DEFERRED=$(mktemp)
+                        python3 "$SCRIPT_DIR/build-aider-invocation.py" \
+                                --recs "$CE_RECS_JSON" \
+                                --rec-ids "$single_rec" \
+                                --repo-path "$IMPLEMENTER_REPO_PATH" \
+                                --site "${RESPONDER_SITE:-}" \
+                                --site-config "${SEO_AGENT_CONFIG:-}" \
+                                --dispatch-kind "$DISPATCH_KIND" \
+                                --pre-dirty-file "$CE_PRE_DIRTY" \
+                                --out-prompt "$SUB_PROMPT" \
+                                --out-files "$SUB_FILES" \
+                                --out-deferred "$SUB_DEFERRED" \
+                                "${ALLOW_TYPES_ARG[@]}" >/dev/null 2>&1
+                        SUB_BUILDER_RC=$?
+                        if [ "$SUB_BUILDER_RC" -ne 0 ]; then
+                            echo "[implementer] phase-1: build-aider rc=$SUB_BUILDER_RC for $single_rec — skipping (will retry in phase-2)" >&2
+                            rm -f "$SUB_PROMPT" "$SUB_FILES" "$SUB_DEFERRED"
+                            continue
+                        fi
+                        SUB_OUT=$(mktemp)
+                        PYTHONPATH="$RA_FRAMEWORK_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                            python3 -m framework.cli.code_edit \
+                                --repo "$IMPLEMENTER_REPO_PATH" \
+                                --prompt-file "$SUB_PROMPT" \
+                                --files-file "$SUB_FILES" \
+                                --pre-dirty-file "$CE_PRE_DIRTY" \
+                                --agent-id "${RESPONDER_SOURCE_AGENT:-implementer}" \
+                                --site "${RESPONDER_SITE:-}" \
+                                --site-config "${SEO_AGENT_CONFIG:-}" \
+                                --dispatch-kind "${DISPATCH_KIND:-}" \
+                                --chain "jcode-ollama" \
+                                --timeout "${IMPLEMENTER_OLLAMA_TIMEOUT:-600}" \
+                                --json 2>&1 | tee "$SUB_OUT"
+                        SUB_RC=${PIPESTATUS[0]}
+                        if [ "$SUB_RC" -eq 0 ]; then
+                            SHIPPED_RECS="$SHIPPED_RECS,$single_rec"
+                            CE_WINNERS_AGG="$CE_WINNERS_AGG,jcode-ollama"
+                            PHASE1_OK=$((PHASE1_OK + 1))
+                            echo "[implementer] phase-1: rec=$single_rec → SHIPPED via jcode-ollama" >&2
+                        else
+                            echo "[implementer] phase-1: rec=$single_rec → ollama did not ship (rc=$SUB_RC) — deferring to phase-2" >&2
+                        fi
+                        rm -f "$SUB_PROMPT" "$SUB_FILES" "$SUB_DEFERRED" "$SUB_OUT"
+                    done <<< "$REC_LIST"
+                    echo "[implementer] phase-1: ollama shipped $PHASE1_OK/$REC_COUNT recs" >&2
+                    # Compute remaining recs = original - shipped
+                    REMAINING_RECS=$(python3 -c "
+shipped = set('$SHIPPED_RECS'.strip(',').split(','))
+shipped.discard('')
+orig = '$RESPONDER_REC_IDS'.split(',')
+remaining = [r for r in orig if r and r not in shipped]
+print(','.join(remaining))
+")
+                    if [ "$PHASE1_OK" -gt 0 ]; then
+                        rc=0  # at least one rec shipped — phase 1 partial success
+                    fi
+                fi
+
+                # ── Phase 2: classic multi-rec batch on remaining recs
+                #              through copilot→claude (no ollama) ──────
+                # Skipped when per-rec-split off OR everything already shipped.
+                if [ -n "$REMAINING_RECS" ]; then
+                    if [ "$PER_REC_SPLIT" = "1" ] && [ "$REC_COUNT" -gt 1 ]; then
+                        # Build a fresh prompt for just the remaining recs
+                        REM_PROMPT=$(mktemp); REM_FILES=$(mktemp); REM_DEFERRED=$(mktemp)
+                        python3 "$SCRIPT_DIR/build-aider-invocation.py" \
+                                --recs "$CE_RECS_JSON" \
+                                --rec-ids "$REMAINING_RECS" \
+                                --repo-path "$IMPLEMENTER_REPO_PATH" \
+                                --site "${RESPONDER_SITE:-}" \
+                                --site-config "${SEO_AGENT_CONFIG:-}" \
+                                --dispatch-kind "$DISPATCH_KIND" \
+                                --pre-dirty-file "$CE_PRE_DIRTY" \
+                                --out-prompt "$REM_PROMPT" \
+                                --out-files "$REM_FILES" \
+                                --out-deferred "$REM_DEFERRED" \
+                                "${ALLOW_TYPES_ARG[@]}" >/dev/null 2>&1
+                        REM_BUILDER_RC=$?
+                        if [ "$REM_BUILDER_RC" -eq 0 ]; then
+                            echo "[implementer] phase-2: classic multi-rec batch through jcode-copilot→claude-cli for $(echo $REMAINING_RECS | tr ',' '\n' | wc -l) remaining recs" >&2
+                            CE_OUT=$(mktemp)
+                            PYTHONPATH="$RA_FRAMEWORK_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                                python3 -m framework.cli.code_edit \
+                                    --repo "$IMPLEMENTER_REPO_PATH" \
+                                    --prompt-file "$REM_PROMPT" \
+                                    --files-file "$REM_FILES" \
+                                    --pre-dirty-file "$CE_PRE_DIRTY" \
+                                    --agent-id "${RESPONDER_SOURCE_AGENT:-implementer}" \
+                                    --site "${RESPONDER_SITE:-}" \
+                                    --site-config "${SEO_AGENT_CONFIG:-}" \
+                                    --dispatch-kind "${DISPATCH_KIND:-}" \
+                                    --chain "claude-cli,jcode-copilot,aider-azure,jcode-ollama" \
+                                    --timeout "$CE_TIMEOUT" \
+                                    --json 2>&1 | tee "$CE_OUT"
+                            REM_RC=${PIPESTATUS[0]}
+                            REM_WINNER=$(python3 -c "
+import json
 try:
     raw = open('$CE_OUT').read()
-    # The JSON is the last { ... } block in stdout.
     start = raw.rfind('{\\n  \"winner\"')
-    if start < 0:
-        start = raw.find('{\\n  \"winner\"')
+    if start < 0: start = raw.find('{\\n  \"winner\"')
     if start >= 0:
-        d = json.loads(raw[start:])
-        print(d.get('winner') or 'none')
-except Exception:
-    pass
+        print(json.loads(raw[start:]).get('winner') or 'none')
+except Exception: pass
 " 2>/dev/null || echo "?")
-                rm -f "$CE_OUT"
+                            if [ "$REM_RC" -eq 0 ]; then
+                                CE_WINNERS_AGG="$CE_WINNERS_AGG,$REM_WINNER"
+                                rc=0
+                            else
+                                [ "$rc" != "0" ] && rc="$REM_RC"
+                            fi
+                            rm -f "$REM_PROMPT" "$REM_FILES" "$REM_DEFERRED" "$CE_OUT"
+                        else
+                            echo "[implementer] phase-2: build-aider rc=$REM_BUILDER_RC — falling back to original prompt" >&2
+                            rm -f "$REM_PROMPT" "$REM_FILES" "$REM_DEFERRED"
+                        fi
+                    else
+                        # Classic single-batch path through full chain
+                        # (preserved for IMPLEMENTER_PER_REC_SPLIT=0 + single-rec)
+                        CE_OUT=$(mktemp)
+                        PYTHONPATH="$RA_FRAMEWORK_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                            python3 -m framework.cli.code_edit \
+                                --repo "$IMPLEMENTER_REPO_PATH" \
+                                --prompt-file "$CE_PROMPT" \
+                                --files-file "$CE_FILES" \
+                                --pre-dirty-file "$CE_PRE_DIRTY" \
+                                --agent-id "${RESPONDER_SOURCE_AGENT:-implementer}" \
+                                --site "${RESPONDER_SITE:-}" \
+                                --site-config "${SEO_AGENT_CONFIG:-}" \
+                                --dispatch-kind "${DISPATCH_KIND:-}" \
+                                --timeout "$CE_TIMEOUT" \
+                                --json 2>&1 | tee "$CE_OUT"
+                        rc=${PIPESTATUS[0]}
+                        CE_WINNER=$(python3 -c "
+import json
+try:
+    raw = open('$CE_OUT').read()
+    start = raw.rfind('{\\n  \"winner\"')
+    if start < 0: start = raw.find('{\\n  \"winner\"')
+    if start >= 0:
+        print(json.loads(raw[start:]).get('winner') or 'none')
+except Exception: pass
+" 2>/dev/null || echo "?")
+                        CE_WINNERS_AGG="$CE_WINNERS_AGG,$CE_WINNER"
+                        rm -f "$CE_OUT"
+                    fi
+                fi
+                set -e
+
+                # Pick the dominant winner across all phases for the
+                # commit-message tag (or "mixed" when both phases shipped).
+                CE_WINNER=$(echo "$CE_WINNERS_AGG" | tr ',' '\n' | sed '/^$/d' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+                [ -z "$CE_WINNER" ] && CE_WINNER="none"
+                UNIQUE_WINNERS=$(echo "$CE_WINNERS_AGG" | tr ',' '\n' | sed '/^$/d' | sort -u | wc -l)
+                [ "$UNIQUE_WINNERS" -gt 1 ] && CE_WINNER="${CE_WINNER}+others"
+
                 echo "[implementer] code-editor winner=$CE_WINNER rc=$rc" >&2
+
+                # Loud failure when every backend in the chain skipped
+                # (preflight failed or auth unset). Previously we exited
+                # silently rc=0 which produced "shipped 0 of N" runs that
+                # looked successful in the dashboard. 2026-05-11: caught
+                # via aider-azure-skip incident where AZURE_OPENAI_API_KEY
+                # was unset and the dispatch consumed work without doing it.
+                if [ "$CE_WINNER" = "none" ] && [ "$rc" -eq 0 ]; then
+                    echo "[implementer] FATAL: no code-editor backend ran (every chain member skipped — check preflight env)" >&2
+                    rc=78  # distinct from 75 (no-change) and 87 (SSR mismatch)
+                fi
             else
                 rc=75  # unchanged — falls into the deferred path below
             fi
@@ -704,14 +960,244 @@ except Exception:
                 CE_NEW_FILES=$(mktemp)
                 git status --porcelain 2>/dev/null \
                     | awk '{print $NF}' | sort -u > "$CE_POST_DIRTY" || true
+                # Newly-dirty files (not in pre-dirty set) — always commit.
                 comm -23 "$CE_POST_DIRTY" "$CE_PRE_DIRTY" \
                     > "$CE_NEW_FILES" 2>/dev/null || true
+                # Pre-dirty files whose CONTENT changed during the run —
+                # these were previously dropped silently. Append to commit
+                # set so legitimate edits to in-progress work are kept.
+                # Compare current sha1 vs pre-run sha1 from CE_PRE_HASHES.
+                if [ -s "$CE_PRE_HASHES" ]; then
+                    CE_ADVANCED=$(mktemp)
+                    while IFS=' ' read -r prev_hash _ pf; do
+                        # awk emits "hash  path"; rebuild path (may have spaces).
+                        [ -z "$prev_hash" ] && continue
+                        # The file may have been deleted by the editor — skip if missing.
+                        [ -f "$pf" ] || continue
+                        cur_hash=$(sha1sum "$pf" 2>/dev/null | awk '{print $1}')
+                        if [ -n "$cur_hash" ] && [ "$cur_hash" != "$prev_hash" ]; then
+                            echo "$pf" >> "$CE_ADVANCED"
+                        fi
+                    done < <(awk '{h=$1; $1=""; sub(/^  /,""); print h" "$0}' "$CE_PRE_HASHES")
+                    if [ -s "$CE_ADVANCED" ]; then
+                        CE_ADVANCED_COUNT=$(wc -l < "$CE_ADVANCED" 2>/dev/null || echo 0)
+                        echo "[implementer] pre-dirty files advanced by editor: $CE_ADVANCED_COUNT (including in commit)" >&2
+                        cat "$CE_ADVANCED" >> "$CE_NEW_FILES"
+                        sort -u -o "$CE_NEW_FILES" "$CE_NEW_FILES" 2>/dev/null || true
+                    fi
+                    rm -f "$CE_ADVANCED"
+                fi
                 CE_NEW_COUNT=$(wc -l < "$CE_NEW_FILES" 2>/dev/null || echo 0)
+
+                # ── Orphan-scaffolding gate ──────────────────────────
+                # Catches the partial-completion failure mode where the
+                # LLM creates a new component / module / utility but
+                # never imports it from any existing page. The gate
+                # finds files that ONLY appear as added (no callers in
+                # the rest of the repo) and treats the dispatch as a
+                # soft-fail so the rec gets re-dispatched with the
+                # corrective Rule 8 prompt instead of shipping dead
+                # code. Set IMPLEMENTER_SKIP_ORPHAN_GATE=1 to disable
+                # (e.g., for genuine library-only commits).
+                CE_ORPHANS=""
+                if [ "${IMPLEMENTER_SKIP_ORPHAN_GATE:-0}" != "1" ] \
+                        && [ "$CE_NEW_COUNT" -gt 0 ]; then
+                    while IFS= read -r f; do
+                        # Only check NEWLY-CREATED source files (not edits
+                        # to existing files). Limit to TS/TSX/JS/JSX/PY —
+                        # other extensions don't have grep-able imports.
+                        case "$f" in
+                            *.tsx|*.ts|*.jsx|*.js|*.py) ;;
+                            *) continue ;;
+                        esac
+                        # Was the file pre-existing? (a modification, not creation)
+                        if git log --oneline -1 -- "$f" 2>/dev/null | grep -qv "^$"; then
+                            # File existed before this commit — modification
+                            # is fine, no orphan check needed.
+                            continue
+                        fi
+                        # Derive the basename-without-extension as the
+                        # symbol/module to grep for. Modern bundlers
+                        # import either by name (e.g. JsonLdScripts) or
+                        # by path. Check both.
+                        bn=$(basename "$f")
+                        sym="${bn%.*}"
+                        path_no_ext="${f%.*}"
+                        # Search the rest of the repo for any reference
+                        # other than the file itself. Look for either
+                        # the symbol name OR the path stem.
+                        # excludes: the file itself, build artifacts, lock files
+                        if ! grep -rEln \
+                                --include='*.ts' --include='*.tsx' \
+                                --include='*.js' --include='*.jsx' \
+                                --include='*.py' \
+                                --exclude-dir=node_modules \
+                                --exclude-dir=.next \
+                                --exclude-dir=dist \
+                                --exclude-dir=build \
+                                --exclude-dir=__pycache__ \
+                                "(\b${sym}\b|['\"]${path_no_ext}['\"]|['\"]@/${path_no_ext}['\"])" \
+                                . 2>/dev/null \
+                                | grep -v "^\./${f}$" \
+                                | head -1 | grep -q .; then
+                            CE_ORPHANS="${CE_ORPHANS}${f}\n"
+                        fi
+                    done < "$CE_NEW_FILES"
+
+                    if [ -n "$CE_ORPHANS" ]; then
+                        echo "[implementer] ORPHAN SCAFFOLDING DETECTED — these new files have no callers:" >&2
+                        printf "%b" "$CE_ORPHANS" | sed 's/^/  /' >&2
+                        echo "[implementer] Per Rule 8, partial-completion is not acceptable. Discarding edits + deferring for re-dispatch with explicit integration instructions." >&2
+                        # Reset the working tree so we don't commit dead code
+                        git reset --hard HEAD 2>/dev/null || true
+                        # Mark dispatch as soft-fail so chain falls over
+                        rc=87  # custom orphan-scaffolding exit code
+                        # Skip the rest of the commit block
+                        CE_NEW_COUNT=0
+                    fi
+                fi
+
+                # ── SSR-mismatch gate ────────────────────────────────
+                # Catches the OTHER class of "shipped but invisible to
+                # Google" failure: the rec affects what crawlers see
+                # (JSON-LD, structured data, blocklists/filters that
+                # gate ItemList items, meta tags) but the LLM only
+                # edited React component files. Since the site has an
+                # SSR layer, the change is invisible to bots even though
+                # the symbols are imported + used in the React tree.
+                #
+                # Heuristic: if the repo has an SSR file AND any rec in
+                # the batch has a SEO-flavored type AND the commit set
+                # touched ZERO SSR files, defer with rc=87 so the chain
+                # re-dispatches with the SSR-mirror prompt now active.
+                # Set IMPLEMENTER_SKIP_SSR_GATE=1 to disable.
+                if [ "${IMPLEMENTER_SKIP_SSR_GATE:-0}" != "1" ] \
+                        && [ "$CE_NEW_COUNT" -gt 0 ]; then
+                    SSR_FILE=""
+                    for cand in \
+                        "src/services/ssrHead.ts" \
+                        "src/services/ssrRender.ts" \
+                        "frontend/src/services/ssrHead.ts" \
+                        "src/entry-server.tsx" \
+                        "src/entry-server.ts"; do
+                        [ -f "$cand" ] && SSR_FILE="$cand" && break
+                    done
+                    if [ -n "$SSR_FILE" ]; then
+                        # Did the rec batch include any SEO/structured-data/
+                        # filter type? Check the dispatch_kind + scan rec types
+                        # in the recs JSON for the trigger keywords.
+                        SEO_FLAVORED=0
+                        case "${DISPATCH_KIND:-}" in
+                            seo*|opportunity*|structured-data*|jsonld*) SEO_FLAVORED=1 ;;
+                        esac
+                        if [ "$SEO_FLAVORED" -eq 0 ] && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+                            if grep -qiE '"type"\s*:\s*"(schema-|jsonld|json-ld|structured-data|meta-|canonical|breadcrumb|itemlist|filter|blocklist|quality-gate|category-pollution|ranking|featured-pick)' \
+                                    "$RESPONDER_RUN_DIR/recommendations.json" 2>/dev/null; then
+                                SEO_FLAVORED=1
+                            fi
+                        fi
+                        if [ "$SEO_FLAVORED" -eq 1 ]; then
+                            # Did the commit set touch any SSR file?
+                            SSR_TOUCHED=0
+                            while IFS= read -r f; do
+                                case "$f" in
+                                    src/services/ssrHead.ts|src/services/ssrRender.ts|frontend/src/services/ssrHead.ts|frontend/src/services/ssrRender.ts|src/entry-server.ts|src/entry-server.tsx)
+                                        SSR_TOUCHED=1
+                                        break
+                                        ;;
+                                esac
+                            done < "$CE_NEW_FILES"
+                            if [ "$SSR_TOUCHED" -eq 0 ]; then
+                                echo "[implementer] SSR-MISMATCH DETECTED — SEO-flavored rec but commit touched 0 SSR files (expected one of $SSR_FILE etc)." >&2
+                                echo "[implementer] Bots/crawlers see only the SSR'd HTML. A blocklist/JSON-LD/filter change in a React component is invisible to Google. Discarding edits + deferring for re-dispatch with SSR-mirror guidance." >&2
+                                git reset --hard HEAD 2>/dev/null || true
+                                rc=87
+                                CE_NEW_COUNT=0
+                            fi
+                        fi
+                    fi
+                fi
+
                 if [ "$CE_NEW_COUNT" -gt 0 ]; then
+                    # ---- Post-LLM scope gate ----
+                    # aider / copilot / claude-cli often roam outside the
+                    # files we asked them to touch. If the site.yaml has
+                    # an implementer.allowed_paths / excluded_paths
+                    # policy, revert every newly-touched file that fails
+                    # it BEFORE staging. This is the second checkpoint
+                    # (the first is in build-aider-invocation.py, which
+                    # filters recs whose `target_files` violate scope;
+                    # this one catches drift inside an otherwise-allowed
+                    # rec's edit, like an SEO rec that legitimately
+                    # touched `frontend/foo.tsx` but the LLM also
+                    # decided to refactor `mobile/...` on the way out).
+                    if [ -n "${SEO_AGENT_CONFIG:-}" ] && [ -f "$SEO_AGENT_CONFIG" ]; then
+                        SCOPE_REVERTED=$(
+                            PYTHONPATH="$REPO_ROOT" \
+                            CHANGED_FILES_LIST="$CE_NEW_FILES" \
+                            SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" \
+                            REPO_PATH="$IMPLEMENTER_REPO_PATH" \
+                            python3 - <<'PY'
+import json, os, subprocess, sys, yaml
+from pathlib import Path
+sys.path.insert(0, os.environ['REPO_ROOT'])
+from framework.core.implementer_scope import ScopePolicy
+
+files = [ln.strip() for ln in Path(os.environ['CHANGED_FILES_LIST']).read_text().splitlines() if ln.strip()]
+cfg = yaml.safe_load(Path(os.environ['SITE_CONFIG_PATH']).read_text()) or {}
+policy = ScopePolicy.from_site_config(cfg)
+if not (policy.allowed_paths or policy.excluded_paths):
+    sys.exit(0)
+allowed, denied = policy.filter_files(files)
+if not denied:
+    sys.exit(0)
+# Revert each denied file in the implementer repo (HEAD).
+for f in denied:
+    full = Path(os.environ['REPO_PATH']) / f
+    try:
+        subprocess.run(['git', '-C', os.environ['REPO_PATH'], 'checkout', '--', f],
+                       check=False, capture_output=True)
+        # If the file didn't exist at HEAD, `git checkout` is a no-op;
+        # delete the new file directly so it doesn't get staged below.
+        if full.exists() and full.is_file():
+            r = subprocess.run(['git', '-C', os.environ['REPO_PATH'], 'cat-file', '-e',
+                                f'HEAD:{f}'], capture_output=True)
+            if r.returncode != 0:
+                full.unlink()
+    except Exception as e:
+        print(f"[scope-revert] error on {f}: {e}", file=sys.stderr)
+# Rewrite the changed-files list to drop denied entries.
+Path(os.environ['CHANGED_FILES_LIST']).write_text('\n'.join(allowed) + '\n' if allowed else '')
+print(json.dumps({'reverted': denied, 'kept': allowed}))
+PY
+                        )
+                        if [ -n "$SCOPE_REVERTED" ]; then
+                            echo "[implementer] scope-revert: $SCOPE_REVERTED" >&2
+                            # Refresh CE_NEW_COUNT from the rewritten list.
+                            CE_NEW_COUNT=$(grep -c . "$CE_NEW_FILES" 2>/dev/null || echo 0)
+                            if [ "$CE_NEW_COUNT" -eq 0 ]; then
+                                echo "[implementer] every touched file was out-of-scope after policy revert — nothing to commit" >&2
+                                CE_NEW_COUNT=0
+                            fi
+                        fi
+                    fi
+
                     set +e
+                    if [ "$CE_NEW_COUNT" -gt 0 ]; then
                     while IFS= read -r f; do
                         [ -n "$f" ] && [ -e "$f" ] && git add "$f"
                     done < "$CE_NEW_FILES"
+                    # Commit-shape linter (2026-05-11 retro): reject commits
+                    # over IMPLEMENTER_MAX_COMMIT_LINES (default 800) — big-
+                    # commit anti-pattern in the LLM backends, 20 commits >500
+                    # lines in 17 days. Soft cap; operator can override.
+                    _shape_cap="${IMPLEMENTER_MAX_COMMIT_LINES:-800}"
+                    _shape_lines=$(git diff --cached --numstat | awk '{a+=$1; d+=$2} END {print (a+d)+0}')
+                    if [ "$_shape_lines" -gt "$_shape_cap" ]; then
+                        echo "[implementer] WARN commit-shape: ${_shape_lines} lines > IMPLEMENTER_MAX_COMMIT_LINES=${_shape_cap}. Letting it through, but this should be split — flagging for retro." >&2
+                        # Record so the dashboard / retro agent can spot it.
+                        echo "{\"ts\":\"$(date -Iseconds)\",\"agent\":\"implementer\",\"run\":\"${RESPONDER_RUN_TS}\",\"backend\":\"${CE_WINNER:-?}\",\"lines\":${_shape_lines},\"cap\":${_shape_cap}}" >> "$RESPONDER_RUN_DIR/_big_commits.jsonl" 2>/dev/null || true
+                    fi
                     git commit -m "implementer (${CE_WINNER:-fallback}): apply ${RESPONDER_REC_IDS#,} for ${RESPONDER_AGENT_ID:-?}/${RESPONDER_RUN_TS:-?}
 
 Recs: $RESPONDER_REC_IDS
@@ -720,9 +1206,16 @@ Run: $RESPONDER_RUN_TS
 Backend: ${CE_WINNER:-fallback}
 Mode: framework-code-editor (claude-pool rate-limited)
 Files staged: $CE_NEW_COUNT (set-diff of post-edit vs pre-edit)" 2>&1 | head -5
+                    fi  # close: if CE_NEW_COUNT > 0 after scope-revert
                     set -e
                     SHA=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
                     echo "[implementer] code-editor commit: SHA=$SHA, files=$CE_NEW_COUNT, backend=${CE_WINNER:-?}" >&2
+                    # Record ship status — agent.py reads this for an
+                    # accurate "shipped N of M" RunResult.summary.
+                    SHIP_TOTAL=$(echo "$RESPONDER_REC_IDS" | tr ',' '\n' | grep -cv '^[[:space:]]*$' || echo 0)
+                    cat > "$RESPONDER_RUN_DIR/_ship_status.json" <<SHIP_EOF
+{"shipped": $SHIP_TOTAL, "deferred": 0, "reason": "code_edit_committed", "rc": 0, "sha": "$SHA", "files": $CE_NEW_COUNT, "backend": "${CE_WINNER:-?}"}
+SHIP_EOF
                     # Mark each dispatched rec as implemented:true in
                     # the run-dir's recommendations.json so the dash-
                     # board sees it shipped (claude-mode does this via
@@ -756,13 +1249,35 @@ open(p, 'w').write(json.dumps(d, indent=2))
 print(f'marked implemented={hit}/{len(ids)} via framework-{backend}')
 PY
                     fi
+
+                    # Ship-back: mark the producer's accumulator entries
+                    # as implemented IMMEDIATELY so backlog-dispatcher
+                    # doesn't re-queue them on its next tick. Without
+                    # this, the producer's accumulator state stays
+                    # `open` until the producer agent re-runs (which
+                    # may be hours away), and the dispatcher keeps
+                    # picking the same recs up.
+                    if [ -n "${RESPONDER_AGENT_ID:-}" ] && [ -n "${RESPONDER_RUN_TS:-}" ]; then
+                        PYTHONPATH="${RA_REPO_ROOT:-/home/voidsstr/development/reusable-agents}" \
+                        python3 -m framework.cli.mark_shipped_in_accumulator \
+                            --source-agent "$RESPONDER_AGENT_ID" \
+                            --source-run-ts "$RESPONDER_RUN_TS" \
+                            --rec-ids "$RESPONDER_REC_IDS" \
+                            --implementation-sha "$SHA" 2>&1 | sed 's/^/[ship-back] /' >&2 || true
+                    fi
                 else
                     echo "[implementer] code-editor rc=0 but produced 0 NEW files — nothing to ship" >&2
+                    # rc=0 with zero file changes = LLM concluded no edit needed
+                    # (or hit an SSR/orphan gate). Recs stay unshipped.
+                    SHIP_TOTAL=$(echo "$RESPONDER_REC_IDS" | tr ',' '\n' | grep -cv '^[[:space:]]*$' || echo 0)
+                    cat > "$RESPONDER_RUN_DIR/_ship_status.json" <<SHIP_EOF
+{"shipped": 0, "deferred": $SHIP_TOTAL, "reason": "no_op_or_gated", "rc": 0}
+SHIP_EOF
                 fi
                 rm -f "$CE_POST_DIRTY" "$CE_NEW_FILES"
                 popd >/dev/null 2>&1 || true
             fi
-            rm -f "$CE_PRE_DIRTY"
+            rm -f "$CE_PRE_DIRTY" "$CE_PRE_HASHES"
 
             # ── Article-author write-then-insert post-step ────────────
             # The prompt builder told the LLM to write
@@ -1118,6 +1633,12 @@ ART_PY
   "next_action": "host-worker will NOT auto-retry; next cron tick of the source agent re-emits the recs if still relevant"
 }
 DEFERRED_EOF
+                    # Mark ship-status so agent.py reports "deferred N"
+                    # rather than the misleading "implemented N".
+                    DEFERRED_COUNT=$(echo "$RESPONDER_REC_IDS" | tr ',' '\n' | grep -cv '^[[:space:]]*$' || echo 0)
+                    cat > "$RESPONDER_RUN_DIR/_ship_status.json" <<SHIP_EOF
+{"shipped": 0, "deferred": $DEFERRED_COUNT, "reason": "graceful_defer", "rc": $rc}
+SHIP_EOF
                 fi
                 rm -f "$PROMPT_FILE"
                 # Exit 0 so host-worker doesn't infinite-retry. The
@@ -1185,10 +1706,13 @@ esac
 # Skipped automatically for DB-only dispatches (article-author, h2h,
 # catalog-audit) since those don't need a docker build.
 #
-# Path note: post agents/ consolidation the deployer lives at
-# agents/seo-deployer/run.sh, not the old top-level seo-deployer/.
-# Keep both paths checked so legacy installs still work.
-DEPLOYER_SCRIPT="$REPO_ROOT/agents/seo-deployer/run.sh"
+# Path note: deployer lives at agents/deployer/run.sh. The legacy
+# seo-deployer name + path is kept as a fallback so older clones
+# still work; both checked in priority order.
+DEPLOYER_SCRIPT="$REPO_ROOT/agents/deployer/run.sh"
+if [ ! -x "$DEPLOYER_SCRIPT" ] && [ -x "$REPO_ROOT/agents/seo-deployer/run.sh" ]; then
+    DEPLOYER_SCRIPT="$REPO_ROOT/agents/seo-deployer/run.sh"
+fi
 if [ ! -x "$DEPLOYER_SCRIPT" ] && [ -x "$REPO_ROOT/seo-deployer/run.sh" ]; then
     DEPLOYER_SCRIPT="$REPO_ROOT/seo-deployer/run.sh"
 fi
@@ -1230,7 +1754,7 @@ elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; th
     # Per-batch deploy — fire after every batch, not waiting for chain
     # end. The _is_last_batch_in_chain helper is preserved (still used
     # by the legacy per-chain gate) but no longer required here.
-    echo "[implementer] batch complete — chaining to seo-deployer (per-batch deploy)"
+    echo "[implementer] batch complete — chaining to deployer (per-batch deploy)"
     SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
         bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
             rc=$?
@@ -1617,6 +2141,21 @@ for r in sd.get("recommendations", []):
         r["shipped"] = True
         r["shipped_at"] = now_iso
         r["shipped_via"] = "pre-existing"
+        n_ship += 1
+    # Auto-ship for article-author-proposal recs: the implementer writes
+    # the markdown body + DB INSERT, no separate deployer step runs
+    # (article-author dispatch_kind explicitly skips the deployer per
+    # CLAUDE.md). Implementing the rec IS publishing it — the DB row
+    # is already serving traffic. Mark shipped immediately so the
+    # dashboard's lifetime stats stop showing them as
+    # "implemented but not shipped" forever.
+    if (r.get("implemented") is True
+            and not r.get("shipped")
+            and (r.get("type") == "article-author-proposal"
+                 or "article-author" in (r.get("implemented_via") or ""))):
+        r["shipped"] = True
+        r["shipped_at"] = now_iso
+        r["shipped_via"] = "article-author-db-insert"
         n_ship += 1
 
 s.write_json(src_path, sd)

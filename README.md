@@ -166,6 +166,7 @@ its bottleneck? *That* is the next change. The
 | **[`blueprints/README.md`](blueprints/README.md)** | The five blueprint patterns (site-quality-recommender, pipeline-stage, inbox-poller, llm-code-editor, scheduled-task) + when to pick each. |
 | **[`shared/schemas/site-config.schema.json`](shared/schemas/site-config.schema.json)** | The canonical `site.yaml` schema. Validates every per-site config at registration. |
 | **[`agents/<id>/README.md`](agents/)** | Per-agent docs (collector, analyzer, reporter, deployer, implementer, responder, digest-rollup, agent-doctor, hydration, ebay-sync, progressive-improvement, competitor-research). |
+| **[`install/glitchtip/README.md`](install/glitchtip/README.md)** | Optional self-hosted error tracker (Sentry-API-compatible). 4-container compose, Cloudflare-Tunnel ingress recipe, and the mobile-SDK wiring checklist (with aisleprompt as the worked example). |
 | **[`CLAUDE.md`](CLAUDE.md)** | Instructions for Claude Code when working in this repo. References the docs above. |
 
 ## What's in the box
@@ -227,57 +228,151 @@ reusable-agents/
 
 ## Quick start
 
-### 1. Bring up the framework
+### One-command bootstrap
 
 ```bash
 git clone https://github.com/voidsstr/reusable-agents
 cd reusable-agents
-
-cp .env.example .env
-$EDITOR .env                # set FRAMEWORK_API_TOKEN, AZURE_STORAGE_CONNECTION_STRING
-
-docker compose up -d --build
+bash install/bootstrap.sh
 ```
 
-The API runs on port 8090, the UI on 8091. If 8090 conflicts with another
-service, override via `.env`:
+The bootstrap walks you through everything in 7 prompted steps:
+
+1. **Prereq check** — python3, docker + compose, optional az/claude
+2. **`.env` creation** with a freshly-generated API token
+3. **Storage backend** — `local` (filesystem, zero deps) or `azure`
+   (Blob Storage; pluggable for S3 / GCS / R2 — see below)
+4. **AI provider auth** — claude-pool init, OpenAI/Anthropic/Azure keys
+5. **Email OAuth** (optional) — pointer to `setup-microsoft-oauth.sh`
+6. **`docker compose up -d --build`** — API on `:8093`, UI on `:8091`
+7. **Host worker** — systemd-user service that exec's agent runs on the host
+
+When it finishes, open <http://localhost:8091> and you're up.
+
+For non-interactive (CI / Dockerfile RUN) mode:
+
+```bash
+bash install/bootstrap.sh --non-interactive
+```
+
+(Reads everything from `.env`; fails fast if anything's missing.)
+
+### Manual install (if you want to know what bootstrap does)
+
+```bash
+cp .env.example .env
+$EDITOR .env                                   # see Configuration § below
+docker compose up -d --build                   # API on :8093, UI on :8091
+bash install/install-host-worker.sh            # systemd-user agent executor
+bash install/register-all-from-dir.sh ./agents # register reference agents
+```
+
+### Configuring storage (pluggable)
+
+Three options, controlled by `STORAGE_BACKEND` in `.env`:
+
+| Backend | Setup | Best for |
+|---|---|---|
+| `local` (default) | `STORAGE_BACKEND=local` — writes to `~/.reusable-agents/data` (configurable via `AGENT_STORAGE_LOCAL_PATH`) | Dev, single-host, no external deps |
+| `azure` | `STORAGE_BACKEND=azure` + `AZURE_STORAGE_CONNECTION_STRING` + `AZURE_STORAGE_CONTAINER` | Production / multi-host |
+| **Custom** (S3, GCS, R2, MinIO) | Implement `framework.core.storage.StorageBackend`, register at startup | When you need a different cloud |
+
+Custom backend example:
+
+```python
+# my_app/storage_s3.py
+from framework.core.storage import StorageBackend, register_backend
+
+class S3Backend(StorageBackend):
+    name = "s3"
+    def read_json(self, key): ...
+    def write_json(self, key, value): ...
+    def list_prefix(self, prefix): ...
+    # ... see framework/core/storage.py for the full interface
+
+register_backend("s3", lambda: S3Backend(bucket=os.environ["S3_BUCKET"]))
+```
+
+Then `STORAGE_BACKEND=s3` in `.env` and import your module before any
+agent code calls `get_storage()`. The framework ships zero S3 glue —
+write your own (≈100 lines) so the boto3 dep stays optional.
+
+### Configuring email (optional)
+
+Two scripts; same Azure App Registration, different scopes:
+
+```bash
+# Set in .env first:
+#   MS_GRAPH_CLIENT_ID=<your-azure-app-client-id>
+#   MS_GRAPH_TENANT_ID=<your-tenant-id>
+#   MS_GRAPH_SIGNIN_HINT=<mailbox-to-send-from-and-poll>
+bash install/setup-microsoft-oauth.sh   # outbound (Mail.Send via Graph)
+bash install/setup-imap-oauth.sh        # inbound  (IMAP polling)
+```
+
+The Azure App Registration needs these delegated permissions:
+`Mail.Send`, `Mail.Send.Shared`, `IMAP.AccessAsUser.All`, `offline_access`.
+Both scripts use the device-code OAuth flow — works over SSH, no
+localhost callback needed.
+
+### Configuring error tracking (optional)
+
+GlitchTip — a Sentry-API-compatible error tracker — ships as an opt-in
+companion. Bring it up with:
+
+```bash
+bash install/glitchtip/install.sh
+```
+
+That starts 4 containers (web, worker, postgres, redis, ~300 MB RAM)
+on `http://localhost:8095`. Sentry-API-compatible means the same
+`@sentry/react-native`, `@sentry/python`, etc. SDKs work with no code
+changes — just point the DSN at the local instance.
+
+The framework includes a companion agent — `crash-watcher-agent` — that
+polls the GlitchTip (or Sentry SaaS) REST API every 10 minutes for new
+unresolved issues, fetches the top in-app frame, and dispatches a
+`crash-fix` rec to the implementer. The crash → fix → ship loop runs
+without human intervention.
+
+Full setup — public-ingress recipe (Cloudflare Tunnel), first-run UI
+steps, mobile-SDK wiring checklist (with aisleprompt as the worked
+example), retention/backup notes — lives in
+**[`install/glitchtip/README.md`](install/glitchtip/README.md)**.
+
+Swap to Sentry SaaS by unsetting `SENTRY_API_BASE` in the framework
+`.env` — same agent code, same SDK, same DSN format.
+
+### Configuring AI providers
+
+The framework's chat fallback chain is `claude-cli (claude-pool) →
+copilot → azure_openai → openai → anthropic → ollama`. The implementer
+also has a code-editor chain (`aider-copilot-proxy → jcode-copilot →
+... → ollama`). Both honor environment variables + per-deployment
+config in storage; no API key in `.env` = that provider is skipped.
+
+Set any of:
 
 ```dotenv
-# Anywhere in .env — the docker-compose ports are also configurable
-FRAMEWORK_API_PORT=8093
+# Pick one or more — agents fall over in DEFAULT_FALLBACK_KINDS order
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+# Free local fallback:
+OLLAMA_HOST=http://localhost:11434
 ```
 
-### 2. Install the host-worker
+Claude Max users: run `bash install/init-claude-pool.sh` (or just
+`HOME=~/.reusable-agents/claude-pool/profile-1 claude /login` per
+profile) to register up to 5 round-robin profiles. The pool waits for
+ALL profiles to exhaust before falling over to a different provider —
+see `framework/cli/claude_pool.py`.
 
-The host-worker exec's "Run now" triggers on the host (not in the API
-container) so agents get full access to docker, git, az, ssh, etc.
+### Open the dashboard
 
-```bash
-bash install/install-host-worker.sh
-```
-
-This writes `~/.config/systemd/user/reusable-agents-host-worker.service`
-and starts it. Linger is enabled so it survives logout.
-
-### 3. Register agents from your repos
-
-In any repo that has agent definitions, run:
-
-```bash
-bash /path/to/reusable-agents/install/register-all-from-dir.sh ./agents
-```
-
-Or build a thin wrapper in the consuming repo (see
-[`nsc-assistant/scripts/register-agents.sh`](https://github.com/voidsstr/nsc-assistant/blob/master/scripts/register-agents.sh)
-for an example).
-
-### 4. Open the UI
-
-http://localhost:8091/
-
-The card grid auto-glows when an agent is running. Click into an agent for
-runbook, runs, decisions, messages, storage browser, confirmations, and
-release changelog.
+<http://localhost:8091/> — agent grid, dependency graph, runs, decisions,
+messages, knowledge tab, confirmations.
 
 ## Manifest format
 
@@ -602,6 +697,46 @@ new agent — both systems above already wrap those binaries with live
 LLM stream capture, usage tracking, fallback chains, and dashboard
 visibility. Calling them directly bypasses all of that.
 
+## Implementer path-scope (per-site)
+
+The implementer agent runs aider/claude/copilot against the entire
+target repo. Without a path-scope policy, LLMs drift — recs about SEO
+meta tags have caused the implementer to refactor a mobile app on the
+same repo. Every per-site agent's `site.yaml` should declare:
+
+```yaml
+implementer:
+  repo_path: /home/voidsstr/development/<site>
+  allowed_paths:
+    - "src/**"
+    - "frontend/**"
+    - "db/migrations/**"
+    - "*.md"
+  excluded_paths:
+    - "mobile/**"
+    - "ios-extensions/**"
+  post_apply:
+    kick_mobile_build: false   # refuse to trigger EAS even on drift
+    kick_backend_deploy: true
+```
+
+Enforcement happens at two checkpoints:
+
+1. **Pre-LLM**, in `agents/implementer/build-aider-invocation.py` — any
+   rec whose `target_files` fall outside policy is deferred with reason
+   `out-of-scope per site policy`.
+2. **Post-LLM**, in `agents/implementer/run.sh` just before `git add` —
+   newly-touched files are filtered through the policy again; offenders
+   are `git checkout`-ed (or deleted if newly-created) and dropped from
+   the commit. This catches drift where an in-scope rec edits an
+   out-of-scope file as a side effect.
+
+Primitive: `framework/core/implementer_scope.py` — `ScopePolicy`
+dataclass with `is_path_allowed()`, `filter_files()`,
+`is_rec_in_scope()`. fnmatch globs, `**` matches any number of path
+segments. Schema in
+`shared/schemas/site-quality-config.schema.json`.
+
 ## Creating a new agent (the standard flow)
 
 The framework ships an `install/create-agent.sh` scaffold script that sets up
@@ -788,6 +923,72 @@ For dangerous actions:
 
 The same flow can be UI-driven: the dashboard's `Confirmations` page has
 approve/reject buttons that write directly to storage, bypassing email.
+
+## Article-author-agent conventions (for sites running editorial pipelines)
+
+The framework includes a reference `article-author-agent` blueprint
+used by aisleprompt and specpicks. Sites that pick it up MUST follow
+these rules so syndication aggregators (MSN.com, Apple News, Google
+News) keep accepting the feed.
+
+**Voice — neutral synthesis, not first-party reviews**
+
+Forbidden phrases anywhere in article body: *"we tested"*, *"in our
+lab"*, *"our team measured"*, *"we benchmarked"*, *"our testbench"*,
+*"our review rig"*. Replace with *"Per [source]…"*, *"Public
+benchmarks show…"*, *"Community measurements indicate…"*. Numeric
+claims must cite a URL inline. Disparagement requires a sourced
+criticism.
+
+Every article ends with `## Citations and sources` listing each
+inline-referenced URL plus the disclaimer:
+*"This piece is editorial synthesis based on publicly available
+information. No independent first-party benchmarking is reported."*
+Drives the `outbound_citations` array → JSON-LD `citation` field.
+
+**SEO surface area the agent must populate**
+
+- `<title>` ≤65 chars (mobile SERP cap)
+- `<meta name="description">` 140-160 chars
+- Canonical URL + Open Graph + Twitter card (1200×630 hero)
+- JSON-LD `Article` (headline, image, datePublished, dateModified,
+  author, publisher, mainEntityOfPage, citation[])
+- JSON-LD `BreadcrumbList` (Home → Vertical → Article)
+- JSON-LD `FAQPage` when `faqs` are populated
+- 3-7 declared `goal_ids` for the SEO opportunity agent
+
+**Hero image policy**
+
+Heroes are cropped to BOTH 16:9 (lead cards) and 1:1 (80×80 thumb-left
+rows on `/articles` + homepage trending rail). Pick photos that work
+for both. **Forbidden sources:** wikimedia.org, wikipedia.org, generic
+placeholder names. **Preferred:** `products.main_image_url` of a
+featured/related SKU, or a vertical-default image. The
+`compute_article_vertical` SQL trigger auto-buckets into
+`{ai-rigs, pc-gaming, retro-gaming, makers, how-to, other}` on write.
+
+**Cross-sell — Amazon + eBay**
+
+Every product mention surfaces a tagged Amazon link, an eBay link, or
+both — chosen by `products.listing_preference`:
+
+| listing_preference | Primary  | Alternate          | Typical SKUs              |
+|--------------------|----------|--------------------|---------------------------|
+| `amazon`           | Amazon   | eBay search URL    | Consumer GPUs, Mac Studio |
+| `ebay`             | eBay     | Amazon search URL  | Workstation/pro, retro    |
+| `either`           | Both     | Equal weight       | Default                   |
+
+Sites should also expose a `🛒 Editor's Picks` strip above the fold
+with side-by-side Amazon (orange pill) + eBay (blue pill) buttons +
+live `products.price`. Each picks-card emits a JSON-LD `Product`
+schema with `AggregateRating` + `Offer` for Google rich-results
+merchant pricing eligibility.
+
+The article-author-agent's full prompt + rule set lives in the site
+repo at `agents/article-author-agent/prompts/article_author_system.md`
+(the canonical reference). Any change to those rules belongs there
+first, then propagate to the per-site CLAUDE.md "How articles are
+written" section.
 
 ## Inter-agent messaging
 

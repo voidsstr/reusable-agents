@@ -50,6 +50,15 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+# Make framework/ imports work whether this script is run via run.sh
+# (which sets PYTHONPATH=REPO_ROOT) or by hand. The implementer dir is
+# `<repo>/agents/implementer/`, so REPO_ROOT is two levels up.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from framework.core.implementer_scope import ScopePolicy  # noqa: E402
+
 
 def _load_recs(path: Path) -> list[dict]:
     """Load recommendations.json, tolerating both top-level shapes."""
@@ -371,27 +380,272 @@ def _resolve_files(rec: dict, repo_path: Path, site: str) -> list[str]:
 
 
 # Rec types the framework code-editor chain handles RELIABLY today.
-# Anything outside this allowlist is deferred — the LLM either hallu-
-# cinates (top5-target-page → wrong framework convention; article-
-# author → fake psql output) or speculates beyond what's safe.
-# Validated 2026-05-04 by inspecting actual commits + reverting bad ones.
+# Anything outside this allowlist is deferred.
+#
+# Promotion policy as of 2026-05-08: every rec_type emitted by an
+# auto-queueing agent is allowlisted. The implementer's per-type code
+# paths handle the well-known shapes (DB UPDATE, template edit,
+# article INSERT, h2h commentary); types without a dedicated path
+# fall through to the generic "edit the relevant files" branch with
+# a pre-prompt warning to the LLM. We accept some LLM hallucination
+# risk on rarely-seen types in exchange for zero false-deferrals on
+# the recommendations that drive site-side metrics (the north star).
+#
+# To revert to the conservative allowlist, set
+# IMPLEMENTER_STRICT_ALLOWLIST=1 in the env — `_strict_allowlist()`
+# below switches to the original 8-type set.
+#
+# Promotion log:
+# - 2026-05-04: ctr-fix, internal-link, top5-target-page (opt-in),
+#   article-author proposals (write-then-insert)
+# - 2026-05-04: onpage-title-length, onpage-low-internal-linking,
+#   article-orphan-boost
+# - 2026-05-08: full fleet sweep — every emitted rec_type allowlisted.
+#   Drove this from the storage corpus + the seo-opportunity-agent's
+#   LLM-audit catalog at lib/analyzer/llm_audit.py (~120 types).
 TRUSTED_REC_TYPES: set[str] = {
-    "ctr-fix",                      # SQL UPDATE migrations on existing rows
-    "outdated-content",             # SQL UPDATE on a known row (slug_id)
-    "snippet-rewrite",              # SQL UPDATE on a known row (slug_id)
-    "internal-link",                # add anchor to existing template file
-    "onpage-title-length",          # static template title tweak
-    "onpage-low-internal-linking",  # add anchor to existing template
-    "article-orphan-boost",         # internal-link addition (sitemap + cross-link)
-    "catalog-audit-criterion",      # DB-only fix: SQL migration OR DEFERRED summary
-    # Add more here as each rec-type proves out. KEEP THIS CONSERVATIVE.
-    # Adding a type means: at least one production run committed clean,
-    # surgical work that survived a `git diff` review. Promotion log:
-    # - 2026-05-04: ctr-fix, internal-link, top5-target-page (opt-in),
-    #   article-author proposals (write-then-insert)
-    # - 2026-05-04: onpage-title-length, onpage-low-internal-linking,
-    #   article-orphan-boost added (similar shape to internal-link)
+    # ── Core (validated, dedicated implementer paths) ───────────────
+    "ctr-fix",                          # SQL UPDATE migrations on existing rows
+    "outdated-content",                 # SQL UPDATE on a known row (slug_id)
+    "snippet-rewrite",                  # SQL UPDATE on a known row (slug_id)
+    "internal-link",                    # add anchor to existing template file
+    "onpage-title-length",              # static template title tweak
+    "onpage-low-internal-linking",      # add anchor to existing template
+    "article-orphan-boost",             # sitemap + cross-link
+    "catalog-audit-criterion",          # DB-only fix: SQL migration OR DEFERRED summary
+    "article-author-proposal",          # write-markdown-then-insert (special path)
+    "top5-target-page",                 # opt-in template change
+
+    # ── SEO opportunity agent — analyzer.py (deterministic) ─────────
+    "onpage-meta-description",
+    "onpage-canonical-missing",
+    "onpage-canonical-issue",
+    "onpage-h1-issue",
+    "onpage-og-incomplete",
+    "onpage-twitter-card-missing",
+    "onpage-thin-content",
+    "broken-internal-link",
+    "broken-page",
+    "new-page-buying-guide",
+    "new-page-brand",
+    "new-page-comparison",
+    "new-page-use-case",
+    "new-page-troubleshooting",
+    "gsc-coverage-discovered",
+    "gsc-coverage-unknown",
+    "ssr-fix",
+    "indexing-fix",
+    "schema-markup",
+    "performance",
+    "accessibility",
+    "layout-issue",
+    "missing-content",
+    "content-expansion",
+    "content-error",
+    "duplicate-content",
+    "incorrect-categorization",
+    "image-name-mismatch",
+
+    # ── SEO opportunity agent — llm_audit.py catalog (~120 types) ───
+    # Article / E-E-A-T
+    "article-author-credentials-missing",
+    "article-cited-sources-missing",
+    "article-datemodified-missing",
+    "article-publish-update-dates",
+    "article-wordcount-schema-missing",
+    "body-internal-links-thin",
+    "body-visible-date-missing",
+    "content-freshness-low",
+    "content-keyword-stuffing",
+    "content-thin",
+    "eeat-about-missing",
+    "eeat-author-bio",
+    "eeat-author-missing",
+    "eeat-citations-missing",
+    "eeat-outbound-citation-count",
+    "eeat-policy-missing",
+    "eeat-publish-date-missing",
+    "eeat-update-date-missing",
+
+    # Conversion / CTA
+    "cta-missing",
+    "cta-position",
+    "cta-weak",
+    "conversion-path",
+
+    # Core Web Vitals / mobile
+    "cwv-font-no-display",
+    "cwv-image-format",
+    "cwv-image-no-dimensions",
+    "cwv-image-no-lazy",
+    "cwv-large-dom",
+    "cwv-render-blocking",
+    "cwv-ttfb-slow",
+    "cwv-ttfb-very-slow",
+    "mobile-font-small",
+    "mobile-horizontal-scroll",
+    "mobile-tap-targets",
+    "mobile-viewport-missing",
+
+    # FAQ / GEO / LLM-search readiness
+    "faq-quality-thin",
+    "feature-conversational-content",
+    "featured-product-pdp-improve",
+    "feature-internal-link-cluster",
+    "footer-trust-links-missing",
+    "geo-author-credentials",
+    "geo-direct-answer-missing",
+    "geo-faq-missing",
+    "geo-listicle-no-summary",
+    "geo-llms-txt-missing",
+    "geo-statistics-missing",
+    "llm-search-citation-readiness",
+    "llm-search-direct-answer-missing",
+    "llm-search-faq-format",
+    "llm-search-quote-extractability",
+
+    # Headings
+    "h1-mismatch",
+    "h1-missing",
+    "h1-multiple",
+    "heading-hierarchy",
+
+    # Images
+    "image-alt-empty-content",
+    "image-alt-keyword-stuffing",
+    "image-alt-missing",
+    "image-filename-non-descriptive",
+
+    # Indexing
+    "indexing-breadcrumb-parity",
+    "indexing-canonical-non-2xx",
+    "indexing-canonical-self",
+    "indexing-hreflang-asymmetric",
+    "indexing-hreflang-missing",
+    "indexing-noindex-conflict",
+    "indexing-pagination-rel",
+    "indexing-robots-blocked",
+    "indexing-sitemap-404",
+    "indexing-sitemap-shrank",
+    "indexing-soft-404",
+
+    # Internal linking
+    "internal-link-graph-regression",
+    "internal-link-to-featured",
+    "link-anchor-generic",
+    "link-anchor-keyword",
+    "link-broken",
+    "link-nofollow-internal",
+    "link-orphan",
+    "link-redirect-chain",
+
+    # Meta
+    "meta-description-cta",
+    "meta-description-duplicate",
+    "meta-description-keyword",
+    "meta-description-length",
+    "meta-description-missing",
+    "meta-title-brand",
+    "meta-title-duplicate",
+    "meta-title-keyword",
+    "meta-title-length",
+
+    # Product
+    "product-affiliate-cta-position",
+    "product-affiliate-tag-missing",
+    "product-aggregate-rating-thin",
+    "product-comparison-link-missing",
+    "product-image-count-thin",
+    "product-pros-cons-missing",
+    "product-schema-incomplete",
+    "product-specs-table-missing",
+    "product-image-present",
+    "product-image-valid-url",
+    "product-brand-present",
+    "product-schema-rich-results",
+
+    # Recipe
+    "recipe-conversational-intro-missing",
+    "recipe-internal-links-thin",
+    "recipe-schema-incomplete",
+    "recipe-image-present",
+    "recipe-image-valid-url",
+    "recipe-video-present",
+    "recipe-nutrition-sanity",
+    "recipe-cuisine-assigned",
+    "recipe-duplicate-source-url",
+    "recipe-category-in-allowlist",
+    "recipe-category-assigned",
+
+    # Review
+    "review-buyer-persona-segmentation-missing",
+    "review-citations-section-missing",
+    "review-specs-source-attribution-missing",
+    "review-template-incomplete",
+
+    # Schema (JSON-LD)
+    "schema-article-missing",
+    "schema-breadcrumblist-missing",
+    "schema-deprecated",
+    "schema-faqpage-missing",
+    "schema-howto-missing",
+    "schema-incomplete",
+    "schema-invalid",
+    "schema-organization-missing",
+    "schema-product-missing",
+    "schema-website-searchaction-missing",
+
+    # Trust / topical
+    "topical-cluster-orphan",
+    "trust-signal-density-thin",
+    "trust-signals-missing",
+
+    # URL hygiene
+    "url-deep",
+    "url-non-descriptive",
+    "url-trailing-slash",
+    "url-uppercase",
+
+    # ── Head-to-head agent (specpicks) ──────────────────────────────
+    "h2h-comparison-format-readiness",
+    "h2h-quote-worthy-verdict-missing",
+    "h2h-stale-pricing",
+    "h2h-stale-pricing-product",
+
+    # ── Competitor research agent (parity / advantage / UX gaps) ────
+    "parity-feature",
+    "competitive-advantage",
+    "ux-improvement",
+    "content-gap",
+    "monetization",
+    "marketing-positioning",
+    "integrations",
+
+    # ── Consolidation primitive (install/consolidate-queued.py) ─────
+    "page-cleanup",                     # mega-rec: N issues on one URL → one LLM call
+
+    # ── Generic / catch-all ─────────────────────────────────────────
+    "other",
 }
+
+
+def _strict_allowlist() -> set[str]:
+    """Conservative pre-2026-05-08 allowlist. Only these types ran in
+    production; the implementer reverts to this set when
+    IMPLEMENTER_STRICT_ALLOWLIST=1 is set."""
+    return {
+        "ctr-fix", "outdated-content", "snippet-rewrite",
+        "internal-link", "onpage-title-length",
+        "onpage-low-internal-linking", "article-orphan-boost",
+        "catalog-audit-criterion",
+    }
+
+
+# Apply the strict-mode env override at import time so a flip doesn't
+# require a code change.
+import os as _os_strict
+if _os_strict.environ.get("IMPLEMENTER_STRICT_ALLOWLIST") == "1":
+    TRUSTED_REC_TYPES = _strict_allowlist()
 
 
 # Patterns lifted from the leaked Claude Code execution/index.ts
@@ -434,6 +688,142 @@ def _scrub_dangerous_commands(text: str) -> tuple[str, list[str]]:
     return out, hits
 
 
+def _detect_repo_stack(repo_path: Path) -> str:
+    """Detect web framework + SSR mode so the LLM uses correct file
+    conventions. Returns a short multi-line hint string injected into
+    the prompt.
+
+    Catches the historical Next.js-on-Vite failure mode where the LLM
+    wrote `pages/buying-guide/[slug].tsx` on a repo that uses
+    react-router. Also flags SSR vs SPA so SEO recs land in the SSR
+    render path instead of post-hydration client code.
+    """
+    hints: list[str] = []
+    pkg_paths = [
+        repo_path / "package.json",
+        repo_path / "frontend" / "package.json",
+    ]
+    deps: dict[str, str] = {}
+    pkg_seen: Path | None = None
+    # Walk every candidate package.json and prefer the one that actually
+    # declares a frontend framework (next/vite/remix). Top-level
+    # package.json on monorepos often has only tooling deps, so don't
+    # stop at the first one we find.
+    framework_keys = {"next", "vite", "react-router", "react-router-dom"}
+    for p in pkg_paths:
+        if not p.exists():
+            continue
+        try:
+            j = json.loads(p.read_text())
+            local: dict[str, str] = {}
+            for key in ("dependencies", "devDependencies"):
+                d = j.get(key) or {}
+                if isinstance(d, dict):
+                    local.update({k: str(v) for k, v in d.items()})
+            if not pkg_seen or any(k in local for k in framework_keys) or any(k.startswith("@remix-run/") for k in local):
+                deps = local
+                pkg_seen = p
+                if any(k in local for k in framework_keys) or any(k.startswith("@remix-run/") for k in local):
+                    break
+        except Exception:
+            continue
+    if not deps:
+        return ""
+
+    has_next = "next" in deps
+    has_vite = "vite" in deps
+    has_remix = any(k.startswith("@remix-run/") for k in deps)
+    has_react_router = any(k.startswith("react-router") for k in deps)
+    has_helmet = "react-helmet-async" in deps or "react-helmet" in deps
+    pkg_dir = pkg_seen.parent if pkg_seen else repo_path
+
+    fw = "unknown"
+    if has_next:
+        fw = "Next.js"
+    elif has_remix:
+        fw = "Remix"
+    elif has_vite and has_react_router:
+        fw = "Vite + react-router (SPA-style)"
+    elif has_vite:
+        fw = "Vite"
+
+    hints.append(f"Frontend framework: {fw} (detected from {pkg_seen.relative_to(repo_path) if pkg_seen else '?'})")
+
+    if fw.startswith("Vite"):
+        hints.append(
+            "  ⚠ This is NOT a Next.js project. DO NOT create files under "
+            "`pages/` or `app/`. Routes live in App.tsx / a router config; "
+            "page components live under `src/pages/` (or `frontend/src/pages/`). "
+            "Use the existing routing pattern — do not introduce Next.js "
+            "file-based routing."
+        )
+
+    # SSR detection — look for an SSR entry file.
+    ssr_paths = [
+        repo_path / "src" / "services" / "ssrRender.ts",
+        repo_path / "src" / "entry-server.ts",
+        repo_path / "src" / "entry-server.tsx",
+        repo_path / "frontend" / "src" / "entry-server.tsx",
+        repo_path / "frontend" / "src" / "services" / "ssrRender.ts",
+        repo_path / "server.ts",
+        repo_path / "server.js",
+        pkg_dir / "src" / "services" / "ssrRender.ts",
+        pkg_dir / "src" / "entry-server.tsx",
+    ]
+    ssr_file: Path | None = None
+    for sp in ssr_paths:
+        if sp.exists():
+            ssr_file = sp
+            break
+
+    if ssr_file:
+        rel = ssr_file.relative_to(repo_path)
+        # Look for an ssrHead-style sibling — same SSR layer where head
+        # tags / JSON-LD are typically built. ssrRender handles the body
+        # HTML; ssrHead handles <head> JSON-LD + meta tags. Both need the
+        # same product/data filters to stay consistent.
+        ssr_head = None
+        for c in (ssr_file.parent / "ssrHead.ts", ssr_file.parent / "ssrHead.tsx"):
+            if c.exists():
+                ssr_head = c.relative_to(repo_path)
+                break
+        sibling = f" + `{ssr_head}`" if ssr_head else ""
+        hints.append(
+            f"SSR: this site server-renders pages via `{rel}`{sibling}. "
+            "For any rec that affects what bots/crawlers see (JSON-LD, "
+            "meta tags, canonical/og:* tags, structured data, robots, "
+            "hreflang) OR what data-quality filters apply to product "
+            "lists shown in indexed JSON-LD ItemList schemas (blocklists, "
+            "rating gates, dedup rules), the change MUST land in the SSR "
+            "file(s) above. Client-only React filters (a `useEffect` "
+            "filter, a function in a page component) do NOT apply to the "
+            "SSR'd HTML or the SSR'd JSON-LD. Search engines see only the "
+            "server-rendered output — so a blocklist that lives in "
+            "`SomePage.tsx` is invisible to Google. Whenever a rec edits "
+            "a client-side filter / blocklist / quality gate, MIRROR it "
+            f"into `{rel}`{(' and `' + str(ssr_head) + '`') if ssr_head else ''} "
+            "in the same dispatch."
+        )
+    elif has_next:
+        hints.append(
+            "SSR: Next.js — use `getServerSideProps` / `getStaticProps` "
+            "or the App Router's server components. Head tags via "
+            "`<Head>` (pages dir) or `metadata` export (app dir)."
+        )
+    else:
+        hints.append(
+            "SSR: not detected — this is a client-rendered SPA. SEO recs "
+            "may still need server-side meta-tag injection (check "
+            "index.html template + any pre-render config like "
+            "vite-plugin-ssr / vike before assuming pure client-side is OK)."
+        )
+
+    if has_helmet:
+        hints.append("Head tags: `react-helmet-async` is available — use it for client-side <head> updates.")
+
+    return "Repo stack hints (read before editing):\n" + "\n".join(hints)
+
+
 def build_prompt(recs: list[dict], repo_path: Path, site: str,
                  dispatch_kind: str,
                  pre_dirty_list: list[str],
@@ -455,7 +845,15 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
     eligible_recs: list[dict] = []
     article_recs: list[dict] = []   # special handling — see article block
     for r in recs:
-        rt = (r.get("type") or "").lower()
+        # progressive-improvement-agent emits rec-type under `category`
+        # (its long-standing field name); SEO + catalog-audit emit it under
+        # `type`. Treat them interchangeably so the TRUSTED allowlist
+        # gate doesn't silently defer 100% of PI's output. If both are
+        # set, `type` wins. Persist back to `r["type"]` so downstream
+        # logging + dispatch records show the resolved value.
+        rt = (r.get("type") or r.get("category") or "").lower()
+        if rt and not r.get("type"):
+            r["type"] = rt
         # Article-author proposals carry a `proposal` block. We route
         # them through the write-body-then-insert pattern: the LLM
         # writes only Markdown to a file (something it's good at), and
@@ -604,57 +1002,66 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
             # script (`scripts/catalog-quality-audit.ts`) is the source
             # of truth for what the criterion checks — preload it so
             # the model can read the SQL the criterion actually runs.
-            evidence_rows = r.get("evidence") or []
-            ev_text = "\n".join(
-                f"  - id={e.get('ref_id','?')}  "
-                f"{(e.get('snippet') or '')[:90]}"
-                for e in evidence_rows[:30]
-            )
-            audit_script_path = "scripts/catalog-quality-audit.ts"
-            audit_script_full = repo_path / audit_script_path
-            if audit_script_full.is_file():
-                rel = str(audit_script_full.relative_to(repo_path))
-                if rel not in seen_files:
-                    seen_files.add(rel)
-                    all_files.append(rel)
-                    files = files + [rel]
-            block.append(
-                f"CATALOG-AUDIT REC — criterion `{catalog_criterion or '?'}`. "
-                f"This is a DB-only fix; the change is a SQL migration "
-                f"or a noop+defer summary, NOT a code edit.\n\n"
-                f"Concrete evidence rows (first 30 — there may be more "
-                f"matching the criterion):\n{ev_text or '  (no evidence rows)'}\n\n"
-                f"Reference: `{audit_script_path}` (preloaded). Read the "
-                f"criterion's `check` SQL to understand exactly what "
-                f"condition flagged these rows. The DETAIL field on the "
-                f"criterion explains the right fix shape — it may say:\n"
-                f"  • 'defer to <name>.py daily backfill' → write a "
-                f"DEFERRED summary, do not edit the DB. Specifically: "
-                f"recipe-image-present + product-image-present should "
-                f"defer to the existing image-backfill jobs.\n"
-                f"  • 'canonical mapping' → write a `db/migrations/"
-                f"<UTC-ts>_catalog-audit-{catalog_criterion or 'fix'}.sql` "
-                f"that UPDATEs the offending rows to the canonical "
-                f"value. Use only the ref_ids listed above + a WHERE "
-                f"clause that's safe (no destructive blanket UPDATEs).\n"
-                f"  • 'deactivate' → UPDATE the row to is_active=false "
-                f"with a reason in a comment column if one exists.\n\n"
-                f"REQUIRED OUTPUT:\n"
-                f"  EITHER: a NEW SQL migration file at db/migrations/<ts>_<criterion>.sql "
-                f"that includes a header comment naming the criterion + "
-                f"the row ids it targets, then the UPDATE/DELETE statements, "
-                f"then a one-line VERIFY comment showing how to re-run "
-                f"the criterion's check.\n"
-                f"  OR: a `changes/{rid}.summary.md` whose first line is "
-                f"`# {rid} — {catalog_criterion or 'catalog-audit'}` and "
-                f"second-line `**Status:** DEFERRED — <one-sentence "
-                f"reason>` (e.g. \"row counts deferred to the "
-                f"image-backfill cron job\"). The wrapper picks up "
-                f"either form.\n\n"
-                f"Do NOT execute SQL via psql/pg/sqlite-CLI. The "
-                f"deployer's migration runner applies the SQL on "
-                f"deploy. Hand-execution against the live DB skips "
-                f"the audit trail.")
+            # Compact prompt: when the rec carries a migration_template
+            # (the catalog-audit agent attaches one for known
+            # criteria), we ship the LLM the EXACT SQL to write — it
+            # just needs to copy it into a new migration file with the
+            # right timestamp prefix. This trims the prompt from
+            # ~11k chars (including audit-script preload) down to
+            # ~1k chars, lets local-LLM tier converge, AND is more
+            # deterministic across all backends.
+            tmpl = r.get("migration_template") or {}
+            ref_ids = r.get("ref_ids") or [
+                e.get("ref_id") for e in (r.get("evidence") or []) if e.get("ref_id")
+            ]
+            if tmpl.get("sql_with_ids"):
+                block.append(
+                    f"CATALOG-AUDIT REC — criterion `{catalog_criterion or '?'}`. "
+                    f"DB-only fix.\n\n"
+                    f"Action: {tmpl.get('action','')}\n"
+                    f"Target ids: {', '.join(ref_ids[:30])}\n\n"
+                    f"REQUIRED OUTPUT: write a NEW SQL migration file at "
+                    f"`db/migrations/<UTC-ts>_{tmpl.get('filename','catalog-audit')}.sql` "
+                    f"containing EXACTLY this SQL plus a 2-line "
+                    f"`-- Criterion: {catalog_criterion}` / "
+                    f"`-- Action: {tmpl.get('action','')}` header and a "
+                    f"trailing `-- VERIFY: ...` comment showing how to "
+                    f"re-run the audit on these ids:\n\n"
+                    f"```sql\n{tmpl['sql_with_ids']}\n```\n\n"
+                    f"Then write `changes/{rid}.summary.md` with `# {rid} "
+                    f"— {catalog_criterion}` / `**Status:** SHIPPED — "
+                    f"<filename>` (no DEFERRED). The migration runs on "
+                    f"deploy; do NOT execute it via psql.")
+            else:
+                # Unknown criterion — fall back to the verbose path
+                # (preloads audit script for the LLM to reverse-engineer).
+                evidence_rows = r.get("evidence") or []
+                ev_text = "\n".join(
+                    f"  - id={e.get('ref_id','?')}  "
+                    f"{(e.get('snippet') or '')[:90]}"
+                    for e in evidence_rows[:30]
+                )
+                audit_script_path = "scripts/catalog-quality-audit.ts"
+                audit_script_full = repo_path / audit_script_path
+                if audit_script_full.is_file():
+                    rel = str(audit_script_full.relative_to(repo_path))
+                    if rel not in seen_files:
+                        seen_files.add(rel)
+                        all_files.append(rel)
+                        files = files + [rel]
+                block.append(
+                    f"CATALOG-AUDIT REC — criterion `{catalog_criterion or '?'}` "
+                    f"(no template registered — fallback path). DB-only fix.\n\n"
+                    f"Concrete evidence rows:\n{ev_text or '  (no evidence rows)'}\n\n"
+                    f"Reference: `{audit_script_path}` (preloaded). Read the "
+                    f"criterion's `check` SQL, then write a SQL migration at "
+                    f"`db/migrations/<UTC-ts>_catalog-audit-{catalog_criterion or 'fix'}.sql` "
+                    f"that UPDATE/DELETEs the listed ref_ids per the criterion's "
+                    f"intent (deactivate / null+backfill / canonical mapping). "
+                    f"Use a defensive WHERE clause that's safe to re-run.\n\n"
+                    f"Write `changes/{rid}.summary.md` with `# {rid} — "
+                    f"{catalog_criterion}` / `**Status:** SHIPPED — <filename>`. "
+                    f"Do NOT execute via psql; deployer runs migrations.")
         elif is_db_snippet_rec:
             block.append(
                 "DB-backed page: the URL above is rendered from a "
@@ -704,9 +1111,16 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
         more = (f"\n  ... ({len(pre_dirty_list) - 60} more)"
                 if len(pre_dirty_list) > 60 else "")
         pre_dirty_section = (
-            "\n\nCRITICAL — files in the working tree that you MUST NOT "
-            "EDIT (they belong to a parallel session and the wrapper will "
-            "drop any of your edits to them anyway):\n" + head + more)
+            "\n\nWorking tree was already dirty before this run on these "
+            "files — they may contain in-progress work from a parallel "
+            "session. PREFER editing other files when possible. You MAY "
+            "edit these if a rec genuinely requires it (the wrapper will "
+            "commit content changes), but stay narrowly within the rec's "
+            "scope and do NOT casually rewrite or reformat them:\n"
+            + head + more)
+
+    stack_hint = _detect_repo_stack(repo_path)
+    stack_section = ("\n\n" + stack_hint) if stack_hint else ""
 
     prompt = f"""You are the implementer agent running in aider fallback mode.
 Your job: apply the {len(recs)} recommendation(s) below to the repo at
@@ -721,9 +1135,58 @@ Rules:
      questions — `--yes-always` is set, and there's no human to answer.
   4. Use `/run` for shell, `/web` for URL fetches, `/add` to bring more
      files into context if needed. Standard aider tools.
-  5. If a rec is ambiguous or would require speculative refactoring,
-     SKIP IT — leave it for the next claude-pool tick. Do not guess.
-{pre_dirty_section}
+  5. PREFER ACTION over deferral. The recs you receive are pre-filtered
+     by an allowlist that only lets through types where the framework
+     has validated the LLM can ship safe edits. So when you receive a
+     rec, the CORRECT default is to make the edit. Defer ONLY when the
+     rec text explicitly says no action is required (e.g. evidence
+     proves the issue is handled elsewhere) — never because the work
+     looks large or speculative. If the file list is unclear, use
+     `/run grep` to locate the right files; do not skip. The deployer's
+     test/build/smoke gates are what protect prod, not your reluctance.
+  6. CONTEXT BUDGET: edit AT MOST 8 files TOTAL across all recs in this
+     batch. If recs collectively touch more, prioritize the highest-
+     severity ones and skip the rest — they will be re-dispatched on the
+     next tick. Going over the budget breaks the LLM's context window
+     and the whole batch fails.
+  7. SCOPE EACH REC NARROWLY: most recs are template tweaks (single
+     file). Only widen to multi-file edits when the rec EXPLICITLY says
+     "across these N pages" or "every product page". When a rec lists
+     "Likely files to edit", treat that list as a HARD CAP — do not
+     auto-expand to sibling files just because they look similar.
+  8. END-TO-END COMPLETION (NO DEAD CODE). The rec is "done" only when
+     a user-visible, automatically-verifiable change ships to the page
+     or API the rec targeted. CONCRETELY:
+       a) If you create a NEW component / module / utility (e.g.
+          `JsonLdScripts.tsx`, `useFooHook.ts`, `helpers/bar.ts`), you
+          MUST also add at least one IMPORT + USE site in an existing
+          page/route/component. A new file with zero callers is a
+          PARTIAL COMPLETION — not acceptable.
+       b) If you create a new schema/type/fixture, you MUST also wire
+          it into the data-flow path that triggered the rec
+          (e.g. an API route that returns it, a page that renders it).
+       c) Before exiting, run `/run grep -rn '<NewSymbolName>' --include='*.ts*'`
+          for every new top-level symbol you introduced. If grep
+          returns ONLY the file that defines it, you have not
+          completed the rec — go add the import + call site.
+       d) For multi-page recs ("across all comparison pages", "every
+          product page"), add the integration to AT LEAST 2 distinct
+          pages so the LLM doesn't wave-its-hands by editing only one.
+       e) If the integration would require touching files outside the
+          rec's "Likely files to edit" list AND you don't see a clear
+          import path, prefer EXTENDING an existing file over leaving
+          the new code unused. If truly impossible, write a one-line
+          DEFER summary explaining why — never ship orphan scaffolding.
+
+     Reason: production smoke tests verify URLs respond — they do NOT
+     check that a new component file is imported by anything. A rec
+     that creates `lib/jsonld/productSchema.ts` but doesn't add it to
+     `pages/buying-guide/[slug].tsx` will pass smoke (the file exists,
+     the build compiles, the page returns 200) but produce ZERO user-
+     visible change. That has happened in past dispatches and the
+     follow-up cleanup is more expensive than doing it right the first
+     time.
+{pre_dirty_section}{stack_section}
 
 Site: {site}
 Dispatch kind: {dispatch_kind}
@@ -756,6 +1219,13 @@ def main() -> int:
                     help="Comma-separated additional rec types to add to "
                          "TRUSTED_REC_TYPES for this run only (used for "
                          "supervised one-off validation).")
+    ap.add_argument("--site-config", default="",
+                    help="Path to the site.yaml. If set, the implementer."
+                         "{allowed,excluded}_paths block is enforced — recs "
+                         "whose target_files fall outside the policy are "
+                         "deferred with reason 'out-of-scope per site policy' "
+                         "and never reach the LLM. Use to keep web-content "
+                         "agents away from mobile/, ios-extensions/, etc.")
     args = ap.parse_args()
 
     recs_path = Path(args.recs)
@@ -799,8 +1269,85 @@ def main() -> int:
                  if t.strip()}
         TRUSTED_REC_TYPES.update(extra)
 
+    # ---- Site path-scope policy ----
+    # Optional. When the site.yaml has an implementer.allowed_paths or
+    # implementer.excluded_paths block, defer any rec whose target files
+    # land outside it. This is what keeps SEO/PI agents away from
+    # mobile/ on aisleprompt — see the framework's
+    # framework/core/implementer_scope.py docstring for the full spec.
+    policy = ScopePolicy()
+    if args.site_config and Path(args.site_config).is_file():
+        try:
+            import yaml  # type: ignore
+            cfg = yaml.safe_load(Path(args.site_config).read_text()) or {}
+            policy = ScopePolicy.from_site_config(cfg)
+            if policy.allowed_paths or policy.excluded_paths:
+                print(
+                    f"build-aider-invocation: scope policy active "
+                    f"(allowed={list(policy.allowed_paths)}, "
+                    f"excluded={list(policy.excluded_paths)})",
+                    file=sys.stderr,
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"build-aider-invocation: site-config load failed ({e}) — "
+                  f"running without scope policy", file=sys.stderr)
+
+    out_of_scope: list[dict] = []
+    if policy.allowed_paths or policy.excluded_paths:
+        in_scope_recs: list[dict] = []
+        for r in selected:
+            rec_files: list[str] = []
+            for k in ("target_files", "files", "target_paths", "files_to_edit"):
+                v = r.get(k)
+                if isinstance(v, list):
+                    rec_files.extend(str(x) for x in v if x)
+            ok, denied = policy.is_rec_in_scope(rec_files)
+            if not ok:
+                out_of_scope.append({
+                    "rec_id": r.get("id"),
+                    "type": (r.get("type") or r.get("category") or "").lower(),
+                    "reason": (
+                        f"out-of-scope per site policy: target files "
+                        f"{denied} not permitted by "
+                        f"implementer.allowed_paths / "
+                        f"implementer.excluded_paths in site.yaml"
+                    ),
+                })
+            else:
+                in_scope_recs.append(r)
+        if out_of_scope:
+            print(
+                f"build-aider-invocation: {len(out_of_scope)}/{len(selected)} "
+                f"recs deferred by site path-scope policy",
+                file=sys.stderr,
+            )
+            for d in out_of_scope:
+                print(f"  scope-defer {d['rec_id']} ({d['type']}): "
+                      f"{d['reason'][:160]}", file=sys.stderr)
+        selected = in_scope_recs
+        if not selected:
+            # All recs scope-deferred — write deferred.json + exit rc=3
+            # the same way the trusted-types allowlist does. The wrapper
+            # already handles rc=3 by recording the run as "deferred".
+            if args.out_deferred:
+                Path(args.out_deferred).write_text(
+                    json.dumps(
+                        {"deferred": out_of_scope,
+                         "deferred_count": len(out_of_scope),
+                         "applied_count": 0,
+                         "reason_class": "site-scope-policy"},
+                        indent=2,
+                    )
+                )
+            print("build-aider-invocation: ALL recs out-of-scope — exiting "
+                  "without dispatch", file=sys.stderr)
+            return 3
+
     prompt, files, deferred = build_prompt(
         selected, repo_path, args.site or "", args.dispatch_kind, pre_dirty)
+    # Merge scope-policy defers into the deferred list so downstream
+    # logging shows both classes uniformly.
+    deferred = out_of_scope + deferred
 
     # Article-author stub creation: aider can only write to files in
     # its chat context (`--file` args). For article recs, pre-create
