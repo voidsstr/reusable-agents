@@ -1137,6 +1137,7 @@ except Exception: pass
                             CHANGED_FILES_LIST="$CE_NEW_FILES" \
                             SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" \
                             REPO_PATH="$IMPLEMENTER_REPO_PATH" \
+                            DISPATCH_KIND="$DISPATCH_KIND" \
                             python3 - <<'PY'
 import json, os, subprocess, sys, yaml
 from pathlib import Path
@@ -1145,7 +1146,7 @@ from framework.core.implementer_scope import ScopePolicy
 
 files = [ln.strip() for ln in Path(os.environ['CHANGED_FILES_LIST']).read_text().splitlines() if ln.strip()]
 cfg = yaml.safe_load(Path(os.environ['SITE_CONFIG_PATH']).read_text()) or {}
-policy = ScopePolicy.from_site_config(cfg)
+policy = ScopePolicy.from_site_config(cfg, dispatch_kind=os.environ.get('DISPATCH_KIND') or None)
 if not (policy.allowed_paths or policy.excluded_paths):
     sys.exit(0)
 allowed, denied = policy.filter_files(files)
@@ -1216,6 +1217,59 @@ Files staged: $CE_NEW_COUNT (set-diff of post-edit vs pre-edit)" 2>&1 | head -5
                     cat > "$RESPONDER_RUN_DIR/_ship_status.json" <<SHIP_EOF
 {"shipped": $SHIP_TOTAL, "deferred": 0, "reason": "code_edit_committed", "rc": 0, "sha": "$SHA", "files": $CE_NEW_COUNT, "backend": "${CE_WINNER:-?}"}
 SHIP_EOF
+
+                    # ---- Post-apply mobile-build hook ----
+                    # If the commit touched mobile/ AND the policy says
+                    # post_apply.kick_mobile_build is true (typically
+                    # only under dispatch_kind=crash-fix), kick an EAS
+                    # build via the site's scripts/build-and-submit.sh.
+                    # Backgrounded so it doesn't block the implementer
+                    # run completion. Output → /tmp/eas-build-<sha>.log.
+                    if [ -n "${SEO_AGENT_CONFIG:-}" ] && [ -f "$SEO_AGENT_CONFIG" ] && [ "$CE_NEW_COUNT" -gt 0 ]; then
+                        EAS_KICK_CMD=$(
+                            PYTHONPATH="$REPO_ROOT" \
+                            CHANGED_FILES_LIST="$CE_NEW_FILES" \
+                            SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" \
+                            REPO_PATH="$IMPLEMENTER_REPO_PATH" \
+                            DISPATCH_KIND="$DISPATCH_KIND" \
+                            python3 - <<'PY'
+import os, sys, yaml
+from pathlib import Path
+sys.path.insert(0, os.environ['REPO_ROOT'])
+from framework.core.implementer_scope import ScopePolicy
+
+files = [ln.strip() for ln in Path(os.environ['CHANGED_FILES_LIST']).read_text().splitlines() if ln.strip()]
+cfg = yaml.safe_load(Path(os.environ['SITE_CONFIG_PATH']).read_text()) or {}
+policy = ScopePolicy.from_site_config(cfg, dispatch_kind=os.environ.get('DISPATCH_KIND') or None)
+
+# Only fire when (a) the touched fileset includes a mobile/ path AND
+# (b) the policy says kick_mobile_build for this dispatch_kind.
+if not policy.kick_mobile_build:
+    sys.exit(0)
+if not policy.touched_mobile(files):
+    sys.exit(0)
+# Build candidate paths the site might ship a build script at — fall
+# back through common conventions. Sites without a build script will
+# silently no-op (the kick is opportunistic, not mandatory).
+repo = Path(os.environ['REPO_PATH'])
+for cand in ('mobile/scripts/build-and-submit.sh',
+             'mobile/scripts/build-and-submit',
+             'scripts/build-and-submit.sh'):
+    p = repo / cand
+    if p.is_file() and os.access(p, os.X_OK):
+        print(f'cd {repo} && bash {cand} build')
+        break
+PY
+                        )
+                        if [ -n "$EAS_KICK_CMD" ]; then
+                            EAS_LOG="/tmp/eas-build-${SHA:-unknown}.log"
+                            echo "[implementer] kicking mobile build: $EAS_KICK_CMD (log: $EAS_LOG)" >&2
+                            nohup bash -c "$EAS_KICK_CMD" >"$EAS_LOG" 2>&1 < /dev/null &
+                            disown
+                        else
+                            echo "[implementer] mobile build hook eligible but no scripts/build-and-submit.sh found — skipping" >&2
+                        fi
+                    fi
                     # Mark each dispatched rec as implemented:true in
                     # the run-dir's recommendations.json so the dash-
                     # board sees it shipped (claude-mode does this via

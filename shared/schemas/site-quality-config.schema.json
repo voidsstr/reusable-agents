@@ -156,6 +156,35 @@
               "description": "After an apply that touches backend (src/, db/, frontend/), kick off the Azure Container App deploy. Set false to require manual deploys."
             }
           }
+        },
+        "scope_by_dispatch_kind": {
+          "type": "object",
+          "description": "Optional. Per-dispatch_kind scope overrides. When the implementer is invoked with a dispatch_kind that matches a key here, the value REPLACES the default allowed_paths / excluded_paths / post_apply for that run. Typical use: let the crash-watcher (dispatch_kind=crash-fix) edit mobile/ while SEO / PI / catalog-audit (default dispatch_kind) stay in web+backend paths.",
+          "patternProperties": {
+            "^[a-z][a-z0-9_-]*$": {
+              "type": "object",
+              "description": "Per-dispatch-kind scope. Same shape as the parent implementer block (allowed_paths, excluded_paths, post_apply).",
+              "additionalProperties": false,
+              "properties": {
+                "allowed_paths": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "excluded_paths": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "post_apply": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kick_mobile_build": { "type": "boolean" },
+                    "kick_backend_deploy": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },

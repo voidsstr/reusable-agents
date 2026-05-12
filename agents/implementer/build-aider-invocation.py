@@ -1280,11 +1280,15 @@ def main() -> int:
         try:
             import yaml  # type: ignore
             cfg = yaml.safe_load(Path(args.site_config).read_text()) or {}
-            policy = ScopePolicy.from_site_config(cfg)
+            # Pass dispatch_kind so the crash-watcher (dispatch_kind=
+            # "crash-fix") gets a scope that allows mobile/ while
+            # SEO / PI / catalog-audit etc. stay in their default lane.
+            policy = ScopePolicy.from_site_config(cfg, dispatch_kind=args.dispatch_kind)
             if policy.allowed_paths or policy.excluded_paths:
                 print(
                     f"build-aider-invocation: scope policy active "
-                    f"(allowed={list(policy.allowed_paths)}, "
+                    f"(dispatch_kind={args.dispatch_kind!r}, "
+                    f"allowed={list(policy.allowed_paths)}, "
                     f"excluded={list(policy.excluded_paths)})",
                     file=sys.stderr,
                 )

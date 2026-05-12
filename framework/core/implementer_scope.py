@@ -58,14 +58,53 @@ class ScopePolicy:
     kick_backend_deploy: bool = True
 
     @classmethod
-    def from_site_config(cls, site_cfg: dict | None) -> "ScopePolicy":
-        """Build a policy from a site.yaml dict. Tolerates missing keys."""
+    def from_site_config(
+        cls,
+        site_cfg: dict | None,
+        *,
+        dispatch_kind: str | None = None,
+    ) -> "ScopePolicy":
+        """Build a policy from a site.yaml dict.
+
+        When `dispatch_kind` is set and the config has a matching entry
+        under `implementer.scope_by_dispatch_kind.<kind>`, the per-kind
+        block REPLACES (not merges with) the default policy. Rationale:
+        the crash-watcher needs to edit mobile/ while SEO must not, so
+        their scope rules are mutually exclusive — merging would let
+        SEO drift into mobile by accident. Authors can copy the default
+        keys into the per-kind block if they want partial overlap.
+
+        Example site.yaml:
+
+            implementer:
+              allowed_paths: ["src/**", "frontend/**"]
+              excluded_paths: ["mobile/**"]
+              scope_by_dispatch_kind:
+                crash-fix:
+                  allowed_paths: ["src/**", "frontend/**", "mobile/**"]
+                  excluded_paths: []
+                  post_apply:
+                    kick_mobile_build: true
+
+        `dispatch_kind="crash-fix"` here yields a policy that allows
+        mobile/ and will kick the EAS build on apply. Any other
+        dispatch_kind (or no dispatch_kind) falls back to the default.
+        """
         impl = (site_cfg or {}).get("implementer") or {}
         if not isinstance(impl, dict):
             return cls()
-        allowed = tuple(_normalize(p) for p in (impl.get("allowed_paths") or []) if isinstance(p, str))
-        excluded = tuple(_normalize(p) for p in (impl.get("excluded_paths") or []) if isinstance(p, str))
-        post = impl.get("post_apply") or {}
+
+        # Choose which block defines this dispatch's scope.
+        block: dict = impl
+        per_kind = impl.get("scope_by_dispatch_kind")
+        if dispatch_kind and isinstance(per_kind, dict):
+            override = per_kind.get(dispatch_kind)
+            if isinstance(override, dict):
+                block = override
+
+        allowed = tuple(_normalize(p) for p in (block.get("allowed_paths") or []) if isinstance(p, str))
+        excluded = tuple(_normalize(p) for p in (block.get("excluded_paths") or []) if isinstance(p, str))
+        post = block.get("post_apply") or {}
         return cls(
             allowed_paths=allowed,
             excluded_paths=excluded,

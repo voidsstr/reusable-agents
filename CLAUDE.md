@@ -448,6 +448,22 @@ reverted — keep it tight to one canonical operator inbox.
 >   post_apply:
 >     kick_mobile_build: false
 >     kick_backend_deploy: true
+>   # Per-dispatch-kind overrides. Different agents have different
+>   # legitimate scopes — the crash-watcher needs mobile/, SEO must
+>   # not. The implementer reads dispatch_kind from the dispatching
+>   # agent and applies the matching block instead of the default.
+>   scope_by_dispatch_kind:
+>     crash-fix:                             # crash-watcher-agent
+>       allowed_paths:
+>         - "src/**"
+>         - "frontend/**"
+>         - "mobile/**"
+>         - "ios-extensions/**"
+>         - "android/**"
+>       excluded_paths: []
+>       post_apply:
+>         kick_mobile_build: true   # auto-kick EAS on mobile fix
+>         kick_backend_deploy: true
 > ```
 >
 > **Two enforcement checkpoints:**
@@ -464,8 +480,9 @@ reverted — keep it tight to one canonical operator inbox.
 >    side effect.
 >
 > Primitive: [`framework/core/implementer_scope.py`](framework/core/implementer_scope.py).
-> `ScopePolicy.from_site_config(cfg)` → `is_path_allowed()`,
-> `filter_files()`, `is_rec_in_scope()`. fnmatch glob syntax, `**`
+> `ScopePolicy.from_site_config(cfg, dispatch_kind=...)` — when
+> `dispatch_kind` matches a key under `scope_by_dispatch_kind`, that
+> block REPLACES (not merges with) the default. fnmatch glob syntax, `**`
 > matches any number of segments.
 >
 > **`post_apply` hooks** (all default `true` for back-compat):
