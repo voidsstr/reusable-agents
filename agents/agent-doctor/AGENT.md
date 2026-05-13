@@ -1,30 +1,56 @@
-# agent-doctor — Continuous Self-Healer
+# agent-doctor — Event-Driven Self-Healer
 
 ## Purpose
 
-A perpetual ops agent that watches every other agent in the framework
-for **failures** and **stuck runs**, investigates the root cause, applies
+An ops agent that watches every other agent in the framework for
+**failures** and **stuck runs**, investigates the root cause, applies
 known fix recipes automatically, and escalates anything novel to the
 operator with full context. It also keeps a durable history of every
 investigation + fix attempt so the same broken signature never gets
 retried in an infinite loop.
 
-## Cadence
+## Invocation Model
 
-Cron: `*/5 * * * *` — every 5 minutes. Most ticks are no-ops (no agents
-in failure or stuck). Tick latency under load is dominated by the API
-call to list agents.
+**Event-driven** — no cron. The doctor is auto-invoked by
+`framework.core.resilience.invoke_doctor()` whenever:
+
+- An `AgentBase` agent's `run_once()` returns `RunResult(status="failure")`
+  or raises an unhandled exception (wired into the post-run hook).
+- The host-worker's wall-clock watchdog kills a stuck agent (timeout).
+- The host-worker's EXIT trap fires because a worker bash crashed before
+  its agent posted a terminal state.
+- A non-AgentBase agent (shell-only) exits with non-zero rc.
+
+Each failure path writes an incident to
+`agents/agent-doctor/incidents/<incident_id>.json` (durable storage)
+**and** drops a job file into `/tmp/agent-trigger-queue/agent-doctor-*.json`
+that the host-worker picks up to exec the doctor. Same trigger mechanism
+the dashboard's "Run now" button uses, so the queue doesn't care where
+the request came from.
+
+The doctor is also runnable **manually** from the dashboard for ad-hoc
+fleet sweeps.
+
+Dedupe protects against tight failure loops: same `(failed_agent_id,
+error_class)` inside a 10-minute window enqueues only one doctor run.
 
 ## Detection
 
-On each tick:
-1. Pull `/api/agents` from the framework API.
-2. For each agent (excluding self):
+On each invocation:
+1. **Drain the incident queue** at `agents/agent-doctor/incidents/` —
+   each entry names a specific agent that just failed plus full error
+   context (class, message, traceback, log path). These are processed
+   first. Drained entries archive to `incidents-processed/`.
+2. **Broad poll** `/api/agents` from the framework API. For each agent
+   (excluding self):
    - **failure**: `last_run_status == "failure"` and `(status, last_run_at)`
      is novel (not in `state/seen.json` from a prior tick).
    - **stuck**: `last_run_status == "running"` and the run has been
      running for >30 minutes (or 2× the agent's historical p95 if known —
      not yet implemented).
+   - **incident-flagged**: any agent with a queued incident, regardless
+     of API status (the failing agent posts the incident before
+     `status.json` flips, so the API may show stale data).
 
 ## Investigation
 

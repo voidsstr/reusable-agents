@@ -45,11 +45,26 @@ class Implementer(AgentBase):
         rec_ids = os.environ.get("RESPONDER_REC_IDS", "")
         run_dir = os.environ.get("RESPONDER_RUN_DIR", "")
         cfg = os.environ.get("SEO_AGENT_CONFIG", "")
+        # Derive SEO_AGENT_CONFIG from RESPONDER_SITE if the dispatcher
+        # didn't set it explicitly. dispatch_now() callers from non-SEO
+        # producers (catalog-audit, PI, competitor-research) typically
+        # pass RESPONDER_SITE only; run.sh has the same fallback for the
+        # bash side, but agent.py runs first and bails before run.sh
+        # gets a chance to derive.
+        if not cfg:
+            site = os.environ.get("RESPONDER_SITE", "")
+            if site:
+                fallback = (
+                    Path(_REPO_ROOT) / "examples" / "sites" / f"{site}.yaml"
+                )
+                if fallback.is_file():
+                    cfg = str(fallback)
+                    os.environ["SEO_AGENT_CONFIG"] = cfg
         if not (rec_ids and run_dir and cfg):
             missing = [n for n, v in [
                 ("RESPONDER_REC_IDS", rec_ids),
                 ("RESPONDER_RUN_DIR", run_dir),
-                ("SEO_AGENT_CONFIG", cfg),
+                ("SEO_AGENT_CONFIG (or RESPONDER_SITE)", cfg),
             ] if not v]
             return RunResult(
                 status="failure",
@@ -90,11 +105,55 @@ class Implementer(AgentBase):
                 metrics={"rec_count": rec_count, "exit_code": rc},
             )
 
-        self.decide("result", f"shipped {rec_count} rec(s)")
+        # Read ship-status sidecar (run.sh writes one of three states:
+        # code_edit_committed / no_op_or_gated / graceful_defer). This
+        # gives accurate "shipped N of M" reporting instead of the older
+        # behavior that always claimed all recs were implemented just
+        # because the wrapper exited 0.
+        ship_status_path = Path(run_dir) / "_ship_status.json"
+        shipped = rec_count
+        deferred = 0
+        reason = "code_edit_committed"
+        if ship_status_path.is_file():
+            try:
+                import json as _json
+                ship = _json.loads(ship_status_path.read_text())
+                shipped = int(ship.get("shipped", rec_count))
+                deferred = int(ship.get("deferred", 0))
+                reason = str(ship.get("reason", reason))
+            except Exception:
+                pass
+
+        if shipped == 0 and deferred > 0:
+            self.decide("result", f"deferred {deferred} rec(s) — reason={reason}")
+            return RunResult(
+                status="success",
+                summary=f"deferred {deferred} rec(s) from {Path(run_dir).name} ({reason})",
+                metrics={
+                    "rec_count": rec_count,
+                    "shipped": 0,
+                    "deferred": deferred,
+                    "exit_code": 0,
+                },
+            )
+
+        self.decide(
+            "result",
+            f"shipped {shipped}/{rec_count} rec(s) (deferred {deferred})",
+        )
         return RunResult(
             status="success",
-            summary=f"implemented {rec_count} rec(s) from {Path(run_dir).name}",
-            metrics={"rec_count": rec_count, "exit_code": 0},
+            summary=(
+                f"implemented {shipped}/{rec_count} rec(s) from "
+                f"{Path(run_dir).name}"
+                + (f" ({deferred} deferred)" if deferred else "")
+            ),
+            metrics={
+                "rec_count": rec_count,
+                "shipped": shipped,
+                "deferred": deferred,
+                "exit_code": 0,
+            },
         )
 
 

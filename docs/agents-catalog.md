@@ -34,36 +34,56 @@ These keep the framework itself healthy. All live in
 
 ## SEO + revenue (reusable engine)
 
-The SEO chain is split into five pure-pipeline-stage agents that
-together implement the collector → analyzer → reporter → implementer
-→ deployer flow. Each is reusable across every site — site-specific
-behavior comes entirely from the per-site `site.yaml`. None has its
-own cron schedule; they're chained from the per-site
-`seo-opportunity-agent` wrappers.
+The SEO chain is one **AgentBase pipeline** (`seo-opportunity-agent`)
+that runs three phases sequentially under a single `run_ts` so all
+artifacts land in the same Azure run-dir. The implementer + deployer
+are separate agents that take over once recs are queued.
 
-| Agent | Code | What it does |
+Engine code lives at `agents/seo-opportunity-agent/`, with each phase
+in its own `lib/` submodule. Full lifecycle + run-dir layout +
+troubleshooting playbook in
+[`agents/seo-opportunity-agent/README.md`](../agents/seo-opportunity-agent/README.md).
+
+| Phase / Agent | Code | What it does |
 |---|---|---|
-| `seo-data-collector` | `agents/seo-data-collector/pull-data.py` | Pulls 90d Google Search Console + GA4 data, optionally Google Ads. Crawls the sitemap, samples per page-type (regex from `site.yaml.page_inventory`), fetches HTML for the analyzer's audit pass. Pulls article inventory (slug+title+optional body_md) from the site's DB. Optionally runs SQL queries from `db-queries.sql`. Output: standardized run-dir layout (`gsc-*.json`, `ga4-*.json`, `pages-by-type.jsonl`, `articles-inventory.json`, `db-stats.json`). |
-| `seo-analyzer` | `agents/seo-analyzer/analyzer.py` | Deterministic Python. Reads collector outputs + applies the rule passes below, then a final adaptive LLM audit pass. Output: `recommendations.json` with monotonically-numbered rec ids. **Rule passes** (each opt-out via `site.yaml` flags, all run when present): striking-distance, zero-click, indexing-fix, conversion-path, paid-organic-gap, ad-copy-headline-winner, content-gap (`new-page-*` against `coverage_targets`), schema completeness, on-page (title/meta/H1/thin-content/internal-link), pros/cons density, outbound citations, body-link density, article-template completeness, **affiliate-tag leak**, **article × featured-product mention attribution** (`revenue_focus`), **TTFB perf** (`cwv-ttfb-slow` at 600ms / 1500ms), **freshness** (`dateModified` coverage on articles), **FAQ quality** (≥3 Qs, ≥20-word avg answer), **hreflang completeness**, **footer trust-links** (privacy/terms/contact/about/affiliate), **breadcrumb parity** (visible vs JSON-LD count), **trust-signal density** (warranty/guarantee/authorized keyword count), **collection numberOfItems** schema, **revenue-focus PDP audit** (featured-PDP weakness + `priority_boost` multipliers), **diff alarms** (sitemap-shrank, schema regression vs prior run), **competitor keyword gaps**. |
-| `seo-reporter` | `agents/seo-reporter/send-report.py` | Renders an HTML digest of recommendations + comparisons + goal-progress, sends via the framework mailer (gated through `DIGEST_ONLY=1` so it lands in the rollup queue). ALSO writes `agents/responder-agent/auto-queue/<request-id>.json` so the responder ships every rec without waiting for a reply. |
+| `seo-opportunity-agent` (pipeline driver) | `agents/seo-opportunity-agent/agent.py` | `AgentBase` driver. Loads + validates `site.yaml`, sequences the three phases, manages run-dir lifecycle, status updates. Each per-site instance subclasses this with `AGENT_ID` env. |
+| 1. Collector | `agents/seo-opportunity-agent/lib/collector/pull-data.py` | Pulls 90d Google Search Console (18 reports) + GA4 (23 reports) + optional Google Ads + optional production-DB content inventory. Crawls the sitemap and samples per page-type (regex from `site.yaml.page_inventory`), fetches HTML for the analyzer's audit pass. Pulls `articles-inventory.json` (slug + title + optional body_md) from `site.yaml.articles.sources`. Statically scans the implementer's repo for SEO-surface files → `repo-routes.json`. Output: standardized run-dir (`data/gsc-*.json`, `data/ga4-*.json`, `data/pages-by-type.jsonl`, `data/page-cache/`, `data/articles-inventory.json`, `data/db-stats.json`, `data/repo-routes.json`) + 7 derived files. |
+| 2. Analyzer | `agents/seo-opportunity-agent/lib/analyzer/analyzer.py` (+ `llm_audit.py`) | Deterministic Python rule passes + an adaptive LLM audit pass (whitelist-gated `check_id` so SEO experts can audit what the agent looks for). Writes `snapshot.json`, `comparison.json`, `goal-progress.json`, `goals.json`, `recommendations.json`. **Rule families** (each opt-out via `site.yaml` flags, all run when present): striking-distance, zero-click, indexing-fix, conversion-path, paid-organic-gap, ad-copy-headline-winner, content-gap (`new-page-*` against `coverage_targets`), schema completeness, on-page (title/meta/H1/thin-content/internal-link), pros/cons density, outbound citations, body-link density, article-template completeness, **affiliate-tag leak**, **article × featured-product mention attribution** (`revenue_focus`), **TTFB perf** (`cwv-ttfb-slow` at 600ms / 1500ms), **freshness** (`dateModified` coverage on articles), **FAQ quality** (≥3 Qs, ≥20-word avg answer), **hreflang completeness**, **footer trust-links** (privacy/terms/contact/about/affiliate), **breadcrumb parity** (visible vs JSON-LD count), **trust-signal density** (warranty/guarantee/authorized keyword count), **collection numberOfItems** schema, **revenue-focus PDP audit** (featured-PDP weakness + `priority_boost` multipliers), **diff alarms** (sitemap-shrank, schema regression vs prior run), **competitor keyword gaps**. Disable LLM pass with `SEO_DISABLE_LLM_AUDIT=1`. |
+| 3. Finalize | `agents/seo-opportunity-agent/finalizer.py` (+ `lib/reporter/send-report.py`) | Renders HTML digest, queues to the digest-rollup-agent (via `DIGEST_ONLY=1`), and writes `agents/responder-agent/auto-queue/<request-id>.json` per rec so the responder ships every rec without waiting for a reply. Records the outbound dispatch on the framework Confirmations page. |
 | `implementer` | `agents/implementer/run.sh` | LLM-driven code editor. Receives `RESPONDER_REC_IDS=<csv>` + `RESPONDER_RUN_DIR=<run-ts>` from the responder, resolves `DATABASE_URL` per-site (from `DATABASE_URL_<UPPER_SITE>` env), routes through claude-pool, drives `claude --print` against `AGENT.md` to apply the edits. Commits + tags `agent/<id>/release/<run-ts>` and optionally chains to seo-deployer. |
-| `seo-deployer` | `agents/seo-deployer/run.sh` | Pluggable deploy pipeline. Runs configured test → build → push → deploy → smoke-check commands per `site.yaml.deployer`. Hard gates on test or smoke-check failure. Stays a no-op when `deployer: null` (e.g. SpecPicks ships via Azure Container Apps using its own scripts). |
+| `seo-deployer` | `agents/seo-deployer/run.sh` | Pluggable test → build → push → deploy → smoke-check chain per `site.yaml.deployer`. Hard gates on test or smoke-check failure. Stays a no-op when `deployer: null`. See [`agents/seo-deployer/README.md`](../agents/seo-deployer/README.md). |
+
+> **Legacy directories.** `agents/seo-data-collector/`,
+> `agents/seo-analyzer/`, and `agents/seo-reporter/` predate the
+> unified pipeline. Active code lives in
+> `agents/seo-opportunity-agent/lib/`; the standalone copies are
+> retained only as importable libraries for one-off scripts. New
+> changes go in `lib/`.
 
 ## SEO + revenue (per-site instances)
 
-These are thin per-site wrappers. Each manifest's `entry_command`
-exports `SEO_AGENT_CONFIG=<path-to-site.yaml>` and runs the four-stage
-chain in series. The framework registers each as a distinct agent id
-so the dashboard tracks runs separately.
+Each per-site instance is a manifest that exports
+`AGENT_ID=<site>-seo-opportunity-agent` + `SEO_AGENT_CONFIG=<site.yaml>`,
+then invokes the engine's `agent.py`. The framework registers each as
+a distinct agent id so the dashboard tracks runs separately.
 
 | Agent | Manifest | site.yaml | Schedule |
 |---|---|---|---|
-| `specpicks-seo-opportunity-agent` | `specpicks/agents/seo-opportunity-agent/` | same dir | `30 */3 * * *` (every 3h at :30) |
-| `aisleprompt-seo-opportunity-agent` | `nsc-assistant/agents/aisleprompt-seo-opportunity-agent/` | same dir | `0 */3 * * *` (every 3h at :00) |
+| `specpicks-seo-opportunity-agent` | `specpicks/agents/seo-opportunity-agent/` | same dir | `0 */2 * * *` (every 2h, top of hour) |
+| `aisleprompt-seo-opportunity-agent` | `nsc-assistant/agents/aisleprompt-seo-opportunity-agent/` | same dir | `15 */2 * * *` (every 2h at :15) |
 
-A new site adds a third entry. See
-[`seo-onboard-new-site.md`](seo-onboard-new-site.md) for the 5-step
-process.
+The :15 offset prevents the two from competing for the same LLM
+provider quota at the same instant. A new site adds a third entry.
+See [`seo-onboard-new-site.md`](seo-onboard-new-site.md) for the
+5-step process.
+
+> **Schema-evolution note.** Both per-site `site.yaml` files share the
+> same JSON schema at `shared/schemas/site-config.schema.json`. Any
+> field added to one `site.yaml` (e.g. `articles.url_template`) MUST
+> first be declared in the schema or the agent fails validation
+> within 1 second of the next cron tick. See the SEO engine's
+> [Troubleshooting](../agents/seo-opportunity-agent/README.md#troubleshooting)
+> section for the full failure-mode walk-through.
 
 ## Content authoring
 

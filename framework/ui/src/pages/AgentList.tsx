@@ -2,8 +2,8 @@
 // then filter pills, then the full grid. Pattern inspired by Linear's project
 // list + Vercel's deployments dashboard.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, openStatusWS } from '../api/client'
+import { useEffect, useMemo, useState } from 'react'
+import { api } from '../api/client'
 import type { AgentLiveStatus, AgentSummary } from '../api/types'
 import AgentCard from '../components/AgentCard'
 
@@ -46,8 +46,6 @@ export default function AgentList() {
   const [error, setError] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
-  const wsRefs = useRef<Map<string, WebSocket>>(new Map())
-
   const refresh = async () => {
     try {
       const list = await api.listAgents()
@@ -72,24 +70,36 @@ export default function AgentList() {
   // WebSockets — one per agent. Open for ALL agents (not just enabled) so
   // disabled agents that get manually triggered still glow live.
   useEffect(() => {
-    const wantedIds = new Set(agents.map(a => a.id))
-    for (const [id, ws] of wsRefs.current) {
-      if (!wantedIds.has(id)) {
-        ws.close()
-        wsRefs.current.delete(id)
+    // Poll a single aggregate endpoint every 5s instead of opening one
+    // WebSocket per agent. With ~50 agents the WS handshake storm took
+    // 3-4s and held 50 idle connections that backed up other API calls
+    // on the Container App. The /api/agents response includes
+    // last_run_status + live snapshot fields, served from the same 5s-
+    // refreshed blob that the WS endpoint streamed from — same data,
+    // 50× fewer connections.
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const list = await api.listAgents()
+        if (cancelled) return
+        // Map [{id, last_run_status, ...}] into the same {state, ...}
+        // shape AgentLiveStatus uses so existing renderers don't change.
+        const next: Record<string, AgentLiveStatus> = {}
+        for (const a of list) {
+          next[a.id] = {
+            state: a.last_run_status ?? '',
+            // Surface the rest if the server included them in the snapshot
+            ...(a as unknown as Partial<AgentLiveStatus>),
+          } as AgentLiveStatus
+        }
+        setStatuses(next)
+      } catch {
+        // network blip — next tick will recover
       }
     }
-    for (const id of wantedIds) {
-      if (wsRefs.current.has(id)) continue
-      const ws = openStatusWS(id, (status) => {
-        setStatuses(s => ({ ...s, [id]: status }))
-      })
-      if (ws) wsRefs.current.set(id, ws)
-    }
-    return () => {
-      for (const ws of wsRefs.current.values()) ws.close()
-      wsRefs.current.clear()
-    }
+    void poll()
+    const t = setInterval(() => { void poll() }, 5000)
+    return () => { cancelled = true; clearInterval(t) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agents.length, agents.map(a => a.id).join(',')])
 

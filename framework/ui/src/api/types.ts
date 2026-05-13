@@ -35,6 +35,13 @@ export interface AgentSummary {
   ai_manifest_provider?: string
   ai_manifest_model?: string
   ai_source?: string  // 'override' | 'manifest' | 'default' | 'unset'
+  // Live last-call telemetry — populated by AgentBase._record_ai_call
+  // on every chat_with_fallback return. Shows what the agent ACTUALLY
+  // used (vs the configured resolution) so smart-tier auto-switches +
+  // fallback-chain transitions are visible on the card.
+  ai_last_provider?: string
+  ai_last_model?: string
+  ai_last_called_at?: string  // ISO-8601 UTC
 }
 
 export interface AgentDetail extends AgentSummary {

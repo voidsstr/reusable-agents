@@ -5,12 +5,12 @@
       "host": "aisleprompt.com",
       "key": "fdae54f621e3caa4f5d2822a66955dcc",
       "databaseUrlEnv": "AISLEPROMPT_DATABASE_URL",
-      "databaseUrlFallback": "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require",
-      "watermarkFile": "/home/voidsstr/.reusable-agents/indexnow-submitter/aisleprompt-watermark.txt",
+      "watermarkFile": "${HOME}/.reusable-agents/indexnow-submitter/aisleprompt-watermark.txt",
       "sitemapUrls": [
         "https://aisleprompt.com/sitemap.xml",
         "https://aisleprompt.com/sitemap-core.xml",
-        "https://aisleprompt.com/sitemap-recipes.xml",
+        "https://aisleprompt.com/sitemap-recipes-1.xml",
+        "https://aisleprompt.com/sitemap-recipes-2.xml",
         "https://aisleprompt.com/sitemap-cuisines.xml",
         "https://aisleprompt.com/sitemap-shop.xml",
         "https://aisleprompt.com/sitemap-blog.xml"
@@ -96,16 +96,21 @@
           "urlTemplate": "slug",
           "urlPrefix": "/blog/"
         }
-      ]
+      ],
+      "gsc_property": "sc-domain:aisleprompt.com",
+      "canonical_urls_endpoint": "https://aisleprompt.com/api/seo/canonical-urls"
     },
     {
       "name": "specpicks",
       "host": "specpicks.com",
       "key": "549c4d17dad4b4906b0323e6cd6b1e6e",
       "databaseUrlEnv": "SPECPICKS_DATABASE_URL",
-      "databaseUrlFallback": "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require",
-      "watermarkFile": "/home/voidsstr/.reusable-agents/indexnow-submitter/specpicks-watermark.txt",
-      "siteIds": ["retro-gaming", "pc-hardware", "retro-pc-building"],
+      "watermarkFile": "${HOME}/.reusable-agents/indexnow-submitter/specpicks-watermark.txt",
+      "siteIds": [
+        "retro-gaming",
+        "pc-hardware",
+        "retro-pc-building"
+      ],
       "sitemapUrls": [
         "https://specpicks.com/sitemap.xml"
       ],
@@ -199,7 +204,9 @@
           "urlTemplate": "slug",
           "urlPrefix": "/retro/marketplace/"
         }
-      ]
+      ],
+      "gsc_property": "sc-domain:specpicks.com",
+      "canonical_urls_endpoint": "https://specpicks.com/api/seo/canonical-urls"
     }
   ]
 }

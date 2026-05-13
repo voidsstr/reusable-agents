@@ -18,14 +18,40 @@ type RecItem = {
   summary_first_line?: string
   summary_chars?: number
   deferred?: boolean
+  deferred_reason?: string
   applied?: boolean
   implemented?: boolean
   implemented_at?: string
   implemented_via?: string
+  commit_sha?: string                 // short SHA of git commit
   shipped?: boolean
   shipped_at?: string
   shipped_tag?: string
   shipped_via?: string
+  shipped_verification?: string       // why we believe it's shipped
+  // ── Rich rec metadata (from recommendations.json, surfaced 2026-05-07) ─
+  description?: string
+  rationale?: string
+  category?: string
+  severity?: string
+  tier?: string
+  confidence?: number
+  expected_impact?: string
+  implementation_outline?: { approach?: string }
+  migration_template?: { sql?: string; sql_with_ids?: string; table?: string; action?: string }
+  ref_ids?: (string | number)[]
+  evidence?: unknown
+  check_id?: string
+  // URL/page targeting (any of these may be set by the agent):
+  affected_url?: string
+  affected_urls?: string[]
+  page_url?: string
+  page_path?: string
+  url?: string
+  // File-edit targeting:
+  files?: string[]
+  files_changed?: string[]
+  target_files?: string[]
 }
 
 type Batch = {
@@ -455,9 +481,123 @@ function RecRow({
         <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded shrink-0">applied</span>
       )}
       {isDeferred && (
-        <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded shrink-0">deferred</span>
+        <span
+          title={item.deferred_reason || 'Deferred — see rec detail for the full reason'}
+          className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded shrink-0"
+        >deferred</span>
       )}
     </button>
+  )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Rich rec details — what actually changed for this rec.
+// Renders below the rec row (collapsed by default; click to expand).
+// ──────────────────────────────────────────────────────────────────────────
+function RichRecDetails({ item }: { item: RecItem }) {
+  // Collect URL-like fields. Agents may set any of these — show them all.
+  const urls: string[] = []
+  for (const u of [item.affected_url, item.page_url, item.page_path, item.url]) {
+    if (u && typeof u === 'string') urls.push(u)
+  }
+  if (Array.isArray(item.affected_urls)) urls.push(...item.affected_urls)
+
+  const files: string[] = []
+  for (const arr of [item.files, item.files_changed, item.target_files]) {
+    if (Array.isArray(arr)) files.push(...arr.filter(f => typeof f === 'string'))
+  }
+
+  const refIds = Array.isArray(item.ref_ids) ? item.ref_ids : []
+  const sql = item.migration_template?.sql_with_ids || item.migration_template?.sql
+  const approach = item.implementation_outline?.approach
+  const description = item.description || item.rationale
+
+  // Nothing rich? Don't render the panel.
+  if (!description && !approach && !sql && urls.length === 0 && files.length === 0
+      && refIds.length === 0 && !item.expected_impact && !item.shipped_verification) {
+    return null
+  }
+
+  return (
+    <div className="px-3 py-2 bg-surface-subtle/40 border-l-2 border-accent-300/40 text-xs space-y-2">
+      {description && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">why</div>
+          <div className="text-ink-700">{description}</div>
+        </div>
+      )}
+      {item.expected_impact && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">expected impact</div>
+          <div className="text-ink-700">{item.expected_impact}</div>
+        </div>
+      )}
+      {urls.length > 0 && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">
+            affected url{urls.length > 1 ? 's' : ''} ({urls.length})
+          </div>
+          <ul className="space-y-0.5">
+            {urls.slice(0, 8).map((u, i) => (
+              <li key={i} className="font-mono text-[11px]">
+                {u.startsWith('http')
+                  ? <a href={u} target="_blank" rel="noopener" className="text-accent-700 hover:underline">{u}</a>
+                  : <span className="text-ink-600">{u}</span>}
+              </li>
+            ))}
+            {urls.length > 8 && <li className="text-ink-400 text-[10px]">+{urls.length - 8} more</li>}
+          </ul>
+        </div>
+      )}
+      {files.length > 0 && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">
+            files touched ({files.length})
+          </div>
+          <ul className="space-y-0.5 font-mono text-[11px] text-ink-600">
+            {files.slice(0, 10).map((f, i) => <li key={i}>{f}</li>)}
+            {files.length > 10 && <li className="text-ink-400 text-[10px]">+{files.length - 10} more</li>}
+          </ul>
+        </div>
+      )}
+      {refIds.length > 0 && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">
+            affected row ids ({refIds.length})
+          </div>
+          <div className="font-mono text-[11px] text-ink-600 break-all">
+            {refIds.slice(0, 20).map(String).join(', ')}
+            {refIds.length > 20 && <span className="text-ink-400"> +{refIds.length - 20} more</span>}
+          </div>
+        </div>
+      )}
+      {approach && !sql && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">approach</div>
+          <div className="text-ink-700">{approach}</div>
+        </div>
+      )}
+      {sql && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">sql migration</div>
+          <pre className="font-mono text-[11px] text-ink-700 bg-surface-card p-2 rounded border border-surface-divider overflow-x-auto whitespace-pre-wrap">
+            {sql.length > 800 ? sql.slice(0, 800) + '\n…' : sql}
+          </pre>
+        </div>
+      )}
+      {item.shipped_verification && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">shipped verification</div>
+          <div className="text-ink-600 italic">{item.shipped_verification}</div>
+        </div>
+      )}
+      {item.commit_sha && (
+        <div>
+          <div className="text-ink-400 mb-0.5 uppercase tracking-wide text-[10px]">commit</div>
+          <code className="text-ink-700 font-mono text-[11px]">{item.commit_sha}</code>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -505,7 +645,10 @@ function BatchCard({
           {batch.rec_items.length === 0
             ? <div className="px-3 py-3 text-xs text-ink-500 italic">(no rec items)</div>
             : batch.rec_items.map(it => (
-                <RecRow key={it.rec_id} item={it} onClick={() => onPickRec(it.rec_id)} />
+                <div key={it.rec_id}>
+                  <RecRow item={it} onClick={() => onPickRec(it.rec_id)} />
+                  <RichRecDetails item={it} />
+                </div>
               ))
           }
         </div>
@@ -953,7 +1096,7 @@ function FilteredRecList({
                               <span className="font-medium text-ink-600">why:</span> {reasonForRec(category, rec, batch.status)}
                             </div>
                             <div className="text-[10px] text-ink-400 pl-1 flex flex-wrap gap-x-2 gap-y-0.5">
-                              <span>run={chain.source_run_ts.slice(0, 19)}</span>
+                              <span>run={(chain.source_run_ts || '').slice(0, 19) || '—'}</span>
                               <span>batch {batch.index}</span>
                               {rec.implemented_at && (
                                 <span title={formatAbsDate(rec.implemented_at)}>
@@ -1013,18 +1156,48 @@ export default function ImplementerQueue() {
   const [refreshedAt, setRefreshedAt] = useState('')
   const [pickedRec, setPickedRec] = useState<{ runDirBasename: string; recId: string } | null>(null)
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(null)
+  // Lifetime per-category recs — populated when the user clicks a tab.
+  // Independent of the windowed `chains` so the tabs aren't blank when
+  // the matching recs live in chains that have rolled off the page.
+  const [lifetimeRecs, setLifetimeRecs] = useState<Record<string, RecItem[]>>({})
+  const [lifetimeRecsLoading, setLifetimeRecsLoading] = useState(false)
+
+  // Rec-memory backlog (open proposals across all producer agents) —
+  // pulled from /api/implementer/queue, populated server-side from each
+  // agent's accumulator.json. This is the FULL set of recs that have
+  // been emitted but not yet implemented — visible at-a-glance so the
+  // operator never has to wonder "where are my queued recs."
+  const [accumulatorByAgent, setAccumulatorByAgent] = useState<
+    Record<string, { id: string; title: string; rec_type: string; severity: string; first_seen_at: string; last_seen_at: string; seen_count: number }[]>
+  >({})
+  const [accumulatorTotal, setAccumulatorTotal] = useState<number>(0)
+  const [accumExpandedAgents, setAccumExpandedAgents] = useState<Set<string>>(new Set())
+  // Phase-2 truth fields: open_recs_total is the title-deduped producer
+  // backlog (recommendations.json across all producers); running_dispatches
+  // is the count of in-flight implementer scopes. These replace the
+  // legacy accumulator-only "queued" tile after the auto-queue
+  // elimination on 2026-05-12.
+  const [openRecsTotal, setOpenRecsTotal] = useState<number>(0)
+  const [runningDispatches, setRunningDispatches] = useState<number>(0)
 
   const refresh = async () => {
     try {
-      const [r, lt] = await Promise.all([
+      const [r, lt, q] = await Promise.all([
         api.implementerBatches(20),
         api.implementerLifetimeStats().catch(() => null),
+        api.implementerQueue(20).catch(() => null),
       ])
       setChains(r.chains)
       if (lt) setLifetime({
         shipped: lt.shipped, implemented: lt.implemented,
         deferred: lt.deferred, pending: lt.pending, total: lt.total,
       })
+      if (q) {
+        setAccumulatorByAgent(q.accumulator_by_agent || {})
+        setAccumulatorTotal(q.accumulator_total || 0)
+        setOpenRecsTotal(q.open_recs_total || 0)
+        setRunningDispatches(q.running_dispatches || 0)
+      }
       setRefreshedAt(new Date().toLocaleTimeString())
       setError('')
     } catch (e: unknown) {
@@ -1079,19 +1252,28 @@ export default function ImplementerQueue() {
         }
       }
     }
+    // Phase-2 truth (post-2026-05-12 auto-queue elimination): the
+    // backlog tile must reflect the producer-side open-rec total
+    // (title-deduped lifetime.pending), NOT just the accumulator —
+    // we archived 648 SEED entries and producer recs now ship via
+    // backlog-dispatcher's direct dispatch, bypassing the auto-queue.
+    // Running tile uses running_dispatches (count of live scopes)
+    // when available so the UI matches `systemctl --user list-units`.
     return {
-      // In-flight: window is authoritative (these states only exist
-      // during an active dispatch, which is always within the page).
-      running: windowed.running,
-      queued:  windowed.queued,
-      // Terminal states: lifetime totals (when available) so older
-      // history doesn't drop off as new chains push it out.
+      running: runningDispatches > 0 ? runningDispatches : windowed.running,
+      // Backlog = lifetime pending bucket (title-deduped producer recs)
+      // + still-counts-from-accumulator for legacy non-recommendations.json
+      // producers. windowed.queued is for transient dispatch-batch
+      // status=pending entries inside the visible chain window.
+      queued: openRecsTotal > 0
+              ? openRecsTotal
+              : (windowed.queued + accumulatorTotal),
       shipped:     lifetime ? lifetime.shipped     : windowed.shipped,
       implemented: lifetime ? lifetime.implemented : windowed.implemented,
       deferred:    lifetime ? lifetime.deferred    : windowed.deferred,
       untouched:   windowed.untouched,
     }
-  }, [chains, lifetime])
+  }, [chains, lifetime, accumulatorTotal, openRecsTotal, runningDispatches])
 
   // Flatten all recs across chains/batches with rich metadata for the
   // filtered drill-down view.
@@ -1115,8 +1297,53 @@ export default function ImplementerQueue() {
 
   const filteredRecs = useMemo(() => {
     if (!categoryFilter) return []
+    // Prefer the lifetime list (populated on tab click) so users see
+    // every matching rec, not just those in the current 20-chain window.
+    // Falls back to the windowed flatRecs while lifetime is loading or
+    // for in-flight buckets (running/queued — those only exist in active
+    // dispatches anyway).
+    if (categoryFilter === 'running' || categoryFilter === 'queued') {
+      return flatRecs.filter(f => f.category === categoryFilter)
+    }
+    const ltList = lifetimeRecs[categoryFilter]
+    if (ltList && ltList.length > 0) {
+      // Map lifetime recs into the FlatRec shape the FilteredRecList expects.
+      // The slim rec from /recs-by-category carries run_ts + agent_id +
+      // run_dir_basename — propagate them into the synthetic Chain so
+      // downstream rendering (.slice on source_run_ts, group-by source_agent)
+      // doesn't crash on undefined.
+      return ltList.map(r => {
+        const slim = r as RecItem & {
+          run_dir_basename?: string; run_ts?: string; agent_id?: string
+        }
+        return {
+          chain: {
+            run_dir_basename: slim.run_dir_basename || '',
+            source_agent:     slim.agent_id || '',
+            source_run_ts:    slim.run_ts || '',
+            site:             '',
+          } as Chain,
+          batch: { status: r.shipped ? 'completed' : r.implemented ? 'completed' : 'pending' } as Chain['batches'][number],
+          rec: r,
+          category: categoryFilter as Exclude<CategoryFilter, null> | 'untouched',
+        }
+      })
+    }
     return flatRecs.filter(f => f.category === categoryFilter)
-  }, [flatRecs, categoryFilter])
+  }, [flatRecs, categoryFilter, lifetimeRecs])
+
+  // When user selects a tab, fetch the full lifetime rec list for that
+  // category. Cached server-side (60s TTL) so subsequent tab clicks are
+  // sub-100ms.
+  useEffect(() => {
+    if (!categoryFilter || categoryFilter === 'running' || categoryFilter === 'queued') return
+    if (lifetimeRecs[categoryFilter]) return  // already loaded
+    setLifetimeRecsLoading(true)
+    api.implementerRecsByCategory(categoryFilter as 'shipped' | 'implemented' | 'deferred', 200)
+      .then(r => setLifetimeRecs(prev => ({ ...prev, [categoryFilter]: r.recs as unknown as RecItem[] })))
+      .catch(() => { /* fall back to windowed */ })
+      .finally(() => setLifetimeRecsLoading(false))
+  }, [categoryFilter, lifetimeRecs])
 
   // Bucket chains by status
   const inProgressChains = (chains || []).filter(c => c.chain_status === 'running')
@@ -1176,6 +1403,85 @@ export default function ImplementerQueue() {
           )
         })}
       </div>
+
+      {/* Rec-memory backlog — open proposals across all producer agents.
+          Populated server-side from agents/<id>/state/accumulator.json
+          via /api/implementer/queue. Always visible (no toggle needed)
+          so the operator never has to wonder "where's my queued work."
+          Collapsed per-agent to keep the page scannable. */}
+      {accumulatorTotal > 0 && (
+        <section className="card-surface">
+          <div className="px-4 py-3 border-b border-surface-divider flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h2 className="text-sm font-semibold text-ink-900 tracking-tight">Pending recs (rec-memory backlog)</h2>
+              <p className="text-[11px] text-ink-500 mt-0.5">
+                Producer-emitted proposals the implementer hasn't shipped yet — auto-updated each refresh.
+              </p>
+            </div>
+            <div className="text-xs text-ink-600">
+              <span className="font-mono font-semibold text-ink-900 text-base mr-1">{accumulatorTotal}</span>
+              open across {Object.keys(accumulatorByAgent).length} agent{Object.keys(accumulatorByAgent).length === 1 ? '' : 's'}
+            </div>
+          </div>
+          <div className="divide-y divide-surface-divider">
+            {Object.entries(accumulatorByAgent)
+              .sort((a, b) => b[1].length - a[1].length)
+              .map(([agentId, opens]) => {
+                const isExpanded = accumExpandedAgents.has(agentId)
+                const toggle = () => {
+                  const next = new Set(accumExpandedAgents)
+                  if (next.has(agentId)) next.delete(agentId); else next.add(agentId)
+                  setAccumExpandedAgents(next)
+                }
+                return (
+                  <div key={agentId}>
+                    <button
+                      onClick={toggle}
+                      className="w-full px-4 py-2 flex items-center justify-between gap-2 hover:bg-surface-subtle/40 text-left"
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-xs text-ink-400 font-mono">{isExpanded ? '▾' : '▸'}</span>
+                        <span className="text-xs font-medium text-ink-800 truncate">{agentId}</span>
+                      </div>
+                      <span className="text-xs text-ink-600 font-mono">{opens.length}</span>
+                    </button>
+                    {isExpanded && (
+                      <ul className="px-4 pb-3 space-y-1">
+                        {opens.map((rec) => (
+                          <li
+                            key={rec.id}
+                            className="text-[11px] text-ink-700 flex items-start gap-2 py-1 border-l-2 border-amber-200 pl-2"
+                          >
+                            <span
+                              className={
+                                'inline-block w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ' +
+                                (rec.severity === 'critical' ? 'bg-red-500'
+                                 : rec.severity === 'high' ? 'bg-amber-500'
+                                 : rec.severity === 'low' ? 'bg-ink-300'
+                                 : 'bg-amber-300')
+                              }
+                              title={`severity: ${rec.severity}`}
+                            />
+                            <span className="flex-1 min-w-0">
+                              <span className="text-ink-800">{rec.title}</span>
+                              {rec.rec_type && (
+                                <span className="ml-2 text-[10px] text-ink-400 font-mono">[{rec.rec_type}]</span>
+                              )}
+                              {rec.seen_count > 1 && (
+                                <span className="ml-2 text-[10px] text-ink-400">×{rec.seen_count} runs</span>
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )
+              })}
+          </div>
+        </section>
+      )}
 
       {/* Filtered drill-down list — appears when a stat card is clicked */}
       {categoryFilter && (

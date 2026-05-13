@@ -529,6 +529,18 @@ class ProgressiveImprovementAgent(AgentBase):
             if ckey and ckey in handled_keys:
                 skipped_dupe += 1
                 continue
+            # Pull URLs out of evidence — usually each evidence row has a
+            # `url` pointing at the page the rec affects. Surface as
+            # affected_urls (top-level) so the dashboard's queue panel can
+            # render clickable links per rec.
+            affected_urls = []
+            seen = set()
+            for ev in (evidence or []):
+                if isinstance(ev, dict):
+                    u = ev.get("url") or ev.get("page_url") or ev.get("page_path") or ""
+                    if u and u not in seen:
+                        seen.add(u)
+                        affected_urls.append(u)
             recs.append({
                 "category": cat,
                 "severity": sev,
@@ -537,6 +549,10 @@ class ProgressiveImprovementAgent(AgentBase):
                 "title": issue.get("title", "(untitled)"),
                 "rationale": issue.get("rationale", ""),
                 "evidence": evidence,
+                # Top-level affected_urls — dashboard renders these as
+                # clickable links under the rec; downstream agents can
+                # rely on this without re-parsing evidence.
+                **({"affected_urls": affected_urls[:10]} if affected_urls else {}),
                 "implementation_outline": {
                     "approach": issue.get("fix_suggestion", ""),
                 },
@@ -624,13 +640,24 @@ class ProgressiveImprovementAgent(AgentBase):
                         "ok": True,
                     },
                 )
-                # ── Auto-queue every rec for implementation ─────────────
-                # Same pattern as seo-reporter: drop a trigger file the
-                # responder picks up on its next tick (every 60s) and
-                # fans out to the implementer. Email becomes informational
-                # — reply with `defer rec-NNN` to override.
+                # ── auto_implement gate via framework.dispatch helper ─────
+                # PI was the first agent gated with an inline check;
+                # we now delegate to gated_dispatch_now() so every
+                # producer reads the same flag from site.yaml the same
+                # way. The helper logs "awaiting email approval" via
+                # self.decide() when the flag is false.
                 if recs:
-                    self._write_auto_queue(request_id=request_id, recs=recs)
+                    rec_ids = [r["id"] for r in recs if r.get("id")]
+                    from framework.core import dispatch as _dispatch
+                    _dispatch.gated_dispatch_now(
+                        cfg=cfg, agent=self,
+                        agent_id=self.agent_id,
+                        run_dir=str(self.run_dir),
+                        rec_ids=rec_ids,
+                        site=cfg.site_id,
+                        subject_tag="progressive-improvement",
+                        request_id=request_id,
+                    )
             else:
                 self.decide("error", f"email send failed: {detail}")
         else:
@@ -711,6 +738,16 @@ class ProgressiveImprovementAgent(AgentBase):
             self.decide("error", f"handoff outcome record failed: {e}")
 
         self.status("done", progress=1.0, state="success")
+        # Per-category counts — same logic as _measure_and_update_goals
+        # but surfaced as RunResult.metrics so Layer-B auto-track works
+        # for goals like goal-zero-broken-pages, goal-zero-duplicate-content,
+        # goal-content-freshness, goal-zero-miscategorized-products.
+        _broken = sum(1 for p in pages
+                      if (p.error or (p.status_code and not (200 <= p.status_code < 400))))
+        _miscat = sum(1 for r in recs if r.get("category") == "incorrect-categorization")
+        _dup    = sum(1 for r in recs if r.get("category") == "duplicate-content")
+        _stale  = sum(1 for r in recs if r.get("category") in ("outdated-content", "missing-content"))
+        _a11y   = sum(1 for r in recs if r.get("category") == "accessibility")
         return RunResult(
             status="success",
             summary=recs_doc["summary"],
@@ -722,6 +759,17 @@ class ProgressiveImprovementAgent(AgentBase):
                 "recs_experimental": sum(1 for r in recs if r["tier"] == "experimental"),
                 "applied_responses": len(applied),
                 "auto_dispatched": len(dispatched),
+                # Per-category — drives the "zero X" north-star goals
+                "broken_pages": float(_broken),
+                "miscategorized_count": float(_miscat),
+                "duplicate_count": float(_dup),
+                "stale_count": float(_stale),
+                "accessibility_violations": float(_a11y),
+                # Health score 0-100: 100 - (issues / pages * scale).
+                # Capped so a clean crawl reads 100 not 200.
+                "quality_score_0_100": round(max(0.0, min(
+                    100.0, 100.0 - (100.0 * len(recs) / max(len(pages), 1))
+                )), 2),
             },
             next_state={
                 "last_run_ts": self.run_ts,

@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 _LOCK_DIR = Path(os.path.expanduser(
@@ -56,7 +59,10 @@ class FileLock:
     def acquire(self, *, timeout_s: Optional[int] = None) -> None:
         """Block until the lock is acquired or `timeout_s` elapses.
         Raises TimeoutError if the timeout fires."""
-        deadline = time.monotonic() + (timeout_s if timeout_s is not None else self.timeout_s)
+        effective_timeout = timeout_s if timeout_s is not None else self.timeout_s
+        deadline = time.monotonic() + effective_timeout
+        start = time.monotonic()
+        last_heartbeat = start  # first heartbeat fires 60s into wait, not immediately
         if self._fd is None:
             self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
         while True:
@@ -69,12 +75,38 @@ class FileLock:
                     os.write(self._fd, f"pid={os.getpid()} acquired={time.time():.0f}\n".encode())
                 except Exception:
                     pass
+                waited = time.monotonic() - start
+                if waited > 5.0:
+                    logger.info("lock %s acquired after %.0fs wait (pid=%d)", self.name, waited, os.getpid())
                 return
             except OSError as e:
                 if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
                     raise
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"could not acquire {self.name} within {self.timeout_s}s")
+                now = time.monotonic()
+                if now >= deadline:
+                    # Surface current holder content for triage
+                    holder = ""
+                    try:
+                        with open(self.path, "rb") as f:
+                            holder = f.read(120).decode("utf-8", "replace").strip()
+                    except Exception:
+                        pass
+                    raise TimeoutError(
+                        f"could not acquire {self.name} within {effective_timeout}s; current holder: {holder!r}"
+                    )
+                # Heartbeat every 60s so wedged holders are visible in logs
+                if now - last_heartbeat >= 60.0:
+                    last_heartbeat = now
+                    holder = ""
+                    try:
+                        with open(self.path, "rb") as f:
+                            holder = f.read(120).decode("utf-8", "replace").strip()
+                    except Exception:
+                        pass
+                    logger.info(
+                        "lock %s waiting %.0fs (deadline in %.0fs) holder=%r",
+                        self.name, now - start, deadline - now, holder,
+                    )
                 time.sleep(1.0)
 
     def try_acquire(self) -> bool:
@@ -130,6 +162,75 @@ def site_dispatch_lock(site: str, *, timeout_s: int = 1800):
         yield lock
     finally:
         lock.release()
+
+
+@contextmanager
+def ollama_dispatch_lock(
+    *,
+    timeout_s: int = 1800,
+    on_timeout: str = "raise",
+):
+    """Global ollama serialization lock — at most one ollama-using
+    operation (chat AI provider, jcode-ollama edit, aider-ollama edit)
+    runs at a time on this host.
+
+    Why: ollama evicts loaded models when a new one arrives AND the new
+    model doesn't fit alongside it. Concurrent ollama calls fight over
+    VRAM and fail with HTTP 500 / "unable to load model". Serializing
+    through this lock makes ollama swap deterministic — load A, use A,
+    swap to B, use B.
+
+    Timeout + deadlock posture:
+      - Default 30 min (down from 60). Any single ollama call should
+        complete inside that even with 70B models — if it doesn't, the
+        runner is wedged and we want callers to fall through, not
+        block forever.
+      - `on_timeout="raise"` (default) → TimeoutError out of the
+        context, caller catches + soft-fails to next backend.
+      - `on_timeout="proceed"` → log + run the body WITHOUT serial
+        guarantees. Useful for chat callers that prefer best-effort
+        over hanging.
+      - `on_timeout="skip"` → yield None instead of a lock; caller
+        checks `if lock is None: <fallback>`.
+      - fcntl.flock releases on process exit, so a crashed holder
+        never leaves an orphan lock.
+
+    Reentrancy: fcntl.flock is per-FD, not per-process. The same PID
+    re-acquiring inside its own context is safe (kernel grants).
+
+    Usage:
+        with ollama_dispatch_lock() as lock:
+            if lock is None:
+                # on_timeout='skip' path — fall through
+                return SOFT_FAIL
+            ensure_ollama_model_loaded("devstral-small-2:24b")
+            run_aider_or_jcode(...)
+    """
+    lock = FileLock("ollama-dispatch", timeout_s=timeout_s)
+    acquired = False
+    try:
+        try:
+            lock.acquire(timeout_s=timeout_s)
+            acquired = True
+            yield lock
+        except TimeoutError:
+            mode = (on_timeout or "raise").lower()
+            if mode == "raise":
+                raise
+            if mode == "skip":
+                # Caller checks `if lock is None` to fall through.
+                yield None
+                return
+            # mode == "proceed" — run unguarded. Caller still gets the
+            # lock object so its preflight calls work, but two callers
+            # may overlap.
+            yield lock
+    finally:
+        if acquired:
+            try:
+                lock.release()
+            except Exception:
+                pass
 
 
 def _safe(s: str) -> str:

@@ -1,0 +1,23 @@
+{
+  "id": "oauth-heartbeat-agent",
+  "name": "OAuth refresh-token heartbeat",
+  "description": "Daily ping of registered Google OAuth files to keep refresh_tokens alive. Google's Testing-mode OAuth apps expire refresh_tokens after 7 days of non-use. This agent calls refresh-token.py once a day to reset the 7-day clock so SEO/GSC/GA4 access stays live even when the seo-opportunity-agent is paused for extended periods. Emails the operator if a refresh fails — early warning before downstream agents break.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "37 8 * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "README.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/oauth-heartbeat-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/oauth-heartbeat-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/oauth-heartbeat-agent",
+    "needs_env": ["OAUTH_HEARTBEAT_FILES"]
+  },
+  "runnable_modes": ["cron", "manual"]
+}

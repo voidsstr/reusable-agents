@@ -267,3 +267,4 @@ framework/.pytest_cache/
 # Playwright
 framework/ui/test-results/
 framework/ui/playwright-report/
+.aider*

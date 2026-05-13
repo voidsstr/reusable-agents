@@ -15,6 +15,10 @@ from ..auth import require_token
 
 router = APIRouter(prefix="/api/agents", tags=["runs"], dependencies=[Depends(require_token)])
 
+# Cross-agent runs listing — separate router so its path doesn't collide
+# with the /api/agents/{agent_id} catch-all.
+all_runs_router = APIRouter(prefix="/api", tags=["runs"], dependencies=[Depends(require_token)])
+
 
 class RunSummary(BaseModel):
     agent_id: str
@@ -41,17 +45,14 @@ def _entry_to_summary(agent_id: str, d: dict) -> RunSummary:
 
 
 def _list_runs_legacy(agent_id: str, limit: int, offset: int) -> list[RunSummary]:
-    """Fallback: list runs by scanning the runs/ prefix.
+    """Fallback when run-index.json is missing/stale — scan the runs/
+    prefix and read each run's progress.json directly.
 
-    Handles two run-dir shapes:
-      • AgentBase shape: <ts>/progress.json  (PI, article-author, etc.)
-      • SEO orchestrator shape: <ts>/recommendations.json + goals.json
-        + snapshot.json + run-summary.md  (no progress.json — the
-        SEO pipeline is multi-step and doesn't go through AgentBase)
-
-    Both encode the same canonical timestamp pattern (<8d>T<6d>Z) as
-    the dir name, so we discover by listing canonical-shaped dirs +
-    fetching whichever marker file each one has.
+    Single shape: every run-dir has `<ts>/progress.json` (AgentBase
+    writes it via post_run; legacy non-AgentBase pipelines that wrote
+    only `recommendations.json` were back-filled to the same shape and
+    every active agent now subclasses AgentBase per the framework
+    directive).
     """
     import re as _re
     s = get_storage()
@@ -74,48 +75,11 @@ def _list_runs_legacy(agent_id: str, limit: int, offset: int) -> list[RunSummary
     if not page:
         return []
 
-    # For each ts, try progress.json first (AgentBase), fall back to
-    # recommendations.json + run-summary.md (SEO/orchestrator). Synthesize
-    # a RunSummary that the dashboard can render.
     def _fetch(ts: str) -> "RunSummary | None":
-        # Fast path: AgentBase shape
         d = s.read_json(f"{prefix}{ts}/progress.json")
-        if d:
-            return _entry_to_summary(agent_id, d)
-        # SEO/orchestrator shape — synthesize from recommendations.json
-        rd = s.read_json(f"{prefix}{ts}/recommendations.json") or {}
-        recs = rd.get("recommendations") or []
-        n_recs = len(recs) if isinstance(recs, list) else 0
-        meta = rd.get("metadata") or {}
-        short_circuited = bool(meta.get("short_circuited"))
-        summary = (
-            f"short-circuit: replayed {n_recs} recs from "
-            f"{meta.get('replayed_from_run','prior run')}"
-            if short_circuited else
-            f"{n_recs} recommendations"
-        )
-        # status: best effort — if a deploy.json exists with success,
-        # we know it shipped; else success-by-default for a run that
-        # produced output.
-        deploy = s.read_json(f"{prefix}{ts}/deploy.json") or {}
-        status = "success"
-        if deploy.get("status") == "failure":
-            status = "failure"
-        # Infer started_at from the run-ts itself (canonical UTC stamp).
-        started_iso = ""
-        try:
-            started_iso = (
-                f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}T"
-                f"{ts[9:11]}:{ts[11:13]}:{ts[13:15]}+00:00"
-            )
-        except Exception:
-            pass
-        return RunSummary(
-            agent_id=agent_id, run_ts=ts,
-            status=status, started_at=started_iso,
-            ended_at=None, summary=summary,
-            iteration_count=0, progress=1.0,
-        )
+        if not d:
+            return None
+        return _entry_to_summary(agent_id, d)
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(_fetch, page))
@@ -240,6 +204,111 @@ def get_run(agent_id: str, run_ts: str):
 @router.get("/{agent_id}/changelog")
 def changelog(agent_id: str, limit: int = Query(50, le=500)):
     return read_changelog(agent_id, limit=limit)
+
+
+@all_runs_router.get("/runs")
+def list_all_runs(
+    limit: int = Query(100, le=1000),
+    offset: int = 0,
+    agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    application: Optional[str] = None,
+    category: Optional[str] = None,
+    since: Optional[str] = None,
+    q: Optional[str] = None,
+):
+    """Aggregate runs across every registered agent. Reads each agent's
+    pre-aggregated `run-index.json` in parallel, flattens, sorts by
+    started_at desc, then applies filters + paging.
+
+    Filters (all optional):
+      - agent_id: exact match
+      - status:   exact match (e.g. success / failure / running)
+      - application / category: derived from the agent manifest
+      - since:    ISO-8601; only runs started_at >= since
+      - q:        case-insensitive substring across summary + agent_id
+
+    Response shape:
+      { total, limit, offset, runs: [ RunSummary + agent_name + application + category ] }
+    """
+    from framework.core import registry as _reg
+
+    s = get_storage()
+    manifests = list(_reg.list_agents())
+    by_id = {m.id: m for m in manifests}
+
+    # Filter agents up-front when filterable from manifest — avoids reading
+    # run-index.json for agents that can't possibly match.
+    def _agent_app(m) -> str:
+        meta = getattr(m, "metadata", None) or {}
+        if isinstance(meta, dict):
+            app = meta.get("application")
+            if app:
+                return str(app)
+        # Mirror agents.py _derive_application fallback: category-based heuristic
+        return "shared"
+
+    target_ids: list[str]
+    if agent_id:
+        target_ids = [agent_id] if agent_id in by_id else []
+    else:
+        target_ids = []
+        for m in manifests:
+            if category and m.category != category:
+                continue
+            if application and _agent_app(m) != application:
+                continue
+            target_ids.append(m.id)
+
+    def _fetch(aid: str) -> list[dict]:
+        idx = s.read_json(f"agents/{aid}/run-index.json")
+        if not idx or not isinstance(idx.get("recent"), list):
+            return []
+        out: list[dict] = []
+        for e in idx["recent"]:
+            if not isinstance(e, dict):
+                continue
+            d = dict(e)
+            d["agent_id"] = aid
+            m = by_id.get(aid)
+            if m is not None:
+                d["agent_name"] = m.name
+                d["category"] = m.category
+                d["application"] = _agent_app(m)
+            out.append(d)
+        return out
+
+    flat: list[dict] = []
+    if target_ids:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            for chunk in ex.map(_fetch, target_ids):
+                flat.extend(chunk)
+
+    # Apply post-filters
+    def _keep(d: dict) -> bool:
+        if status and d.get("status") != status:
+            return False
+        if since:
+            sa = d.get("started_at") or ""
+            if sa and sa < since:
+                return False
+        if q:
+            ql = q.lower()
+            hay = f"{d.get('summary', '')} {d.get('agent_id', '')} {d.get('agent_name', '')}".lower()
+            if ql not in hay:
+                return False
+        return True
+
+    filtered = [d for d in flat if _keep(d)]
+
+    # Sort by started_at desc, falling back to run_ts
+    def _sort_key(d: dict) -> str:
+        return (d.get("started_at") or d.get("run_ts") or "")
+    filtered.sort(key=_sort_key, reverse=True)
+
+    total = len(filtered)
+    page = filtered[offset:offset + limit]
+    return {"total": total, "limit": limit, "offset": offset, "runs": page}
 
 
 @router.get("/{agent_id}/runs/{run_ts}/artifacts")

@@ -155,27 +155,100 @@ def reap_one(
         return None
 
 
+def reap_run_index(
+    agent_id: str,
+    *,
+    grace_s: int = STALE_RUN_GRACE_S,
+    storage: Optional[StorageBackend] = None,
+) -> int:
+    """Sweep `agents/<id>/run-index.json::recent[]` for entries stuck in
+    `running` state whose started_at is older than `grace_s`. Flip them
+    to `failure` so the dashboard's Runs tab doesn't show perpetual
+    spinners after a host-worker / dispatch-scope crash.
+
+    Distinct from reap_one (which handles the live `status.json`).
+    This handles HISTORICAL run records that never got their terminal
+    state written because the scope died abruptly. Common for the
+    implementer because each dispatch is a one-shot systemd-run scope
+    that doesn't always exit cleanly.
+
+    Returns the number of entries flipped.
+    """
+    s = storage or get_storage()
+    key = f"agents/{agent_id}/run-index.json"
+    try:
+        ri = s.read_json(key) or {}
+    except Exception:
+        return 0
+    recent = ri.get("recent") or []
+    if not isinstance(recent, list) or not recent:
+        return 0
+    now = datetime.now(timezone.utc)
+    cleared = 0
+    for r in recent:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") != "running":
+            continue
+        started = _parse_iso(r.get("started_at") or "")
+        if started is None:
+            continue
+        age = (now - started).total_seconds()
+        if age <= grace_s:
+            continue
+        # Optionally consult live systemd state for implementer scopes,
+        # but skipping that here — if a scope older than grace_s is
+        # still running, the reaper running every 60s will catch up the
+        # NEXT pass after the scope finally exits. Worst case: one false
+        # reap on a single tick, which is acceptable since the actual
+        # run-record.json holds the real terminal state.
+        r["status"] = "failure"
+        r["ended_at"] = now.isoformat(timespec="seconds")
+        sm = r.get("summary") or ""
+        if "[ghost-cleaned" not in sm:
+            r["summary"] = sm + f" [ghost-cleaned: stale running, age={int(age/60)}m]"
+        cleared += 1
+    if cleared:
+        try:
+            ri["recent"] = recent
+            s.write_json(key, ri)
+        except Exception as e:
+            logger.warning("[ghost-reaper] run-index write failed for %s: %s",
+                            agent_id, e)
+            return 0
+    return cleared
+
+
 def reap_all(
     *,
     grace_s: int = STALE_RUN_GRACE_S,
     storage: Optional[StorageBackend] = None,
 ) -> list[str]:
-    """Sweep every status.json under agents/. Returns the list of
-    agent_ids that got reaped this pass."""
+    """Sweep every status.json AND run-index.json under agents/. Returns
+    the list of agent_ids that got reaped this pass.
+
+    Uses the registry to enumerate agent_ids instead of `list_prefix(
+    'agents/')` — the latter hit Azure's 10K pagination cap (2026-05-11:
+    `implementer/status.json` and 6 other agents were invisible to the
+    reaper because they sorted alphabetically after the first 10K keys
+    under agents/, which is dominated by run-dir contents). The
+    registry is a single small file (`registry/agents.json`) so this
+    scales linearly with agent count, not blob count.
+    """
     s = storage or get_storage()
     reaped: list[str] = []
     try:
-        # status.json keys are agents/<id>/status.json
-        keys = s.list_prefix("agents/") if hasattr(s, "list_prefix") else []
+        from . import registry
+        agent_ids = [a.id for a in registry.list_agents(storage=s)]
     except Exception as e:
-        logger.warning("[ghost-reaper] list_prefix failed: %s", e)
+        logger.warning("[ghost-reaper] registry list failed: %s", e)
         return reaped
-    for k in keys:
-        if not k.endswith("/status.json"):
-            continue
-        agent_id = k[len("agents/"):-len("/status.json")]
-        if "/" in agent_id:
-            continue
+    for agent_id in agent_ids:
+        # Live-status reap (existing behavior)
         if reap_one(agent_id, grace_s=grace_s, storage=s) is not None:
+            reaped.append(agent_id)
+        # Run-index history reap (new — clears dashboard ghosts)
+        n = reap_run_index(agent_id, grace_s=grace_s, storage=s)
+        if n and agent_id not in reaped:
             reaped.append(agent_id)
     return reaped

@@ -11,12 +11,14 @@ import argparse
 import json
 import os
 import shlex
+import re
 import subprocess
 import sys
 import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -246,6 +248,62 @@ def run_step(name: str, cwd: str | None, cmd: str, env: dict | None = None,
     )
     print(f"[deployer:{name}] rc={proc.returncode}", file=sys.stderr)
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def _infer_content_check(rec: dict, base_url: str) -> Optional[dict]:
+    """Heuristic: derive a {url, contains} content-check spec from a rec
+    when the producer didn't specify one explicitly.
+
+    Returns None when we can't tell what to verify (then the deploy
+    skips content-verify for that rec — better than false-positive).
+
+    The mapping is per rec_type; new types fall through silently.
+    """
+    if not isinstance(rec, dict) or not base_url:
+        return None
+    rec_type = (rec.get("type") or rec.get("category") or "").lower()
+    base = base_url.rstrip("/")
+
+    # Affected URL — many producers attach it
+    affected = rec.get("affected_url") or rec.get("page_url") or rec.get("url") or ""
+    if affected.startswith("/"):
+        affected = base + affected
+    if not affected:
+        # Fall back to evidence[0].url
+        evid = rec.get("evidence") or []
+        if isinstance(evid, list) and evid and isinstance(evid[0], dict):
+            u = evid[0].get("url") or ""
+            if u.startswith("/"): u = base + u
+            affected = u
+
+    # Type → marker. Add cases as we encounter them; missing maps return None.
+    if rec_type in ("schema-markup", "schema-product-missing",
+                    "schema-article-missing", "schema-faqpage-missing",
+                    "schema-howto-missing", "schema-breadcrumblist-missing",
+                    "schema-organization-missing"):
+        return {"url": affected or base, "contains": "application/ld+json"}
+    if rec_type == "ux-improvement" and "json-ld" in (rec.get("title") or "").lower():
+        return {"url": affected or base, "contains": "application/ld+json"}
+    if rec_type in ("onpage-canonical-missing", "onpage-canonical-issue"):
+        return {"url": affected or base, "contains": '<link rel="canonical"', "regex": False}
+    if rec_type == "onpage-twitter-card-missing":
+        return {"url": affected or base, "contains": 'name="twitter:card"'}
+    if rec_type in ("onpage-og-incomplete",):
+        return {"url": affected or base, "contains": 'property="og:'}
+    if rec_type == "h1-missing":
+        return {"url": affected or base, "contains": "<h1", "regex": False}
+    if rec_type == "indexing-sitemap-404":
+        return {"url": base + "/sitemap.xml", "contains": "<urlset"}
+    # Article-author proposals: verify the new article slug renders
+    if rec_type == "article-author-proposal":
+        slug = ((rec.get("article_proposal") or {}).get("slug")
+                or (rec.get("proposal") or {}).get("slug") or "")
+        if slug:
+            # Heuristic: most article-author destinations are under /articles/
+            # or /reviews/ or /buying-guide/. Try the most likely one.
+            for prefix in ("/articles/", "/reviews/", "/buying-guide/", "/blog/"):
+                return {"url": base + prefix + slug, "contains": slug}
+    return None
 
 
 def smoke_check(base_url: str, paths: list[str], timeout: int = 30) -> tuple[bool, list[dict]]:
@@ -517,19 +575,94 @@ def main() -> None:
         else:
             deploy_meta["deploy"]["skipped"] = True
 
-        # ---- 5. Smoke check ----
+        # ---- 5. Smoke check (URL-level + content-level) ----
         sc = deployer.get("smoke_check", {})
         if sc.get("base_url") and sc.get("paths"):
-            time.sleep(20)  # let the deploy settle
+            # Cold-start grace period — Container Apps takes 30-60s to
+            # warm up after a revision swap. Increased from 20s after
+            # repeated false-positive smoke failures.
+            settle_s = int(sc.get("settle_seconds", 60))
+            print(f"[deployer] settling for {settle_s}s before smoke", file=sys.stderr)
+            time.sleep(settle_s)
             ok, results = smoke_check(
                 sc["base_url"], sc["paths"], int(sc.get("timeout_seconds", 30)),
             )
             deploy_meta["smoke"] = {"ok": ok, "results": results}
             if not ok:
+                # Retry once with a longer timeout — this is the cold-start
+                # window for Azure Container Apps. Many false positives
+                # historically came from this race.
+                print(f"[deployer] smoke failed first attempt, retrying once after 30s", file=sys.stderr)
+                time.sleep(30)
+                ok, results = smoke_check(
+                    sc["base_url"], sc["paths"], int(sc.get("timeout_seconds", 60)),
+                )
+                deploy_meta["smoke"] = {"ok": ok, "results": results, "retried": True}
+            if not ok:
                 deploy_meta["status"] = "failure"; _save()
-                # Best-effort: print rollback hint if we have a prior tag
                 print(f"[deployer] SMOKE FAILED — manual rollback needed", file=sys.stderr)
                 sys.exit(1)
+
+            # ── Content-level verification (per-rec) ────────────────
+            # Previous smoke just checked URLs respond 200. That passes
+            # even when the rec's *intent* didn't actually ship (e.g.
+            # the LLM created a JSON-LD component but didn't import it,
+            # so /buying-guide/* still emits zero ld+json tags).
+            #
+            # For each rec we just shipped, look at its `content_check`
+            # block (set by the producer agent or inferred from rec.type)
+            # and curl + grep the affected URL for the expected marker.
+            # If grep fails, we know the LLM produced orphan code or
+            # missed the integration step — fail the deploy so the
+            # dispatch retries with stronger Rule 8 prompting.
+            #
+            # Disabled by default per-deployment if you want the old
+            # behavior: set RESPONDER_SKIP_CONTENT_VERIFY=1.
+            if os.environ.get("RESPONDER_SKIP_CONTENT_VERIFY") != "1":
+                cv_results = []
+                cv_failed = []
+                try:
+                    recs_doc = (run_dir / "recommendations.json")
+                    if recs_doc.is_file():
+                        recs_data = json.loads(recs_doc.read_text())
+                        recs_list = (recs_data.get("recommendations")
+                                     if isinstance(recs_data, dict) else recs_data) or []
+                        for r in recs_list:
+                            if not isinstance(r, dict): continue
+                            if not r.get("implemented"): continue
+                            # Skip if this rec doesn't carry a content_check spec
+                            cc = r.get("content_check") or _infer_content_check(r, sc.get("base_url",""))
+                            if not cc: continue
+                            url = cc.get("url"); needle = cc.get("contains")
+                            if not (url and needle): continue
+                            try:
+                                req = urllib.request.Request(url,
+                                    headers={"User-Agent":"seo-deployer-content-check/1.0"})
+                                with urllib.request.urlopen(req, timeout=30) as resp:
+                                    body = resp.read().decode("utf-8","replace")
+                                ok_cv = needle.lower() in body.lower() if not cc.get("regex") \
+                                        else bool(re.search(needle, body, re.I))
+                            except Exception as e:
+                                body = ""; ok_cv = False
+                            cv_results.append({
+                                "rec_id": r.get("id"), "url": url, "needle": needle,
+                                "ok": ok_cv,
+                            })
+                            if not ok_cv:
+                                cv_failed.append(r.get("id"))
+                except Exception as e:
+                    print(f"[deployer] content-verify skipped: {e}", file=sys.stderr)
+
+                deploy_meta["content_verify"] = {
+                    "results": cv_results,
+                    "failed_rec_ids": cv_failed,
+                }
+                if cv_failed:
+                    deploy_meta["status"] = "failure"; _save()
+                    print(f"[deployer] CONTENT VERIFY FAILED for recs: {cv_failed}", file=sys.stderr)
+                    print(f"[deployer] The deploy succeeded (URLs return 200) but the"
+                          f" expected content is NOT visible. Likely orphan code or missed integration.", file=sys.stderr)
+                    sys.exit(1)
 
         deploy_meta["status"] = "success"
         deploy_meta["rollback_cmd"] = _expand(d.get("cmd", ""), deploy_vars, "<PRIOR_TAG>", image)

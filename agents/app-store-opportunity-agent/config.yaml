@@ -1,0 +1,181 @@
+# app-store-opportunity-agent — example config
+#
+# Drop a copy at config.yaml (or set APP_STORE_OPPORTUNITY_CONFIG).
+
+# ===========================================================================
+# Discovery — broad-catalog sweep is the default. Pulls top apps fleet-wide
+# from the iTunes top-charts RSS feeds (top free / paid / grossing, overall
+# AND per-genre). Combined with the eligibility filter below this finds the
+# "popular app that nobody updates" signal exactly.
+# ===========================================================================
+discovery:
+  countries: ["us"]              # which storefronts to scan
+  max_apps_per_run: 200          # cap candidates LLM evaluates per run
+
+  top_charts:
+    enabled: true
+    # Pull from each chart kind. "free" + "grossing" surface the apps with
+    # users + revenue; "paid" catches premium apps that may have stopped
+    # being maintained.
+    kinds: ["free", "paid", "grossing"]
+
+    # Overall (no genre) — the front-page top N across all categories.
+    overall_limit: 100
+
+    # Per-genre — same charts repeated per category. Builds a wide net.
+    # Setting per_genre_limit: 0 disables per-genre and keeps overall only.
+    per_genre_limit: 50
+
+    # genre_ids: which Apple genre IDs to walk. Default (omit this key) =
+    # every genre EXCEPT Games (6014) and Stickers (6025). Set explicitly
+    # to narrow the scan, or to []  to do overall-only.
+    #
+    # Reference (top-level App Store genres):
+    #   6000 Business        6011 Music             6020 Medical
+    #   6001 Weather         6012 Lifestyle         6022 Catalogs
+    #   6002 Utilities       6013 Health & Fitness  6023 Food & Drink
+    #   6003 Travel          6014 Games             6024 Shopping
+    #   6004 Sports          6015 Finance           6026 Developer Tools
+    #   6005 Social Network  6016 Entertainment     6027 Graphics & Design
+    #   6006 Reference       6017 Education
+    #   6007 Productivity    6018 Books
+    #   6008 Photo & Video   6020 Medical
+    #   6009 News
+    #   6010 Navigation
+    # genre_ids: [6007, 6013, 6015, 6024]   # uncomment to narrow
+
+# Optional niche-search supplement. Top charts cover most popular apps; use
+# this for very-long-tail topics that don't chart but matter to your thesis.
+# Leave empty for pure top-charts mode.
+search:
+  queries: []
+  # Examples if you want them:
+  # - "barcode scanner"
+  # - "tip calculator"
+  # - "interval timer"
+  results_per_query: 25
+
+# ===========================================================================
+# Eligibility filters — pre-LLM gate.
+#
+# HARD rule: every candidate must be rated below `max_average_rating`.
+# Top-rated apps are deliberately filtered out — they're rarely
+# replaceable and waste tokens.
+#
+# Two review-count tiers on top of the rating gate:
+#   • neglected — moderate userbase + stale update (classic "abandoned"
+#                 pattern; chart-fallen leaders surface here)
+#   • popular   — huge userbase regardless of update cadence (active
+#                 maintenance still counts as long as the rating is low)
+#
+# Tune defaults as you learn what's actually replaceable.
+# ===========================================================================
+filters:
+  # GLOBAL rating gate — applies to every candidate.
+  min_average_rating: 0.0           # set above 0 to exclude rating-less new apps
+  max_average_rating: 4.0           # below 4.0 = real user friction;
+                                    # raise to 4.2 to cast a wider net,
+                                    # lower to 3.5 for only the most-broken
+
+  # Tier 1: neglected
+  neglected_min_reviews:            500
+  neglected_min_days_since_update:  180
+  # Tier 2: popular (huge userbase override; staleness ignored)
+  popular_min_reviews:              50000
+
+  exclude_publishers:                # mega-publishers we can't realistically displace
+    - "Google LLC"
+    - "Google"
+    - "Apple"
+    - "Apple Inc."
+    - "Meta Platforms, Inc."
+    - "Microsoft Corporation"
+    - "OpenAI OpCo, LLC"
+    - "Anthropic PBC"
+    - "Amazon"
+    - "Amazon.com Services LLC"
+  exclude_keywords:                  # heuristic skip list — regulated / hardware-tied / network-effect-locked
+    - "banking"
+    - "credit union"
+    - "insurance claim"
+    - "telemedicine"
+    - "epic mychart"
+    - "pharmacy benefits"
+    - "child's school"
+
+# ===========================================================================
+# Scoring weights — final opportunity_score = weighted sum of these signals.
+# decline_signal:  low rating × many reviews × stale update
+# install_base:    review-count saturation curve (popularity proxy)
+# monetization:    IAP/subscription/ad signals from description + price
+# simplicity:      inverse of LLM build_complexity (1=trivial, 5=huge)
+# ===========================================================================
+scoring:
+  weights:
+    decline_signal: 0.30
+    install_base:   0.30
+    monetization:   0.20
+    simplicity:     0.20
+  build_complexity:
+    factors:
+      - "external integrations or APIs the app depends on"
+      - "regulated domain (HIPAA, PCI, financial, child-safety)"
+      - "real-time multiplayer or sync requirements"
+      - "specialized hardware (BLE, camera CV, AR) requirements"
+      - "marketplace/two-sided network effects"
+      - "content production cost (curated database, licensed media)"
+  revenue_potential:
+    rubric: |
+      Estimate revenue ceiling for a 'better v2' clone. Consider:
+      review velocity, IAP/subscription pricing visible in screenshots,
+      ad density, sticky use-case (daily vs. one-shot), enterprise/B2B
+      angles. 'high' = $5k-50k MRR plausible; 'very_high' = $50k+.
+
+# Cap on the active backlog — beyond this we auto-pass the lowest-scored.
+max_open_opportunities: 300
+
+# ===========================================================================
+# Blueprints — for the top-ranked opportunities (sorted by ROI =
+# revenue_potential / build_complexity), the agent generates a complete
+# build spec the implementer can execute. Files written to:
+#   agents/<agent_id>/blueprints/<opportunity_id>/
+#     - manifest.json          (machine-readable, implementer reads this first)
+#     - README.md              (human entry-point)
+#     - product-spec.md, ux-research.md, ux-spec.md
+#     - tech-stack.md, api-spec.md, data-model.md
+#     - implementation-plan.md (file tree + ordered milestones)
+# Blueprints follow `docs/reference-app-architecture.md` (reference doc
+# threaded into the LLM prompt so output is consistent across apps).
+# ===========================================================================
+blueprints:
+  max_per_run: 3                # generate at most N blueprints per run
+                                # (set 0 to disable blueprint generation)
+  regenerate_after_days: 90     # skip items whose blueprint is fresher than this
+
+  # Tech stack baked into the prompt. Override per-deployment if you
+  # want a different stack family (e.g. Python+FastAPI backend, SwiftUI
+  # native instead of RN, etc).
+  tech_stack:
+    frontend: "React Native (TypeScript) with Expo for delivery"
+    backend:  "Node.js + Express on Postgres, deployed via Docker (mirrors aisleprompt's stack)"
+    infra:    "Docker compose for local dev, Azure Container Apps for production"
+    auth:     "OAuth + JWT sessions"
+    ci:       "GitHub Actions: lint, type-check, test, build, push image"
+
+# ===========================================================================
+# Reporter — daily email with the top backlog ordered by
+# revenue_potential / build_complexity (the "easiest big-win first" lens).
+# ===========================================================================
+reporter:
+  email:
+    to: [mperry@northernsoftwareconsulting.com]
+    from: automation@northernsoftwareconsulting.com
+    msmtp_account: automation
+    subject_template: "App Store Opportunities — {date}"
+    backlog_cap: 50               # cap email at top 50; full list on dashboard
+
+# Optional: provider/model overrides for the analysis call. Default empty
+# = use the framework's per-agent provider chain at config/ai-defaults.json.
+ai:
+  provider: ""
+  model: ""

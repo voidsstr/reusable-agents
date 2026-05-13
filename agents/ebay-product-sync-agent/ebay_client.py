@@ -147,6 +147,55 @@ class EbayClient:
         # All retries exhausted
         raise last_err if last_err else RuntimeError("eBay search failed: unknown")
 
+    def get_item(self, item_id: str) -> Optional[dict]:
+        """Fetch one listing by eBay item id. Returns the item dict on
+        success, None if the listing is ended/removed (HTTP 404) so the
+        caller can mark it inactive.
+
+        Why this exists: search() finds new listings, but BIN listings
+        sold quickly stay "active" in our DB until time-based staleness
+        (72h default) catches them. This call lets the audit pass verify
+        each currently-active row is actually still live on eBay so we
+        can drop sold/ended ones immediately and free the slot for a
+        fresh listing during the same run's backfill phase.
+        """
+        token = self._ensure_token()
+        # Browse API item endpoint: /item/{item_id}
+        # eBay item ids look like "v1|123456789012|0" — already URL-safe,
+        # but quote_plus to be defensive against future format changes.
+        url = self._base_url + "/item/" + urllib.parse.quote(item_id, safe="|")
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": self.marketplace,
+        }
+        if self.campaign_id:
+            headers["X-EBAY-C-ENDUSERCTX"] = (
+                f"affiliateCampaignId={self.campaign_id},"
+                f"affiliateReferenceId=ebay-product-sync-agent"
+            )
+        req = urllib.request.Request(url, headers=headers)
+        import time as _time
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            if attempt > 0:
+                _time.sleep(2 ** attempt)  # 2s, 4s
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return json.loads(r.read().decode())
+            except urllib.error.HTTPError as e:
+                # 404 = item ended/removed. Don't retry, just signal "gone".
+                if e.code == 404:
+                    return None
+                err_body = e.read().decode("utf-8", errors="replace")[:300]
+                last_err = RuntimeError(f"eBay get_item failed: {e.code} {err_body}")
+                if e.code in (502, 503, 504):
+                    continue
+                raise last_err from e
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+                last_err = RuntimeError(f"eBay get_item failed (transport): {e}")
+                continue
+        raise last_err if last_err else RuntimeError("eBay get_item failed: unknown")
+
     def healthcheck(self) -> dict:
         """Verify creds work and the marketplace is reachable."""
         self._ensure_token()

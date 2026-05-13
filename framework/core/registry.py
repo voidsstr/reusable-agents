@@ -63,7 +63,7 @@ class AgentManifest:
         manual   — Run-now button in dashboard / API trigger
         chained  — dispatched by another agent (response queue, run-dir feed)
 
-    Pure pipeline-stage agents (e.g. implementer, seo-deployer) are
+    Pure pipeline-stage agents (e.g. implementer, deployer) are
     typically ['chained'] only — manually running them with no upstream
     payload is a footgun. The dashboard greys out the Run-now button
     when 'manual' is not present."""
@@ -83,6 +83,25 @@ class AgentManifest:
     recommendations` means: agent emails ranked recs and waits for the
     user's reply (via responder-agent) before shipping. Defaults to
     empty (no confirmation gate)."""
+
+    priority_tier: int = 0
+    """Optional override for the agent's queue-pickup priority. When set
+    to a positive integer, this overrides whatever pattern match
+    `framework.core.priority.tier_for_agent` would otherwise compute
+    from `config/priority-config.json`. Lower = run first. Set to 0
+    (default) to defer to the storage config patterns. See
+    framework/core/priority.py for the resolution order."""
+
+    code_editor_chain: list[str] = field(default_factory=list)
+    """Optional override for the LLM-driven code-editor backend chain
+    (used by implementer + any agent that edits files via an LLM).
+    When non-empty, takes precedence over the per-deployment storage
+    config and any per-site `site.yaml` `code_editor.chain`. Each entry
+    is a backend id defined under
+    `config/code-editor-config.json` → `backends`. Default chain ships
+    with sensible behaviour out of the box (aider via Copilot proxy →
+    aider via github_copilot native → aider via Azure → plandex →
+    goose). See framework/core/code_editor.py."""
 
     created_at: str = ""
     updated_at: str = ""

@@ -13,6 +13,67 @@ to the configured site repo.
 - `RESPONDER_RUN_TS` — run-ts (informational)
 - `AGENT_RUN_ID` — the dashboard's run id, if invoked from the dashboard
 
+## LLM driver
+
+The implementer is the only agent that does its own model routing
+*before* falling through to the framework's normal chain. Two-tier:
+
+```
+1. claude-pool — round-robin across Claude Max accounts
+   (CLI in --print mode, no API key, subscription billing)
+       │
+       ├─ on success: rec applied via `claude` directly
+       │
+       └─ on rc=75 (CLAUDE_POOL_FAIL_FAST=1, all accounts rate-limited)
+          OR IMPLEMENTER_FORCE_FALLBACK=1
+          OR IMPLEMENTER_LLM=framework
+              │
+              ▼
+2. framework code-editor chain — `framework.core.code_editor`
+   default chain (top-to-bottom):
+     aider-copilot-proxy   (aider + claude-sonnet-4.6 via :4141)
+     aider-github-copilot  (aider + github_copilot/claude-sonnet-4)
+     opencode-azure        (sst/opencode + Azure gpt-4.1-mini)
+     crush-azure           (charmbracelet/crush + Azure)
+     aider-azure           (aider + Azure gpt-4.1-mini, last-resort)
+     codex-azure           (OpenAI Codex CLI via Responses API)
+     plandex-azure         (plandex pluggable)
+```
+
+`build-aider-invocation.py` builds the prompt + file list passed into
+the framework chain when claude is unavailable. The chain itself is
+configured at `config/code-editor-config.json` in framework storage —
+edit via dashboard `/code-editor` page, NOT inline in this agent.
+
+**Env knobs (read by `run.sh`):**
+
+| Var | Default | Effect |
+|---|---|---|
+| `IMPLEMENTER_LLM` | `claude` | `claude` / `framework` / `noop` |
+| `IMPLEMENTER_FORCE_FALLBACK` | `0` | `1` = skip claude entirely, go straight to framework chain |
+| `CLAUDE_POOL` | `1` | `0` = disable round-robin, use the user's default `claude` |
+| `CLAUDE_POOL_ROOT` | `$HOME/.reusable-agents/claude-pool` | where the pool wrapper + per-account state live |
+| `CLAUDE_POOL_FAIL_FAST` | `1` | rate-limited Max accounts → rc=75 immediately so the framework chain takes over (don't wait for reset) |
+| `IMPLEMENTER_USE_PROXY` | `1` | route claude through Cloudflare WARP at `~/.local/bin/claude-via-proxy` |
+
+**When to flip these:**
+- Claude Max quota hit fleet-wide → set `IMPLEMENTER_FORCE_FALLBACK=1`
+  on the run (or as a default in `run.sh`) until the reset window;
+  aider via copilot proxy still ships the rec and costs nothing under
+  Copilot Pro.
+- Need a deterministic non-LLM smoke-test of the dispatch + commit
+  path → `IMPLEMENTER_LLM=noop`.
+- Adding a new editor binary → register it in the framework
+  `code_editor` config, NOT here. The implementer doesn't know which
+  backend won — the framework returns a successful `EditResult` either
+  way.
+
+Don't add new shell-out paths to `claude` / `aider` / `gh copilot`
+inside `run.sh`. Both fallback layers above already capture the LLM
+stream into `agents/<id>/runs/<run-ts>/llm-output.jsonl` and record
+usage at `config/llm-usage-*.jsonl` for the dashboard. Bypassing them
+breaks the Live LLM tab + cost reporting.
+
 ## What you do
 
 1. **Read** `$RESPONDER_RUN_DIR/recommendations.json`. Keep only the recs in

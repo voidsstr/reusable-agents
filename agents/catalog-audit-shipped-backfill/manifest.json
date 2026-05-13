@@ -1,0 +1,20 @@
+{
+  "id": "catalog-audit-shipped-backfill",
+  "name": "Catalog-Audit Shipped Backfill",
+  "description": "Periodically reconciles catalog-audit migration recs: queries prod DB to verify each migration's effects landed, then flips shipped:false→true on the rec.",
+  "category": "ops",
+  "task_type": "desktop-task",
+  "cron_expr": "*/30 * * * *",
+  "timezone": "UTC",
+  "enabled": true,
+  "owner": "perrymb@gmail.com",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "DATABASE_URL_AISLEPROMPT='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require' DATABASE_URL_SPECPICKS='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require' PYTHONPATH=/home/voidsstr/development/reusable-agents python3 /home/voidsstr/development/reusable-agents/agents/catalog-audit-shipped-backfill/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/catalog-audit-shipped-backfill",
+    "created_at": "2026-05-07T15:34:59Z"
+  }
+}

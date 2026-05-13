@@ -7,7 +7,9 @@ new site is **configuration only**.
 
 ## What you get
 
-For each site you onboard, the SEO agent runs every 3 hours and:
+For each site you onboard, the SEO agent runs every 2 hours (see
+[engine README](../agents/seo-opportunity-agent/README.md) for the
+full lifecycle) and:
 
 1. **Crawls the sitemap** + samples pages by type (product / head-to-head
    / article / buying-guide / hardware).

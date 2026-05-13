@@ -521,18 +521,74 @@ class _AnthropicClient(AIClient):
 class _OllamaClient(AIClient):
     def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         import urllib.request, urllib.error
-        url = (self.provider.base_url or "http://localhost:11434").rstrip("/") + "/api/chat"
-        body = json.dumps({
-            "model": model or self.model or "qwen3:8b",
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-        }).encode()
-        req = urllib.request.Request(url, data=body,
-                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            payload = json.loads(r.read().decode())
-        return (payload.get("message") or {}).get("content", "")
+        base = (self.provider.base_url or "http://localhost:11434").rstrip("/")
+        target_model = model or self.model or "qwen3:8b"
+
+        # ── Preflight reachability check (2026-05-12) ───────────────────
+        # The remote ollama box (e.g. ollama-4080 at 192.168.1.82:11434)
+        # is reached cross-LAN. Silent failures were happening when the
+        # remote ollama wasn't running — the agent's chat call would
+        # eventually raise URLError or ConnectionError and the fallback
+        # chain would transparently re-route to a metered provider.
+        # No alert, no signal that the user's "cost-savings split" was
+        # broken. We probe /api/tags with a tight 3s timeout here. If
+        # unreachable, fire an operator alert (24h cooldown) THEN raise
+        # so the fallback chain can pick a backup.
+        if not _ollama_reachable(base, timeout_s=3.0):
+            _alert_ollama_unreachable(
+                agent_id=getattr(self.provider, "agent_id", None)
+                         or getattr(self, "agent_id", None) or "?",
+                provider_name=self.provider.name,
+                base_url=base,
+            )
+            raise ConnectionError(
+                f"ollama unreachable at {base} (provider={self.provider.name})"
+            )
+
+        # Serialize all ollama use across the framework — chat AND
+        # code-editor backends fight for VRAM. We hold the global
+        # ollama_dispatch_lock for the duration of one chat call. Lock
+        # is reentrant per-process, file-locked, releases on crash.
+        # `on_timeout="proceed"` so a stuck mate doesn't kill chat —
+        # we'd rather race than hang indefinitely. Chat calls are
+        # bounded by urlopen's 300s timeout below.
+        try:
+            from .locks import ollama_dispatch_lock as _ollama_lock
+            from .code_editor import ensure_ollama_model_loaded as _ensure
+        except Exception:
+            _ollama_lock = None
+            _ensure = None
+
+        def _do_call() -> str:
+            url = base + "/api/chat"
+            body = json.dumps({
+                "model": target_model,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            }).encode()
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=300) as r:
+                payload = json.loads(r.read().decode())
+            return (payload.get("message") or {}).get("content", "")
+
+        if _ollama_lock is None:
+            return _do_call()
+
+        # Tight 5-min lock-acquire timeout — chat wants a fast verdict.
+        # If we can't grab the lock that fast, run anyway (proceed) so
+        # we don't block higher-level agents.
+        with _ollama_lock(timeout_s=300, on_timeout="proceed"):
+            if _ensure is not None:
+                try:
+                    _ensure(target_model, base_url=base)
+                except Exception:
+                    # Preflight is best-effort; ollama will load on
+                    # demand if we skipped here.
+                    pass
+            return _do_call()
 
 
 class _CopilotClient(AIClient):
@@ -642,9 +698,22 @@ class _ClaudeCliClient(AIClient):
         # it for callers that need tool use (web_search etc.) — the CLI
         # counts each tool invocation as a turn.
         max_turns = int(kwargs.get("max_turns", 1))
-        # CLAUDE_CLI_CMD lets you swap in a round-robin wrapper (e.g. claude-rr)
-        # or a version pinned to a specific Claude Max account.
-        claude_bin = os.environ.get("CLAUDE_CLI_CMD", "claude")
+        # CLAUDE_CLI_CMD explicit override (highest priority).
+        # Otherwise auto-discover the claude-pool shim — when present, it
+        # round-robins across authenticated/non-rate-limited Max profiles
+        # so chat agents share the load instead of all hammering one
+        # account. Falls back to bare `claude` (single default account)
+        # when the pool isn't installed.
+        claude_bin = os.environ.get("CLAUDE_CLI_CMD", "")
+        if not claude_bin:
+            pool_shim = os.path.expanduser(
+                os.environ.get("CLAUDE_POOL_ROOT",
+                               "~/.reusable-agents/claude-pool") + "/bin/claude"
+            )
+            if os.path.isfile(pool_shim) and os.access(pool_shim, os.X_OK):
+                claude_bin = pool_shim
+            else:
+                claude_bin = "claude"
         cmd = [
             claude_bin,
             "--print",
@@ -789,7 +858,7 @@ _FALLBACK_TRIGGER_SUBSTRINGS = (
 # Kinds we consider for fallback, in preference order. Skipped if no
 # provider of that kind is registered or if the registered one has no
 # usable credentials.
-DEFAULT_FALLBACK_KINDS = ("copilot", "azure_openai", "openai", "anthropic", "ollama")
+DEFAULT_FALLBACK_KINDS = ("copilot", "ollama", "azure_openai", "openai", "anthropic")
 
 
 def _is_fallback_trigger(exc: BaseException) -> bool:
@@ -859,6 +928,193 @@ def _build_fallback_chain(primary: "AIClient",
     return chain
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Operator-alert hooks for the LLM fallback chain.
+# Two events the operator cares about (added 2026-05-12 after Copilot
+# Plus premium quota was found at -3,760/1,500 with no auto-billing):
+#
+#   1. Pre-paid provider rejects a request (claude pool rate-limited,
+#      copilot premium quota exceeded, etc.) — operator should know
+#      their plan is exhausted so they can decide whether to:
+#        a. Wait for the natural reset window
+#        b. Re-arrange chain (drop the dead backend)
+#        c. Manually flip producers to a different provider
+#
+#   2. Chain falls through to a METERED provider (azure_openai,
+#      openai, anthropic API). Each call costs real money — the
+#      operator wants to know when this starts happening so they can
+#      cap or shift workload.
+#
+# Both alerts use notify_operator() with daily cooldown so the
+# operator gets ~1 email per (event, provider) per day, not per call.
+# ─────────────────────────────────────────────────────────────────────
+
+# Providers that bill per-token (the operator pays directly via API).
+# Pre-paid plans (claude-cli via Claude Max, copilot via subscription,
+# ollama free local) are NOT in this set.
+_METERED_KINDS = frozenset((
+    "azure_openai",   # Azure OpenAI — token-metered via the user's Azure subscription
+    "openai",         # OpenAI direct API — token-metered
+    "anthropic",      # Anthropic direct API — token-metered (not Claude Max!)
+))
+
+
+def _ollama_reachable(base_url: str, *, timeout_s: float = 3.0) -> bool:
+    """Cheap GET /api/tags reachability probe. Returns True if the
+    server responds 2xx within timeout_s. Used by _OllamaClient._chat
+    to fail fast (and alert) when the local ollama box is down,
+    instead of letting urlopen hang for 300s."""
+    import urllib.request, urllib.error
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/api/tags")
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
+def _alert_ollama_unreachable(*, agent_id: str, provider_name: str,
+                               base_url: str) -> None:
+    """Operator-alert when a chat agent's ollama provider is unreachable.
+
+    The cost-savings split (5090 + 4080 ollama boxes) only works if both
+    ollama instances are running. When the remote box (typically
+    ollama-4080 at 192.168.1.82:11434) is down, ten chat agents
+    silently fall through the fallback chain to METERED providers
+    (Azure OpenAI / OpenAI / Anthropic). No signal otherwise — usage
+    logs don't distinguish "intended fallback" from "endpoint dead".
+
+    Cooldown: 24h per (agent, provider) so the operator gets one
+    summary alert, not one per chat call.
+    """
+    try:
+        from .resilience import notify_operator
+        notify_operator(
+            agent_id=agent_id,
+            error=RuntimeError(
+                f"Ollama provider '{provider_name}' unreachable at "
+                f"{base_url}. Chat fallback chain will route to a paid "
+                f"provider instead."
+            ),
+            context={
+                "category": "ollama-unreachable",
+                "provider": provider_name,
+                "base_url": base_url,
+                "impact": (
+                    "Cost-savings split is broken: agents configured to "
+                    "use this local ollama box are bouncing to metered "
+                    "providers (Azure / OpenAI / Anthropic) or to "
+                    "another claude-cli session, increasing burn rate "
+                    "and risk of Claude Max throttling."
+                ),
+                "recovery": (
+                    "Bring ollama back up on the host. Typical fixes: "
+                    "(a) systemctl --user start ollama on the box, "
+                    "(b) ollama serve & if not running under systemd, "
+                    "(c) check the host is reachable on the LAN, "
+                    "(d) verify /api/tags responds: "
+                    f"curl {base_url}/api/tags"
+                ),
+            },
+            severity="high",
+            cooldown_s=86400,
+        )
+    except Exception:
+        pass
+
+
+def _alert_metered_fallback(*, agent_id: str, winner_kind: str,
+                              winner_name: str, primary_name: str,
+                              last_err: str) -> None:
+    """Operator-alert when chain_with_fallback selects a per-token
+    metered provider AFTER the pre-paid primary failed."""
+    try:
+        from .resilience import notify_operator
+        # One alert per (agent, winner_kind) per day. The operator only
+        # needs to know "X is now hitting Azure" once per day per agent
+        # — not for every single call.
+        notify_operator(
+            agent_id=agent_id,
+            error=RuntimeError(
+                f"Falling through to METERED provider: {winner_name} "
+                f"({winner_kind}). Primary {primary_name} failed: {last_err}"
+            ),
+            context={
+                "category": "metered-provider-fallback",
+                "winner_provider": winner_name,
+                "winner_kind": winner_kind,
+                "primary_provider": primary_name,
+                "last_error": last_err,
+                "impact": (
+                    "Each call to this provider bills against your "
+                    "metered subscription (Azure OpenAI / OpenAI / "
+                    "Anthropic direct API). Your pre-paid plan "
+                    "(Claude Max / Copilot Plus / etc.) is exhausted "
+                    "or unavailable."
+                ),
+                "recovery": (
+                    "Either (a) wait for the pre-paid plan to reset, "
+                    "(b) edit config/code-editor-config.json and "
+                    "config/ai-defaults.json to remove the metered "
+                    "provider from the chain, or (c) pause heavy "
+                    "agents until quota recovers."
+                ),
+            },
+            severity="medium",
+            cooldown_s=86400,  # 24h — one alert per agent+provider per day
+        )
+    except Exception:
+        # Non-fatal — never let an alert path break the actual LLM call.
+        pass
+
+
+def _alert_provider_quota_exhausted(*, agent_id: str, provider_kind: str,
+                                      provider_name: str, err: str) -> None:
+    """Operator-alert when a provider rejects a call with what looks
+    like a quota/rate-limit error. Distinct from the metered-fallback
+    alert because this fires the moment the FIRST provider goes
+    sideways, not when the chain successfully recovers."""
+    # Only alert for pre-paid providers — we don't care about metered
+    # rate-limits (those are tactical, not strategic).
+    if provider_kind in _METERED_KINDS:
+        return
+    try:
+        from .resilience import notify_operator
+        notify_operator(
+            agent_id=agent_id,
+            error=RuntimeError(
+                f"Pre-paid provider rejected: {provider_name} "
+                f"({provider_kind}). Error: {err}"
+            ),
+            context={
+                "category": "provider-quota-exhausted",
+                "provider": provider_name,
+                "provider_kind": provider_kind,
+                "error": err,
+                "impact": (
+                    "This agent's primary pre-paid provider is "
+                    "currently unavailable. Subsequent calls will "
+                    "fall through the chain — possibly to metered "
+                    "providers (see the metered-fallback alert if "
+                    "that fires)."
+                ),
+                "recovery": (
+                    "Check provider state — for Claude Max: run "
+                    "`PYTHONPATH=. python3 framework/cli/claude_pool.py "
+                    "status` to see profile rate-limits + reset windows. "
+                    "For Copilot Plus: curl http://localhost:4141/usage "
+                    "to see premium-request quota_remaining. The chain "
+                    "will keep working with whatever's left, but heavy "
+                    "agents may start hitting metered providers."
+                ),
+            },
+            severity="medium",
+            cooldown_s=86400,  # 24h — one alert per agent+provider per day
+        )
+    except Exception:
+        pass
+
+
 def chat_with_fallback(agent_id: str,
                         messages: list[dict],
                         *,
@@ -885,6 +1141,19 @@ def chat_with_fallback(agent_id: str,
     re-raises immediately rather than burning through the chain — those
     won't get better by switching providers.
     """
+    # Prompt-bloat guardrail: stop runaway-context bugs before we burn
+    # tokens. ~4 chars/token rough estimate; refuse anything over the
+    # configured limit (default 200k chars ≈ 50k tokens). Loud failure
+    # in the run log + decision trail beats a quiet $5 spike.
+    _prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    _prompt_cap = int(os.environ.get("AI_PROMPT_CHAR_CAP", "200000"))
+    if _prompt_chars > _prompt_cap:
+        raise ValueError(
+            f"prompt-budget exceeded: {_prompt_chars} chars > AI_PROMPT_CHAR_CAP="
+            f"{_prompt_cap} (~{_prompt_chars // 4} tokens). Reduce inputs or "
+            f"raise the cap via env. agent_id={agent_id}"
+        )
+
     primary = ai_client_for(agent_id, storage=storage,
                              override_provider=override_provider,
                              override_model=override_model)
@@ -922,6 +1191,20 @@ def chat_with_fallback(agent_id: str,
                         client.provider.name, client.provider.kind,
                         primary.provider.name, last_err,
                     )
+                # Operator-alert: chain fell through to a METERED provider.
+                # The user pays per token for these. Fire a daily-capped
+                # alert so the operator knows their pre-paid plans (Claude
+                # Max, Copilot Plus) are exhausted and metered billing is
+                # actively running. The free tier providers (claude-cli,
+                # copilot, ollama) don't trigger this alert.
+                if i > 0 and client.provider.kind in _METERED_KINDS:
+                    _alert_metered_fallback(
+                        agent_id=agent_id,
+                        winner_kind=client.provider.kind,
+                        winner_name=client.provider.name,
+                        primary_name=primary.provider.name,
+                        last_err=str(last_err)[:300],
+                    )
                 return text, client
             except Exception as e:  # noqa: BLE001 — we re-raise for non-fallback cases
                 if not _is_fallback_trigger(e):
@@ -942,6 +1225,18 @@ def chat_with_fallback(agent_id: str,
                     agent_id, client.provider.name, client.provider.kind,
                     type(e).__name__, str(e)[:300],
                 )
+                # Operator-alert: a pre-paid provider just rejected us.
+                # Different shape from the metered-fallback alert above —
+                # this fires the FIRST time a quota is detected so the
+                # operator knows their plan is full. Quota-exhausted vs.
+                # transient-rate-limit differ in the error text; we fire
+                # for both since the operational impact is the same.
+                _alert_provider_quota_exhausted(
+                    agent_id=agent_id,
+                    provider_kind=client.provider.kind,
+                    provider_name=client.provider.name,
+                    err=str(e)[:300],
+                )
                 break  # fall over to next provider in chain
 
     # All clients exhausted.
@@ -958,11 +1253,19 @@ def ai_client_for(agent_id: str,
                   storage: Optional[StorageBackend] = None) -> AIClient:
     """Return an AIClient configured for `agent_id`.
 
-    Resolution order:
+    Resolution order (2026-05-11: operator-config beats manifest defaults):
       1. override_provider / override_model arguments (e.g., agent run-time choice)
-      2. agent's manifest `metadata.ai.provider` / `metadata.ai.model`
-      3. defaults.json agent_overrides[agent_id]
+      2. defaults.json agent_overrides[agent_id]    ← operator-level config
+      3. agent's manifest `metadata.ai.provider`     ← code-level default
       4. defaults.json default_provider / default_model
+
+    Rationale: manifests pin provider as a code-author preference, but
+    operators need a runtime escape hatch when a provider runs out or a
+    cheaper local alternative is good enough. Previously manifest beat
+    agent_overrides, which meant config changes were silently ignored
+    — the 2026-05-09→11 incident where `specpicks-ebay-product-sync-agent`
+    burned 9,763 claude-pool calls despite a config override to
+    ollama-4080 happened because of this. Swapped here.
     Raises if no provider can be resolved.
     """
     s = storage or get_storage()
@@ -973,7 +1276,13 @@ def ai_client_for(agent_id: str,
     if override_provider:
         provider = get_provider(override_provider, s)
 
-    # Then the agent's manifest
+    # Then operator-config (agent_overrides in defaults.json)
+    if provider is None:
+        provider, default_model = resolve_for_agent(agent_id, s)
+        if provider is not None and not model:
+            model = default_model
+
+    # Then the agent's manifest (code-level default)
     if provider is None:
         from .registry import get_agent
         manifest = get_agent(agent_id, s)
@@ -983,12 +1292,6 @@ def ai_client_for(agent_id: str,
                 provider = get_provider(ai_cfg["provider"], s)
                 if not model and ai_cfg.get("model"):
                     model = ai_cfg["model"]
-
-    # Finally fall back to global defaults + per-agent overrides
-    if provider is None:
-        provider, default_model = resolve_for_agent(agent_id, s)
-        if not model:
-            model = default_model
 
     if provider is None:
         raise RuntimeError(

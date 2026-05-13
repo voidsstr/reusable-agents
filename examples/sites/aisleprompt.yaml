@@ -1,1 +1,151 @@
-/home/voidsstr/development/nsc-assistant/agents/aisleprompt-seo-opportunity-agent/site.yaml
+site:
+  id: aisleprompt
+  domain: aisleprompt.com
+  label: AislePrompt
+  mode: recommend
+data_sources:
+  gsc:
+    site_url: sc-domain:aisleprompt.com
+    default_country_filter: usa
+  ga4:
+    property_id: '529023310'
+  db:
+    type: docker-exec
+    container: mr-aisleprompt-recipe-scraper-1
+    queries_file: /home/voidsstr/development/nsc-assistant/agents/aisleprompt-seo-opportunity-agent/db-queries/aisleprompt.js
+  # Google Ads (optional — uncomment + fill in customer_id when ready).
+  # When present, the collector pulls 90d search-terms, keyword performance,
+  # ad copy, and the paid-vs-organic 'goldmine' report. Enables paid-organic-gap
+  # and ad-copy-headline-winner recommendation types.
+  # google_ads:
+  #   customer_id: '{ADS_CUSTOMER_ID}'
+  #   developer_token: '{ADS_DEVELOPER_TOKEN}'
+  #   # login_customer_id: '{MCC_ID}'   # only if customer_id sits under an MCC
+# Page-type inventory crawl. The collector samples up to sample_size URLs
+# (weighted toward GSC-impression-rich pages) per type and feeds their HTML
+# into the LLM audit so type-specific checks (recipe-*, feature-*, etc.) fire.
+page_inventory:
+- { type: recipe,        sitemap_pattern: "/recipes/[^/]+$",        sample_size: 40 }
+- { type: feature,       sitemap_pattern: "/(meal-plan|shoppinglist|pantry|family|chat)$" }
+- { type: shop_category, sitemap_pattern: "/k/[^/]+$",              sample_size: 30 }
+revenue_kpis:
+- id: instacart-carts
+  label: Instacart cart creates
+  ga4_event: instacart_cart_create
+  db_table: instacart_clicks
+- id: amazon-clicks
+  label: Amazon /k/ click-throughs
+  ga4_event: ''
+  db_table: kitchen_click_events
+- id: sign-ups
+  label: Sign-ups completed
+  ga4_event: sign_up_complete
+  db_table: ''
+analyzer:
+  primary_objective: top5-rank
+  max_recs_per_run: 12
+  us_traffic_weight: 1.5
+  min_impressions_for_target: 3
+  max_llm_audit_pages: 30
+  # Pre-traffic mode: when total GSC impressions over 90 days fall below
+  # this threshold, the analyzer prioritizes net-new-page recs from
+  # `coverage_targets` over rank-target recs (which return empty when GSC
+  # has no data). 100 is a deliberately low bar.
+  pre_traffic_impr_threshold: 100
+# Net-new-page coverage gaps (the studio-supplies engine).
+# Each entry: count existing pages matching `sitemap_pattern`, compare
+# against `expected_min` (literal int) or `expected_from_db` (key in
+# db-stats.json), emit one `new-page-<type>` rec per shortfall.
+coverage_targets:
+  buying_guide:
+    sitemap_pattern: "/buying-guide/[^/]+$"
+    expected_min: 10
+    rec_priority: high
+    horizon_weeks: 12
+    json_ld: "Article + ItemList"
+    min_words: 1500
+    min_internal_links: 8
+    title_template: "Best {category} for 2026: Top Picks + Buying Guide"
+  cuisine_guide:
+    sitemap_pattern: "/cuisines/[^/]+$"
+    expected_min: 24
+    rec_priority: medium
+    horizon_weeks: 12
+    json_ld: "CollectionPage + ItemList"
+    min_words: 1200
+    title_template: "{cuisine} Recipes: 50+ Authentic Dishes + Buying Guide"
+  use_case:
+    sitemap_pattern: "/best-[^/]+-for-[^/]+$"
+    expected_min: 20
+    rec_priority: high
+    horizon_weeks: 12
+    title_template: "Best {category} for {persona/use-case} (2026 Guide)"
+  comparison:
+    sitemap_pattern: "/(?:vs|compare)/[^/]+$"
+    expected_min: 10
+    rec_priority: medium
+    json_ld: "Article"
+    title_template: "{product-A} vs {product-B}: Which is Better in 2026?"
+local_dev:
+  port: 4001
+  url: http://localhost:4001
+  health_url: http://localhost:4001/
+  ensure_running:
+    cwd: .
+    cmd: docker compose up -d frontend backend db
+  health_timeout_s: 90
+implementer:
+  repo_path: /home/voidsstr/development/aisleprompt
+  branch: master
+  commit_message_template: 'SEO agent: %s'
+deployer:
+  test:
+    full_interval_days: 7
+    smoke:
+      cwd: tests
+      cmd: TEST_URL={local_dev_url} npx playwright test --config=pw.config.ts --reporter=line --grep "@smoke"
+    full:
+      cwd: tests
+      cmd: TEST_URL={local_dev_url} npx playwright test --config=pw.config.ts --reporter=line
+  build:
+    cwd: .
+    cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
+  push:
+    cmd: az acr login --name nscappsacr && docker push {image}:{tag}
+  deploy:
+    cmd: az containerapp update --name {app} --resource-group {rg} --image {image}:{tag}
+    vars:
+      app: aisleprompt
+      rg: nsc-apps
+      image: nscappsacr.azurecr.io/aisleprompt
+  smoke_check:
+    base_url: https://aisleprompt.com
+    paths:
+    - /
+    - /sitemap.xml
+    - /sitemap-collections.xml
+    - /recipes
+    - /meal-plan
+    - /shoppinglist
+    timeout_seconds: 30
+reporter:
+  email:
+    to:
+    - mperry@northernsoftwareconsulting.com
+    from: SEO Agent <automation@northernsoftwareconsulting.com>
+    subject_template: "[SEO:{site}] run {tag} \u2014 {recs_count} recs"
+    graph:
+      oauth_file: ~/.reusable-agents/responder/.oauth.json
+      scope: offline_access https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Send.Shared
+      use_shared_mailbox: true
+      from_address: automation@northernsoftwareconsulting.com
+  dashboard:
+    base_url: http://localhost:8080
+    agent_id: aisleprompt-seo-opportunity-agent
+auth:
+  oauth_file: ~/.reusable-agents/seo/.oauth.json
+# runs_root: legacy local-FS fallback — only used when the SEO sub-agents
+# are invoked manually without --agent-id. The orchestrator (run.sh) supplies
+# --agent-id + --run-ts and writes runs to Azure under
+# agents/aisleprompt-seo-opportunity-agent/runs/<run-ts>/.
+runs_root: ~/.reusable-agents/seo/runs

@@ -242,7 +242,28 @@ export const api = {
   // implementer dispatch queue
   implementerQueue: (limit = 20) => http<{
     pending: { agent_id: string; request_id?: string; site?: string; from_run?: string; rec_ids?: string[]; action?: string; ts?: string; _key?: string }[];
+    pending_total: number;
     dispatches: DispatchEntry[];
+    // Rec-memory backlog — open proposals every producer agent has emitted
+    // but the implementer hasn't shipped yet. Keyed by agent_id.
+    // Populated server-side from agents/<id>/state/accumulator.json.
+    accumulator_by_agent?: Record<string, {
+      id: string
+      title: string
+      rec_type: string
+      severity: string
+      first_seen_at: string
+      last_seen_at: string
+      seen_count: number
+    }[]>
+    accumulator_total?: number
+    // Phase-2 truth fields (post-auto-queue elimination): the real
+    // backlog lives in producer recommendations.json. open_recs_total
+    // mirrors the lifetime-stats pending bucket; running_dispatches
+    // counts active scopes.
+    open_recs_total?: number
+    open_recs_by_agent?: Record<string, number>
+    running_dispatches?: number
   }>(`/api/implementer/queue?limit=${limit}`),
   implementerDispatches: (limit = 20) => http<DispatchEntry[]>(`/api/implementer/dispatches?limit=${limit}`),
   getDispatchLog: (dispatchId: string, tailBytes = 32768) => http<DispatchEntry & { content: string }>(`/api/implementer/dispatches/${encodeURIComponent(dispatchId)}/log?tail_bytes=${tailBytes}`),
@@ -322,6 +343,57 @@ export const api = {
       }>
     }>(`/api/implementer/lifetime-stats`),
 
+  // Lifetime per-category rec list — backs the queue page's tab
+  // drill-downs. Returns the latest rec snapshot for every rec in
+  // the requested category (shipped|implemented|deferred|pending),
+  // capped at 200/bucket. Same cache as lifetime-stats so it's
+  // always a hit after the first cold compute.
+  implementerRecsByCategory: (category: 'shipped' | 'implemented' | 'deferred' | 'pending', limit = 100) =>
+    http<{
+      category: string
+      count: number
+      capped_at: number
+      recs: Array<{
+        rec_id: string
+        title: string
+        kind: string
+        category: string
+        agent_id: string
+        run_ts: string
+        run_dir_basename: string
+        shipped: boolean
+        implemented: boolean
+        deferred: boolean
+        commit_sha?: string
+        description?: string
+        rationale?: string
+        severity?: string
+        tier?: string
+        confidence?: number
+        expected_impact?: string
+        implementation_outline?: { approach?: string }
+        migration_template?: { sql?: string; sql_with_ids?: string; table?: string; action?: string }
+        ref_ids?: (string | number)[]
+        evidence?: unknown
+        check_id?: string
+        affected_url?: string
+        affected_urls?: string[]
+        page_url?: string
+        page_path?: string
+        url?: string
+        files?: string[]
+        files_changed?: string[]
+        target_files?: string[]
+        implemented_at?: string
+        implemented_via?: string
+        shipped_at?: string
+        shipped_tag?: string
+        shipped_via?: string
+        shipped_verification?: string
+        deferred_reason?: string
+      }>
+    }>(`/api/implementer/recs-by-category?category=${category}&limit=${limit}`),
+
   getRecVerificationScript: (runDirBasename: string, recId: string) =>
     http<{
       rec_id: string
@@ -381,6 +453,23 @@ export const api = {
   getGraphLayout:    (userId: string) => http<{ positions: Record<string, { x: number; y: number }>; viewport: Record<string, number> }>(`/api/agents/dependencies/layout/${encodeURIComponent(userId)}`),
   putGraphLayout:    (userId: string, layout: { positions: Record<string, { x: number; y: number }>; viewport: Record<string, number> }) =>
     http<{ ok: boolean }>(`/api/agents/dependencies/layout/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(layout) }),
+
+  // Knowledge buckets — accumulated cross-run findings
+  listKnowledgeBuckets: (id: string) =>
+    http<{ agent_id: string; buckets: Array<{
+      bucket: string; label: string; storage_key: string;
+      items_field: string; title_field: string; id_field: string;
+      is_legacy: boolean; item_count: number;
+      states: Record<string, number>; updated_at?: string;
+    }> }>(`/api/agents/${encodeURIComponent(id)}/knowledge`),
+  getKnowledgeBucket: (id: string, bucket: string,
+                       state: string = 'all', limit: number = 500) =>
+    http<{ agent_id: string; bucket: string; label: string;
+           title_field: string; id_field: string;
+           item_count_total: number; item_count_returned: number;
+           states: Record<string, number>; updated_at?: string;
+           items: Array<Record<string, unknown>>;
+    }>(`/api/agents/${encodeURIComponent(id)}/knowledge/${encodeURIComponent(bucket)}?state=${encodeURIComponent(state)}&limit=${limit}`),
 }
 
 // ---------------------------------------------------------------------------

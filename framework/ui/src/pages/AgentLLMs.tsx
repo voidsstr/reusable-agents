@@ -50,6 +50,33 @@ async function rawApi<T>(path: string, opts?: RequestInit): Promise<T> {
 
 type Source = 'override' | 'manifest' | 'default' | 'unset'
 
+// Mirror of framework.core.ai_providers.DEFAULT_FALLBACK_KINDS.
+// chat_with_fallback walks these in order after the primary fails.
+const FALLBACK_KIND_ORDER = ['copilot', 'ollama', 'azure_openai', 'openai', 'anthropic'] as const
+
+function computeFallbackChain(primaryProvider: string, providers: Provider[]): Provider[] {
+  // Find primary by name to know its kind
+  const primary = providers.find(p => p.name === primaryProvider)
+  if (!primary) return []
+  const seenKinds = new Set([primary.kind])
+  const seenNames = new Set([primary.name])
+  const chain: Provider[] = []
+  for (const kind of FALLBACK_KIND_ORDER) {
+    if (seenKinds.has(kind)) continue
+    const match = providers.find(p =>
+      p.kind === kind && !seenNames.has(p.name)
+      // For api-key providers, exclude when no key is configured
+      && (!['openai', 'azure_openai', 'anthropic'].includes(p.kind) || p.has_key)
+    )
+    if (match) {
+      chain.push(match)
+      seenKinds.add(kind)
+      seenNames.add(match.name)
+    }
+  }
+  return chain
+}
+
 // Column-header sort keys shared between AgentLLMs (state) and
 // SortableTh (display). Defined at file scope so both reference the
 // same type.
@@ -72,6 +99,7 @@ export default function AgentLLMs() {
   const [defaults, setDefaults] = useState<Defaults>({
     default_provider: '', default_model: '', agent_overrides: {},
   })
+  const [codeEditorChain, setCodeEditorChain] = useState<{chain: string[], backends: Record<string, any>} | null>(null)
   const [editing, setEditing] = useState<Row | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -97,14 +125,16 @@ export default function AgentLLMs() {
       // 3 calls in parallel — was 3 + 39 sequential getAgent() follow-ups
       // (~15s waterfall). AgentSummary now carries ai_manifest_provider/
       // ai_manifest_model/ai_source so no per-agent detail fetches needed.
-      const [list, provs, defs] = await Promise.all([
+      const [list, provs, defs, ceCfg] = await Promise.all([
         api.listAgents(),
         rawApi<Provider[]>('/api/providers'),
         rawApi<Defaults>('/api/providers/defaults/all'),
+        rawApi<{chain: string[], backends: Record<string, any>}>('/api/providers/code-editor/config').catch(() => null),
       ])
       setAgents(list)
       setProviders(provs)
       setDefaults(defs)
+      setCodeEditorChain(ceCfg)
       setError('')
     } catch (e) {
       setError(String(e))
@@ -362,6 +392,27 @@ export default function AgentLLMs() {
                         title="Jump to usage stats for this provider+model"
                       >{r.effectiveModel}</a>
                     ) : <span className="text-ink-400">—</span>}
+                    {/* Fallback chain — what chat_with_fallback walks
+                        when the primary rate-limits or times out. Static
+                        DEFAULT_FALLBACK_KINDS order, mirrored client-side. */}
+                    {(() => {
+                      const fb = computeFallbackChain(r.effectiveProvider, providers)
+                      if (fb.length === 0) return null
+                      return (
+                        <div
+                          className="text-[10px] text-ink-400 mt-0.5"
+                          title={`On ${r.effectiveProvider} failure, falls back to: ${fb.map(p => `${p.name} (${p.default_model})`).join(' → ')}`}
+                        >
+                          ↳ {fb.slice(0, 3).map((p, i) => (
+                            <span key={p.name}>
+                              {i > 0 && <span className="text-ink-300"> → </span>}
+                              <span className="text-ink-500">{p.name}</span>
+                            </span>
+                          ))}
+                          {fb.length > 3 && <span className="text-ink-300"> +{fb.length - 3}</span>}
+                        </div>
+                      )
+                    })()}
                   </td>
                   <td className="px-3 py-2 hidden lg:table-cell">
                     <SourceBadge source={r.source} />
@@ -406,6 +457,45 @@ export default function AgentLLMs() {
             }
           }}
         />
+      )}
+
+      {/* Implementer's code-editor chain — separate from chat providers above.
+          The implementer doesn't go through framework.core.ai_providers — it
+          uses framework.core.code_editor with its own backend chain. Surface
+          it here so operators can see the full LLM routing in one place. */}
+      {codeEditorChain && codeEditorChain.chain.length > 0 && (
+        <div className="mt-6 bg-surface-card border border-surface-divider rounded p-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm font-semibold text-ink-900">
+              Implementer code-editor chain
+            </h2>
+            <span className="text-[11px] text-ink-400">
+              config: <code className="text-ink-600">config/code-editor-config.json</code>
+            </span>
+          </div>
+          <p className="text-xs text-ink-500 mb-3">
+            The <code className="text-ink-700">implementer</code> agent uses a separate routing system from chat agents.
+            It tries claude-pool first, then falls through this chain on rate-limit (rc=75) or when
+            <code className="text-ink-700 mx-1">IMPLEMENTER_FORCE_FALLBACK=1</code>:
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+            {codeEditorChain.chain.map((backendId, i) => {
+              const backend = codeEditorChain.backends[backendId] || {}
+              const model = backend.model || backend.native_provider || ''
+              return (
+                <span key={backendId} className="flex items-center gap-1.5">
+                  <span className="px-2 py-1 bg-surface-subtle border border-surface-divider rounded">
+                    <span className="text-accent-700">{backendId}</span>
+                    {model && <span className="text-ink-400 ml-1">({model})</span>}
+                  </span>
+                  {i < codeEditorChain.chain.length - 1 && (
+                    <span className="text-ink-400">→</span>
+                  )}
+                </span>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       <UsageSection />

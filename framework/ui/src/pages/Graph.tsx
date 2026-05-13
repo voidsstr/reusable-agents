@@ -36,7 +36,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css'
 import ELK from 'elkjs/lib/elk.bundled.js'
 
-import { api, openStatusWS } from '../api/client'
+import { api } from '../api/client'
 import type { AgentLiveStatus } from '../api/types'
 
 const STORAGE_KEY = 'framework-graph-layout:v1'
@@ -185,7 +185,6 @@ function GraphInner() {
   const [loading, setLoading] = useState(true)
   const [savedAt, setSavedAt] = useState<string>('')
   const [statuses, setStatuses] = useState<Record<string, AgentLiveStatus>>({})
-  const wsRefs = useRef<Map<string, WebSocket>>(new Map())
   const rfInstance = useRef<ReactFlowInstance | null>(null)
   const { setViewport } = useReactFlow()
 
@@ -193,24 +192,31 @@ function GraphInner() {
   // When status arrives we splice it into the matching node's `data.live`
   // so the AgentNode component can glow + show current_action.
   useEffect(() => {
-    const wantedIds = new Set(nodes.filter(n => (n.data as any).enabled).map(n => n.id))
-    for (const [id, ws] of wsRefs.current) {
-      if (!wantedIds.has(id)) {
-        ws.close()
-        wsRefs.current.delete(id)
+    // Poll the aggregate /api/agents endpoint instead of one WebSocket
+    // per node. WS-per-agent storms the Container App (50 connections,
+    // 3-4s handshake fan-out) and starves regular API calls. Snapshot
+    // is refreshed every 5s server-side; one poll request gives us the
+    // same data with 1/50th the connection overhead.
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const list = await api.listAgents()
+        if (cancelled) return
+        const next: Record<string, AgentLiveStatus> = {}
+        for (const a of list) {
+          next[a.id] = {
+            state: a.last_run_status ?? '',
+            ...(a as unknown as Partial<AgentLiveStatus>),
+          } as AgentLiveStatus
+        }
+        setStatuses(next)
+      } catch {
+        // ignore — next tick will recover
       }
     }
-    for (const id of wantedIds) {
-      if (wsRefs.current.has(id)) continue
-      const ws = openStatusWS(id, (status) => {
-        setStatuses(s => ({ ...s, [id]: status }))
-      })
-      if (ws) wsRefs.current.set(id, ws)
-    }
-    return () => {
-      for (const ws of wsRefs.current.values()) ws.close()
-      wsRefs.current.clear()
-    }
+    void poll()
+    const t = setInterval(() => { void poll() }, 5000)
+    return () => { cancelled = true; clearInterval(t) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes.length, nodes.map(n => n.id).join(',')])
 

@@ -9,7 +9,7 @@ import type {
 } from '../api/types'
 import StatusBadge from '../components/StatusBadge'
 
-type TabId = 'overview' | 'live' | 'goals' | 'directives' | 'runs' | 'messages' | 'storage' | 'confirmations' | 'changelog'
+type TabId = 'overview' | 'live' | 'goals' | 'directives' | 'runs' | 'messages' | 'knowledge' | 'storage' | 'confirmations' | 'changelog'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview',      label: 'Overview' },
@@ -17,6 +17,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'goals',         label: 'Goals' },
   { id: 'directives',    label: 'Directives' },
   { id: 'runs',          label: 'Runs' },
+  { id: 'knowledge',     label: 'Knowledge' },
   { id: 'messages',      label: 'Messages' },
   { id: 'storage',       label: 'Storage' },
   { id: 'confirmations', label: 'Confirmations' },
@@ -54,6 +55,7 @@ export default function AgentDetail() {
   const [tab, setTab] = useState<TabId>('overview')
   const [error, setError] = useState('')
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
+  const [triggering, setTriggering] = useState(false)
   const showToast = (kind: 'ok' | 'err', msg: string) => {
     setToast({ kind, msg })
     setTimeout(() => setToast(null), 4500)
@@ -186,6 +188,8 @@ export default function AgentDetail() {
                   onClick={async (e) => {
                     e.preventDefault()
                     e.stopPropagation()
+                    if (triggering) return
+                    setTriggering(true)
                     try {
                       const r = await api.triggerAgent(id)
                       showToast('ok', `▶ Triggered ${id} (run ${(r?.run_id || '').slice(0, 16)})`)
@@ -193,11 +197,20 @@ export default function AgentDetail() {
                     } catch (err: unknown) {
                       const msg = String((err as Error)?.message || err)
                       showToast('err', `Trigger failed: ${msg}`)
+                    } finally {
+                      setTimeout(() => setTriggering(false), 2000)
                     }
                   }}
                   className="btn-primary flex-1 sm:flex-none !min-h-[40px] sm:!min-h-0"
-                  disabled={liveState === 'running'}
-                >▶ Run now</button>
+                  disabled={liveState === 'running' || triggering}
+                >
+                  {triggering ? (
+                    <span className="inline-flex items-center gap-2">
+                      <span className="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden />
+                      <span>Starting…</span>
+                    </span>
+                  ) : '▶ Run now'}
+                </button>
               )
             })()}
             <button
@@ -260,6 +273,7 @@ export default function AgentDetail() {
       {tab === 'goals' && <GoalsTab agentId={id} />}
       {tab === 'directives' && <DirectivesTab detail={detail} onUpdated={refresh} />}
       {tab === 'runs' && <RunsTab agentId={id} />}
+      {tab === 'knowledge' && <KnowledgeTab agentId={id} />}
       {tab === 'messages' && <MessagesTab agentId={id} />}
       {tab === 'storage' && <StorageTab agentId={id} />}
       {tab === 'confirmations' && <ConfirmationsTab agentId={id} onChange={refresh} />}
@@ -686,6 +700,322 @@ function RunDetailPanel({ agentId, runTs }: { agentId: string; runTs: string }) 
         <div>
           <h3 className="text-[10px] uppercase text-ink-500 font-semibold tracking-wide mb-1">Context summary</h3>
           <pre className="whitespace-pre-wrap text-xs text-ink-600 font-mono bg-ink-100 p-2 rounded max-h-72 overflow-auto">{detail.context_summary_md}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge — accumulated cross-run findings (proposals, opportunities,
+// audit findings, etc). Surfaces buckets persisted via
+// `framework.core.knowledge` plus legacy per-agent paths.
+// ---------------------------------------------------------------------------
+
+type KnowledgeBucket = {
+  bucket: string; label: string; storage_key: string;
+  items_field: string; title_field: string; id_field: string;
+  is_legacy: boolean; item_count: number;
+  states: Record<string, number>; updated_at?: string;
+}
+
+type KnowledgeItem = Record<string, unknown> & {
+  item_id?: string; state?: string;
+  first_seen_at?: string; first_seen_run_ts?: string;
+  last_seen_at?: string;  last_seen_run_ts?: string;
+  times_seen?: number;
+}
+
+function _fmtDate(s?: string): string {
+  if (!s) return '—'
+  try { return new Date(s).toLocaleString() } catch { return s }
+}
+
+function _stateChip(state: string): string {
+  const cls: Record<string, string> = {
+    open:        'bg-emerald-50 text-emerald-700 ring-emerald-200',
+    pursued:     'bg-blue-50 text-blue-700 ring-blue-200',
+    implemented: 'bg-blue-50 text-blue-700 ring-blue-200',
+    deferred:    'bg-amber-50 text-amber-700 ring-amber-200',
+    skipped:     'bg-ink-50 text-ink-600 ring-ink-200',
+    passed:      'bg-ink-50 text-ink-600 ring-ink-200',
+    obsolete:    'bg-ink-50 text-ink-500 ring-ink-200',
+  }
+  return cls[state] || 'bg-surface-subtle text-ink-600 ring-ink-200'
+}
+
+function KnowledgeTab({ agentId }: { agentId: string }) {
+  const [buckets, setBuckets] = useState<KnowledgeBucket[] | null>(null)
+  const [activeBucket, setActiveBucket] = useState<string | null>(null)
+  const [items, setItems] = useState<KnowledgeItem[]>([])
+  const [bucketMeta, setBucketMeta] = useState<{
+    title_field: string; id_field: string;
+    item_count_total: number; states: Record<string, number>;
+  } | null>(null)
+  const [stateFilter, setStateFilter] = useState<string>('all')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [picked, setPicked] = useState<KnowledgeItem | null>(null)
+  const [search, setSearch] = useState('')
+
+  // Load buckets
+  useEffect(() => {
+    let alive = true
+    setLoading(true); setError('')
+    api.listKnowledgeBuckets(agentId)
+      .then(d => {
+        if (!alive) return
+        setBuckets(d.buckets || [])
+        if ((d.buckets || []).length > 0 && !activeBucket) {
+          setActiveBucket(d.buckets[0].bucket)
+        }
+      })
+      .catch(e => { if (alive) setError(String(e?.message || e)) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId])
+
+  // Load items for active bucket
+  useEffect(() => {
+    if (!activeBucket) return
+    let alive = true
+    setLoading(true); setError('')
+    api.getKnowledgeBucket(agentId, activeBucket, stateFilter, 500)
+      .then(d => {
+        if (!alive) return
+        setItems(d.items || [])
+        setBucketMeta({
+          title_field: d.title_field || 'title',
+          id_field: d.id_field || 'item_id',
+          item_count_total: d.item_count_total || 0,
+          states: d.states || {},
+        })
+      })
+      .catch(e => { if (alive) setError(String(e?.message || e)) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [agentId, activeBucket, stateFilter])
+
+  if (buckets === null) {
+    return <div className="card-surface p-6 text-sm text-ink-500">Loading…</div>
+  }
+  if (buckets.length === 0) {
+    return (
+      <div className="card-surface p-8 text-center">
+        <div className="text-4xl mb-2">📚</div>
+        <h2 className="text-lg font-semibold text-ink-900">No accumulated knowledge yet</h2>
+        <p className="text-sm text-ink-500 mt-1">
+          When this agent persists cross-run findings via
+          {' '}<code className="text-xs bg-surface-subtle px-1.5 py-0.5 rounded">framework.core.knowledge</code>{' '}
+          they'll appear here.
+        </p>
+      </div>
+    )
+  }
+
+  const titleField = bucketMeta?.title_field || 'title'
+  const idField = bucketMeta?.id_field || 'item_id'
+  const filteredItems = search
+    ? items.filter(i => {
+        const t = String(i[titleField] || '').toLowerCase()
+        return t.includes(search.toLowerCase())
+      })
+    : items
+
+  return (
+    <div className="space-y-4">
+      {/* Bucket tabs */}
+      <div className="flex flex-wrap items-center gap-2">
+        {buckets.map(b => {
+          const open = b.states['open'] || 0
+          const total = b.item_count
+          const isActive = activeBucket === b.bucket
+          return (
+            <button
+              key={b.bucket}
+              onClick={() => setActiveBucket(b.bucket)}
+              className={
+                `px-3 py-1.5 rounded-md text-xs font-medium ring-1 transition-all ` +
+                (isActive
+                  ? 'bg-accent-50 text-accent-800 ring-accent-300 shadow-sm'
+                  : 'bg-surface-card text-ink-700 ring-ink-200 hover:bg-surface-subtle')
+              }
+            >
+              {b.label}
+              <span className="ml-1.5 text-[10px] text-ink-500 font-normal">
+                {open} open · {total} total
+              </span>
+            </button>
+          )
+        })}
+        <span className="text-[11px] text-ink-400 ml-2">
+          stored at: <code className="text-[10px]">{buckets.find(b => b.bucket === activeBucket)?.storage_key || ''}</code>
+        </span>
+      </div>
+
+      {/* State filter + search */}
+      {bucketMeta && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-ink-500">filter:</span>
+          {(['all', 'open', ...Object.keys(bucketMeta.states).filter(s => s !== 'open')] as string[]).map(st => {
+            const isActive = stateFilter === st
+            const count = st === 'all'
+              ? bucketMeta.item_count_total
+              : (bucketMeta.states[st] || 0)
+            return (
+              <button
+                key={st}
+                onClick={() => setStateFilter(st)}
+                className={
+                  `px-2 py-1 rounded text-[11px] ring-1 transition-all ` +
+                  (isActive ? 'bg-accent-100 text-accent-800 ring-accent-300'
+                            : `${_stateChip(st)} ring-1 hover:ring-2`)
+                }
+              >
+                {st} ({count})
+              </button>
+            )
+          })}
+          <input
+            type="search"
+            placeholder="search title…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="ml-auto px-2 py-1 rounded ring-1 ring-ink-200 bg-surface-card text-xs w-48"
+          />
+        </div>
+      )}
+
+      {error && (
+        <div className="px-3 py-2 bg-status-failure-bg border border-status-failure-glow/40 rounded text-sm text-status-failure-fg">
+          {error}
+        </div>
+      )}
+
+      {/* Items table */}
+      {loading && <div className="text-sm text-ink-500">Loading…</div>}
+      {!loading && filteredItems.length === 0 && (
+        <div className="card-surface p-6 text-center text-sm text-ink-500">
+          No items match the current filter.
+        </div>
+      )}
+      {!loading && filteredItems.length > 0 && (
+        <div className="card-surface overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-surface-subtle text-[11px] text-ink-500 uppercase tracking-wide">
+              <tr>
+                <th className="text-left px-3 py-2 font-medium">Item</th>
+                <th className="text-left px-3 py-2 font-medium w-24">State</th>
+                <th className="text-left px-3 py-2 font-medium w-40">First seen</th>
+                <th className="text-left px-3 py-2 font-medium w-40">Last seen</th>
+                <th className="text-right px-3 py-2 font-medium w-16">Seen</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-surface-divider">
+              {filteredItems.map((it, idx) => {
+                const id = String(it[idField] || it.item_id || idx)
+                const title = String(it[titleField] || it.item_id || '(untitled)')
+                const state = String(it.state || 'open')
+                return (
+                  <tr key={id}
+                      onClick={() => setPicked(it)}
+                      className="hover:bg-surface-subtle cursor-pointer">
+                    <td className="px-3 py-2 align-top">
+                      <div className="font-medium text-ink-900">{title}</div>
+                      <div className="text-[11px] text-ink-500 mt-0.5 font-mono">{id}</div>
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <span className={`status-pill text-[10px] ring-1 ${_stateChip(state)}`}>{state}</span>
+                    </td>
+                    <td className="px-3 py-2 align-top text-[11px] text-ink-600">
+                      <div>{_fmtDate(String(it.first_seen_at || ''))}</div>
+                      {it.first_seen_run_ts ? (
+                        <div className="text-[10px] text-ink-400 font-mono">{String(it.first_seen_run_ts)}</div>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 align-top text-[11px] text-ink-600">
+                      <div>{_fmtDate(String(it.last_seen_at || ''))}</div>
+                      {it.last_seen_run_ts ? (
+                        <div className="text-[10px] text-ink-400 font-mono">{String(it.last_seen_run_ts)}</div>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 align-top text-right text-[11px] text-ink-600">
+                      {Number(it.times_seen || 0)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Drill-down side panel */}
+      {picked && (
+        <div className="fixed inset-0 z-30 flex justify-end" onClick={() => setPicked(null)}>
+          <div className="absolute inset-0 bg-black/30" />
+          <div
+            className="relative w-full max-w-2xl bg-surface-page h-full overflow-auto shadow-xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <header className="sticky top-0 bg-surface-page/95 backdrop-blur border-b border-surface-divider px-4 py-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-base font-semibold text-ink-900 break-words">
+                  {String(picked[titleField] || picked.item_id || '(untitled)')}
+                </h3>
+                <div className="text-[11px] text-ink-500 font-mono mt-0.5">
+                  {String(picked[idField] || picked.item_id || '')}
+                </div>
+              </div>
+              <button onClick={() => setPicked(null)}
+                      className="text-ink-500 hover:text-ink-900 text-xl leading-none">✕</button>
+            </header>
+            <div className="px-4 py-3 space-y-3 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`status-pill text-[11px] ring-1 ${_stateChip(String(picked.state || 'open'))}`}>
+                  {String(picked.state || 'open')}
+                </span>
+                <span className="text-[11px] text-ink-500">
+                  seen {Number(picked.times_seen || 0)} time(s)
+                </span>
+                {picked.state_changed_at ? (
+                  <span className="text-[11px] text-ink-500">
+                    · transitioned {_fmtDate(String(picked.state_changed_at))}
+                    {picked.state_changed_reason ? `: ${picked.state_changed_reason}` : ''}
+                  </span>
+                ) : null}
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-[12px] bg-surface-subtle p-2 rounded">
+                <div><span className="text-ink-500">First seen:</span> {_fmtDate(String(picked.first_seen_at || ''))}</div>
+                <div><span className="text-ink-500">First run:</span>  <code className="text-[11px]">{String(picked.first_seen_run_ts || '—')}</code></div>
+                <div><span className="text-ink-500">Last seen:</span>  {_fmtDate(String(picked.last_seen_at || ''))}</div>
+                <div><span className="text-ink-500">Last run:</span>   <code className="text-[11px]">{String(picked.last_seen_run_ts || '—')}</code></div>
+              </div>
+              {/* All other fields, formatted */}
+              <div className="space-y-2">
+                {Object.entries(picked).map(([k, v]) => {
+                  // skip already-rendered structural fields
+                  if (['item_id','state','first_seen_at','first_seen_run_ts',
+                       'last_seen_at','last_seen_run_ts','times_seen',
+                       'state_changed_at','state_changed_reason',
+                       idField, titleField].includes(k)) return null
+                  return (
+                    <div key={k} className="border-t border-surface-divider pt-2">
+                      <div className="text-[11px] text-ink-500 uppercase tracking-wide font-medium">{k.replace(/_/g, ' ')}</div>
+                      {typeof v === 'string' ? (
+                        <div className="text-sm text-ink-800 whitespace-pre-wrap break-words mt-1">{v}</div>
+                      ) : (
+                        <pre className="text-[11px] text-ink-700 whitespace-pre-wrap break-words bg-surface-subtle p-2 rounded mt-1 overflow-auto max-h-64">
+                          {JSON.stringify(v, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

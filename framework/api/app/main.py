@@ -56,6 +56,17 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
+# Silence the Azure SDK's HTTP-policy logger — at INFO it dumps ~30 lines
+# per blob call which is most of the CPU on a busy dashboard list. Set
+# AZURE_SDK_LOG_LEVEL=DEBUG to opt back in for diagnostics.
+_az_log_level = os.getenv("AZURE_SDK_LOG_LEVEL", "WARNING").upper()
+for _ln in (
+    "azure.core.pipeline.policies.http_logging_policy",
+    "azure.storage.blob",
+    "azure.identity",
+    "urllib3.connectionpool",
+):
+    logging.getLogger(_ln).setLevel(_az_log_level)
 logger = logging.getLogger("framework.api")
 
 
@@ -130,6 +141,33 @@ async def lifespan(app: FastAPI):
         logger.info("ghost-reaper periodic sweep started (60s)")
     except Exception as e:
         logger.warning(f"ghost-reaper periodic sweep start failed: {e}")
+    # Periodic batch reap — kicks off immediately in a background thread
+    # so the dashboard's startup isn't blocked. The full agents/ scan can
+    # take 10-30s on Azure Blob (200+ dispatch-batches.json files), and
+    # the load balancer would 502 callers if FastAPI hadn't started
+    # accepting requests yet.
+    try:
+        from framework.core import batch_reaper as _br
+        import threading
+        def _batch_sweep_loop():
+            import time
+            # First sweep runs IMMEDIATELY (catching any stale state from a
+            # crash before this restart), then every 5 min.
+            while True:
+                try:
+                    result = _br.reap_all()
+                    if result.get("batches_reaped"):
+                        logger.warning(
+                            "batch-reaper: reaped %d batch(es) across %d file(s)",
+                            result["batches_reaped"], result["files_updated"],
+                        )
+                except Exception:
+                    pass
+                time.sleep(300)
+        threading.Thread(target=_batch_sweep_loop, daemon=True, name="batch-reaper").start()
+        logger.info("batch-reaper background sweep started (immediate + 300s loop)")
+    except Exception as e:
+        logger.warning(f"batch-reaper sweep start failed: {e}")
     # Pre-warm cold-path caches at startup so the first request after
     # API restart isn't a multi-second cold hit. Then warmer threads
     # keep them fresh on TTL cycles.
@@ -254,6 +292,7 @@ for r in (
     goals_routes.router,
     agents_routes.router,
     runs_routes.router,
+    runs_routes.all_runs_router,
     status_routes.router,
     directives_routes.router,
     messages_routes.router,

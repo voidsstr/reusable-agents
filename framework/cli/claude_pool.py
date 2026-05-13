@@ -193,8 +193,11 @@ def cmd_status(args) -> None:
     fd = _open_state_locked()
     try:
         state = _read_state(fd)
-        # Refresh authenticated flag from disk
-        for p in state.values():
+        # Refresh authenticated flag from disk (skip internal/__-prefixed
+        # bookkeeping entries like __outage__ which have no `home` field).
+        for k, p in state.items():
+            if k.startswith("__") or "id" not in p:
+                continue
             p["authenticated"] = _is_authenticated(p.get("home", ""))
         _write_state(fd, state)
     finally:
@@ -205,14 +208,25 @@ def cmd_status(args) -> None:
     print(f"{'PROFILE':<12}  {'AUTH':<5} {'STATE':<14} {'IN_USE':<7} {'TOTAL':<6} {'LAST_USED':<22}  LABEL / NOTES")
     print("-" * 100)
     for k in sorted(state.keys()):
+        if k.startswith("__"):
+            continue
         p = state[k]
+        if "id" not in p:
+            continue
         auth = "✓" if p.get("authenticated") else "—"
         last = p.get("last_used_at") or "-"
         if not p.get("authenticated"):
             state_str = "no-auth"
         elif _is_rate_limited_now(p):
             state_str = f"rate-limited"
-            resets_at = p.get("limit_resets_at", "")[:19]
+            # limit_resets_at may be a per-family dict OR a legacy string —
+            # render the earliest reset across families for the display.
+            raw = p.get("limit_resets_at", "")
+            if isinstance(raw, dict):
+                vals = [str(v) for v in raw.values() if v]
+                resets_at = (min(vals)[:19] if vals else "?")
+            else:
+                resets_at = str(raw)[:19]
             label_extra = f" — resets {resets_at}"
         else:
             state_str = "ready"
@@ -222,24 +236,70 @@ def cmd_status(args) -> None:
         print(f"{p['id']:<12}  {auth:<5} {state_str:<14} {p.get('in_use',0):<7} {p.get('total_uses',0):<6} {last:<22}  {p.get('label','')}{label_extra}")
 
 
-def _is_rate_limited_now(p: dict) -> bool:
-    """Check if a profile's stored `limit_resets_at` is still in the future."""
-    rs = p.get("limit_resets_at") or ""
+def _model_family(model: str) -> str:
+    """Map a Claude model id to its rate-limit family.
+
+    Anthropic enforces SEPARATE seven-day caps per model family
+    (rateLimitType in the API response: "seven_day_sonnet" /
+    "seven_day_opus" / "seven_day_haiku"). A profile that hit its
+    Sonnet cap can still serve Opus or Haiku — without per-family
+    tracking we lock the profile out of all models for days.
+    """
+    m = (model or "").lower()
+    if "haiku" in m:
+        return "haiku"
+    if "opus" in m:
+        return "opus"
+    if "sonnet" in m:
+        return "sonnet"
+    return "sonnet"  # safe default — most calls use Sonnet
+
+
+def _is_rate_limited_now(p: dict, model: str = "") -> bool:
+    """Check whether the profile's rate limit is still in effect.
+
+    `limit_resets_at` may be either:
+      * a plain ISO string  (legacy: account-wide / single-cap behavior)
+      * a dict {family: iso_string, ...}  (per-model tracking)
+
+    When `model` is provided we only consult the matching family. With
+    no model, treat ANY family in the dict as a global lockout (back-compat).
+    """
+    rs = p.get("limit_resets_at")
     if not rs:
         return False
+    fam = _model_family(model) if model else None
     try:
-        when = datetime.fromisoformat(rs.replace("Z", "+00:00"))
+        if isinstance(rs, dict):
+            if fam is not None:
+                v = rs.get(fam)
+                if not v:
+                    return False
+                when = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                return datetime.now(timezone.utc) < when
+            # No model specified — any active family counts as limited.
+            for v in rs.values():
+                try:
+                    when = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) < when:
+                        return True
+                except Exception:
+                    continue
+            return False
+        when = datetime.fromisoformat(str(rs).replace("Z", "+00:00"))
         return datetime.now(timezone.utc) < when
     except Exception:
         return False
 
 
-def _pick_profile(state: dict, exclude_ids: set | None = None) -> dict | None:
+def _pick_profile(state: dict, exclude_ids: set | None = None,
+                   model: str = "") -> dict | None:
     """Return the next profile to dispatch to, or None if nothing eligible.
 
     Eligibility (in order):
       1. authenticated (cred file on disk)
-      2. NOT currently rate-limited (limit_resets_at in the future)
+      2. NOT currently rate-limited for the requested `model` family
+         (`limit_resets_at` may be a per-family dict — see _is_rate_limited_now)
       3. not in exclude_ids (used by failover loop to avoid re-picking
          the same just-failed profile in this same call)
 
@@ -247,9 +307,11 @@ def _pick_profile(state: dict, exclude_ids: set | None = None) -> dict | None:
     """
     excl = exclude_ids or set()
     eligible = [
-        p for p in state.values()
-        if _is_authenticated(p.get("home", ""))
-        and not _is_rate_limited_now(p)
+        p for k, p in state.items()
+        if not k.startswith("__")
+        and "id" in p
+        and _is_authenticated(p.get("home", ""))
+        and not _is_rate_limited_now(p, model=model)
         and p.get("id") not in excl
     ]
     if not eligible:
@@ -261,12 +323,19 @@ def _pick_profile(state: dict, exclude_ids: set | None = None) -> dict | None:
 
 
 # Patterns that indicate the picked account is rate-limited and we should
-# fail over to a different one. Captured from claude's actual error message:
+# fail over to a different one. Captured from claude's actual error messages:
 #   "You've hit your limit · resets 10pm (America/Detroit)"
-#   "5-hour usage limit reached" / similar variants from API quotas.
+#   "You've hit your org's monthly usage limit"
+#   "5-hour usage limit reached"
+# Use non-greedy "hit your.*?limit" so phrases with extra words between
+# "your" and "limit" still match — without it the monthly-limit form
+# silently falls through and the pool treats it as a non-rate-limit
+# failure (no failover to a healthy profile).
 _RATE_LIMIT_PATTERNS = [
-    re.compile(r"hit your limit", re.I),
+    re.compile(r"hit your.*?limit", re.I),     # daily / monthly / hourly variants
+    re.compile(r"monthly usage limit", re.I),  # explicit monthly form
     re.compile(r"usage limit reached", re.I),
+    re.compile(r"usage limit\b", re.I),        # generic — covers most quota errors
     re.compile(r"rate limit", re.I),
     re.compile(r"quota exceeded", re.I),
     re.compile(r"too many requests", re.I),
@@ -286,14 +355,59 @@ _AUTH_DEAD_PATTERNS = [
     re.compile(r"authentication failed", re.I),
 ]
 # Capture the human reset hint so we can store an approximate resets_at.
+# Two real-world forms from claude CLI:
+#   "resets 10pm (America/Detroit)"           — daily/5h limit
+#   "resets May 13, 10pm (America/Detroit)"   — weekly Max-plan cap
+# The weekly form is days away, so detecting it matters — without it the
+# parser silently fell through to a 5h default and the pool kept probing.
+_RESET_HINT_DATE_RE = re.compile(
+    r"resets?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2}),?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?",
+    re.I,
+)
 _RESET_HINT_RE = re.compile(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?", re.I)
+_MONTH_NUM = {m: i+1 for i, m in enumerate(
+    ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"])}
 
 
 def _parse_reset_at(text: str) -> str | None:
     """Best-effort parse of "resets 10pm (America/Detroit)" → next 10pm in
     that timezone, expressed as a UTC ISO timestamp. If parsing fails,
     return None and the caller falls back to a fixed-offset default."""
-    m = _RESET_HINT_RE.search(text or "")
+    text = text or ""
+    # Try the dated weekly form first ("resets May 13, 10pm"). Without
+    # this, weekly Max-plan caps days away got stored as today+5h.
+    md = _RESET_HINT_DATE_RE.search(text)
+    if md:
+        mon_name = md.group(1).lower()
+        day = int(md.group(2))
+        hour = int(md.group(3))
+        minute = int(md.group(4) or 0)
+        ampm = (md.group(5) or "").lower()
+        tzname = (md.group(6) or "").strip()
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+        try:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(tzname) if tzname else timezone.utc
+            except Exception:
+                tz = timezone.utc
+            now_local = datetime.now(tz)
+            year = now_local.year
+            month = _MONTH_NUM.get(mon_name, now_local.month)
+            # If the named month is before now's month, assume next year.
+            if month < now_local.month or (month == now_local.month and day < now_local.day):
+                year += 1
+            reset = now_local.replace(year=year, month=month, day=day,
+                                      hour=hour, minute=minute,
+                                      second=0, microsecond=0)
+            return reset.astimezone(timezone.utc).isoformat(timespec="seconds")
+        except Exception:
+            pass
+
+    m = _RESET_HINT_RE.search(text)
     if not m:
         return None
     hour = int(m.group(1))
@@ -319,23 +433,62 @@ def _parse_reset_at(text: str) -> str | None:
         return None
 
 
-def _mark_rate_limited(profile_id: str, captured_text: str) -> None:
-    """Record limit_resets_at on the profile so subsequent picks skip it."""
+_MODEL_FAMILY_RE = re.compile(r"seven_day_(sonnet|opus|haiku)", re.I)
+
+
+def _detect_model_family_from_response(text: str) -> str | None:
+    """Pull the model family out of an Anthropic rate_limit_event payload.
+
+    Streaming JSON form:
+      "rateLimitType":"seven_day_sonnet"
+    Plaintext fallback: returns None and the caller stores under the
+    family it INTENDED to call, when known.
+    """
+    if not text:
+        return None
+    m = _MODEL_FAMILY_RE.search(text)
+    return m.group(1).lower() if m else None
+
+
+def _mark_rate_limited(profile_id: str, captured_text: str,
+                       *, model: str = "") -> None:
+    """Record limit_resets_at on the profile so subsequent picks skip it.
+
+    Stores PER-MODEL-FAMILY when the response identifies which
+    seven_day_* cap was hit (or `model` is supplied). Other families
+    on the same profile remain usable.
+    """
     parsed = _parse_reset_at(captured_text)
     fallback = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat(timespec="seconds")
     resets_at = parsed or fallback
+    family = (
+        _detect_model_family_from_response(captured_text)
+        or (_model_family(model) if model else None)
+    )
     fd = _open_state_locked()
     try:
         state = _read_state(fd)
         if profile_id in state:
-            state[profile_id]["limit_resets_at"] = resets_at
+            existing = state[profile_id].get("limit_resets_at")
+            if family:
+                # Per-family map. Migrate from legacy plain string by
+                # promoting the old value to whichever family we're
+                # marking now.
+                if not isinstance(existing, dict):
+                    existing = {}
+                existing[family] = resets_at
+                state[profile_id]["limit_resets_at"] = existing
+            else:
+                state[profile_id]["limit_resets_at"] = resets_at
             state[profile_id]["limit_last_seen_at"] = _now_iso()
             state[profile_id]["limit_last_message"] = captured_text[:300]
+            state[profile_id]["limit_last_family"] = family or ""
             _write_state(fd, state)
     finally:
         _close_state(fd)
     sys.stderr.write(
-        f"[claude-pool] {profile_id} marked rate-limited until {resets_at} "
+        f"[claude-pool] {profile_id} marked rate-limited "
+        f"family={family or 'unknown'} until {resets_at} "
         f"(parsed={'yes' if parsed else 'fallback-+5h'})\n"
     )
 
@@ -353,6 +506,12 @@ def _run_one_dispatch(picked_id: str, picked_home: str,
     parts = [d for d in (env.get("PATH") or "").split(":")
              if d and Path(d).resolve() != SHIM_DIR.resolve()]
     env["PATH"] = ":".join(parts)
+    # Tell claude-via-proxy which profile is running so it can pick the
+    # matching SOCKS5 proxy from $CLAUDE_POOL_ROOT/proxies.conf. Each
+    # profile gets its own egress IP, isolating per-IP burst limits at
+    # Anthropic's edge. If no proxies.conf entry exists, the wrapper
+    # falls back to direct (or the legacy WARP socket on :40000).
+    env["CLAUDE_PROXY_FOR_PROFILE"] = picked_id
     real = _resolve_real_claude()
 
     captured_lines: list[str] = []
@@ -415,11 +574,21 @@ def _mark_auth_dead(profile_id: str, captured_text: str) -> None:
 
 def _claim_profile(picked: dict) -> None:
     """Mark a picked profile as in-use under lock."""
+    pid = picked.get("id") if isinstance(picked, dict) else None
+    if not pid:
+        # Defensive: state.json shouldn't contain entries without 'id',
+        # but a stray sentinel ('__outage__') leaking through filters
+        # should not crash the dispatch.
+        sys.stderr.write(
+            "[claude-pool] _claim_profile: picked profile lacks 'id', "
+            f"skipping claim (entry keys={list(picked.keys()) if isinstance(picked, dict) else type(picked).__name__})\n"
+        )
+        return
     fd = _open_state_locked()
     try:
         state = _read_state(fd)
-        if picked["id"] in state:
-            entry = state[picked["id"]]
+        if pid in state:
+            entry = state[pid]
             entry["in_use"] = entry.get("in_use", 0) + 1
             entry["last_used_at"] = _now_iso()
             entry["total_uses"] = entry.get("total_uses", 0) + 1
@@ -501,17 +670,31 @@ def _discover_profiles_from_disk() -> int:
     return found
 
 
-def _all_rate_limited(state: dict) -> tuple[bool, list[str]]:
-    """True iff every authenticated profile is currently rate-limited.
+def _all_rate_limited(state: dict, model: str = "") -> tuple[bool, list[str]]:
+    """True iff every authenticated profile is currently rate-limited
+    for the requested model family (or any model when `model` is empty).
     Returns (bool, list of resets_at strings sorted ascending) — the
     earliest reset is the soonest we'd recover."""
-    authed = [p for p in state.values() if _is_authenticated(p.get("home", ""))]
+    authed = [p for k, p in state.items()
+              if not k.startswith("__")
+              and "id" in p
+              and _is_authenticated(p.get("home", ""))]
     if not authed:
         return False, []
-    if not all(_is_rate_limited_now(p) for p in authed):
+    if not all(_is_rate_limited_now(p, model=model) for p in authed):
         return False, []
-    resets = sorted(p.get("limit_resets_at", "") for p in authed if p.get("limit_resets_at"))
-    return True, resets
+    resets: list[str] = []
+    fam = _model_family(model) if model else None
+    for p in authed:
+        rs = p.get("limit_resets_at")
+        if isinstance(rs, dict):
+            if fam and rs.get(fam):
+                resets.append(rs[fam])
+            elif not fam:
+                resets.extend(v for v in rs.values() if v)
+        elif isinstance(rs, str) and rs:
+            resets.append(rs)
+    return True, sorted(resets)
 
 
 def _emit_outage_event(state: dict, resets: list[str]) -> None:
@@ -539,13 +722,33 @@ def _emit_outage_event(state: dict, resets: list[str]) -> None:
     # Build the email body
     profile_lines = []
     for k in sorted(state.keys()):
-        p = state[k]
-        if not _is_authenticated(p.get("home", "")):
+        if k.startswith("__"):
             continue
-        rs = p.get("limit_resets_at", "—")
+        p = state[k]
+        if "id" not in p or not _is_authenticated(p.get("home", "")):
+            continue
+        rs_raw = p.get("limit_resets_at", "—")
+        # Per-family dict (since 2026-05-10) or legacy plain string.
+        # Render the EARLIEST family reset for the email.
+        if isinstance(rs_raw, dict):
+            vals = [str(v) for v in rs_raw.values() if v]
+            rs = min(vals) if vals else "—"
+        else:
+            rs = str(rs_raw or "—")
         msg = (p.get("limit_last_message", "") or "").splitlines()[-1][:140] if p.get("limit_last_message") else ""
         profile_lines.append(f"  • {p['id']:<14} resets {rs[:19]}  {msg}")
-    soonest = resets[0][:19] if resets else "(unknown)"
+    # `resets` is a list of iso strings from _all_rate_limited — also
+    # handle the case where it came from a dict family map.
+    if resets:
+        flat = []
+        for r in resets:
+            if isinstance(r, dict):
+                flat.extend(str(v) for v in r.values() if v)
+            elif r:
+                flat.append(str(r))
+        soonest = min(flat)[:19] if flat else "(unknown)"
+    else:
+        soonest = "(unknown)"
     body_md = (
         "All authenticated Claude Max profiles in the pool are currently "
         "rate-limited. Agents that call claude are sleeping and will retry "
@@ -614,6 +817,20 @@ def cmd_exec(args) -> None:
     last_rc = 1
     outage_emailed = False
 
+    # Extract --model from the claude args so pick can filter on the
+    # specific 7-day family the caller is going to hit. Without this,
+    # a profile with seven_day_sonnet rejected gets skipped even when
+    # the dispatch is actually requesting Opus/Haiku.
+    requested_model = ""
+    claude_args = list(args.claude_args or [])
+    for i, tok in enumerate(claude_args):
+        if tok == "--model" and i + 1 < len(claude_args):
+            requested_model = claude_args[i + 1]
+            break
+        if tok.startswith("--model="):
+            requested_model = tok.split("=", 1)[1]
+            break
+
     while True:
         # Auto-pickup of any new profile dirs / freshly-authenticated profiles
         _discover_profiles_from_disk()
@@ -626,7 +843,8 @@ def cmd_exec(args) -> None:
             fd = _open_state_locked()
             try:
                 state = _read_state(fd)
-                picked = _pick_profile(state, exclude_ids=tried)
+                picked = _pick_profile(state, exclude_ids=tried,
+                                       model=requested_model)
             finally:
                 _close_state(fd)
 
@@ -641,7 +859,7 @@ def cmd_exec(args) -> None:
                 f"{' [failover ' + str(attempt + 1) + ']' if attempt else ''}\n"
             )
             try:
-                rc, captured = _run_one_dispatch(picked_id, picked["home"], args.claude_args or [])
+                rc, captured = _run_one_dispatch(picked_id, picked["home"], claude_args)
             finally:
                 _release_profile(picked_id)
             last_rc = rc
@@ -652,8 +870,12 @@ def cmd_exec(args) -> None:
                 sys.exit(0)
 
             if _looks_rate_limited(captured):
-                _mark_rate_limited(picked_id, captured)
-                sys.stderr.write(f"[claude-pool] {picked_id} hit rate limit; trying next\n")
+                # Pass the requested_model so _mark_rate_limited can record
+                # the per-family lock (sonnet/opus/haiku) instead of locking
+                # the whole profile across all models.
+                _mark_rate_limited(picked_id, captured, model=requested_model)
+                sys.stderr.write(f"[claude-pool] {picked_id} hit rate limit "
+                                 f"(model={requested_model or 'unknown'}); trying next\n")
                 continue
 
             if _looks_auth_dead(captured):
@@ -672,7 +894,7 @@ def cmd_exec(args) -> None:
             state = _read_state(fd)
             authed_count = sum(1 for p in state.values()
                                 if isinstance(p, dict) and _is_authenticated(p.get("home", "")))
-            limited, resets = _all_rate_limited(state)
+            limited, resets = _all_rate_limited(state, model=requested_model)
         finally:
             _close_state(fd)
 
@@ -694,12 +916,26 @@ def cmd_exec(args) -> None:
             )
             sys.exit(last_rc)
 
-        # All authenticated profiles are rate-limited. Email once, then
-        # sleep + re-pick. The user's spec: "essentially just wait until
-        # it can find an account that works."
+        # All authenticated profiles are rate-limited.
         if not outage_emailed:
             _emit_outage_event(state, resets)
             outage_emailed = True
+
+        soonest = resets[0][:19] if resets else "(unknown)"
+
+        # FAIL-FAST mode: caller wants an immediate exit (rc=75 EX_TEMPFAIL)
+        # so it can react — fall back to Copilot, mark a run as deferred,
+        # etc — instead of wedging the worker process for hours. Used by
+        # the implementer + any future caller that has its own fallback
+        # plan. Activated when CLAUDE_POOL_FAIL_FAST=1 is set in the
+        # environment.
+        if os.environ.get("CLAUDE_POOL_FAIL_FAST") == "1":
+            sys.stderr.write(
+                f"[claude-pool] all {authed_count} profile(s) rate-limited "
+                f"(soonest reset {soonest}); FAIL_FAST=1, exiting rc=75 "
+                f"(EX_TEMPFAIL) so caller can fall back.\n"
+            )
+            sys.exit(75)
 
         elapsed = time.time() - started
         if MAX_WAIT_S > 0 and elapsed >= MAX_WAIT_S:
@@ -709,7 +945,6 @@ def cmd_exec(args) -> None:
             )
             sys.exit(last_rc)
 
-        soonest = resets[0][:19] if resets else "(unknown)"
         sys.stderr.write(
             f"[claude-pool] all {authed_count} profile(s) rate-limited; "
             f"sleeping {RETRY_INTERVAL_S}s then re-checking "
@@ -759,6 +994,91 @@ def cmd_remove(args) -> None:
     print(f"removed {args.profile}")
 
 
+def cmd_test_profile(args) -> None:
+    """Run a quick one-shot ping against a specific profile to verify auth works.
+
+    Execs `claude --print` with HOME pointing at the profile dir and checks for
+    a clean response. Designed to be invoked by the trigger queue so the API
+    can surface results in the dashboard without the container needing claude.
+
+    Output format (all lines prefixed [pool-test]) is parsed by the API route
+    GET /api/providers/claude-pool/test-result/{job_id}.
+    """
+    fd = _open_state_locked()
+    try:
+        state = _read_state(fd)
+    finally:
+        _close_state(fd)
+
+    profile_id = args.profile
+    if profile_id not in state:
+        print(f"[pool-test] RESULT: error")
+        print(f"[pool-test] {profile_id}: not found — run `claude-pool init` first", flush=True)
+        sys.exit(2)
+
+    p = state[profile_id]
+    home = p.get("home", "")
+
+    if not _is_authenticated(home):
+        print(f"[pool-test] RESULT: no-auth")
+        print(f"[pool-test] {profile_id}: not authenticated")
+        print(f"[pool-test] login: HOME={home} claude /login", flush=True)
+        sys.exit(1)
+
+    try:
+        real = _resolve_real_claude()
+    except SystemExit:
+        print(f"[pool-test] RESULT: error")
+        print(f"[pool-test] {profile_id}: claude binary not found on PATH", flush=True)
+        sys.exit(1)
+
+    env = dict(os.environ)
+    env["HOME"] = home
+    parts = [d for d in (env.get("PATH") or "").split(":")
+             if d and Path(d).resolve() != SHIM_DIR.resolve()]
+    env["PATH"] = ":".join(parts)
+
+    label = p.get("label", "") or profile_id
+    print(f"[pool-test] testing {profile_id} label={label}", flush=True)
+    t0 = time.time()
+
+    try:
+        proc = subprocess.run(
+            [real, "--print", "--output-format", "text", "--no-session-persistence",
+             "--model", "claude-haiku-4-5", "--max-turns", "1",
+             "--dangerously-skip-permissions",
+             "Reply with exactly: POOL OK"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        elapsed = round(time.time() - t0, 1)
+        print(f"[pool-test] RESULT: timeout")
+        print(f"[pool-test] {profile_id}: timed out after {elapsed}s", flush=True)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"[pool-test] RESULT: error")
+        print(f"[pool-test] {profile_id}: {exc}", flush=True)
+        sys.exit(1)
+
+    elapsed = round(time.time() - t0, 1)
+    response = (proc.stdout or "").strip()
+    err_text = (proc.stderr or "").strip()
+
+    if proc.returncode == 0:
+        print(f"[pool-test] RESULT: ok")
+        print(f"[pool-test] {profile_id}: success in {elapsed}s")
+        print(f"[pool-test] response: {response}", flush=True)
+    else:
+        print(f"[pool-test] RESULT: failed")
+        print(f"[pool-test] {profile_id}: rc={proc.returncode} in {elapsed}s")
+        if response:
+            print(f"[pool-test] stdout: {response}")
+        if err_text:
+            print(f"[pool-test] stderr: {err_text[:400]}", flush=True)
+
+    sys.exit(proc.returncode)
+
+
 def main() -> None:
     # Special-case: when invoked with NO subcommand and no args, show help.
     # When invoked as `claude-pool exec -- ...`, treat the rest as claude args.
@@ -786,6 +1106,10 @@ def main() -> None:
     pr = sub.add_parser("remove", help="remove a profile (deletes its dir)")
     pr.add_argument("profile")
     pr.set_defaults(func=cmd_remove)
+
+    pt = sub.add_parser("test-profile", help="quick ping test for one profile")
+    pt.add_argument("profile", help="profile id, e.g. profile-3")
+    pt.set_defaults(func=cmd_test_profile)
 
     args = p.parse_args()
     # When `exec`'s claude_args starts with `--`, drop it

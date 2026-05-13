@@ -60,7 +60,10 @@ function GoalsFleetList() {
       try {
         const agents = await api.listAgents()
         const out: AgentGoalsSummary[] = []
-        // Fetch goal time-series in parallel for every agent
+        // Fetch goal time-series in parallel for every agent. The API
+        // endpoint now returns the pre-aggregated cache when available
+        // (single storage call) and falls back to per-run-dir scan only
+        // for agents that haven't recorded a metric yet.
         const results = await Promise.allSettled(
           agents.map(a => api.goalsTimeseries(a.id, 30).then(d => ({ a, d })))
         )
@@ -90,7 +93,17 @@ function GoalsFleetList() {
             improving_count: improving,
             worsening_count: worsening,
             flat_count: flat,
-            recs_shipped_count: (d.annotations || []).filter(x => x.kind === 'shipped').length,
+            // Count UNIQUE shipped recs (not annotations). Each rec
+            // produces one annotation per goal it targets — counting
+            // annotations directly inflates the total ~10× when recs
+            // map to many goals (a rec targeting 28 goals would otherwise
+            // count as 28 "shipped"). The truth is the unique rec_id
+            // count.
+            recs_shipped_count: new Set(
+              (d.annotations || [])
+                .filter(x => x.kind === 'shipped')
+                .map(x => x.rec_id)
+            ).size,
           })
         }
         if (!cancelled) {

@@ -98,6 +98,7 @@
         "dsn": { "type": "string", "description": "Literal Postgres DSN. Prefer dsn_env in committed configs to avoid leaking credentials." },
         "audit_full_body": { "type": "boolean", "default": false, "description": "When true, the collector pulls body_md alongside slug+title (capped 200KB/article) so the analyzer's revenue_focus pass can scan article bodies for product mentions that lack tagged affiliate links." },
         "audit_all": { "type": "boolean", "default": false, "description": "When true, every published article is audited every run instead of being sampled. Enables comprehensive article-level SEO coverage at the cost of larger run dirs." },
+        "url_template": { "type": "string", "description": "Canonical public URL pattern for an article on this site, used by the implementer + reporter when emitting summary.md and completion-email URLs. Example: 'https://specpicks.com/reviews/{slug}'. Per-source URL templates inside `articles.sources[].url_template` still drive collector inventory; this top-level field is the canonical/default for downstream consumers." },
         "sources": {
           "type": "array",
           "items": {
@@ -196,6 +197,26 @@
         "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." }
       }
     },
+    "local_dev": {
+      "type": ["object", "null"],
+      "description": "Per-site local Docker dev server backing the deployer's test step. The deployer probes health_url; if unhealthy it runs ensure_running.cmd (typically `docker compose up -d`) then waits for health. Test commands can substitute {local_dev_port} and {local_dev_url} so each site uses its own port without colliding with siblings on the same host.",
+      "properties": {
+        "port": { "type": "integer", "description": "Host-bound port for the dev server. Substituted into test cmds as {local_dev_port}." },
+        "url": { "type": "string", "description": "Convenience full URL (default: http://localhost:{port}). Substituted as {local_dev_url}." },
+        "health_url": { "type": "string", "description": "URL the deployer GETs to verify the dev server is up. Should return 2xx when healthy." },
+        "health_timeout_s": { "type": "number", "default": 60, "description": "How long to wait for health after ensure_running.cmd before giving up." },
+        "health_interval_s": { "type": "number", "default": 2 },
+        "ensure_running": {
+          "type": "object",
+          "description": "Idempotent bring-up command (e.g. `docker compose up -d`). Skipped when health_url already returns 2xx.",
+          "properties": {
+            "cwd": { "type": "string" },
+            "cmd": { "type": "string" }
+          }
+        },
+        "ensure_timeout_s": { "type": "number", "default": 300 }
+      }
+    },
     "implementer": {
       "type": ["object", "null"],
       "description": "Required if site.mode=implement. The implementer edits files in repo_path.",
@@ -214,9 +235,35 @@
       "properties": {
         "test": {
           "type": "object",
+          "description": "Test stage. Either single-command form (cmd+cwd) or tiered (smoke+full sub-blocks). Framework auto-picks smoke per-batch and full weekly. See agents/deployer/deployer.py:_select_test_scope.",
           "properties": {
             "cwd": { "type": "string" },
-            "cmd": { "type": "string", "description": "Test command. Hard gate: any non-zero exit aborts the run before deploy." }
+            "cmd": { "type": "string", "description": "Test command (legacy single-command form). Hard gate: any non-zero exit aborts the run before deploy." },
+            "smoke": {
+              "type": "object",
+              "description": "Smoke tier — a fast subset run on every per-batch deploy.",
+              "properties": {
+                "cwd": { "type": "string" },
+                "cmd": { "type": "string" }
+              }
+            },
+            "full": {
+              "type": "object",
+              "description": "Full tier — complete suite, run weekly or when last full run is older than full_interval_days.",
+              "properties": {
+                "cwd": { "type": "string" },
+                "cmd": { "type": "string" }
+              }
+            },
+            "full_interval_days": {
+              "type": "number",
+              "description": "How often the full tier MUST run (default 7). Framework auto-promotes smoke→full when last full run is older than this."
+            },
+            "test_scope": {
+              "type": "string",
+              "enum": ["smoke", "full", "legacy"],
+              "description": "Force a specific tier for this site. Overridden by DEPLOYER_TEST_SCOPE env."
+            }
           }
         },
         "build": {

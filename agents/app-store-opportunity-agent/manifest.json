@@ -1,0 +1,67 @@
+{
+  "id": "app-store-opportunity-agent",
+  "name": "App Store Opportunity Agent",
+  "description": "LLM-driven scout: each run, the LLM picks where to look (countries/genres/queries/regional-gap pairs) based on accumulator state + goal progress. Hunts iOS/Android apps that are POPULAR (large userbase) but LOW-RATED (≤4.0), where a small team can plausibly build a better v2. Bonus: surfaces apps popular in some markets but absent in others (regional gap = same need, no competitor).",
+  "category": "research",
+  "task_type": "desktop-task",
+  "cron_expr": "0 14 * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "entry_command": "APP_STORE_OPPORTUNITY_CONFIG=${APP_STORE_OPPORTUNITY_CONFIG:-/home/voidsstr/development/reusable-agents/agents/app-store-opportunity-agent/config.yaml} python3 /home/voidsstr/development/reusable-agents/agents/app-store-opportunity-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "app-store-opportunity-finder",
+    "is_blueprint": false,
+    "ai": {
+      "provider": "",
+      "model": ""
+    }
+  },
+  "capabilities": [
+    {
+      "name": "send_email",
+      "description": "Sends operator email with ranked opportunities",
+      "confirmation_required": false
+    }
+  ],
+  "goals": [
+    {
+      "id": "goal-qualifying-backlog",
+      "title": "Build a backlog of qualifying opportunities",
+      "description": "Accumulate at least 25 apps that are popular (high review count) but low-rated (≤4.0) — the pre-LLM eligibility-filter pass-rate.",
+      "target_metric": "open_opportunities",
+      "metric": {"name": "open_opportunities", "current": 0, "target": 25, "direction": "increase", "unit": "apps"},
+      "directives": [
+        "Each run, plan a search that explores under-sampled countries + genres relative to the existing accumulator distribution",
+        "Bias toward the long tail — LLM-suggested keyword queries that target real demand (e.g. 'expense splitter', 'sleep tracker') rather than re-sweeping today's US top-100",
+        "Auto-pass items that drop below the rating gate so the backlog stays useful"
+      ]
+    },
+    {
+      "id": "goal-low-complexity-wins",
+      "title": "Surface low-complexity / high-revenue picks",
+      "description": "Find at least 5 apps where build_complexity ≤ 2 AND revenue_potential ≥ high — the 'easy lift, real money' picks that justify a build.",
+      "target_metric": "low_complexity_wins",
+      "metric": {"name": "low_complexity_wins", "current": 0, "target": 5, "direction": "increase", "unit": "apps"},
+      "directives": [
+        "Score build_complexity 1-5 from feature surface, integration count, regulated-domain flag",
+        "Sort the email by (revenue_potential / build_complexity) descending",
+        "Highlight items where complexity ≤ 2 AND revenue_potential ∈ {high, very_high} at the top of every email"
+      ]
+    },
+    {
+      "id": "goal-regional-gap-finds",
+      "title": "Surface regional-gap opportunities",
+      "description": "Find at least 5 apps that are popular in 2+ source markets but absent from 2+ underserved markets — same need, no competitor in those countries.",
+      "target_metric": "country_gap_finds",
+      "metric": {"name": "country_gap_finds", "current": 0, "target": 5, "direction": "increase", "unit": "apps"},
+      "directives": [
+        "Each run, the planner picks one (popular_in, missing_in) country pair to gap-check",
+        "Rotate the underserved markets explored across runs so coverage broadens (br/mx/in/id/ph/pl/tr/vn/eg/ng/za)",
+        "Tag each gap-find with `gap_present_in` and `gap_absent_in` so the operator can see which markets are underserved"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "crash-watcher-agent",
+  "name": "Sentry crash \u2192 implementer fix loop",
+  "description": "Polls Sentry every 10 minutes for unresolved iOS/Android crashes, fetches stack traces + source context, and dispatches fix recommendations to the implementer. Tracks issues across runs (rec-memory pattern) so a single crash gets one dispatch even if it keeps recurring \u2014 and re-dispatches when a prior fix didn't hold.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "*/10 * * * *",
+  "timezone": "America/Detroit",
+  "enabled": false,
+  "owner": "${OPERATOR_EMAIL}",
+  "runbook": "README.md",
+  "entry_command": "python3 /home/voidsstr/development/nsc-assistant/agents/crash-watcher-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/crash-watcher-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/crash-watcher-agent",
+    "needs_env": [
+      "SENTRY_API_TOKEN",
+      "SENTRY_ORG_SLUG",
+      "SENTRY_PROJECT_SLUG",
+      "CRASH_WATCHER_TARGET_SITE",
+      "SENTRY_API_BASE"
+    ]
+  },
+  "runnable_modes": [
+    "cron",
+    "manual"
+  ]
+}

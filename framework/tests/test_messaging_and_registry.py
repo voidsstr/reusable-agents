@@ -16,23 +16,23 @@ def test_email_codes_round_trip():
     # Sortable lexicographically
     assert rid1 < rid2
 
-    subject = email_codes.encode_subject("seo-reporter", rid1, "[SEO:aisleprompt] run xyz")
+    subject = email_codes.encode_subject("seo-opportunity-agent", rid1, "[SEO:aisleprompt] run xyz")
     agent, req, original = email_codes.decode_subject(subject)
-    assert agent == "seo-reporter"
+    assert agent == "seo-opportunity-agent"
     assert req == rid1
     assert "[SEO:aisleprompt]" in original
 
     # Reply prefix tolerated
     reply = "Re: " + subject
     agent2, req2, _ = email_codes.decode_subject(reply)
-    assert agent2 == "seo-reporter"
+    assert agent2 == "seo-opportunity-agent"
     assert req2 == rid1
 
 
 def test_confirmation_id_determinism():
-    a = email_codes.new_confirmation_id("seo-deployer", "deploy_to_azure",
+    a = email_codes.new_confirmation_id("deployer", "deploy_to_azure",
                                          "('20260426-1200',){}", "20260426T120000Z")
-    b = email_codes.new_confirmation_id("seo-deployer", "deploy_to_azure",
+    b = email_codes.new_confirmation_id("deployer", "deploy_to_azure",
                                          "('20260426-1200',){}", "20260426T120000Z")
     assert a == b  # same inputs → same id (so re-running an agent finds the same confirmation)
 

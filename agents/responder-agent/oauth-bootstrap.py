@@ -54,6 +54,8 @@ import json
 import os
 import secrets
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -107,21 +109,33 @@ def _start_callback_server(port: int = 0) -> tuple[HTTPServer, int]:
 
 MS_AUTH = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
 MS_TOKEN = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-# Default scopes: IMAP for the responder, Graph Mail.Send for the reporter.
-# SMTP.Send is included as a fallback for environments where Graph isn't viable.
-# Mail.Send.Shared lets the reporter use /users/{shared}/sendMail with delegation.
-# All four of these must be pre-granted (delegated) on the Azure AD app +
-# admin-consented before bootstrap will work.
-MS_SCOPES = " ".join([
-    "offline_access",
-    "https://outlook.office.com/IMAP.AccessAsUser.All",
-    "https://outlook.office.com/SMTP.Send",
-    "https://graph.microsoft.com/Mail.Send",
-    "https://graph.microsoft.com/Mail.Send.Shared",
-])
+# Microsoft AAD requires all scopes in a single token request to belong to
+# ONE resource (graph.microsoft.com OR outlook.office.com, never both).
+# We expose two scope sets:
+#   • "graph"   — for sending email via Microsoft Graph /sendMail. This is
+#                 what the reporter / comp-research / app-store-opportunity
+#                 agents use today.
+#   • "outlook" — for the responder's IMAP polling + legacy SMTP fallback.
+# If you need both, run the bootstrap twice (different output paths) and
+# point the responder + reporter at their respective oauth files.
+MS_SCOPE_SETS = {
+    "graph": " ".join([
+        "offline_access",
+        "https://graph.microsoft.com/Mail.Send",
+        "https://graph.microsoft.com/Mail.Send.Shared",
+    ]),
+    "outlook": " ".join([
+        "offline_access",
+        "https://outlook.office.com/IMAP.AccessAsUser.All",
+        "https://outlook.office.com/SMTP.Send",
+    ]),
+}
+# Backwards compat — anything still importing MS_SCOPES gets the Graph set.
+MS_SCOPES = MS_SCOPE_SETS["graph"]
 
 
-def bootstrap_microsoft(client_id: str, tenant: str) -> dict:
+def bootstrap_microsoft(client_id: str, tenant: str, scope_set: str = "graph") -> dict:
+    scopes = MS_SCOPE_SETS[scope_set]
     server, port = _start_callback_server()
     redirect_uri = f"http://localhost:{port}"
     state = secrets.token_urlsafe(16)
@@ -131,7 +145,7 @@ def bootstrap_microsoft(client_id: str, tenant: str) -> dict:
         "response_type": "code",
         "redirect_uri": redirect_uri,
         "response_mode": "query",
-        "scope": MS_SCOPES,
+        "scope": scopes,
         "state": state,
         "prompt": "consent",
     })
@@ -157,7 +171,7 @@ def bootstrap_microsoft(client_id: str, tenant: str) -> dict:
         "code": code,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
-        "scope": MS_SCOPES,
+        "scope": scopes,
     }).encode()
     req = urllib.request.Request(
         MS_TOKEN.format(tenant=tenant),
@@ -174,7 +188,7 @@ def bootstrap_microsoft(client_id: str, tenant: str) -> dict:
         "tenant": tenant,
         "refresh_token": tokens["refresh_token"],
         "username_hint": "",  # filled by mint-token if missing
-        "scopes": MS_SCOPES,
+        "scopes": scopes,
     }
 
 
@@ -249,6 +263,89 @@ def save_oauth(path: Path, data: dict) -> None:
 
 # ---------------------------------------------------------------------------
 
+def bootstrap_microsoft_device_code(client_id: str, tenant: str,
+                                    scope_set: str = "graph") -> dict:
+    """Microsoft device-code flow — no localhost callback needed.
+
+    Prints a short code + URL. User visits the URL on any device
+    (phone, laptop, etc), enters the code, signs in. We poll the token
+    endpoint until the user finishes. Way more robust over SSH or
+    behind firewalls than the redirect-based flow.
+
+    Microsoft AAD enforces single-resource scopes per request — pick
+    one of the predefined scope sets. Default "graph" enables
+    `Mail.Send` for the email-sending agents; "outlook" enables IMAP
+    + legacy SMTP for the responder's inbox poll.
+    """
+    scopes = MS_SCOPE_SETS[scope_set]
+    DEVICE_URL = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
+    body = urllib.parse.urlencode({
+        "client_id": client_id,
+        "scope": scopes,
+    }).encode()
+    req = urllib.request.Request(
+        DEVICE_URL, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        device = json.loads(resp.read().decode())
+
+    print("", file=sys.stderr)
+    print("─" * 60, file=sys.stderr)
+    print(" Visit this URL on any device with a browser:", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(f"   {device['verification_uri']}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(f" Enter this code:   {device['user_code']}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print(" Then sign in as the mailbox you want the agents to send", file=sys.stderr)
+    print(" from (e.g. automation@northernsoftwareconsulting.com), and", file=sys.stderr)
+    print(" click Allow on the consent screen.", file=sys.stderr)
+    print("─" * 60, file=sys.stderr)
+    print("", file=sys.stderr)
+
+    interval = max(5, int(device.get("interval", 5)))
+    deadline = time.time() + int(device.get("expires_in", 900))
+    token_url = MS_TOKEN.format(tenant=tenant)
+    while time.time() < deadline:
+        time.sleep(interval)
+        body = urllib.parse.urlencode({
+            "client_id": client_id,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device["device_code"],
+        }).encode()
+        try:
+            req = urllib.request.Request(
+                token_url, data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                tokens = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as e:
+            err = json.loads(e.read().decode("utf-8", "replace"))
+            code = err.get("error", "")
+            if code == "authorization_pending":
+                continue
+            if code == "slow_down":
+                interval += 5
+                continue
+            raise SystemExit(f"OAuth device-flow error: {err}")
+    else:
+        raise SystemExit("Device code expired before sign-in completed.")
+
+    if "refresh_token" not in tokens:
+        raise SystemExit(f"No refresh_token in response. Got: {list(tokens.keys())}")
+    return {
+        "provider": "microsoft",
+        "client_id": client_id,
+        "tenant": tenant,
+        "refresh_token": tokens["refresh_token"],
+        "username_hint": "",
+        "scopes": scopes,
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--provider", choices=["microsoft", "google"], required=True)
@@ -257,11 +354,21 @@ def main() -> None:
     p.add_argument("--tenant", default="organizations",
                    help="Microsoft tenant id, 'common', 'organizations', or 'consumers' (default: organizations)")
     p.add_argument("--username", help="The mailbox username (e.g. automation@example.com). Saved as username_hint.")
+    p.add_argument("--device-code", action="store_true",
+                   help="Use device-code flow (Microsoft only) — no localhost callback. Best over SSH.")
+    p.add_argument("--scope-set", choices=["graph", "outlook"], default="graph",
+                   help="Microsoft scope set. 'graph' (default) = Mail.Send via Microsoft Graph "
+                        "(used by reporter agents). 'outlook' = IMAP + legacy SMTP (used by "
+                        "responder agent for inbox polling). AAD requires single-resource per "
+                        "token request; if you need both, run twice with --out paths.")
     p.add_argument("--out", default=str(DEFAULT_OAUTH_PATH))
     args = p.parse_args()
 
     if args.provider == "microsoft":
-        data = bootstrap_microsoft(args.client_id, args.tenant)
+        if args.device_code:
+            data = bootstrap_microsoft_device_code(args.client_id, args.tenant, args.scope_set)
+        else:
+            data = bootstrap_microsoft(args.client_id, args.tenant, args.scope_set)
     else:
         if not args.client_secret:
             raise SystemExit("--client-secret required for Google")

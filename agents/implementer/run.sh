@@ -589,7 +589,7 @@ EOF
             # through to the framework chain (rc=75). The claude-pool shim
             # picks the right profile per family on each call. Override the
             # start tier via IMPLEMENTER_CLAUDE_MODEL.
-            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-sonnet-4-6}"
+            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-opus-4-7}"
             TIER_ORDER=("$START_MODEL")
             case "$START_MODEL" in
                 *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;
@@ -1133,6 +1133,7 @@ except Exception: pass
                     # decided to refactor `mobile/...` on the way out).
                     if [ -n "${SEO_AGENT_CONFIG:-}" ] && [ -f "$SEO_AGENT_CONFIG" ]; then
                         SCOPE_REVERTED=$(
+                            REPO_ROOT="$REPO_ROOT" \
                             PYTHONPATH="$REPO_ROOT" \
                             CHANGED_FILES_LIST="$CE_NEW_FILES" \
                             SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" \
@@ -1183,6 +1184,78 @@ PY
                         fi
                     fi
 
+                    # ── Article-scaffold gate (2026-05-12) ──────────────
+                    # Pre-LLM hook writes a scaffold template into
+                    # changes/<slug>.body.md before the LLM runs. The LLM
+                    # is supposed to REPLACE that scaffold with real prose
+                    # (1500–3000 words). When claude-cli fails or returns
+                    # only a summary, the scaffold remains on disk but
+                    # shows as `M` in git status (because it's different
+                    # from the previously-committed body). Without this
+                    # gate the implementer would happily commit the
+                    # scaffold, the article-insert step would reject it
+                    # (< 400 words floor), and the rec gets marked
+                    # "shipped" while the DB has no article. Hit on
+                    # aisleprompt 2026-05-12 — 5 stuck mediterranean /
+                    # vegetarian meal-plan slugs.
+                    #
+                    # Detection: a body.md file is "still a scaffold" if
+                    # it BOTH (a) contains the pre-LLM scaffold marker
+                    # `<!-- art-` near the top AND (b) is under 400 words.
+                    # The 400-word floor matches the article-insert step's
+                    # rejection threshold, so the gate stays consistent.
+                    if [ -n "$CE_NEW_COUNT" ] && [ "$CE_NEW_COUNT" -gt 0 ]; then
+                        _scaffold_reverted=""
+                        _scaffold_kept=""
+                        while IFS= read -r f; do
+                            [ -z "$f" ] && continue
+                            case "$f" in
+                                changes/*.body.md|*/changes/*.body.md) ;;
+                                *) continue ;;
+                            esac
+                            full="${REPO_PATH}/$f"
+                            [ -f "$full" ] || continue
+                            # Cheap scaffold marker check: first 5 lines
+                            # contain the pre-LLM HTML comment.
+                            if ! head -5 "$full" 2>/dev/null | grep -q "<!-- art-"; then
+                                continue
+                            fi
+                            _wc=$(wc -w < "$full" 2>/dev/null || echo 0)
+                            if [ "$_wc" -lt 400 ]; then
+                                # Scaffold not overwritten — revert + drop
+                                # from CE_NEW_FILES so we don't commit it.
+                                if git -C "$REPO_PATH" cat-file -e "HEAD:$f" 2>/dev/null; then
+                                    git -C "$REPO_PATH" checkout -- "$f" 2>/dev/null || true
+                                else
+                                    rm -f "$full"
+                                fi
+                                _scaffold_reverted="${_scaffold_reverted}${f} (${_wc}w)\n"
+                            fi
+                        done < "$CE_NEW_FILES"
+                        if [ -n "$_scaffold_reverted" ]; then
+                            echo "[implementer] article-scaffold gate: REVERTED unreplaced scaffolds:" >&2
+                            printf "%b" "$_scaffold_reverted" | sed 's/^/  /' >&2
+                            # Rebuild CE_NEW_FILES list, dropping the reverted entries.
+                            _tmp_new=$(mktemp)
+                            while IFS= read -r f; do
+                                [ -z "$f" ] && continue
+                                _was_reverted=0
+                                printf "%b" "$_scaffold_reverted" | while IFS= read -r line; do
+                                    case "$line" in
+                                        "${f} "*) exit 1 ;;
+                                    esac
+                                done || _was_reverted=1
+                                [ "$_was_reverted" -eq 0 ] && echo "$f" >> "$_tmp_new"
+                            done < "$CE_NEW_FILES"
+                            mv "$_tmp_new" "$CE_NEW_FILES"
+                            CE_NEW_COUNT=$(grep -c . "$CE_NEW_FILES" 2>/dev/null || echo 0)
+                            if [ "$CE_NEW_COUNT" -eq 0 ]; then
+                                echo "[implementer] every body.md was scaffold-only — nothing to commit, dispatch will soft-fail for retry" >&2
+                                rc=88  # custom scaffold-unreplaced exit code
+                            fi
+                        fi
+                    fi
+
                     set +e
                     if [ "$CE_NEW_COUNT" -gt 0 ]; then
                     while IFS= read -r f; do
@@ -1227,6 +1300,7 @@ SHIP_EOF
                     # run completion. Output → /tmp/eas-build-<sha>.log.
                     if [ -n "${SEO_AGENT_CONFIG:-}" ] && [ -f "$SEO_AGENT_CONFIG" ] && [ "$CE_NEW_COUNT" -gt 0 ]; then
                         EAS_KICK_CMD=$(
+                            REPO_ROOT="$REPO_ROOT" \
                             PYTHONPATH="$REPO_ROOT" \
                             CHANGED_FILES_LIST="$CE_NEW_FILES" \
                             SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" \
@@ -1808,13 +1882,37 @@ elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; th
     # Per-batch deploy — fire after every batch, not waiting for chain
     # end. The _is_last_batch_in_chain helper is preserved (still used
     # by the legacy per-chain gate) but no longer required here.
-    echo "[implementer] batch complete — chaining to deployer (per-batch deploy)"
-    SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
-        bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
-            rc=$?
-            echo "[implementer] deployer failed rc=$rc" >&2
-            exit $rc
-        }
+    #
+    # No-commit guard: aider sometimes returns success with zero edits
+    # (rec already deferred, already implemented in a prior pass, or
+    # determined to be a no-op). Running the full test→build→push→
+    # deploy→smoke pipeline against an unchanged HEAD wastes ~15-20 min
+    # of a throttle slot for zero value. Compare current HEAD against
+    # GIT_SHA_BEFORE captured at run start; skip the deployer if they
+    # match. We still drop into the artifact-detection block below so
+    # the run is correctly marked status=paused (no ship).
+    GIT_SHA_NOW=""
+    if [ -n "${IMPLEMENTER_REPO_PATH:-}" ] && [ -d "$IMPLEMENTER_REPO_PATH" ] \
+            && git -C "$IMPLEMENTER_REPO_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        GIT_SHA_NOW=$(git -C "$IMPLEMENTER_REPO_PATH" log -1 --format='%H' 2>/dev/null || echo "")
+    fi
+    if [ -n "$GIT_SHA_NOW" ] && [ "$GIT_SHA_NOW" = "${GIT_SHA_BEFORE:-}" ]; then
+        echo "[implementer] no commits this batch (HEAD unchanged ${GIT_SHA_NOW:0:8}) — skipping deployer"
+    else
+        echo "[implementer] batch complete — chaining to deployer (per-batch deploy, smoke tests only)"
+        # Per-batch deploys ALWAYS run smoke tests, never the full suite.
+        # The full suite (when present in site.yaml under test.full) is
+        # long-running (15-20 min playwright runs) and holds a throttle
+        # slot hostage. If a periodic full-suite cadence is needed, run
+        # it as a separate scheduled task with DEPLOYER_TEST_SCOPE=full.
+        SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
+        DEPLOYER_TEST_SCOPE="${DEPLOYER_TEST_SCOPE:-smoke}" \
+            bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
+                rc=$?
+                echo "[implementer] deployer failed rc=$rc" >&2
+                exit $rc
+            }
+    fi
 fi
 
 

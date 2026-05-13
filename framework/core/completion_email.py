@@ -519,8 +519,10 @@ def send_completion_email(
     the dashboard's Confirmations view can show the send trail.
     """
     s = storage or get_storage()
-    sender = sender or os.environ.get("IMPLEMENTER_FROM",
-                                       "automation@northernsoftwareconsulting.com")
+    sender = sender or os.environ.get(
+        "IMPLEMENTER_FROM",
+        os.environ.get("OPERATOR_FROM_EMAIL", ""),
+    )
     dashboard_base = dashboard_base or os.environ.get(
         "FRAMEWORK_DASHBOARD_URL", "http://localhost:8091")
     to = _resolve_recipient(

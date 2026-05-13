@@ -1234,6 +1234,10 @@ class AgentDoctor(AgentBase):
     # that recurred, or an unfixable signature). Run-by-run status
     # updates aren't actionable for the operator.
     send_run_summary_email = False
+    # The doctor must never auto-invoke itself on its own failure — that
+    # would loop. The framework also short-circuits by agent_id, but
+    # making it explicit at the class level documents intent.
+    auto_recovery_enabled = False
 
     def _api_token(self) -> str:
         tok = os.environ.get("FRAMEWORK_API_TOKEN") or ""
@@ -1262,6 +1266,33 @@ class AgentDoctor(AgentBase):
                         progress=1.0, state="failure")
             return RunResult(status="failure", summary="missing FRAMEWORK_API_TOKEN")
 
+        # Drain auto-recovery incidents queued by failing agents (via
+        # framework.core.resilience.invoke_doctor). Each incident names a
+        # specific agent that just failed plus rich error context. We
+        # process these FIRST so the doctor responds to live failures
+        # before doing the broad poll. Successful drain archives entries
+        # to incidents-processed/ so the next run doesn't re-process.
+        priority_agents: dict[str, dict] = {}
+        try:
+            from framework.core.resilience import drain_incident_queue
+            incidents = drain_incident_queue(archive=True, limit=50)
+        except Exception as e:
+            self.decisions.warn(f"incident drain failed: {e}")
+            incidents = []
+        for inc in incidents:
+            aid = inc.get("failed_agent_id") or ""
+            if not aid:
+                continue
+            # Most-recent incident wins when an agent has multiple queued
+            priority_agents[aid] = inc
+        if priority_agents:
+            self.decide(
+                "observe",
+                f"Drained {len(priority_agents)} auto-recovery incident(s): "
+                f"{', '.join(sorted(priority_agents.keys())[:8])}",
+                evidence={"incident_count": len(priority_agents)},
+            )
+
         # Load "seen" state — agent_id → last_run_at we already investigated
         try:
             seen = s.read_json(self._state_path()) or {}
@@ -1280,6 +1311,15 @@ class AgentDoctor(AgentBase):
         if not isinstance(agents, list):
             return RunResult(status="failure", summary="unexpected /api/agents shape")
 
+        # Sort: incident-flagged agents first (most urgent), then the rest in
+        # whatever order the API returned. The investigation loop short-circuits
+        # on already-seen failures, so unaffected agents from the broad poll
+        # cost ~zero per tick.
+        agents = sorted(
+            agents,
+            key=lambda a: 0 if a.get("id") in priority_agents else 1,
+        )
+
         investigated = 0
         fixed = 0
         escalated = 0
@@ -1290,7 +1330,12 @@ class AgentDoctor(AgentBase):
                 continue
             last_status = a.get("last_run_status", "")
             last_at = a.get("last_run_at") or ""
-            if last_status not in ("failure", "running"):
+            incident = priority_agents.get(aid)
+            # Auto-recovery incidents force investigation regardless of what
+            # the API reports — the failing agent posted the incident before
+            # status.json had a chance to flip, so /api/agents may still show
+            # 'success' or 'running' here. Trust the incident.
+            if last_status not in ("failure", "running") and not incident:
                 continue
 
             # Stuck detection: running with stale updated_at
@@ -1303,7 +1348,7 @@ class AgentDoctor(AgentBase):
                         is_stuck = True
                 except Exception:
                     pass
-            if last_status != "failure" and not is_stuck:
+            if last_status != "failure" and not is_stuck and not incident:
                 continue
 
             # Dedupe — but ONLY if we have a fixes-log entry for this exact

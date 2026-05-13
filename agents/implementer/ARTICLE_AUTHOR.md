@@ -1,5 +1,96 @@
 # implementer — ARTICLE_AUTHOR runbook
 
+> ## 🚨 PRE-INSERT CHECKLIST — DO NOT SKIP 🚨
+>
+> **As of 2026-05-12 retro:** 552 of 556 previously-published articles
+> shipped with `faqs=NULL` and `outbound_citations=NULL`. The SSR layer
+> has full FAQPage + Citation JSON-LD scaffolding that **silently
+> short-circuits** when those columns are null. Result: a six-month
+> structured-data leak across the entire `/reviews/*` corpus, and zero
+> FAQ rich-results in Google.
+>
+> **Every INSERT INTO editorial_articles MUST populate ALL of:**
+>
+> - `faqs` — JSONB array of ≥5 objects, each `{question, answer}`.
+>   `answer` MUST be ≥40 words. Questions MUST be distinct.
+> - `outbound_citations` — text[] array of ≥3 authoritative URLs
+>   (manufacturer pages, peer-reviewed reviews, Wikipedia, AMD/NVIDIA
+>   product pages, GitHub repos, primary-source benchmarks). Each URL
+>   MUST also appear inline in `body_md` as `[Source name](https://...)`.
+> - `hero_image_url` — non-null, non-empty.
+> - `related_product_asins` — text[] array of ≥3 ASINs from
+>   `proposals.json[].expected_products_or_hardware`. **CRITICAL:** the
+>   SSR article template renders an inline cross-sell strip
+>   (`<section class="ssr-art-buystrip">`) that pulls every related ASIN
+>   and emits buy buttons per product — readers convert without clicking
+>   through to a PDP first. **Button channel rule (enforced by SSR):**
+>     - `era='retro'` → **eBay button ONLY** (no Amazon). Vintage SKUs
+>       on Amazon are almost always stale 3rd-party listings — linking
+>       to them sends readers to dead inventory.
+>     - `listing_preference='ebay'` but `era=NULL` (workstation /
+>       datacenter channel: RTX A6000, H100, MI3xx) → eBay button first,
+>       Amazon button second.
+>     - Everything else (modern consumer) → Amazon button first, eBay
+>       button second.
+>   For the strip to render correctly:
+>     1. Every ASIN MUST exist in `products` with `is_active=true` AND
+>        `main_image_url IS NOT NULL`.
+>     2. `products.listing_preference` controls primary-button ordering
+>        (`'ebay'` → eBay first, otherwise Amazon first). Both buttons
+>        are always shown.
+>     3. **Channel-correct picks per vertical:**
+>        - `vertical='retro-gaming'` → ALL related_product_asins MUST
+>          have `era='retro'` AND `listing_preference='ebay'`. These
+>          products generally have stale or missing Amazon stock; the
+>          eBay button is the only working channel.
+>        - `vertical='ai-rigs' | 'pc-gaming' | 'makers' | 'how-to'` →
+>          prefer `listing_preference='amazon'` SKUs. eBay-channel
+>          datacenter/workstation parts (RTX A6000, H100, MI3xx) are
+>          fine when the body explicitly names them; the article-page
+>          buy-strip will surface eBay as primary for those, Amazon
+>          fallback as secondary.
+>     4. Don't ship articles with fewer than 3 catalog-resolvable
+>        ASINs — the inline buy-strip degrades to a single-card or
+>        empty state, which kills conversion on long articles where
+>        the in-body autolinker pulled readers to PDPs successfully
+>        but they couldn't see "Buy on eBay" without an extra click.
+>
+> **AFTER each successful INSERT — fire an IndexNow push (≤ 1 min budget):**
+>
+> ```bash
+> python3 /home/voidsstr/development/reusable-agents/agents/indexnow-submitter/queue-publish.py \
+>     --site <specpicks|aisleprompt> \
+>     --slug reviews/<the-new-slug>
+> ```
+>
+> This drops the URL into the per-site force-submit queue. The indexnow
+> agent's next tick (≤15 min) pushes it to Bing/Yandex via IndexNow and
+> notifies Google Search Console via the sitemap-submit chain. Without
+> this hook the new article waits up to 15 min for the agent's sitemap
+> diff to discover it; with it, indexation latency drops to seconds.
+>
+> **VERIFICATION STEP — run BEFORE you commit the SQL:**
+>
+> ```sql
+> -- This MUST return zero rows. If it returns any rows, your INSERT is
+> -- malformed; fix the INSERT and re-run. Do NOT skip this check.
+> SELECT slug, faqs IS NULL AS no_faqs,
+>        jsonb_array_length(faqs) AS n_faqs,
+>        outbound_citations IS NULL OR cardinality(outbound_citations)<3 AS bad_cites
+> FROM editorial_articles
+> WHERE slug = ANY(ARRAY[<the slugs you just wrote>])
+>   AND (faqs IS NULL OR jsonb_array_length(faqs) < 5
+>     OR outbound_citations IS NULL OR cardinality(outbound_citations) < 3);
+> ```
+>
+> **Without these fields, the article is invisible to FAQPage + E-E-A-T
+> SEO signals and the analyzer's `faq-quality-thin` + 
+> `eeat-outbound-citation-count` rules immediately flag it.** Treat any
+> proposal that doesn't carry these in `recommendations.json` as an
+> upstream bug — copy the FAQs verbatim from the proposal, and if the
+> proposal somehow lacks them, **author them yourself before the INSERT**
+> rather than shipping a partial row.
+
 You are the **article writer** for the SpecPicks article-author flow.
 A separate proposal agent has already proposed N articles for this run
 (in `recommendations.json[*].article_proposal`). Your job is to **write

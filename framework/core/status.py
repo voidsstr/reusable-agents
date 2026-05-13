@@ -31,6 +31,8 @@ Schema:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -124,6 +126,24 @@ class StatusReporter:
             )
         except Exception as e:
             logger.warning(f"status write failed for {self.agent_id}: {e}")
+
+        # Mirror to stderr so systemd captures the run's progress in the
+        # per-agent log file (StandardError=append:...). Without this,
+        # agents that use only self.status() (e.g. progressive-improvement)
+        # produce 0-byte logs because their useful output never reaches
+        # any stream — it goes straight to Azure blob storage. Disable
+        # with AGENT_STATUS_STDERR=0 if you want pure-quiet runs.
+        if os.environ.get("AGENT_STATUS_STDERR", "1") != "0":
+            try:
+                pct = int(payload["progress"] * 100)
+                line = (
+                    f"[{payload['updated_at']}] [{self.agent_id}] "
+                    f"{state}{(' ' + current_action) if current_action else ''} "
+                    f"({pct}%) {message}".rstrip()
+                )
+                print(line, file=sys.stderr, flush=True)
+            except Exception:
+                pass  # never let logging break a status write
 
         # Always append the transition to the global event log
         if state_changed or terminal:

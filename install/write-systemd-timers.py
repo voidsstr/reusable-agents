@@ -91,24 +91,47 @@ def main() -> None:
     enabled = 0
     failed: list[str] = []
 
-    # Forward storage env vars to the agent's systemd unit so dispatched
-    # subprocesses (e.g. seo-implementer) inherit them.
-    storage_env = {
-        k: os.environ[k]
-        for k in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_CONTAINER",
-                   "STORAGE_BACKEND")
-        if os.environ.get(k)
-    }
-    # Also fall back to .env values if not already in environment
-    if not storage_env:
-        env_path = REPO_DIR / ".env"
-        if env_path.is_file():
-            for line in env_path.read_text().splitlines():
-                if "=" in line and not line.startswith("#"):
-                    k, _, v = line.partition("=")
-                    if k in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_CONTAINER",
-                             "STORAGE_BACKEND") and v:
-                        storage_env[k] = v.strip()
+    # Forward storage + provider env vars to the agent's systemd unit so
+    # dispatched subprocesses (e.g. seo-implementer, framework AIClient)
+    # inherit them. Without this, agents flipped to provider=azure-openai
+    # can't read the API key at call time.
+    FORWARD_KEYS = (
+        "AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_CONTAINER",
+        "STORAGE_BACKEND",
+        # Provider creds — read by framework.core.ai_providers at call time.
+        "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    # .env is the source-of-truth for these keys. We read it FIRST,
+    # then overlay os.environ values ONLY if the .env didn't have them.
+    #
+    # Why this order: bash `source .env` mangles values that contain
+    # unquoted semicolons (Azure conn strings) — it interprets each `;`
+    # as a statement separator, leaving only the substring before the
+    # first `;` in os.environ. The .env file itself still has the full
+    # value when parsed line-by-line below. 2026-05-11: prior order
+    # (os.environ first) silently wrote truncated conn strings into
+    # every agent service file, causing 17+ agents to fail with
+    # `KeyError: 'ACCOUNTNAME'`.
+    storage_env: dict[str, str] = {}
+    env_path = REPO_DIR / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k in FORWARD_KEYS and v:
+                    # Strip surrounding quotes if user happened to add them.
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                        v = v[1:-1]
+                    storage_env[k] = v
+    # Fill any missing from os.environ (e.g., AZURE_OPENAI_API_KEY set
+    # only in the host's systemd Environment= block, not in .env).
+    for k in FORWARD_KEYS:
+        if k not in storage_env and os.environ.get(k):
+            storage_env[k] = os.environ[k]
 
     for a in agents:
         if args.agent_id and a["id"] != args.agent_id:
@@ -144,18 +167,39 @@ def main() -> None:
     # in the manifest but kept firing every 30 min for hours.)
     stopped = 0
     if scheduler.systemctl_reload():
+        import subprocess as _sp
         for a in agents:
             if args.agent_id and a["id"] != args.agent_id:
                 continue
-            if not a.get("cron_expr"):
+            unit = f"agent-{a['id']}.timer"
+            cron = (a.get("cron_expr") or "").strip()
+            if not cron:
+                # Event-driven agent (cron_expr cleared) — stop + disable
+                # + remove the leftover timer/service files. Without this
+                # step, an agent that was previously cron-driven keeps its
+                # timer running after being switched to event-driven mode.
+                try:
+                    _sp.run(["systemctl", "--user", "stop", unit],
+                            capture_output=True, timeout=10)
+                    r = _sp.run(["systemctl", "--user", "disable", unit],
+                                capture_output=True, timeout=10)
+                    if r.returncode == 0:
+                        stopped += 1
+                    # Drop the unit files so a stale "Loaded" entry doesn't
+                    # confuse `systemctl list-unit-files`.
+                    from pathlib import Path as _P
+                    _unit_dir = _P.home() / ".config/systemd/user"
+                    for fname in (f"agent-{a['id']}.timer", f"agent-{a['id']}.service"):
+                        try: (_unit_dir / fname).unlink()
+                        except FileNotFoundError: pass
+                except Exception:
+                    pass
                 continue
             if a.get("enabled", True):
                 if scheduler.systemctl_enable_and_start(a["id"]):
                     enabled += 1
             else:
                 # Stop + disable any running timer for this agent
-                import subprocess as _sp
-                unit = f"agent-{a['id']}.timer"
                 try:
                     _sp.run(["systemctl", "--user", "stop", unit],
                             capture_output=True, timeout=10)

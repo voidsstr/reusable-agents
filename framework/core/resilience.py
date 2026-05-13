@@ -163,18 +163,20 @@ def notify_operator(
       context: free-form dict — phase ('imap-poll', 'graph-send'),
                run_ts, request_id, last 1000 chars of stderr, etc.
       operator_email: defaults to env $FRAMEWORK_OPERATOR_EMAIL or
-                      mperry@northernsoftwareconsulting.com.
-      sender: defaults to env $IMPLEMENTER_FROM or automation@nsc.
+                      $OPERATOR_EMAIL — set in your .env. Empty disables
+                      operator notifications (incidents still log to
+                      storage either way).
+      sender: defaults to env $IMPLEMENTER_FROM or $OPERATOR_FROM_EMAIL.
       cooldown_s: per (agent, error_class) suppression window. Set to 0
                   to disable rate-limiting (e.g., test the alert path).
       severity: 'critical' / 'high' / 'medium' — affects subject prefix.
     """
     operator_email = (operator_email
                       or os.environ.get("FRAMEWORK_OPERATOR_EMAIL")
-                      or "mperry@northernsoftwareconsulting.com")
+                      or os.environ.get("OPERATOR_EMAIL", ""))
     sender = (sender
               or os.environ.get("IMPLEMENTER_FROM")
-              or "automation@northernsoftwareconsulting.com")
+              or os.environ.get("OPERATOR_FROM_EMAIL", ""))
     error_class = type(error).__name__
 
     # Always record the incident — the email may be skipped (rate-limit) or
@@ -342,3 +344,206 @@ def safe_run(
         except Exception as e:
             logger.warning(f"safe_run alert failed: {e}")
     raise last_exc
+
+
+# ---------------------------------------------------------------------------
+# invoke_doctor — auto-recovery enqueue for agent-doctor on failure
+# ---------------------------------------------------------------------------
+
+# In-memory dedupe map for invoke_doctor — same (agent_id, error_class) within
+# cooldown only enqueues one doctor run, so a flapping agent doesn't dispatch
+# a doctor every minute. Persists for the lifetime of the failing process,
+# which is enough since most agents are oneshot.
+_DOCTOR_INVOKE_LAST: dict[tuple[str, str], float] = {}
+
+DOCTOR_AGENT_ID = "agent-doctor"
+DEFAULT_DOCTOR_COOLDOWN_S = 600.0  # 10 min — same agent+error class
+
+# Fixed file paths the doctor + host-worker both know about.
+INCIDENT_QUEUE_PREFIX = f"agents/{DOCTOR_AGENT_ID}/incidents/"
+DEFAULT_TRIGGER_QUEUE_DIR = "/tmp/agent-trigger-queue"
+
+
+def invoke_doctor(
+    *,
+    failed_agent_id: str,
+    error: Optional[BaseException] = None,
+    context: Optional[dict] = None,
+    run_id: str = "",
+    severity: str = "high",
+    cooldown_s: float = DEFAULT_DOCTOR_COOLDOWN_S,
+    triggered_by: str = "auto-recovery",
+) -> tuple[bool, str]:
+    """Queue an `agent-doctor` run focused on the just-failed agent.
+
+    Two writes happen:
+
+      1. Storage  → `agents/agent-doctor/incidents/<incident_id>.json`
+         Full failure context (error class, message, traceback excerpt,
+         `failed_agent_id`, `run_id`, severity, log path if known). Durable;
+         survives doctor crashes; the doctor drains this queue at start of
+         every run.
+
+      2. Filesystem → `/tmp/agent-trigger-queue/agent-doctor-<incident_id>.json`
+         The host-worker polls this dir and exec's the doctor's
+         `entry_command`. Same mechanism the dashboard's "Run now" button uses.
+
+    Returns (queued, detail). queued=False means the call was deduped or the
+    target was the doctor itself (don't recurse).
+
+    Idempotency:
+      Same (failed_agent_id, error_class) inside `cooldown_s` is dropped
+      with `queued=False`. The first call within a window writes the
+      incident *and* the trigger; the rest are no-ops. Set cooldown_s=0 to
+      always queue (e.g. tests).
+    """
+    if failed_agent_id == DOCTOR_AGENT_ID:
+        return False, "skip: doctor cannot doctor itself"
+
+    error_class = type(error).__name__ if error is not None else "UnknownFailure"
+
+    # Dedupe: same agent+error within cooldown window
+    if cooldown_s > 0:
+        key = (failed_agent_id, error_class)
+        now = time.time()
+        last = _DOCTOR_INVOKE_LAST.get(key, 0)
+        if now - last < cooldown_s:
+            return False, f"deduped within {cooldown_s:.0f}s cooldown"
+        _DOCTOR_INVOKE_LAST[key] = now
+
+    incident_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + \
+                   ("%06d" % (int(time.time() * 1_000_000) % 1_000_000))
+
+    # Build the incident record. Trim traceback so a flapping agent doesn't
+    # wedge storage with megabytes of stack frames.
+    tb_excerpt = ""
+    if error is not None:
+        try:
+            tb_excerpt = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )[-4000:]
+        except Exception:
+            tb_excerpt = ""
+
+    incident = {
+        "schema_version": "1",
+        "incident_id": incident_id,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "failed_agent_id": failed_agent_id,
+        "run_id": run_id,
+        "severity": severity,
+        "error_class": error_class,
+        "error_message": (str(error)[:1000] if error is not None else ""),
+        "traceback": tb_excerpt,
+        "context": context or {},
+        "triggered_by": triggered_by,
+        "status": "queued",
+    }
+
+    # 1) Persist to durable storage (survives doctor crashes / process death).
+    try:
+        from framework.core.storage import get_storage
+        s = get_storage()
+        s.write_json(f"{INCIDENT_QUEUE_PREFIX}{incident_id}.json", incident)
+    except Exception as e:
+        logger.warning(f"invoke_doctor: storage write failed: {e}")
+        return False, f"storage write failed: {e}"
+
+    # 2) Enqueue a host-worker trigger so the doctor actually runs now.
+    #    The trigger JSON shape mirrors what /api/agents/<id>/trigger writes —
+    #    host-worker.sh expects: agent_id, run_id, entry_command, triggered_by.
+    try:
+        # Look up the doctor's entry_command from its manifest (in storage).
+        entry_command = ""
+        try:
+            from framework.core.storage import get_storage
+            s = get_storage()
+            manifest = s.read_json(f"agents/{DOCTOR_AGENT_ID}/manifest.json") or {}
+            entry_command = manifest.get("entry_command") or ""
+        except Exception:
+            pass
+        if not entry_command:
+            # Reasonable fallback so we still trigger when storage is misconfigured.
+            entry_command = (
+                f"FRAMEWORK_API_URL=${{FRAMEWORK_API_URL:-http://localhost:8093}} "
+                f"python3 /home/voidsstr/development/reusable-agents/agents/agent-doctor/agent.py"
+            )
+
+        queue_dir = Path(os.environ.get("AGENT_TRIGGER_QUEUE_DIR", DEFAULT_TRIGGER_QUEUE_DIR))
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        run_ts_local = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        job = {
+            "agent_id": DOCTOR_AGENT_ID,
+            "run_id": run_ts_local,
+            "entry_command": entry_command,
+            "triggered_by": f"auto-recovery:{failed_agent_id}",
+            "incident_id": incident_id,
+            "enqueued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        job_path = queue_dir / f"{DOCTOR_AGENT_ID}-{incident_id}.json"
+        tmp = job_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(job, indent=2))
+        tmp.rename(job_path)
+        logger.info(
+            f"invoke_doctor: queued doctor run for failed_agent={failed_agent_id} "
+            f"err={error_class} incident={incident_id} job={job_path}"
+        )
+        return True, f"queued: incident={incident_id} job={job_path}"
+    except Exception as e:
+        logger.warning(f"invoke_doctor: trigger enqueue failed: {e}")
+        return False, f"trigger enqueue failed: {e}"
+
+
+def drain_incident_queue(
+    *,
+    archive: bool = True,
+    limit: int = 50,
+) -> list[dict]:
+    """Read all pending incidents from `agents/agent-doctor/incidents/`,
+    return them sorted oldest-first. If `archive=True`, move each one to
+    `agents/agent-doctor/incidents-processed/<incident_id>.json` so the
+    next doctor run doesn't re-process the same incident.
+
+    Called by `agent-doctor.run()` at the start of each tick to discover
+    auto-recovery requests queued by failing agents.
+    """
+    try:
+        from framework.core.storage import get_storage
+        s = get_storage()
+    except Exception as e:
+        logger.warning(f"drain_incident_queue: storage unavailable: {e}")
+        return []
+
+    try:
+        keys = list(s.list_prefix(INCIDENT_QUEUE_PREFIX, limit=limit))
+    except Exception as e:
+        logger.warning(f"drain_incident_queue: list_prefix failed: {e}")
+        return []
+
+    incidents: list[dict] = []
+    for key in keys:
+        if not key.endswith(".json"):
+            continue
+        try:
+            data = s.read_json(key)
+        except Exception as e:
+            logger.warning(f"drain_incident_queue: read {key} failed: {e}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        incidents.append(data)
+
+        if archive:
+            iid = data.get("incident_id") or Path(key).stem
+            archive_key = f"agents/{DOCTOR_AGENT_ID}/incidents-processed/{iid}.json"
+            try:
+                data2 = dict(data)
+                data2["status"] = "processed"
+                data2["processed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                s.write_json(archive_key, data2)
+                s.delete(key)
+            except Exception as e:
+                logger.warning(f"drain_incident_queue: archive {key} failed: {e}")
+
+    incidents.sort(key=lambda d: d.get("ts") or "")
+    return incidents

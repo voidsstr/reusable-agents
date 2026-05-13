@@ -39,8 +39,10 @@ from framework.core.storage import get_storage
 
 
 # Config
-TO_EMAIL = os.environ.get("GOALS_TRACKER_TO", "mperry@northernsoftwareconsulting.com")
-FROM_EMAIL = os.environ.get("GOALS_TRACKER_FROM", "automation@northernsoftwareconsulting.com")
+TO_EMAIL = os.environ.get("GOALS_TRACKER_TO",
+                          os.environ.get("OPERATOR_EMAIL", ""))
+FROM_EMAIL = os.environ.get("GOALS_TRACKER_FROM",
+                            os.environ.get("OPERATOR_FROM_EMAIL", ""))
 # Send path: prefer Microsoft Graph /sendMail (works through tenant SMTP-auth
 # disable), fall back to msmtp[automation] if Graph fails, then msmtp[personal].
 GRAPH_OAUTH_FILE = os.environ.get(
@@ -351,7 +353,7 @@ def render_email_html(agents: list[dict]) -> str:
     Generated {now().strftime('%Y-%m-%d %H:%M UTC')} ·
     <a href="https://agents.happysky-24190067.eastus.azurecontainerapps.io" style="color:#475569;text-decoration:none">View dashboard</a>
     <br>
-    <span style="color:#cbd5e1">Sent daily at 7:00 AM Detroit · automation@northernsoftwareconsulting.com</span>
+    <span style="color:#cbd5e1">Sent daily at 7:00 AM · {FROM_EMAIL or "(operator email)"}</span>
   </p>
 </td></tr>
 

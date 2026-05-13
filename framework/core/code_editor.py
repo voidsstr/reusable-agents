@@ -60,6 +60,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -120,15 +121,43 @@ DEFAULT_CONFIG: dict = {
     # multi-file edit harness beats aider's whole-edit format. Promote
     # `jcode-copilot` to step 1 if its soft-fail rate stays below
     # aider-copilot-proxy's after a week of runs.
+    # Chain order is COST-DRIVEN (2026-05-09): exhaust already-paid
+    # subscription quota first, only meter on Azure when those are
+    # exhausted, only fall to free-but-quality-variable Ollama when
+    # everything paid is dry. Specifically:
+    #   1. claude-cli      — Claude Max subscription (flat-rate). Pool
+    #                        round-robins across logged-in profiles +
+    #                        per-model rate-limit families (sonnet/opus/haiku).
+    #   2. jcode-copilot   — GitHub Copilot subscription (flat-rate)
+    #                        via the local copilot-api proxy. Currently
+    #                        pinned to gpt-4.1 because the Claude family
+    #                        on Copilot is metered separately and blew
+    #                        its premium-model cap; gpt-4.1 is free-tier.
+    #   3. aider-azure     — Azure OpenAI gpt-4.1 GlobalStandard. Metered
+    #                        per-token; only fires when the two
+    #                        subscriptions are exhausted.
+    #   4. jcode-ollama    — local Ollama on the 5090. Free, but
+    #                        accuracy/throughput trails the cloud
+    #                        backends. Tail position — only when
+    #                        everything paid is unavailable.
+    # Aider variants (copilot-proxy / github-copilot / azure / ollama)
+    # are listed below as backends but kept off the default chain because
+    # the jcode harness consistently outperforms aider's whole-edit format
+    # on multi-file recs. Operators who prefer aider can override the
+    # chain in storage `config/code-editor-config.json`.
+    # Order: cheapest-with-best-quality first, destructive backend last.
+    # Per the 2026-05-11 retro:
+    #   - aider-azure showed 67% big-commit rate + 2 destructive incidents
+    #     in 9 commits → demoted to last resort (after the destructive-
+    #     shrinkage gate in run_with_fallback catches its bad edits, the
+    #     fallthrough lands on jcode-ollama which is local-free anyway).
+    #   - aider-github-copilot had 18 clean commits / 0 destructive →
+    #     promoted into the default chain as a peer of jcode-copilot.
     "default_chain": [
+        "claude-cli",
         "jcode-copilot",
-        "aider-copilot-proxy",
         "aider-github-copilot",
-        "opencode-azure",
-        "crush-azure",
         "aider-azure",
-        "codex-azure",
-        "jcode-azure",
         "jcode-ollama",
     ],
     # Backend-specific params. The "kind" tells run_with_fallback which
@@ -241,17 +270,54 @@ DEFAULT_CONFIG: dict = {
             # login --provider ollama` once.
             #
             # Model selection (validated 2026-05-06 on RTX 5090 / 32 GB VRAM):
-            #   • qwen3-coder:30b — strong on benchmarks but in jcode's
-            #     `run` harness it explores instead of converging; rc=0
-            #     with zero file changes after 60s on a focused
-            #     single-line edit. Doesn't reliably engage the Edit tool.
-            #   • devstral-small-2:24b — Mistral's purpose-built agent-
-            #     coding model. Engages the Edit tool, makes surgical
-            #     1-line edits cleanly. ~15 GB VRAM. PRIMARY CHOICE.
+            #   • qwen3.6:35b-a3b — Apr 2026 release, 73.4% SWE-bench
+            #     Verified (best dense+MoE combo for tool-use), MoE
+            #     35B total / 3B active per token = same VRAM as 24B
+            #     dense but faster inference. Native tool-call parser.
+            #     PRIMARY CHOICE.
+            #   • devstral-small-2:24b — 68% SWE-bench Verified.
+            #     Mistral's purpose-built agent-coding model. Reliable
+            #     fallback if qwen3.6 misbehaves on a particular repo.
+            #     SECONDARY (set via DEPLOYER_OLLAMA_MODEL env override).
+            #   • qwen3-coder:30b — strong benchmarks but in jcode's
+            #     `run` harness it explores instead of converging
+            #     (rc=0, files_changed=0). Doesn't reliably engage Edit
+            #     tool. Avoid.
             # Override per-deployment via storage `config/code-editor-config.json`
-            # if a future model proves out better.
+            # or env DEPLOYER_OLLAMA_MODEL when a future model proves
+            # out better.
             "native_provider": "ollama",
-            "model": "devstral-small-2:24b",
+            "model": "${DEPLOYER_OLLAMA_MODEL:-devstral-small-2:24b}",
+        },
+        "aider-ollama": {
+            "kind": "aider",
+            # aider talks to ollama via the litellm `ollama_chat/<model>`
+            # provider. The `ollama_chat/` prefix is the trigger for
+            # per-dispatch-kind model routing in AiderBackend.edit() —
+            # it strips the prefix, calls select_ollama_model() with the
+            # dispatch kind, then reattaches the prefix. The bare model
+            # name here is the FALLBACK if the router can't decide.
+            "model": "ollama_chat/devstral-small-2:24b",
+            # aider speaks SEARCH/REPLACE diff format reliably with
+            # devstral, qwen3.6, qwen3-coder-next.
+            "edit_format": "diff",
+            # aider reads OLLAMA_API_BASE if set, else defaults to
+            # http://localhost:11434. Override via env when running
+            # against a remote ollama box.
+            "extra_env": {
+                "OLLAMA_API_BASE": "${OLLAMA_API_BASE:-http://localhost:11434}",
+            },
+            # Preflight: ollama listens on the OLLAMA_API_BASE URL.
+            "preflight_url": "${OLLAMA_API_BASE:-http://localhost:11434}/api/tags",
+        },
+        "claude-cli": {
+            "kind": "claude-cli",
+            # The pool shim at $CLAUDE_POOL_ROOT/bin/claude is on PATH when
+            # CLAUDE_POOL=1 (default). It rotates across Max profiles +
+            # exits rc=75 fast when ALL profiles rate-limited (chain runner
+            # treats rc=75 as soft-fail). No model param — claude --print
+            # uses the profile's default.
+            "preflight_path": "~/.reusable-agents/claude-pool/bin/claude",
         },
     },
 }
@@ -312,6 +378,10 @@ class EditRequest:
     files: list[str] = field(default_factory=list)
     pre_dirty_path: Optional[Path] = None
     timeout_sec: int = 600
+    # Hint about the dispatch shape so backends with model-routing
+    # (jcode-ollama, aider-ollama) can pick the right local model. Set
+    # by run.sh from DISPATCH_KIND env. Empty = generic code edit.
+    dispatch_kind: str = ""
 
 
 @dataclass
@@ -348,6 +418,162 @@ def _expand(val: str) -> str:
 def _expand_dict(d: dict) -> dict:
     return {k: _expand(v) if isinstance(v, str) else v
             for k, v in d.items()}
+
+
+# ---------------------------------------------------------------------------
+# Per-dispatch-kind ollama model routing
+# ---------------------------------------------------------------------------
+#
+# Different rec shapes benefit from different local models. Empirically
+# (validated 2026-05-06 on RTX 5090):
+#   - catalog-audit recs are small + structured (tight UPDATE/DELETE
+#     migrations against listed row IDs). devstral-small-2 engages the
+#     Edit tool reliably and converges in <60s.
+#   - article-author recs are long-form prose (1500-2500 word articles).
+#     qwen3-coder-next has 256k native context + Sonnet-4.5-ish quality
+#     and handles multi-paragraph generation cleanly.
+#   - generic code edits (PI, CR, SEO snippet) want a fast, recent
+#     coder MoE. qwen3.6:35b-a3b is the latest open-weight tool-use
+#     leader (73.4% SWE-bench Verified) with 3B active per token.
+#
+# Override via env DEPLOYER_OLLAMA_MODEL (single-pin) or per-kind
+# DEPLOYER_OLLAMA_MODEL_<KIND> (e.g. DEPLOYER_OLLAMA_MODEL_CATALOG_AUDIT).
+# Per-deployment override via storage `config/code-editor-config.json`
+# `ollama_model_by_kind` dict.
+
+# 2026-05-07: Two-GPU split deployment — RTX 5090 (32GB) hosts ONE
+# always-resident large model on port 11434, RTX 4080 (16GB) hosts ONE
+# always-resident small model on port 11435 (used by chat agents, not
+# code-editor). The implementer/code-editor only talks to the 5090
+# instance and uses its single resident model. No more per-dispatch-kind
+# swap — the swap was the source of HTTP 500 preflight failures (model B
+# couldn't load before model A released VRAM under contention).
+#
+# Override single-pin via DEPLOYER_OLLAMA_MODEL env. Per-kind overrides
+# (DEPLOYER_OLLAMA_MODEL_<KIND>) still work for ad-hoc experiments but
+# default config doesn't use them.
+
+OLLAMA_MODEL_BY_DISPATCH_KIND: dict[str, str] = {
+    # Single resident model on the 5090 — handles every code-editor
+    # dispatch kind. qwen3-coder-next has 256k context + Sonnet-4.5-ish
+    # quality, large enough for multi-rec batches and small/large prose.
+    "": "devstral-small-2:24b",
+}
+
+
+def ensure_ollama_model_loaded(
+    model: str,
+    *,
+    base_url: str = "",
+    keep_alive: str = "30m",
+    load_timeout_s: float = 90.0,
+) -> tuple[bool, str]:
+    """Force-unload any model OTHER than `model` from ollama, then
+    pre-warm `model` so the next inference call doesn't pay the
+    cold-load cost. Idempotent.
+
+    Returns (ok, detail). On failure the caller should still attempt
+    the actual call — ollama will retry the load itself, but cold +
+    contended.
+
+    Strategy:
+      1. GET /api/ps — list currently-loaded models.
+      2. For each loaded model whose name != target, POST /api/generate
+         with `{"model": <name>, "keep_alive": 0, "prompt": ""}`. This
+         is ollama's documented way to immediately unload — `keep_alive: 0`
+         tells the runner to drop the model on completion, and an
+         empty prompt makes the call a no-op generation.
+      3. POST /api/generate with `{"model": target, "keep_alive": "30m",
+         "prompt": ""}` — this loads + warms the target. The empty
+         prompt is cheap; we just want the model resident.
+
+    The caller is expected to hold ollama_dispatch_lock so two
+    concurrent dispatches don't fight over the runner.
+    """
+    import json as _json
+    import urllib.request as _ur
+    import urllib.error as _ue
+
+    url_base = (base_url or os.environ.get("OLLAMA_API_BASE")
+                or "http://localhost:11434").rstrip("/")
+
+    def _post(path: str, body: dict, timeout: float) -> tuple[int, dict]:
+        try:
+            req = _ur.Request(
+                f"{url_base}{path}",
+                data=_json.dumps(body).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _ur.urlopen(req, timeout=timeout) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+                try:
+                    return r.status, _json.loads(raw)
+                except Exception:
+                    return r.status, {"_raw": raw[:300]}
+        except _ue.HTTPError as e:
+            return e.code, {"error": str(e)[:200]}
+        except Exception as e:
+            return 0, {"error": str(e)[:200]}
+
+    # 1. Inventory currently-loaded models
+    try:
+        with _ur.urlopen(f"{url_base}/api/ps", timeout=5) as r:
+            ps = _json.loads(r.read())
+    except Exception as e:
+        return False, f"/api/ps failed: {e}"
+    loaded = [m.get("name", "") for m in (ps.get("models") or [])]
+    others = [m for m in loaded if m and m != model]
+
+    # 2. Unload anything else (keep_alive=0 with empty prompt)
+    for other in others:
+        rc, body = _post(
+            "/api/generate",
+            {"model": other, "prompt": "", "keep_alive": 0, "stream": False},
+            timeout=30.0,
+        )
+        logger.info("[ollama] unload %s rc=%s", other, rc)
+
+    # 3. Warm the target (small load timeout — most models warm in <60s
+    #    on 5090, longer for 70B-class)
+    rc, body = _post(
+        "/api/generate",
+        {"model": model, "prompt": "", "keep_alive": keep_alive, "stream": False},
+        timeout=load_timeout_s,
+    )
+    if rc != 200:
+        return False, f"warm-up rc={rc} body={body}"
+    return True, f"loaded {model} (unloaded {len(others)} others)"
+
+
+def select_ollama_model(dispatch_kind: str = "",
+                         backend_default: str = "") -> str:
+    """Pick the local ollama model for a given dispatch_kind.
+
+    Resolution order (operator-pinned defaults win over backend defs so a
+    deleted-model backend def can't poison the chain):
+      1. DEPLOYER_OLLAMA_MODEL env (single-pin operator override)
+      2. DEPLOYER_OLLAMA_MODEL_<KIND> env (per-kind operator override)
+      3. OLLAMA_MODEL_BY_DISPATCH_KIND[kind]  (per-kind operator default)
+      4. OLLAMA_MODEL_BY_DISPATCH_KIND[""]    (generic operator default)
+      5. backend_default (the model field on the backend definition)
+    """
+    pin = os.environ.get("DEPLOYER_OLLAMA_MODEL", "").strip()
+    if pin:
+        return pin
+    kind_key = (dispatch_kind or "").upper().replace("-", "_")
+    if kind_key:
+        per_kind = os.environ.get(f"DEPLOYER_OLLAMA_MODEL_{kind_key}", "").strip()
+        if per_kind:
+            return per_kind
+    if dispatch_kind in OLLAMA_MODEL_BY_DISPATCH_KIND:
+        return OLLAMA_MODEL_BY_DISPATCH_KIND[dispatch_kind]
+    generic = OLLAMA_MODEL_BY_DISPATCH_KIND.get("", "")
+    if generic:
+        return generic
+    if backend_default:
+        return backend_default
+    return "devstral-small-2:24b"
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +616,7 @@ class AiderBackend(CodeEditorBackend):
         # preflight_url: skip if endpoint unreachable (cheap probe)
         url = self.params.get("preflight_url")
         if url:
+            url = _expand(url)
             try:
                 import urllib.request
                 req = urllib.request.Request(
@@ -417,6 +644,20 @@ class AiderBackend(CodeEditorBackend):
                            self.params.get("auth_default_value", "dummy"))
 
         model = _expand(self.params.get("model", ""))
+        # Ollama models route per-dispatch-kind + are protected by a
+        # global ollama_dispatch_lock so concurrent dispatches don't
+        # collide on VRAM. We ensure the model is loaded BEFORE invoking
+        # aider, so aider's first request hits a warm runner instead of
+        # racing on a load.
+        is_ollama = model.startswith("ollama_chat/") or model.startswith("ollama/")
+        ollama_target: Optional[str] = None
+        if is_ollama:
+            from .locks import ollama_dispatch_lock as _ollama_lock
+            prefix = "ollama_chat/" if model.startswith("ollama_chat/") else "ollama/"
+            base = model[len(prefix):]
+            picked = select_ollama_model(req.dispatch_kind, backend_default=base)
+            model = f"{prefix}{picked}"
+            ollama_target = picked
         edit_format = self.params.get("edit_format")
         # Ship a model-metadata file so aider knows real input/output
         # caps for our proxy aliases (otherwise it logs misleading
@@ -458,22 +699,62 @@ class AiderBackend(CodeEditorBackend):
         for f in req.files:
             cmd += ["--file", f]
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(req.repo_path),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=req.timeout_sec,
-            )
-            rc = proc.returncode
-            log = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        except subprocess.TimeoutExpired:
-            return EditResult(
-                rc=124, backend_id=self.backend_id,
-                log_excerpt=f"timeout after {req.timeout_sec}s",
-                duration_sec=time.time() - t0)
+        # Wrap the actual aider invocation in the ollama lock when
+        # this backend uses ollama, so concurrent dispatches serialize
+        # through the runner instead of fighting over VRAM.
+        if ollama_target:
+            from .locks import ollama_dispatch_lock as _ol
+            # Edits hold the lock the longest (full aider/jcode session).
+            # If ollama is busy with another dispatch, we want to FALL
+            # THROUGH to the next chain backend (copilot/claude) RIGHT
+            # AWAY rather than block the whole queue for tens of
+            # minutes. The next dispatch will retry ollama when free.
+            # Override via OLLAMA_LOCK_PROBE_S env (default 30s).
+            _probe_s = int(os.environ.get("OLLAMA_LOCK_PROBE_S", "30") or 30)
+            with _ol(timeout_s=_probe_s, on_timeout="raise") as _ol_h:
+                if _ol_h is None:
+                    return EditResult(
+                        rc=99, backend_id=self.backend_id,
+                        log_excerpt="ollama_dispatch_lock unavailable",
+                        duration_sec=time.time() - t0,
+                    )
+                ok, detail = ensure_ollama_model_loaded(
+                    ollama_target,
+                    base_url=env.get("OLLAMA_API_BASE", ""),
+                )
+                logger.info("[aider-ollama] preflight: %s", detail)
+                try:
+                    proc = subprocess.run(
+                        cmd, cwd=str(req.repo_path), env=env,
+                        capture_output=True, text=True,
+                        stdin=subprocess.DEVNULL,
+                        timeout=req.timeout_sec,
+                    )
+                    rc = proc.returncode
+                    log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                except subprocess.TimeoutExpired:
+                    return EditResult(
+                        rc=124, backend_id=self.backend_id,
+                        log_excerpt=f"timeout after {req.timeout_sec}s",
+                        duration_sec=time.time() - t0)
+        else:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(req.repo_path),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=req.timeout_sec,
+                )
+                rc = proc.returncode
+                log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            except subprocess.TimeoutExpired:
+                return EditResult(
+                    rc=124, backend_id=self.backend_id,
+                    log_excerpt=f"timeout after {req.timeout_sec}s",
+                    duration_sec=time.time() - t0)
 
         files_changed = self._parse_files_changed(log)
         return EditResult(
@@ -944,21 +1225,123 @@ class JcodeBackend(CodeEditorBackend):
         elif native:
             cmd += ["--provider", native]
         model = _expand(self.params.get("model", ""))
+        # When this backend talks to ollama, route per-dispatch-kind so
+        # different work shapes pick the best local model.
+        is_ollama = (native or "").lower() == "ollama"
+        if is_ollama:
+            model = select_ollama_model(req.dispatch_kind, backend_default=model)
         if model:
             cmd += ["--model", model]
         cmd += ["--cwd", str(req.repo_path), "--no-update", "run", "--quiet", prompt_text]
 
-        try:
-            proc = subprocess.run(
-                cmd, cwd=str(req.repo_path), env=env,
-                capture_output=True, text=True, timeout=req.timeout_sec)
-            rc = proc.returncode
-            log = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        except subprocess.TimeoutExpired:
-            return EditResult(
-                rc=124, backend_id=self.backend_id,
-                log_excerpt=f"timeout after {req.timeout_sec}s",
-                duration_sec=time.time() - t0)
+        # Wrap ollama path in the global ollama_dispatch_lock so two
+        # concurrent jcode/aider-ollama dispatches don't fight over the
+        # runner. Pre-warm the target model + force-unload others.
+        if is_ollama:
+            from .locks import ollama_dispatch_lock as _ol
+            # If ollama is busy with another dispatch, fall through to
+            # the next chain backend (copilot/claude) within ~30s rather
+            # than blocking this dispatch for the whole edit budget.
+            # OLLAMA_LOCK_PROBE_S overrides.
+            _probe_s = int(os.environ.get("OLLAMA_LOCK_PROBE_S", "30") or 30)
+            with _ol(timeout_s=_probe_s, on_timeout="raise") as _ol_h:
+                if _ol_h is None:
+                    return EditResult(
+                        rc=99, backend_id=self.backend_id,
+                        log_excerpt="ollama_dispatch_lock unavailable",
+                        duration_sec=time.time() - t0,
+                    )
+                ok, detail = ensure_ollama_model_loaded(
+                    model, base_url=env.get("OLLAMA_API_BASE", ""),
+                )
+                logger.info("[jcode-ollama] preflight: %s", detail)
+
+                # Live capture — tee subprocess output to a sibling log
+                # file so we can SEE what jcode/ollama is doing during
+                # the long inference, even when the subprocess times
+                # out (subprocess.run loses the buffer on timeout).
+                ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+                live_log = (
+                    Path(os.environ.get(
+                        "DISPATCH_LOG_PATH",
+                        str(Path("/tmp/reusable-agents-logs") /
+                            f"jcode-ollama-{ts}.log"),
+                    )).parent / f"jcode-ollama-{ts}.log"
+                )
+                live_log.parent.mkdir(parents=True, exist_ok=True)
+                logger.info("[jcode-ollama] live output → %s", live_log)
+                try:
+                    with open(live_log, "wb") as lf:
+                        lf.write(f"# jcode-ollama live capture\n".encode())
+                        lf.write(f"# cmd: {' '.join(cmd[:-1])} <prompt>\n".encode())
+                        lf.write(f"# started_at: {ts}\n".encode())
+                        lf.write(f"# timeout_sec: {req.timeout_sec}\n".encode())
+                        lf.write(b"# --- output ---\n")
+                        lf.flush()
+                        proc = subprocess.Popen(
+                            cmd, cwd=str(req.repo_path), env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            bufsize=0, text=False,
+                        )
+                        deadline = time.time() + req.timeout_sec
+                        # Stream chunks to the log file as they arrive.
+                        # Use select() so read doesn't block past the
+                        # deadline when ollama is silent mid-generation
+                        # (the prior read1()-only version blocked on the
+                        # pipe for the full inference, missing the cap).
+                        import select as _select
+                        try:
+                            while True:
+                                remaining = deadline - time.time()
+                                if remaining <= 0:
+                                    raise subprocess.TimeoutExpired(cmd, req.timeout_sec)
+                                # Wait at most 5s OR until pipe ready
+                                ready, _, _ = _select.select(
+                                    [proc.stdout], [], [], min(5.0, remaining),
+                                )
+                                if not ready:
+                                    # Pipe quiet but process may still be alive — loop
+                                    if proc.poll() is not None:
+                                        break  # process exited
+                                    continue
+                                chunk = proc.stdout.read1(4096) if hasattr(proc.stdout, "read1") else proc.stdout.read(4096)
+                                if not chunk:
+                                    break
+                                lf.write(chunk); lf.flush()
+                        except subprocess.TimeoutExpired:
+                            try: proc.terminate(); proc.wait(timeout=5)
+                            except Exception:
+                                try: proc.kill()
+                                except Exception: pass
+                            lf.write(b"\n# --- TIMEOUT ---\n")
+                            lf.flush()
+                            return EditResult(
+                                rc=124, backend_id=self.backend_id,
+                                log_excerpt=(f"timeout after {req.timeout_sec}s — "
+                                             f"live transcript: {live_log}"),
+                                duration_sec=time.time() - t0)
+                        rc = proc.wait()
+                        lf.write(f"\n# --- exit rc={rc} ---\n".encode())
+                    log = live_log.read_text(errors="replace")
+                except OSError as e:
+                    return EditResult(
+                        rc=2, backend_id=self.backend_id,
+                        log_excerpt=f"jcode spawn failed: {e}",
+                        duration_sec=time.time() - t0)
+        else:
+            try:
+                proc = subprocess.run(
+                    cmd, cwd=str(req.repo_path), env=env,
+                    capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=req.timeout_sec)
+                rc = proc.returncode
+                log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            except subprocess.TimeoutExpired:
+                return EditResult(
+                    rc=124, backend_id=self.backend_id,
+                    log_excerpt=f"timeout after {req.timeout_sec}s",
+                    duration_sec=time.time() - t0)
         files_changed = self._parse_files_changed(log)
         return EditResult(
             rc=rc, backend_id=self.backend_id,
@@ -972,14 +1355,22 @@ class JcodeBackend(CodeEditorBackend):
         ansi = re.compile(r"\x1b\[[0-9;]*m|\x1b\[[0-9;]*[a-zA-Z]")
         for raw in log.splitlines():
             line = ansi.sub("", raw)
-            # jcode's tool calls emit edit/write/patch lines similar to
-            # opencode. The framework's outer `git diff --quiet` check
-            # in run.sh is the authoritative "did anything change" gate;
-            # this regex is a best-effort hint for the dashboard's
-            # files-changed column.
+            # jcode emits multiple file-write signals we need to catch:
+            #   [write] path/to/file.ext
+            #   [edit]  path/to/file.ext
+            #   → Created path/to/file.ext (N lines):
+            #   → Updated path/to/file.ext (N lines):
+            #   Edited file.ext
+            #   Wrote N bytes to file.ext
+            # Match either form: bracketed-tool tag OR past-tense verb.
+            m = re.search(r"^\s*\[(?:write|edit|patch|create)\]\s+(\S+\.\w+)",
+                          line, re.IGNORECASE)
+            if m and not m.group(1).startswith("http"):
+                out.append(m.group(1))
+                continue
             m = re.search(
-                r"(?:^|\s)(?:Edit|Write|Patch|Update|Edited|Wrote|Patched|Applied)"
-                r"\s+(\S+\.\w+)",
+                r"(?:^|\s)(?:Edit|Write|Patch|Update|Edited|Wrote|Patched|"
+                r"Applied|Created|Updated|Modified)\s+(\S+\.\w+)",
                 line,
             )
             if m and not m.group(1).startswith("http"):
@@ -995,6 +1386,144 @@ class JcodeBackend(CodeEditorBackend):
         return deduped
 
 
+class ClaudeCliBackend(CodeEditorBackend):
+    """Claude Code CLI in agentic --print mode. Wraps the same `claude
+    --print --dangerously-skip-permissions --output-format text` invocation
+    that the implementer's run.sh uses for the claude-pool path. The pool
+    shim at $CLAUDE_POOL_ROOT/bin/claude rotates across Max profiles and
+    handles auth, so this backend just hands the prompt to whichever
+    `claude` binary is first on PATH.
+
+    Used as a final tier in the implementer chain (after ollama + copilot)
+    so that when both ollama and copilot are exhausted we still ship the
+    rec via subscription claude rather than deferring.
+
+    Honors:
+      - CLAUDE_POOL_FAIL_FAST=1 → claude-pool exits rc=75 when ALL profiles
+        rate-limited, so the chain runner soft-fails to next backend
+        (which there isn't — claude-cli is the tail).
+      - IMPLEMENTER_MAX_TURNS env (default 200).
+    """
+
+    kind = "claude-cli"
+
+    def is_available(self) -> tuple[bool, str]:
+        if not shutil.which("claude"):
+            return False, "claude binary not on PATH"
+        return True, ""
+
+    def _claude_invocation(self) -> list[str]:
+        """Build the head of the command, preferring the claude-pool
+        shim so per-model round-robin + rate-limit failover engages
+        automatically. Falls back to bare `claude` if the shim isn't
+        installed."""
+        shim = Path(os.environ.get("CLAUDE_POOL_ROOT")
+                    or Path.home() / ".reusable-agents" / "claude-pool") / "bin" / "claude"
+        if shim.exists():
+            return [str(shim)]
+        return ["claude"]
+
+    def edit(self, req: EditRequest) -> EditResult:
+        t0 = time.time()
+        env = os.environ.copy()
+        # Pool fail-fast: when all profiles rate-limited, exit rc=75 instead
+        # of sleeping for hours. The chain runner treats rc=75 as soft-fail.
+        env.setdefault("CLAUDE_POOL_FAIL_FAST", "1")
+        max_turns = env.get("IMPLEMENTER_MAX_TURNS", "200")
+
+        # Build a single prompt that names the files + carries the rec
+        # instructions. Claude's agentic loop will Read/Edit/Write directly
+        # against the working tree.
+        try:
+            prompt_text = req.prompt_path.read_text() if hasattr(req.prompt_path, "read_text") \
+                else open(req.prompt_path).read()
+        except Exception as e:
+            return EditResult(
+                rc=2, backend_id=self.backend_id,
+                log_excerpt=f"could not read prompt: {e}",
+                duration_sec=time.time() - t0,
+            )
+        file_list = "\n".join(f"- {f}" for f in req.files) if req.files else ""
+        full_prompt = (
+            f"You are running headless against the repository at {req.repo_path}.\n"
+            f"Apply the requested changes by Reading + Editing files in-place.\n"
+            f"Files in scope:\n{file_list}\n\n"
+            f"---\n\n{prompt_text}\n"
+        )
+
+        # Pick model per backend params. Default to claude-opus-4-7 because
+        # Anthropic's seven-day rate limit is PER-MODEL (rateLimitType in
+        # the API response is "seven_day_sonnet" / "seven_day_opus" /
+        # "seven_day_haiku" — independent quota pools). Sonnet bears most
+        # of the chat traffic and tends to cap first; Opus and Haiku
+        # usually have headroom. Override via the storage config or env.
+        claude_model = (
+            self.params.get("model")
+            or os.environ.get("CLAUDE_CLI_MODEL")
+            or "claude-opus-4-7"
+        )
+        cmd = [
+            *self._claude_invocation(),
+            "--dangerously-skip-permissions",
+            "--print", "--output-format", "text",
+            "--max-turns", str(max_turns),
+            "--model", claude_model,
+        ]
+
+        # Snapshot pre-edit working-tree dirty-list so we can compute the
+        # actual file-changed set after the run (claude doesn't emit a
+        # machine-parseable list of files written).
+        pre_dirty: set[str] = set()
+        try:
+            r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(req.repo_path), capture_output=True, text=True, timeout=10,
+            )
+            for line in (r.stdout or "").splitlines():
+                p = line[3:].strip()
+                if p:
+                    pre_dirty.add(p)
+        except Exception:
+            pass
+
+        try:
+            proc = subprocess.run(
+                cmd, cwd=str(req.repo_path), env=env,
+                input=full_prompt, capture_output=True, text=True,
+                timeout=req.timeout_sec,
+            )
+            rc = proc.returncode
+            log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        except subprocess.TimeoutExpired:
+            return EditResult(
+                rc=124, backend_id=self.backend_id,
+                log_excerpt=f"timeout after {req.timeout_sec}s",
+                duration_sec=time.time() - t0,
+            )
+
+        # Post-edit dirty-list minus pre-edit gives us files the agent
+        # actually touched.
+        files_changed: list[str] = []
+        try:
+            r = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(req.repo_path), capture_output=True, text=True, timeout=10,
+            )
+            for line in (r.stdout or "").splitlines():
+                p = line[3:].strip()
+                if p and p not in pre_dirty:
+                    files_changed.append(p)
+        except Exception:
+            pass
+
+        return EditResult(
+            rc=rc, backend_id=self.backend_id,
+            log_excerpt="\n".join(log.splitlines()[-100:]),
+            files_changed=files_changed,
+            duration_sec=time.time() - t0,
+        )
+
+
 _BACKEND_REGISTRY: dict[str, type[CodeEditorBackend]] = {
     "aider": AiderBackend,
     "plandex": PlandexBackend,
@@ -1002,6 +1531,7 @@ _BACKEND_REGISTRY: dict[str, type[CodeEditorBackend]] = {
     "codex": CodexBackend,
     "crush": CrushBackend,
     "jcode": JcodeBackend,
+    "claude-cli": ClaudeCliBackend,
 }
 
 
@@ -1099,14 +1629,125 @@ def run_with_fallback(
             logger.info(f"code-editor: skip {bid} ({why})")
             continue
         logger.info(f"code-editor: trying {bid}")
-        result = backend.edit(req)
+        # Defensive — any backend that raises (e.g. ollama lock timeout
+        # bubbles out of AiderBackend.edit) becomes a soft-fail rather
+        # than killing the whole chain.
+        try:
+            result = backend.edit(req)
+        except Exception as _e:
+            logger.warning(
+                "code-editor: %s raised %s — treating as soft-fail",
+                bid, type(_e).__name__,
+            )
+            result = EditResult(
+                rc=109, backend_id=bid,
+                log_excerpt=f"{type(_e).__name__}: {str(_e)[:300]}",
+            )
         attempts.append(result)
         last = result
         if result.rc == 0 and result.files_changed:
+            # Reject "all DEFERRED summaries, no real work" — backends
+            # that respond to a substantive rec batch by writing only
+            # `changes/<rec>.summary.md` with `Status: DEFERRED` are
+            # rationalizing inaction, not shipping. Earlier soft-fail
+            # logic only checked file count, not file kind. With the
+            # tightened prompt this should be rare, but keep the guard
+            # so a regressed prompt or misbehaving backend doesn't ship
+            # zero-work batches as success.
+            non_summary = [
+                f for f in result.files_changed
+                if not (
+                    f.endswith(".summary.md")
+                    or f.endswith("/summary.md")
+                    or "/changes/" in f and f.endswith(".md")
+                )
+            ]
+            if not non_summary:
+                # Inspect the actual summary content — if EVERY summary
+                # marks DEFERRED, that's the rationalize-inaction case.
+                # If at least one is SHIPPED/<other>, accept the result.
+                deferred_count = 0
+                summary_count = 0
+                for rel in result.files_changed:
+                    abs_path = req.repo_path / rel
+                    try:
+                        text = abs_path.read_text(errors="replace")
+                    except Exception:
+                        continue
+                    summary_count += 1
+                    head = text[:500]
+                    if (
+                        "Status: DEFERRED" in head
+                        or "**Status:** DEFERRED" in head
+                        or head.lstrip().startswith("DEFERRED")
+                    ):
+                        deferred_count += 1
+                if summary_count > 0 and deferred_count == summary_count:
+                    logger.warning(
+                        f"code-editor: {bid} produced ONLY DEFERRED "
+                        f"summaries ({deferred_count} of {summary_count}) "
+                        f"— treating as soft-fail, trying next in chain "
+                        f"({result.duration_sec:.1f}s)"
+                    )
+                    continue
             logger.info(f"code-editor: {bid} succeeded "
                         f"(files_changed={len(result.files_changed)}, "
                         f"{result.duration_sec:.1f}s)")
             return result, attempts
+        if result.rc == 0 and result.files_changed:
+            # ── Destructive-shrinkage gate ───────────────────────────
+            # aider's whole-edit format on multi-thousand-line files
+            # has been observed truncating the entire file to a single
+            # comment line (rec-001..005 → "// no code changes needed")
+            # while still reporting "Applied edit to X". rc=0 + files
+            # listed isn't enough — verify the file didn't lose >50% of
+            # its content vs the working-tree version we started with.
+            # If a file shrank that aggressively, treat as soft-fail
+            # and roll back the edits before falling through.
+            shrinkage_threshold = 0.5  # tolerate up to 50% reduction
+            destroyed: list[str] = []
+            for rel in result.files_changed:
+                p = req.repo_path / rel
+                try:
+                    new_text = p.read_text(errors="replace") if p.is_file() else ""
+                except Exception:
+                    continue
+                # Compare against the version recorded by git BEFORE the
+                # edit (HEAD). If the file is new (untracked at HEAD),
+                # any size is fine.
+                try:
+                    old_text = subprocess.run(
+                        ["git", "show", f"HEAD:{rel}"],
+                        cwd=str(req.repo_path),
+                        capture_output=True, text=True, timeout=10,
+                    ).stdout
+                except Exception:
+                    old_text = ""
+                if not old_text:
+                    continue  # newly-created file, no shrinkage check
+                old_lines = old_text.count("\n") + 1
+                new_lines = new_text.count("\n") + 1
+                if old_lines >= 50 and new_lines / old_lines < (1 - shrinkage_threshold):
+                    destroyed.append(f"{rel} ({old_lines}→{new_lines} lines)")
+            if destroyed:
+                logger.warning(
+                    f"code-editor: {bid} produced DESTRUCTIVE shrinkage on "
+                    f"{len(destroyed)} file(s): {destroyed} — rolling back "
+                    f"+ trying next backend ({result.duration_sec:.1f}s)"
+                )
+                # Roll back the destructive edits so the wrapper doesn't
+                # commit them. We restore via `git checkout HEAD --` for
+                # each shrunk path; pre-existing dirty content on other
+                # files stays intact.
+                try:
+                    subprocess.run(
+                        ["git", "checkout", "HEAD", "--",
+                         *[f.split(" (")[0] for f in destroyed]],
+                        cwd=str(req.repo_path), check=False, timeout=15,
+                    )
+                except Exception as e:
+                    logger.warning(f"code-editor: rollback failed: {e}")
+                continue  # try next backend in chain
         if result.rc == 0 and not result.files_changed:
             # Some backends (aider on a too-large repo, or when the
             # prompt resolves to no concrete edits) exit rc=0 without

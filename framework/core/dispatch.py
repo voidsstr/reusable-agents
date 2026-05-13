@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -45,7 +46,7 @@ MAX_RETRIES = int(os.environ.get("FRAMEWORK_DISPATCH_RETRIES", "3"))
 RETRY_BASE_DELAY_S = int(os.environ.get("FRAMEWORK_DISPATCH_RETRY_DELAY_S", "5"))
 NOTIFY_EMAIL = os.environ.get(
     "FRAMEWORK_DISPATCH_NOTIFY_EMAIL",
-    "mperry@northernsoftwareconsulting.com",
+    os.environ.get("OPERATOR_EMAIL", ""),
 )
 LOG_DIR = Path(os.environ.get(
     "FRAMEWORK_DISPATCH_LOG_DIR", "/tmp/reusable-agents-logs"
@@ -95,6 +96,82 @@ class DispatchHandle:
 
 
 # Public API -------------------------------------------------------------
+
+def gated_dispatch_now(
+    *,
+    cfg: Optional[dict] = None,
+    agent: Optional["object"] = None,  # noqa: F821 — AgentBase, avoid circular import
+    agent_id: str,
+    run_dir: str,
+    rec_ids: list[str],
+    action: str = "implement",
+    site: str = "",
+    subject_tag: str = "seo",
+    request_id: Optional[str] = None,
+    **dispatch_kwargs,
+) -> Optional["DispatchHandle"]:
+    """Single source of truth for "auto-ship vs email-approval" per agent.
+
+    Behavior is controlled by ONE flag in the agent's site.yaml:
+
+        auto_implement: true   # auto-ship via dispatch_now() (default)
+        auto_implement: false  # don't dispatch — email is the proposal,
+                               # responder dispatches on user reply
+                               # (`ship rec-NNN` / `implement rec-NNN`)
+
+    Producers call this INSTEAD of dispatch_now() and stop carrying their
+    own "if auto_implement: dispatch else email-only" branching. Comp-
+    research, which used to be hardcoded email-only, now relies on the
+    yaml flag like everyone else.
+
+    Defaults to TRUE (auto-ship) when the flag is missing — preserves
+    pre-2026-05-12 behavior for agents that never had a site.yaml.
+
+    Args mirror dispatch_now() except for the leading `cfg` (site config
+    dict) and `agent` (optional AgentBase instance for self.decide()
+    logging). Pass either or both; cfg is what drives the gate decision.
+
+    Returns:
+      * DispatchHandle when auto_implement=true and the dispatch fired
+      * None when auto_implement=false (the email path takes over)
+    """
+    auto_implement = True
+    if cfg is not None and hasattr(cfg, "get"):
+        # Works for both plain dict AND SiteQualityConfig wrapper.
+        # Defaults to True so agents without a site.yaml flag (legacy)
+        # keep their pre-gate behavior (auto-ship).
+        auto_implement = bool(cfg.get("auto_implement", True))
+
+    if not auto_implement:
+        # Email-approval path. The producer's own run() should have
+        # already sent the proposal email; we just log the decision so
+        # the dashboard's run history reflects "did not auto-dispatch".
+        if agent is not None and hasattr(agent, "decide"):
+            try:
+                agent.decide(
+                    "observation",
+                    f"auto_implement=false — {len(rec_ids)} rec(s) "
+                    f"awaiting email approval. Reply `ship rec-NNN` or "
+                    f"`implement rec-NNN` to dispatch.",
+                    evidence={"rec_ids": list(rec_ids),
+                                "gate": "auto_implement",
+                                "value": False},
+                )
+            except Exception:
+                pass
+        return None
+
+    return dispatch_now(
+        agent_id=agent_id,
+        run_dir=run_dir,
+        rec_ids=rec_ids,
+        action=action,
+        site=site,
+        subject_tag=subject_tag,
+        request_id=request_id,
+        **dispatch_kwargs,
+    )
+
 
 def dispatch_now(
     *,
@@ -149,7 +226,28 @@ def dispatch_now(
     # so anything written only to the local tempdir is invisible).
 
     last_err: Optional[Exception] = None
-    with site_dispatch_lock(site or "shared", timeout_s=lock_timeout_s):
+
+    # Parallelism gate: only app-code dispatch kinds serialize per site
+    # (one frontend/backend deploy at a time). DB-only kinds (catalog-
+    # audit / h2h) and content-only kinds (article-author) bypass the
+    # site lock so a deploy doesn't block a DB migration or article
+    # insert. Override by setting DATA_ONLY_KINDS / APP_CODE_KINDS env.
+    _data_only = set((os.environ.get("DATA_ONLY_KINDS") or
+                      "catalog-audit,h2h,article-author,product-hydration"
+                      ).split(","))
+    _data_only.discard("")
+    needs_site_lock = (subject_tag or "").strip() not in _data_only
+
+    @contextmanager
+    def _maybe_site_lock():
+        if needs_site_lock:
+            with site_dispatch_lock(site or "shared", timeout_s=lock_timeout_s) as _l:
+                yield _l
+        else:
+            _log(f"[dispatch] kind={subject_tag!r} is data-only — bypassing site lock for {site}")
+            yield None
+
+    with _maybe_site_lock():
         for attempt in range(1, max_retries + 1):
             try:
                 handle = _spawn_implementer(
@@ -233,6 +331,30 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     it on disk for debugging just like the log file.
     """
     env = os.environ.copy()
+    # Honor any KEY=VAL prefix the implementer's manifest puts on its
+    # entry_command — `python3 agent.py` is invoked DIRECTLY by
+    # systemd-run, so a shell-style env prefix (e.g.
+    # IMPLEMENTER_ALLOW_REC_TYPES=foo,bar python3 agent.py) is lost
+    # unless we parse it here.
+    try:
+        from . import registry as _reg
+        impl_manifest = _reg.get_agent("implementer")
+        if impl_manifest and impl_manifest.entry_command:
+            for tok in impl_manifest.entry_command.split():
+                if "=" in tok and tok[0].isalpha() and not tok.startswith(
+                    ("/", "python", "bash", "sh")
+                ):
+                    k, v = tok.split("=", 1)
+                    # Caller-set env wins (e.g. test overrides via
+                    # `os.environ['IMPLEMENTER_ALLOW_REC_TYPES'] = ...`)
+                    if k not in env:
+                        env[k] = v
+                else:
+                    # Stop at the first non-KEY=VAL token (the
+                    # interpreter or script path).
+                    break
+    except Exception:
+        pass
     env["RESPONDER_ACTION"] = action
     env["RESPONDER_REC_IDS"] = ",".join(rec_ids)
     env["RESPONDER_SITE"] = site
@@ -465,20 +587,30 @@ def _try_graph_send(to_addr: str, subject: str, html: str) -> bool:
         oauth_file,
         scope_override="offline_access https://graph.microsoft.com/Mail.Send.Shared",
     )
+    # Sender mailbox — set OPERATOR_FROM_EMAIL in .env (or per-agent
+    # IMPLEMENTER_FROM). Required for Graph /users/<mailbox>/sendMail.
+    sender_addr = (os.environ.get("IMPLEMENTER_FROM")
+                   or os.environ.get("OPERATOR_FROM_EMAIL")
+                   or "")
+    if not sender_addr:
+        raise RuntimeError(
+            "no sender mailbox configured — set OPERATOR_FROM_EMAIL "
+            "(or IMPLEMENTER_FROM) in .env"
+        )
     body = {
         "message": {
             "subject": subject,
             "body": {"contentType": "HTML", "content": html},
             "toRecipients": [{"emailAddress": {"address": to_addr}}],
-            "from": {"emailAddress": {"address": "automation@northernsoftwareconsulting.com"}},
-            "sender": {"emailAddress": {"address": "automation@northernsoftwareconsulting.com"}},
+            "from": {"emailAddress": {"address": sender_addr}},
+            "sender": {"emailAddress": {"address": sender_addr}},
         },
         "saveToSentItems": "false",
     }
     import urllib.parse, json as _j
     url = (
         "https://graph.microsoft.com/v1.0/users/"
-        f"{urllib.parse.quote('automation@northernsoftwareconsulting.com', safe='')}"
+        f"{urllib.parse.quote(sender_addr, safe='')}"
         "/sendMail"
     )
     req = urllib.request.Request(
@@ -492,7 +624,12 @@ def _try_graph_send(to_addr: str, subject: str, html: str) -> bool:
 def _try_msmtp(to_addr: str, subject: str, html: str, *, account: str) -> bool:
     import email.message
     msg = email.message.EmailMessage()
-    msg["From"] = "automation@northernsoftwareconsulting.com"
+    sender_addr = (os.environ.get("IMPLEMENTER_FROM")
+                   or os.environ.get("OPERATOR_FROM_EMAIL")
+                   or "")
+    if not sender_addr:
+        return False
+    msg["From"] = sender_addr
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.set_content("Plain-text fallback")

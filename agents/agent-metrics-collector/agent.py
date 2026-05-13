@@ -36,16 +36,19 @@ from framework.core import metric_helper
 from framework.core.storage import get_storage
 
 
-# Map common DB DSNs by short site_id → env var → fallback DSN
+# Per-site DB DSN: read from env var only. NEVER hardcode credentials
+# in source. Each entry maps short site_id → env var name.
+#
+# To add a new site:
+#   1. Set <SITE>_DATABASE_URL in your .env or ~/.reusable-agents/secrets.env
+#   2. Add the entry below.
+#
+# Multi-site setups can also drop in a single `DATABASE_URLS` JSON env
+# var: `{"aisleprompt": "postgresql://...", "specpicks": "..."}`. See
+# `db()` for the lookup order.
 DB_DSN_MAP = {
-    "aisleprompt": (
-        "AISLEPROMPT_DATABASE_URL",
-        "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require",
-    ),
-    "specpicks": (
-        "SPECPICKS_DATABASE_URL",
-        "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require",
-    ),
+    "aisleprompt": "AISLEPROMPT_DATABASE_URL",
+    "specpicks":   "SPECPICKS_DATABASE_URL",
 }
 
 
@@ -58,8 +61,38 @@ def now() -> datetime:
 
 
 def db(site_id: str):
-    env, fallback = DB_DSN_MAP[site_id]
-    dsn = os.environ.get(env, fallback)
+    """Resolve a Postgres DSN for `site_id`.
+
+    Lookup order:
+      1. Per-site env (DB_DSN_MAP[site_id]) — e.g. AISLEPROMPT_DATABASE_URL
+      2. JSON map env DATABASE_URLS — `{"aisleprompt": "postgresql://...",
+         "specpicks": "..."}` — useful when one .env has multi-site creds
+      3. Generic DATABASE_URL — single-site deployments
+
+    Raises a clear error if none resolve. NEVER hardcodes credentials.
+    """
+    env_name = DB_DSN_MAP.get(site_id)
+    dsn = os.environ.get(env_name, "") if env_name else ""
+    if not dsn:
+        # JSON map fallback
+        try:
+            import json as _j
+            blob = os.environ.get("DATABASE_URLS", "")
+            if blob:
+                m = _j.loads(blob)
+                if isinstance(m, dict):
+                    dsn = m.get(site_id, "") or ""
+        except Exception:
+            pass
+    if not dsn:
+        # Single-site fallback
+        dsn = os.environ.get("DATABASE_URL", "")
+    if not dsn:
+        raise RuntimeError(
+            f"No DB DSN resolved for site {site_id!r}. "
+            f"Set {env_name or '<SITE>_DATABASE_URL'} in your .env "
+            f"(or DATABASE_URLS JSON / DATABASE_URL)."
+        )
     return psycopg2.connect(dsn)
 
 

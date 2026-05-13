@@ -1,0 +1,25 @@
+{
+  "id": "jcode-agent",
+  "name": "Jcode Agent",
+  "description": "Wrapper for Jcode harness that executes Jcode Agent API calls and integrates with the reusable-agents framework. Provides access to the full Jcode harness functionality including all tools, skills, and memory systems.",
+  "category": "ops",
+  "task_type": "manual",
+  "cron_expr": "",
+  "timezone": "UTC",
+  "enabled": true,
+  "runbook": "agents/jcode-agent/AGENT.md",
+  "skill": "",
+  "entry_command": "PYTHONPATH=/home/voidsstr/development/reusable-agents python3 /home/voidsstr/development/reusable-agents/agents/jcode-agent/agent.py",
+  "routine_id": "",
+  "trigger_url": "",
+  "trigger_token_env": "",
+  "runnable_modes": ["manual", "chained"],
+  "confirmation_flow": {
+    "enabled": false,
+    "kind": "none",
+    "description": "Direct execution with no confirmation gate"
+  },
+  "metadata": {
+    "is_blueprint": true
+  }
+}

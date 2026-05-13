@@ -294,6 +294,71 @@ class RunDir:
         finally:
             shutil.rmtree(td, ignore_errors=True)
 
+    def list_prior_run_ts(self) -> list[str]:
+        """Return sorted-descending list of prior run timestamps under
+        agents/<agent_id>/runs/, excluding the current run_ts."""
+        prefix = f"agents/{self.agent_id}/runs/"
+        keys = self.storage.list_prefix(prefix)
+        ts_set: set[str] = set()
+        for k in keys:
+            rest = k[len(prefix):]
+            if "/" not in rest:
+                continue
+            ts = rest.split("/", 1)[0]
+            if ts and ts != self.run_ts and "T" in ts:
+                ts_set.add(ts)
+        return sorted(ts_set, reverse=True)
+
+    def reuse_artifact_from_recent_prior(
+        self,
+        relpath: str,
+        *,
+        max_age_hours: float = 6.0,
+        target_local_path: Optional[Path] = None,
+    ) -> Optional[str]:
+        """Copy a file from the most-recent prior run (within
+        `max_age_hours`) into the current run dir + optional local
+        target. Skips the expensive live call when GSC/RRT/SMV/sitemap
+        crawls would produce ~identical output anyway.
+
+        Returns the prior_run_ts the file came from, or None if no
+        recent prior had it.
+        """
+        from datetime import datetime, timezone
+        try:
+            now = datetime.now(timezone.utc)
+            for prior_ts in self.list_prior_run_ts():
+                if len(prior_ts) < 15 or prior_ts[8] != "T":
+                    continue
+                try:
+                    prior_dt = datetime(
+                        int(prior_ts[0:4]), int(prior_ts[4:6]),
+                        int(prior_ts[6:8]), int(prior_ts[9:11]),
+                        int(prior_ts[11:13]), int(prior_ts[13:15]),
+                        tzinfo=timezone.utc,
+                    )
+                except ValueError:
+                    continue
+                age_h = (now - prior_dt).total_seconds() / 3600.0
+                if age_h > max_age_hours:
+                    return None  # prior runs only get older from here
+                src_key = f"agents/{self.agent_id}/runs/{prior_ts}/{relpath.lstrip('/')}"
+                blob = self.storage.read_bytes(src_key)
+                if blob is None:
+                    continue  # this prior didn't have it; check next
+                # Write to our own run-dir blob
+                self.write_bytes(relpath, blob)
+                # Optional: also write to a local path the caller can
+                # pass in (so the live workflow keeps file-on-disk
+                # semantics it had before).
+                if target_local_path is not None:
+                    target_local_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_local_path.write_bytes(blob)
+                return prior_ts
+            return None
+        except Exception:
+            return None
+
     def _mirror_prior_runs_for_analyzer(self, site_dir: Path) -> None:
         """Pull each prior run's snapshot.json + goals.json into a sibling
         dir under site_dir so find_prior_snapshot() works in tempdir mode."""

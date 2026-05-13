@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
+
+logger = logging.getLogger(__name__)
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -25,6 +28,31 @@ router = APIRouter(prefix="/api/agents", tags=["agents"], dependencies=[Depends(
 from concurrent.futures import ThreadPoolExecutor as _ReapExecutor
 _LAST_REAP_AT: float = 0.0
 _REAP_POOL = _ReapExecutor(max_workers=1)
+
+# In-process snapshot cache. The snapshot blob is rewritten every 5s
+# by snapshot_updater; reading it from Azure on EVERY /api/agents call
+# costs 100-300ms (sometimes 12s under load) for data that's at most 5s
+# old. Cache it in-process for 3s so a tight burst of dashboard
+# requests collapses to one blob read.
+_SNAPSHOT_CACHE: tuple[float, dict] | None = None
+_SNAPSHOT_CACHE_TTL_S: float = 3.0
+
+
+def _read_snapshot_cached(s) -> dict:
+    """Return the agent-snapshot.json with a 3s in-process TTL."""
+    import time as _t
+    global _SNAPSHOT_CACHE
+    now = _t.monotonic()
+    if _SNAPSHOT_CACHE is not None:
+        cached_at, snap = _SNAPSHOT_CACHE
+        if now - cached_at < _SNAPSHOT_CACHE_TTL_S:
+            return snap
+    try:
+        snap = s.read_json("registry/agent-snapshot.json") or {}
+    except Exception:
+        snap = {}
+    _SNAPSHOT_CACHE = (now, snap)
+    return snap
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +152,15 @@ class AgentSummary(BaseModel):
     # "manifest" | "default" | "unset". Same resolution order as
     # framework.core.ai_providers.ai_client_for().
     ai_source: str = ""
+    # LIVE last-AI-call telemetry, written by AgentBase._record_ai_call
+    # after every chat_with_fallback() return. Lets the dashboard show
+    # what the agent ACTUALLY used (vs just the configured override) so
+    # fallback-chain transitions + smart-tier auto-switches are visible.
+    # Empty string means the agent has never made an AI call (or the
+    # sidecar hasn't been written yet).
+    ai_last_provider: str = ""
+    ai_last_model: str = ""
+    ai_last_called_at: Optional[str] = None
 
 
 class AgentDetail(AgentSummary):
@@ -225,8 +262,7 @@ def _derive_application(m: registry.AgentManifest) -> str:
     # Whole-id matches for orchestrators that span multiple sites
     if aid == "seo-opportunity-agent":
         return "seo-pipeline"
-    if aid in ("seo-data-collector", "seo-analyzer", "seo-reporter",
-                "implementer", "seo-deployer"):
+    if aid in ("implementer", "seo-deployer"):
         return "seo-pipeline"
     if aid == "responder-agent":
         return "shared"
@@ -291,13 +327,21 @@ def _resolve_ai_summary(agent_id: str,
 def _summary(m: registry.AgentManifest,
               providers_cache: dict | None = None,
               defaults_cache: dict | None = None,
-              status: dict | None = None) -> AgentSummary:
+              status: dict | None = None,
+              last_ai: dict | None = None) -> AgentSummary:
     """Build one AgentSummary. `status` (dict) can be passed pre-fetched
     so the caller can parallelize blob reads — list_all() does this to
     avoid 29 serial Azure roundtrips."""
+    s = get_storage()
     if status is None:
-        s = get_storage()
         status = s.read_json(f"agents/{m.id}/status.json") or {}
+    if last_ai is None:
+        # Best-effort — agents that have never run an LLM call don't
+        # have this sidecar yet, which is fine.
+        try:
+            last_ai = s.read_json(f"agents/{m.id}/state/last-ai-call.json") or {}
+        except Exception:
+            last_ai = {}
     ai_name, ai_kind, ai_model, uses_claude = _resolve_ai_summary(
         m.id, providers_cache=providers_cache, defaults_cache=defaults_cache,
     )
@@ -340,6 +384,9 @@ def _summary(m: registry.AgentManifest,
         ai_manifest_provider=manifest_provider,
         ai_manifest_model=manifest_model,
         ai_source=ai_source,
+        ai_last_provider=str((last_ai or {}).get("provider") or ""),
+        ai_last_model=str((last_ai or {}).get("model") or ""),
+        ai_last_called_at=(last_ai or {}).get("called_at"),
     )
 
 
@@ -382,7 +429,7 @@ def list_all():
     #      thread is down.
     # ------------------------------------------------------------------
     statuses: dict[str, dict] = {}
-    snap = s.read_json("registry/agent-snapshot.json") or {}
+    snap = _read_snapshot_cached(s)
     snap_age_s = _age_seconds(snap.get("updated_at", ""))
     use_snapshot = snap_age_s < 30.0 and bool(snap.get("agents"))
     if use_snapshot:
@@ -399,9 +446,24 @@ def list_all():
             for aid, st in ex.map(_fetch_status, [m.id for m in manifests]):
                 statuses[aid] = st
 
+    # Parallel-fetch the last-ai-call sidecars (best-effort — many agents
+    # won't have one yet). Cap at 16 workers so we don't thrash Azure.
+    last_ai_calls: dict[str, dict] = {}
+    from concurrent.futures import ThreadPoolExecutor
+    def _fetch_last_ai(agent_id: str) -> tuple[str, dict]:
+        try:
+            return agent_id, (s.read_json(f"agents/{agent_id}/state/last-ai-call.json") or {})
+        except Exception:
+            return agent_id, {}
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for aid, la in ex.map(_fetch_last_ai, [m.id for m in manifests]):
+            last_ai_calls[aid] = la
+
     return [
         _summary(m, providers_cache=providers_cache,
-                 defaults_cache=defaults_cache, status=statuses.get(m.id, {}))
+                 defaults_cache=defaults_cache,
+                 status=statuses.get(m.id, {}),
+                 last_ai=last_ai_calls.get(m.id, {}))
         for m in manifests
     ]
 
@@ -681,8 +743,6 @@ def trigger(agent_id: str):
             ),
         )
 
-    queue_dir = Path(os.getenv("AGENT_TRIGGER_QUEUE_DIR", "/tmp/agent-trigger-queue"))
-    queue_dir.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     job = {
         "agent_id": agent_id,
@@ -691,9 +751,198 @@ def trigger(agent_id: str):
         "triggered_by": "manual:api",
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
-    job_path = queue_dir / f"{agent_id}-{run_id}.json"
+    # Dual-write: blob storage is canonical (cross-host), /tmp is back-
+    # compat for any caller running on the same box as the API container.
+    # The 2026-05-11 Option-B migration moved the dashboard off localhost,
+    # which means a prod-API /trigger only reaches the host-worker on the
+    # dev box if we leave the job somewhere they BOTH can see — Azure blob.
+    #
+    # Filename uses run_id (UTC, second-precision) so two triggers on the
+    # same agent within one second still collide — that's fine, it means
+    # the second call gets the same run.
+    job_filename = f"{agent_id}-{run_id}.json"
+    blob_key = f"_trigger-queue/{job_filename}"
+    try:
+        get_storage().write_json(blob_key, job)
+    except Exception as e:
+        # Don't fail the request on storage errors — fall back to /tmp.
+        logger.warning("trigger blob-queue write failed for %s: %s", agent_id, e)
+    queue_dir = Path(os.getenv("AGENT_TRIGGER_QUEUE_DIR", "/tmp/agent-trigger-queue"))
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    job_path = queue_dir / job_filename
     tmp = job_path.with_suffix(".tmp")
     tmp.write_text(json.dumps(job, indent=2))
     tmp.rename(job_path)
     return TriggerResponse(ok=True, run_id=run_id,
-                           detail=f"queued at {job_path}")
+                           detail=f"queued at blob:{blob_key} (+ {job_path})")
+
+
+# ---------------------------------------------------------------------------
+# Knowledge buckets — surface accumulated cross-run findings to the dashboard.
+# ---------------------------------------------------------------------------
+
+# Path conventions the API auto-discovers as knowledge buckets per agent:
+#   1. agents/<id>/knowledge/<bucket>.json  — canonical (new agents)
+#   2. agents/<id>/proposals/active.json    — legacy (competitor-research)
+#   3. agents/<id>/opportunities/active.json — legacy (app-store-opportunity)
+# Each surfaced as one bucket with a normalized item list.
+_LEGACY_BUCKETS_BY_SUFFIX = (
+    # (agent_id_suffix,           bucket_label,   storage_subpath,            items_field,    title_field,        primary_id_field)
+    ("competitor-research-agent", "proposals",    "proposals/active.json",     "proposals",    "title",            "proposal_id"),
+    ("app-store-opportunity-agent", "opportunities", "opportunities/active.json", "opportunities", "name",          "opportunity_id"),
+)
+
+
+def _list_known_buckets_for_agent(agent_id: str, s) -> list[dict]:
+    """Return [{bucket, label, storage_key, items_field, title_field, id_field}]
+    for every knowledge bucket the API knows how to render for this agent.
+    Includes legacy paths + auto-discovered canonical paths."""
+    out: list[dict] = []
+
+    # 1. Legacy per-suffix paths (existing data, no migration needed).
+    for suffix, label, subpath, items_field, title_field, id_field in _LEGACY_BUCKETS_BY_SUFFIX:
+        if not agent_id.endswith(suffix):
+            continue
+        key = f"agents/{agent_id}/{subpath}"
+        try:
+            d = s.read_json(key)
+        except Exception:
+            d = None
+        if not isinstance(d, dict):
+            continue
+        if not isinstance(d.get(items_field), list):
+            continue
+        out.append({
+            "bucket": label, "label": label, "storage_key": key,
+            "items_field": items_field, "title_field": title_field,
+            "id_field": id_field, "is_legacy": True,
+        })
+
+    # 2. Canonical agents/<id>/knowledge/*.json
+    try:
+        for key in s.list_prefix(f"agents/{agent_id}/knowledge/"):
+            if not key.endswith(".json"):
+                continue
+            bucket_name = key.rsplit("/", 1)[-1][:-5]  # strip .json
+            # don't double-list a bucket already surfaced via legacy mapping
+            if any(b["bucket"] == bucket_name for b in out):
+                continue
+            try:
+                d = s.read_json(key)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            # Pick the items field — canonical primitive uses "items"; some
+            # buckets carry their own.
+            items_field = "items"
+            for fname in ("items", "proposals", "opportunities", "findings"):
+                if isinstance(d.get(fname), list):
+                    items_field = fname
+                    break
+            out.append({
+                "bucket": bucket_name, "label": bucket_name.replace("-", " ").title(),
+                "storage_key": key, "items_field": items_field,
+                "title_field": "title", "id_field": "item_id",
+                "is_legacy": False,
+            })
+    except Exception:
+        pass
+
+    return out
+
+
+def _bucket_states(items: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for it in items:
+        st = it.get("state") or "open"
+        counts[st] = counts.get(st, 0) + 1
+    return counts
+
+
+@router.get("/{agent_id}/knowledge")
+def list_knowledge_buckets(agent_id: str):
+    """Enumerate the knowledge buckets accumulated by this agent.
+
+    Surfaces both legacy per-agent paths (proposals/active.json,
+    opportunities/active.json) and canonical agents/<id>/knowledge/*.json
+    so any agent that uses the framework primitive is visible without
+    extra wiring.
+    """
+    s = get_storage()
+    bucket_specs = _list_known_buckets_for_agent(agent_id, s)
+    out = []
+    for spec in bucket_specs:
+        try:
+            d = s.read_json(spec["storage_key"]) or {}
+        except Exception:
+            d = {}
+        items = d.get(spec["items_field"]) or []
+        out.append({
+            "bucket": spec["bucket"],
+            "label": spec["label"],
+            "storage_key": spec["storage_key"],
+            "items_field": spec["items_field"],
+            "title_field": spec["title_field"],
+            "id_field": spec["id_field"],
+            "is_legacy": spec["is_legacy"],
+            "item_count": len(items),
+            "states": _bucket_states(items),
+            "updated_at": d.get("updated_at"),
+        })
+    return {"agent_id": agent_id, "buckets": out}
+
+
+@router.get("/{agent_id}/knowledge/{bucket}")
+def get_knowledge_bucket(
+    agent_id: str,
+    bucket: str,
+    state: str = "all",
+    limit: int = 500,
+    offset: int = 0,
+):
+    """Return items in a knowledge bucket.
+
+    Query params:
+      state   filter by state ("open", "obsolete", ...) or "all"
+      limit   cap returned items (default 500)
+      offset  pagination offset
+    """
+    s = get_storage()
+    bucket_specs = _list_known_buckets_for_agent(agent_id, s)
+    spec = next((b for b in bucket_specs if b["bucket"] == bucket), None)
+    if not spec:
+        raise HTTPException(status_code=404, detail=f"unknown bucket {bucket!r} for agent {agent_id!r}")
+    try:
+        d = s.read_json(spec["storage_key"]) or {}
+    except Exception:
+        d = {}
+    items = d.get(spec["items_field"]) or []
+
+    # Optional state filter.
+    if state and state != "all":
+        items = [i for i in items if (i.get("state") or "open") == state]
+
+    # Sort: open first, then by last_seen_at desc (newest re-confirmation
+    # at the top); for obsolete/closed, by state_changed_at desc.
+    def _sort_key(i: dict):
+        st = i.get("state") or "open"
+        is_open = 0 if st == "open" else 1
+        ts = i.get("last_seen_at") or i.get("first_seen_at") or ""
+        return (is_open, -1 * (int("".join(c for c in ts if c.isdigit()) or 0)))
+    items.sort(key=_sort_key)
+
+    total = len(items)
+    page = items[offset:offset + limit]
+    return {
+        "agent_id": agent_id,
+        "bucket": bucket,
+        "label": spec["label"],
+        "title_field": spec["title_field"],
+        "id_field": spec["id_field"],
+        "item_count_total": total,
+        "item_count_returned": len(page),
+        "states": _bucket_states(items),
+        "updated_at": d.get("updated_at"),
+        "items": page,
+    }

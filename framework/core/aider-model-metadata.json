@@ -1,0 +1,22 @@
+{
+  "openai/claude-sonnet-4.6": {
+    "max_input_tokens": 200000,
+    "max_output_tokens": 16000,
+    "max_tokens": 16000
+  },
+  "github_copilot/claude-sonnet-4": {
+    "max_input_tokens": 128000,
+    "max_output_tokens": 16000,
+    "max_tokens": 16000
+  },
+  "github_copilot/claude-sonnet-4.6": {
+    "max_input_tokens": 200000,
+    "max_output_tokens": 16000,
+    "max_tokens": 16000
+  },
+  "azure/chat": {
+    "max_input_tokens": 128000,
+    "max_output_tokens": 16000,
+    "max_tokens": 16000
+  }
+}

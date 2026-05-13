@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from framework.core.storage import get_storage
+from framework.core.title_dedup import title_signature
 
 from ..auth import require_token
 
@@ -31,6 +32,32 @@ _DONE_PAT = re.compile(r"\[implementer\] done")
 # implementer is the default target; others have opted in via
 # `target_agent: <id>` in responder routes.
 _QUEUE_AGENT_IDS = ("implementer", "ebay-product-sync-agent")
+
+# Producer agents that maintain a rec-memory accumulator at
+# `agents/<id>/state/accumulator.json` (framework.core.rec_memory).
+# The Queue page reads this list directly — we can't rely on a flat
+# `list_prefix("agents/")` scan because Azure caps at 10k keys per page
+# and the alphabetic ordering means specpicks-* accumulators get
+# truncated before they're enumerated. Direct-key reads always work.
+#
+# Add new producer agents here when they register; the dashboard will
+# auto-pick up their backlog without any UI/wiring change.
+_ACCUMULATOR_AGENT_IDS = (
+    "specpicks-progressive-improvement-agent",
+    "aisleprompt-progressive-improvement-agent",
+    "specpicks-seo-opportunity-agent",
+    "aisleprompt-seo-opportunity-agent",
+    "specpicks-article-author-agent",
+    "aisleprompt-article-author-agent",
+    "specpicks-catalog-audit-agent",
+    "aisleprompt-catalog-audit-agent",
+    "specpicks-competitor-research-agent",
+    "aisleprompt-competitor-research-agent",
+    "specpicks-app-store-opportunity-agent",
+    "aisleprompt-app-store-opportunity-agent",
+    "specpicks-benchmark-research-agent",
+    "specpicks-head-to-head-agent",
+)
 
 
 def _parse_dispatch_log(path: Path) -> dict:
@@ -128,10 +155,114 @@ def get_queue(limit: int = Query(20, le=100)):
 
     dispatches = _list_dispatches(limit)
 
+    # Accumulator-pending recs (rec-memory backlog) — recs producer agents
+    # have emitted that haven't been implemented yet. Parallel-fetch each
+    # known producer's accumulator (direct key reads bypass the 10k
+    # list_prefix cap). Returned grouped by agent so the UI can render
+    # collapsible sections. Each entry is the open proposals only.
+    from concurrent.futures import ThreadPoolExecutor
+    def _fetch_accum(agent_id: str) -> tuple[str, list[dict]]:
+        try:
+            d = s.read_json(f"agents/{agent_id}/state/accumulator.json") or {}
+            opens = [
+                {
+                    "id": p.get("id"),
+                    "title": p.get("title"),
+                    "rec_type": p.get("rec_type", ""),
+                    "severity": p.get("severity", "medium"),
+                    "first_seen_at": p.get("first_seen_at", ""),
+                    "last_seen_at": p.get("last_seen_at", ""),
+                    "seen_count": int(p.get("seen_count", 1)),
+                }
+                for p in (d.get("proposals") or [])
+                if p.get("state") == "open"
+            ]
+            # Sort by most-recently-seen (operator most likely cares about freshest)
+            opens.sort(key=lambda x: x.get("last_seen_at", ""), reverse=True)
+            return agent_id, opens
+        except Exception:
+            return agent_id, []
+
+    accumulator_by_agent: dict[str, list[dict]] = {}
+    accumulator_total = 0
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for aid, opens in ex.map(_fetch_accum, _ACCUMULATOR_AGENT_IDS):
+            if opens:
+                accumulator_by_agent[aid] = opens
+                accumulator_total += len(opens)
+
+    # Phase 2 (post-auto-queue): the true backlog lives in producer
+    # `recommendations.json` files, not the auto-queue. The /queue
+    # endpoint historically counted ONLY responses-queue items (always
+    # zero after the auto-queue elimination). Surface the lifetime-stats
+    # pending count and currently-running implementer dispatches so the
+    # UI shows reality.
+    open_rec_total = 0
+    open_recs_by_agent: dict[str, int] = {}
+    running_dispatches = 0
+    try:
+        lifetime = _LIFETIME_CACHE.get("data") or {}
+        open_rec_total = int(lifetime.get("pending") or 0)
+        for aid, c in (lifetime.get("by_agent") or {}).items():
+            n = int((c or {}).get("pending") or 0)
+            if n > 0:
+                open_recs_by_agent[aid] = n
+    except Exception:
+        pass
+    # Live in-flight scope count — published every ~60s by the backlog-
+    # dispatcher via `_write_live_scopes_heartbeat`. The blob
+    # `dispatch-batches.json` files can't serve this directly because the
+    # implementer only updates a LOCAL copy in /tmp/dispatch-rundirs;
+    # blob copies stay frozen at status=pending until the batch_reaper
+    # marks them abandoned at 6h. The heartbeat closes that gap.
+    live_scopes: list[str] = []
+    live_scopes_age_s: int = -1
+    try:
+        hb = s.read_json(
+            "agents/backlog-dispatcher-agent/state/live-scopes.json")
+        if isinstance(hb, dict):
+            running_dispatches = int(hb.get("count") or 0)
+            live_scopes = list(hb.get("scopes") or [])
+            # Compute heartbeat age so the UI can warn if stale
+            ts = hb.get("updated_at")
+            if ts:
+                try:
+                    from datetime import datetime as _dt, timezone as _tz
+                    hb_dt = _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    live_scopes_age_s = int(
+                        (_dt.now(_tz.utc) - hb_dt).total_seconds())
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # Fallback to the legacy dispatch-batches scan if heartbeat unavailable
+    if running_dispatches == 0 and live_scopes_age_s == -1:
+        try:
+            for d in dispatches:
+                batches = (d or {}).get("batches") or []
+                for b in batches:
+                    if (b or {}).get("status") in ("running", "pending"):
+                        running_dispatches += 1
+                        break
+        except Exception:
+            pass
+
     return {
         "pending": pending,
         "pending_total": len(all_keys),
         "dispatches": dispatches,
+        # New: rec-memory backlog (open proposals across all producers)
+        "accumulator_by_agent": accumulator_by_agent,
+        "accumulator_total": accumulator_total,
+        # Phase-2 truth: producer-side open recs + active dispatches
+        "open_recs_total": open_rec_total,
+        "open_recs_by_agent": open_recs_by_agent,
+        "running_dispatches": running_dispatches,
+        # Live heartbeat from the host's systemd — names of currently-
+        # running implementer scopes. Stale-detector: if `live_scopes_age_s`
+        # is > 180, the dispatcher itself is wedged; ignore the count.
+        "live_scopes": live_scopes,
+        "live_scopes_age_s": live_scopes_age_s,
     }
 
 
@@ -328,12 +459,22 @@ def get_lifetime_stats(force_refresh: bool = Query(False)):
 
 def _compute_lifetime_stats():
     """Inner: actually walk storage and aggregate. Always called via
-    `_refresh_lifetime_cache` (which holds the dedup lock)."""
+    `_refresh_lifetime_cache` (which holds the dedup lock).
+
+    Side effect: populates `_LIFETIME_RECS_BY_CATEGORY` with the rich
+    rec list per category so the new /recs-by-category endpoint can
+    serve it without a second scan. Same TTL as the counts cache.
+    """
     s = get_storage()
     counts = {
         "shipped": 0, "implemented": 0, "deferred": 0,
         "pending": 0, "total": 0,
         "by_agent": {},  # {agent_id: {shipped, implemented, ...}}
+    }
+    # Per-category rec list, populated alongside counts. Bounded to
+    # _LIFETIME_RECS_CAP per bucket so we don't ship huge JSON to the UI.
+    recs_by_category: dict[str, list[dict]] = {
+        "shipped": [], "implemented": [], "deferred": [], "pending": [],
     }
 
     # Walk every rundir under agents/*/runs/*/recommendations.json. Use
@@ -377,6 +518,25 @@ def _compute_lifetime_stats():
         "specpicks-catalog-audit-agent",
     ):
         rec_emitting_agents.add(aid)
+    # Filter: only valid rec-emitter ids. A historical implementer bug
+    # uploaded run-dirs to bogus paths like
+    # `agents/<aid>-rundir-<aid>/runs/rundir-<aid>-<ts>-<hash>/` (154
+    # blobs from April 2026). Those paths surfaced in _DISPATCH_AGENTS
+    # via the bootstrap walker and showed up on the dashboard as a
+    # bogus agent_id. Whitelist by suffix match + reject any id that
+    # contains "-rundir-" (the marker of the path-derived bogus form).
+    _VALID_SUFFIXES = (
+        "-seo-opportunity-agent",
+        "-progressive-improvement-agent",
+        "-article-author-agent",
+        "-catalog-audit-agent",
+    )
+    rec_emitting_agents = {
+        aid for aid in rec_emitting_agents
+        if (aid in _QUEUE_AGENT_IDS
+            or any(aid.endswith(suf) for suf in _VALID_SUFFIXES))
+        and "-rundir-" not in aid
+    }
 
     # Collect the union of states for each (agent_id, rec_id) across
     # ALL rundirs first. Recs are propagated across runs by the
@@ -385,13 +545,21 @@ def _compute_lifetime_stats():
     # snapshot) and sometimes with shipped=True (after the deployer
     # ran). We need ANY True to win for that rec.
     rec_state: dict[tuple[str, str], dict] = {}  # (agent_id, rid) → flags
+    # Cache the most-recent rich rec snapshot per (agent_id, rid) so
+    # /recs-by-category can return rec details without re-scanning.
+    rec_latest: dict[tuple[str, str], dict] = {}
+    rec_latest_run: dict[tuple[str, str], str] = {}
 
     for agent_id in sorted(rec_emitting_agents):
         try:
             keys = s.list_prefix(f"agents/{agent_id}/runs/")
         except Exception:
             continue
-        recs_keys = [k for k in keys if k.endswith("/recommendations.json")]
+        # Sort run keys so newer runs override older ones for the
+        # rec_latest snapshot (keeps the rich fields fresh).
+        recs_keys = sorted(
+            [k for k in keys if k.endswith("/recommendations.json")]
+        )
         for rk in recs_keys:
             try:
                 rd = s.read_json(rk) or {}
@@ -402,13 +570,37 @@ def _compute_lifetime_stats():
             recs = rd.get("recommendations") or []
             if not isinstance(recs, list):
                 continue
+            # Extract run_ts from the path for chain-context links
+            try:
+                run_ts = rk.split("/runs/")[1].split("/")[0]
+            except Exception:
+                run_ts = ""
             for r in recs:
                 if not isinstance(r, dict):
                     continue
                 rid = r.get("id") or r.get("rec_id") or ""
                 if not rid:
                     continue
-                key = (agent_id, rid)
+                # Dedup key: prefer title-signature so the SAME logical
+                # rec (re-emitted across runs with the same topic but a
+                # fresh rec-NNN id) coalesces. Falls back to rec_id when
+                # the title is empty/missing. Including agent_id in the
+                # key keeps recs scoped per producer.
+                #
+                # Why this is safer than the prior `(agent_id, rid)`:
+                # rec-001..rec-NNN are reset each run, so two completely
+                # different recs from different runs (e.g. catalog-audit
+                # rec-001 today vs rec-001 last week) were colliding and
+                # under-counting the backlog. Title-keyed dedup correctly
+                # treats "re-emission of the same topic" as one rec and
+                # "different topic, same numeric slot" as two.
+                title_str = (r.get("title") or "").strip()
+                sig = title_signature(title_str) if title_str else None
+                if sig:
+                    dedup_id = "T:" + ":".join(sorted(sig))
+                else:
+                    dedup_id = "R:" + str(rid)
+                key = (agent_id, dedup_id)
                 cur_state = rec_state.get(key) or {
                     "shipped": False, "implemented": False, "deferred": False,
                 }
@@ -421,30 +613,186 @@ def _compute_lifetime_stats():
                    "deferred" in str(r.get("status", "")).lower():
                     cur_state["deferred"] = True
                 rec_state[key] = cur_state
+                # Always update latest — newer runs have richer fields
+                # (commit_sha after implementer ships, shipped_at after
+                # deployer/backfill flips).
+                rec_latest[key] = r
+                rec_latest_run[key] = run_ts
+
+            # Merge deferred-by-allowlist.json sibling — recs that the
+            # implementer's prompt builder rejected before LLM (rec_type
+            # not in TRUSTED_REC_TYPES). They never get a `deferred:true`
+            # on the rec itself, so without this branch they'd appear as
+            # `pending` in the lifetime view even though they were
+            # explicitly skipped.
+            #
+            # Key includes run_ts so deferred entries don't get overwritten
+            # by the SAME rec_id from a later successful run (catalog-audit
+            # reuses rec-001..rec-008 per run — different runs are
+            # different recs). The synthetic id `<rec_id>@<run_ts>` keeps
+            # the deferred entry distinct in the lifetime view.
+            try:
+                allowlist_key = rk.rsplit("/", 1)[0] + "/deferred-by-allowlist.json"
+                allowlist_data = s.read_json(allowlist_key)
+                if isinstance(allowlist_data, dict):
+                    # Skip the entire file if it's been requeued — the
+                    # consolidator/requeue script stamps `requeued_at` so
+                    # historical defer entries don't pollute the lifetime
+                    # counter forever. The recs themselves continue to
+                    # surface via the recommendations.json scan above
+                    # if they actually deferred again on retry.
+                    if allowlist_data.get("requeued_at"):
+                        continue
+                    # Skip files where every entry has been individually
+                    # consolidated (an alternative path some scripts use).
+                    deferred_entries = allowlist_data.get("deferred") or []
+                    unconsolidated = [
+                        e for e in deferred_entries
+                        if isinstance(e, dict) and not e.get("consolidated_into")
+                    ]
+                    if not unconsolidated:
+                        continue
+                    for entry in unconsolidated:
+                        rid = entry.get("rec_id") or entry.get("id")
+                        if not rid:
+                            continue
+                        # Synthetic per-run id so this deferred entry is
+                        # never overwritten by a same-id rec from a
+                        # subsequent run.
+                        synth_rid = f"{rid}@{run_ts}" if run_ts else str(rid)
+                        key = (agent_id, synth_rid)
+                        st = {
+                            "shipped": False, "implemented": False,
+                            "deferred": True,
+                        }
+                        rec_state[key] = st
+                        # Build a minimal snapshot for the recs-by-category
+                        # endpoint (the rec-detail view uses run_ts so the
+                        # synth_rid doesn't leak into URLs).
+                        snap = {
+                            "id": str(rid),
+                            "rec_id": str(rid),
+                            "title": (entry.get("type") or "deferred-by-allowlist") + " (deferred)",
+                            "deferred": True,
+                            "deferred_reason": (entry.get("reason") or "")[:200],
+                            "category": entry.get("type", ""),
+                            "tier": "deferred",
+                        }
+                        rec_latest[key] = snap
+                        rec_latest_run[key] = run_ts
+            except Exception:
+                pass
 
     # Bucket each rec exactly once — same precedence as the UI's
     # classifyRec(): shipped > implemented > deferred > pending.
-    for (agent_id, _rid), state in rec_state.items():
+    for (agent_id, rid), state in rec_state.items():
         agent_counts = counts["by_agent"].setdefault(agent_id, {
             "shipped": 0, "implemented": 0, "deferred": 0,
             "pending": 0, "total": 0,
         })
         agent_counts["total"] += 1
         counts["total"] += 1
+        category: str
         if state["shipped"]:
             agent_counts["shipped"] += 1
             counts["shipped"] += 1
+            category = "shipped"
         elif state["implemented"]:
             agent_counts["implemented"] += 1
             counts["implemented"] += 1
+            category = "implemented"
         elif state["deferred"]:
             agent_counts["deferred"] += 1
             counts["deferred"] += 1
+            category = "deferred"
         else:
             agent_counts["pending"] += 1
             counts["pending"] += 1
+            category = "pending"
+        # Build the per-category rec list with chain context for the
+        # UI to link back. Cap each bucket at _LIFETIME_RECS_CAP (200)
+        # to keep the JSON payload under 1MB.
+        if len(recs_by_category[category]) < _LIFETIME_RECS_CAP:
+            r = rec_latest.get((agent_id, rid)) or {}
+            run_ts = rec_latest_run.get((agent_id, rid), "")
+            # Slim to fields the queue UI's RichRecDetails consumes —
+            # don't ship the whole rec (some have huge implementation
+            # outlines). Keep file-edit + URL fields for the new
+            # affected_urls support, plus shipped/implemented metadata.
+            slim = {
+                "rec_id": rid,
+                "title": (r.get("title") or "")[:240],
+                "kind": str(r.get("priority") or r.get("severity") or r.get("tier") or ""),
+                "category": category,
+                "agent_id": agent_id,
+                "run_ts": run_ts,
+                "run_dir_basename": f"rundir-{agent_id}-{run_ts}" if run_ts else "",
+                "shipped": bool(state["shipped"]),
+                "implemented": bool(state["implemented"]),
+                "deferred": bool(state["deferred"]),
+            }
+            for f in ("description", "rationale", "severity", "tier",
+                      "confidence", "expected_impact", "implementation_outline",
+                      "migration_template", "ref_ids", "evidence", "check_id",
+                      "affected_url", "affected_urls", "page_url", "page_path",
+                      "url", "files", "files_changed", "target_files",
+                      "implemented_at", "implemented_via",
+                      "implementation_commit_sha", "implemented_commit",
+                      "implementation_commit", "shipped_at", "shipped_tag",
+                      "shipped_via", "shipped_verification", "deferred_reason"):
+                if r.get(f) is not None:
+                    slim[f] = r[f]
+            # Surface the commit SHA in a stable place so the UI can render it
+            sha = (slim.pop("implementation_commit", None)
+                   or slim.pop("implemented_commit", None)
+                   or slim.pop("implementation_commit_sha", None))
+            if sha:
+                slim["commit_sha"] = str(sha)[:12]
+            recs_by_category[category].append(slim)
 
+    # Stash for /recs-by-category — same TTL/cache as counts above.
+    _LIFETIME_RECS_BY_CATEGORY["data"] = recs_by_category
     return counts
+
+
+# Cap per category — keeps the JSON payload under 1MB even with
+# all-rich-fields rec rows. UI shows newest-first.
+_LIFETIME_RECS_CAP = 200
+_LIFETIME_RECS_BY_CATEGORY: dict = {"data": None}
+
+
+@router.get("/recs-by-category")
+def get_recs_by_category(
+    category: str = Query(..., pattern="^(shipped|implemented|deferred|pending)$"),
+    limit: int = Query(100, le=200),
+):
+    """Return up to `limit` lifetime recs in the requested category.
+
+    The /batches endpoint serves a windowed view of the latest N
+    dispatch chains — when the user clicked a Shipped/Implemented
+    /Deferred tab, the drill-down list could appear empty if the
+    matching recs lived in older chains that had rolled off the
+    page. This endpoint returns ALL such recs (capped at 200/bucket)
+    so the tabs are never "empty when the count says 100."
+
+    Sourced from the same scan as /lifetime-stats and shares its 60s
+    cache + warmer thread, so it's a hit on every user request after
+    the first cold compute.
+    """
+    # Trigger the warmer / refresh if needed — same as lifetime-stats.
+    _start_lifetime_warmer()
+    import time
+    now = time.monotonic()
+    if (_LIFETIME_CACHE.get("data") is None
+            or (now - _LIFETIME_CACHE["ts"]) >= _LIFETIME_TTL_S):
+        _refresh_lifetime_cache()
+    bucket = (_LIFETIME_RECS_BY_CATEGORY.get("data") or {}).get(category, [])
+    return {
+        "category": category,
+        "count": len(bucket),
+        "capped_at": _LIFETIME_RECS_CAP,
+        "recs": bucket[:limit],
+    }
 
 
 @router.get("/batches")
@@ -526,6 +874,7 @@ def _refresh_batches_cache() -> list[dict]:
             rec_titles: dict[str, str] = {}
             rec_kinds: dict[str, str] = {}
             rec_lifecycle: dict[str, dict] = {}
+            rec_extras: dict[str, dict] = {}
             for read_run_ts in (source_run_ts, dispatch_run_ts):
                 if not read_run_ts:
                     continue
@@ -541,10 +890,35 @@ def _refresh_batches_cache() -> list[dict]:
                                 if r.get(f):
                                     rec_kinds[rid] = str(r.get(f))
                                     break
+                        # Capture rich rec metadata for the queue UI to display
+                        # alongside the implemented/shipped state. Anything
+                        # the agent puts on the rec is fair game; we keep the
+                        # ones the dashboard actually renders.
+                        if rid not in rec_extras:
+                            extras: dict = {}
+                            for f in (
+                                "description", "rationale", "category", "severity",
+                                "tier", "confidence", "expected_impact",
+                                "implementation_outline",
+                                # SQL-migration-style fields:
+                                "migration_template", "ref_ids", "evidence",
+                                "check_id",
+                                # URL/page targeting (going-forward standard):
+                                "affected_url", "affected_urls", "page_url",
+                                "page_path", "url",
+                                # File-edit targeting:
+                                "files", "files_changed", "target_files",
+                            ):
+                                if r.get(f) is not None:
+                                    extras[f] = r[f]
+                            if extras:
+                                rec_extras[rid] = extras
                         for f in ("implemented", "implemented_at", "implemented_run_ts",
                                   "implemented_via", "implemented_commit",
+                                  "implementation_commit_sha",
                                   "shipped", "shipped_at",
-                                  "shipped_tag", "shipped_image", "shipped_via"):
+                                  "shipped_tag", "shipped_image", "shipped_via",
+                                  "shipped_verification"):
                             if f in r:
                                 rec_lifecycle.setdefault(rid, {})[f] = r[f]
                 except Exception:
@@ -579,6 +953,54 @@ def _refresh_batches_cache() -> list[dict]:
                         applied_set = {str(x) for x in ids if x}
             except Exception:
                 pass
+
+            # Merge build-aider-invocation's deferred-by-allowlist data into
+            # rec_status — these recs were rejected pre-LLM because their
+            # rec_type isn't in the trusted allowlist. Without this merge, the
+            # dashboard's "deferred" icon stays empty even though the recs
+            # were correctly skipped.
+            try:
+                deferred_data = s.read_json(
+                    f"agents/{source_agent}/runs/{dispatch_run_ts}/deferred-by-allowlist.json"
+                )
+                # Producer writes {"deferred": [{"rec_id":..., "reason":...}], ...}
+                deferred_list = []
+                if isinstance(deferred_data, list):
+                    deferred_list = deferred_data
+                elif isinstance(deferred_data, dict):
+                    deferred_list = deferred_data.get("deferred") or []
+                    # Legacy fallback: {"deferred_rec_ids": [...]} shape
+                    for rid in (deferred_data.get("deferred_rec_ids") or []):
+                        rec_status.setdefault(str(rid), {})["deferred"] = True
+                for entry in deferred_list:
+                    if isinstance(entry, dict):
+                        rid = entry.get("rec_id") or entry.get("id")
+                        if rid:
+                            rec_status.setdefault(str(rid), {})["deferred"] = True
+                            rec_status[str(rid)]["deferred_reason"] = (entry.get("reason", "") or "")[:200]
+                    elif isinstance(entry, str):
+                        rec_status.setdefault(entry, {})["deferred"] = True
+            except Exception:
+                pass
+
+            # Also merge generic deferred.json (single-batch deferral note from
+            # the implementer when claude-pool exhausts and chain has nothing)
+            try:
+                gen_def = s.read_json(
+                    f"agents/{source_agent}/runs/{dispatch_run_ts}/deferred.json"
+                )
+                if isinstance(gen_def, dict):
+                    rec_ids_raw = gen_def.get("rec_ids", "")
+                    if isinstance(rec_ids_raw, str):
+                        rec_ids_raw = rec_ids_raw.split(",")
+                    for rid in rec_ids_raw:
+                        rid = str(rid).strip()
+                        if rid:
+                            rec_status.setdefault(rid, {})["deferred"] = True
+                            if not rec_status[rid].get("deferred_reason"):
+                                rec_status[rid]["deferred_reason"] = (gen_def.get("reason") or "")[:200]
+            except Exception:
+                pass
             batches_out = []
             for b in m.get("batches", []):
                 cs = b.get("completion_status") or b.get("status", "")
@@ -593,15 +1015,31 @@ def _refresh_batches_cache() -> list[dict]:
                         rs["shipped_at"] = lc.get("shipped_at", "")
                         rs["shipped_tag"] = lc.get("shipped_tag", "")
                         rs["shipped_via"] = lc.get("shipped_via", "")
+                        if lc.get("shipped_verification"):
+                            rs["shipped_verification"] = lc.get("shipped_verification", "")
                     if lc.get("implemented"):
                         rs["implemented"] = True
                         rs["implemented_at"] = lc.get("implemented_at", "")
                         rs["implemented_via"] = lc.get("implemented_via", "")
+                        # Surface commit SHA so the UI can link to the actual
+                        # change in git. Try implementation_commit (newer) →
+                        # implemented_commit (older) → implementation_commit_sha.
+                        sha = (lc.get("implementation_commit")
+                               or lc.get("implemented_commit")
+                               or lc.get("implementation_commit_sha")
+                               or "")
+                        if sha:
+                            rs["commit_sha"] = sha[:12]
+                    # Merge the rich rec metadata captured above so the queue
+                    # UI can render description, affected URLs, files changed,
+                    # SQL preview, etc. without a follow-up fetch.
+                    extras = rec_extras.get(rid, {})
                     items.append({
                         "rec_id": rid,
                         "title": rec_titles.get(rid, ""),
                         "kind": rec_kinds.get(rid, ""),
                         **rs,
+                        **extras,
                     })
                 batches_out.append({
                     "index": b.get("index"),
@@ -725,9 +1163,18 @@ def get_batch_rec_detail(run_dir_basename: str, rec_id: str):
     `run_dir_basename` is the synthetic key from /api/implementer/batches:
     `rundir-<source_agent>-<source_run_ts>` (no random suffix because the
     Azure-side data is keyed on the agent + run_ts pair).
+
+    `rec_id` may be a synthetic per-run id from /recs-by-category like
+    `rec-001@<run_ts>` (used by the deferred-tab endpoint to keep
+    same-rec-id different-run entries distinct in the lifetime view).
+    Strip the `@<run_ts>` before storage lookup since storage has the
+    plain rec_id.
     """
     if "/" in run_dir_basename or ".." in run_dir_basename or not run_dir_basename.startswith("rundir-"):
         return {"error": "invalid run_dir"}
+    # Strip synthetic suffix from deferred-allowlist entries.
+    if "@" in rec_id:
+        rec_id = rec_id.split("@", 1)[0]
     # Parse <agent>-<run_ts> from the basename. run_ts is `YYYYmmddTHHMMSSZ`.
     m = re.match(r"^rundir-(?P<agent>.+?)-(?P<ts>\d{8}T\d{6}Z)$", run_dir_basename)
     if not m:

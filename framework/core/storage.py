@@ -217,10 +217,24 @@ class AzureBlobStorage(StorageBackend):
         cs_kwargs = {"content_type": _guess_content_type(key)}
         if cache_control:
             cs_kwargs["cache_control"] = cache_control
-        self._blob(key).upload_blob(
-            data, overwrite=True,
-            content_settings=self._ContentSettings(**cs_kwargs),
-        )
+        blob = self._blob(key)
+        try:
+            blob.upload_blob(
+                data, overwrite=True,
+                content_settings=self._ContentSettings(**cs_kwargs),
+            )
+        except Exception as e:
+            # Existing blob is the wrong type (e.g. append blob written
+            # by streaming logger at the same key). Delete + retry as
+            # block blob. Mirrors the symmetric handler in append_bytes.
+            if "InvalidBlobType" in str(e):
+                blob.delete_blob()
+                blob.upload_blob(
+                    data, overwrite=True,
+                    content_settings=self._ContentSettings(**cs_kwargs),
+                )
+            else:
+                raise
 
     def append_bytes(self, key: str, data: bytes) -> None:
         # Use AppendBlob for server-side append (no read-modify-write).
@@ -389,13 +403,48 @@ _DEFAULT_BACKEND: Optional[StorageBackend] = None
 _BACKEND_LOCK = threading.Lock()
 
 
+# Pluggable backend registry — third parties can add S3, GCS, R2,
+# MinIO, etc. without forking. Register a factory before any agent
+# code calls get_storage():
+#
+#   from framework.core.storage import register_backend
+#   register_backend("s3", lambda: MyS3Backend(...))
+#   # then set STORAGE_BACKEND=s3 in env, get_storage() will use it.
+#
+# Built-in factories live in `_BUILTIN_BACKENDS` below; user-registered
+# ones go in `_USER_BACKENDS`. Lookup tries user first, then built-in,
+# so a deployment can override 'local' or 'azure' if needed.
+_BUILTIN_BACKENDS: dict[str, "callable"] = {
+    "azure": lambda: AzureBlobStorage(),
+    "local": lambda: LocalFilesystemStorage(),
+}
+_USER_BACKENDS: dict[str, "callable"] = {}
+
+
+def register_backend(name: str, factory: "callable") -> None:
+    """Register a backend factory. `factory()` must return a
+    `StorageBackend` instance. Idempotent — re-registering the same
+    name overwrites the prior factory (useful for tests).
+    """
+    _USER_BACKENDS[name] = factory
+
+
+def list_backends() -> list[str]:
+    """Names registered + built-in. Used by setup scripts + the
+    dashboard's Settings page to populate a dropdown."""
+    return sorted(set(_BUILTIN_BACKENDS) | set(_USER_BACKENDS))
+
+
 def get_storage(backend: Optional[str] = None) -> StorageBackend:
     """Return a process-wide cached storage backend.
 
     Backend selection (in priority order):
-      1. `backend` parameter ('azure' | 'local')
+      1. `backend` parameter (any registered name)
       2. STORAGE_BACKEND env var
-      3. Default: 'azure' if AZURE_STORAGE_CONNECTION_STRING is set, else 'local'
+      3. Auto-detect: 'azure' if AZURE_STORAGE_CONNECTION_STRING is set,
+         else 'local'
+
+    See `register_backend` for adding S3 / GCS / etc.
     """
     global _DEFAULT_BACKEND
     with _BACKEND_LOCK:
@@ -404,12 +453,15 @@ def get_storage(backend: Optional[str] = None) -> StorageBackend:
         choice = backend or os.getenv("STORAGE_BACKEND")
         if not choice:
             choice = "azure" if os.getenv("AZURE_STORAGE_CONNECTION_STRING") else "local"
-        if choice == "azure":
-            inst: StorageBackend = AzureBlobStorage()
-        elif choice == "local":
-            inst = LocalFilesystemStorage()
-        else:
-            raise SystemExit(f"unknown STORAGE_BACKEND={choice!r}")
+        factory = _USER_BACKENDS.get(choice) or _BUILTIN_BACKENDS.get(choice)
+        if factory is None:
+            available = ", ".join(list_backends())
+            raise SystemExit(
+                f"unknown STORAGE_BACKEND={choice!r}. "
+                f"Available: {available}. Register custom backends via "
+                f"`framework.core.storage.register_backend(name, factory)`."
+            )
+        inst: StorageBackend = factory()
         if backend is None:
             _DEFAULT_BACKEND = inst
         logger.info(f"storage backend: {inst.name}")

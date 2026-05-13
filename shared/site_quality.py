@@ -120,17 +120,131 @@ def score_tier(*, confidence: float, severity: str, threshold: float) -> str:
     return "review"
 
 
-def assign_rec_ids(recs: list[dict]) -> list[dict]:
-    """Assign rec-001..rec-NNN ids in the order given."""
+def normalize_rec_type(rec: dict) -> dict:
+    """Ensure `rec["type"]` is always set on a rec dict.
+
+    The implementer's TRUSTED_REC_TYPES allowlist gates on `type` (with
+    `category` as a fallback). Some producers historically only emitted
+    `category` (progressive-improvement-agent) and a handful emitted
+    neither (the LLM forgot the field). When the field is missing both
+    places the implementer logs the rec as "(no type)" and defers it,
+    making it invisible to allowlist promotion.
+
+    Rules:
+      • If `type` is set → leave it.
+      • Else if `category` is set → mirror it to `type`.
+      • Else → set `type = "unclassified"` so the rec at least carries
+        a stable label and shows up explicitly in deferred audits.
+
+    Mutates and returns the same rec.
+    """
+    if not isinstance(rec, dict):
+        return rec
+    t = (rec.get("type") or "").strip()
+    if t:
+        return rec
+    c = (rec.get("category") or "").strip()
+    if c:
+        rec["type"] = c
+        return rec
+    rec["type"] = "unclassified"
+    return rec
+
+
+def make_rec_uid(*, agent_id: str = "", run_ts: str = "",
+                 rec_index: int = 0, title: str = "") -> str:
+    """Universally-unique rec identifier — short, stable, content-derived.
+
+    Shape: `r-<8 lowercase hex>` (e.g. `r-a1b2c3d4`).
+
+    Derivation: SHA-1 of (agent_id|run_ts|rec_index|normalized_title),
+    truncated to 8 hex chars. Stable: re-hashing the same rec yields
+    the same uid; a rec proposed by two different runs gets two
+    different uids (intentional — they ARE different runs/proposals
+    even if the title is similar).
+
+    The uid stays attached to the rec through the entire pipeline
+    (recommendations.json → email → responder → auto-queue → implementer
+    → accumulator). Operators can reference it directly in email
+    replies (`implement r-a1b2c3d4`) without ambiguity. The legacy
+    `rec-NNN` form still works — the responder resolves it against
+    the email's request_id to find the right run.
+    """
+    import hashlib
+    norm_title = re.sub(r"\s+", " ", (title or "").strip().lower())[:120]
+    seed = f"{agent_id}|{run_ts}|{rec_index}|{norm_title}"
+    h = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
+    return f"r-{h}"
+
+
+def assign_rec_ids(recs: list[dict],
+                   *, agent_id: str = "",
+                   run_ts: str = "") -> list[dict]:
+    """Assign rec-001..rec-NNN ids AND a globally-unique rec_uid.
+
+    Two ids per rec:
+      • `id`       — `rec-NNN` per-email display id (compact for emails)
+      • `rec_uid`  — `r-<8hex>` globally unique, content-derived (stable
+                     across re-renders, distinct across runs)
+
+    Email replies accept either form — `implement rec-001` (run-local,
+    resolves via the email's subject-tag request_id) or
+    `implement r-a1b2c3d4` (global, no run lookup needed). The latter
+    is preferred for unambiguous tracking + cross-run references.
+
+    Also runs `normalize_rec_type` on every rec so the implementer's
+    allowlist gate never sees a typeless rec.
+    """
     for i, r in enumerate(recs, start=1):
         r["id"] = f"rec-{i:03d}"
+        # Don't overwrite an existing rec_uid — some agents pre-compute
+        # it from the proposal stage (e.g. accumulator-backed agents
+        # use proposal_id which IS the uid).
+        if not r.get("rec_uid"):
+            r["rec_uid"] = make_rec_uid(
+                agent_id=agent_id, run_ts=run_ts,
+                rec_index=i, title=r.get("title") or "",
+            )
+        normalize_rec_type(r)
     return recs
 
 
-def validate_recs_doc(doc: dict) -> None:
-    """Validate against quality-recommendations.schema.json. Raises on failure."""
+def ensure_rec_uids(recs: list[dict], *, agent_id: str = "",
+                     run_ts: str = "") -> list[dict]:
+    """Defensive uid-stamper. For every rec missing `rec_uid`, derive one.
+
+    Use case: a producer that doesn't go through `assign_rec_ids` (rare —
+    only the seo-opportunity analyzers and a few legacy paths) can still
+    guarantee uids on its output by calling this helper before persisting.
+    Also called from `validate_recs_doc` so any producer that validates
+    gets uids for free.
+
+    Idempotent — never overwrites an existing rec_uid.
+    """
+    for i, r in enumerate(recs or [], start=1):
+        if isinstance(r, dict) and not r.get("rec_uid"):
+            r["rec_uid"] = make_rec_uid(
+                agent_id=agent_id, run_ts=run_ts,
+                rec_index=i, title=r.get("title") or "",
+            )
+    return recs
+
+
+def validate_recs_doc(doc: dict, *,
+                      agent_id: str = "", run_ts: str = "") -> None:
+    """Validate against quality-recommendations.schema.json. Raises on failure.
+
+    Side effects (defensive — guarantees fleet-wide invariants even when
+    a producer bypassed the canonical helpers):
+      • normalize_rec_type — every rec has a `type` field
+      • ensure_rec_uids    — every rec has a globally-unique `rec_uid`
+    """
     schema = json.loads(RECS_SCHEMA_PATH.read_text())
     jsonschema.validate(doc, schema)
+    recs = doc.get("recommendations") or []
+    for r in recs:
+        normalize_rec_type(r)
+    ensure_rec_uids(recs, agent_id=agent_id, run_ts=run_ts)
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +532,20 @@ def send_via_msmtp(
             capture_output=True,
             timeout=60,
         )
+        # msmtp returns 0 even when its passwordeval prints nothing (the
+        # daemon then can't authenticate but the client doesn't surface
+        # the failure on stderr exit code). Detect the empty-credential
+        # signature explicitly so we don't silently lie about delivery.
+        stderr_txt = proc.stderr.decode("utf-8", "replace")
+        if "cannot read output of" in stderr_txt or \
+           "authentication failed" in stderr_txt.lower() or \
+           "passwordeval" in stderr_txt.lower() and "empty" in stderr_txt.lower():
+            return False, (
+                f"msmtp credential unavailable for account {msmtp_account!r}: "
+                f"{stderr_txt.strip()[:300]}"
+            )
         if proc.returncode != 0:
-            return False, f"msmtp rc={proc.returncode}: {proc.stderr.decode('utf-8','replace')[:300]}"
+            return False, f"msmtp rc={proc.returncode}: {stderr_txt[:300]}"
         return True, f"sent to {len(to)} recipient(s)"
     except FileNotFoundError:
         return False, "msmtp not found on PATH"
@@ -495,9 +621,10 @@ def render_recs_email(
                 )
         rec_rows.append(f"""
             <tr>
-              <td style="vertical-align:top;padding:12px 14px;border-bottom:1px solid #e2e8f0;width:80px">
+              <td style="vertical-align:top;padding:12px 14px;border-bottom:1px solid #e2e8f0;width:120px">
                 <div style="font-family:monospace;font-size:13px;color:#0f172a"><b>{r['id']}</b></div>
-                <div style="font-size:11px;color:{sev_color};margin-top:2px;text-transform:uppercase">{sev}</div>
+                <div style="font-family:monospace;font-size:10px;color:#64748b;margin-top:1px;letter-spacing:0.2px" title="globally-unique rec id — usable in any email reply, never collides across runs">{r.get('rec_uid', '')}</div>
+                <div style="font-size:11px;color:{sev_color};margin-top:4px;text-transform:uppercase">{sev}</div>
                 <div style="font-size:11px;color:{tier_color};margin-top:4px">{emoji} {tier_label}</div>
                 <div style="font-size:11px;color:#64748b;margin-top:2px">conf {conf_pct}%</div>
               </td>
@@ -555,6 +682,9 @@ def render_recs_email(
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement rec-001 rec-005</code> &nbsp;
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">skip rec-002</code> &nbsp;
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">merge rec-003 rec-004</code>
+          <br>
+          <span style="color:#64748b;font-size:12px">Or use the globally-unique uid for unambiguous tracking across emails:
+          <code style="font-size:11px">implement r-a1b2c3d4</code> (each rec's uid is shown next to its title below).</span>
           <br><br>
           <b>Bulk by tier or severity:</b><br>
           <code style="background:#fff;padding:2px 6px;border:1px solid #e2e8f0;border-radius:3px">implement all</code> &nbsp;
@@ -593,6 +723,8 @@ def render_recs_email(
 # ---------------------------------------------------------------------------
 
 _REC_ID_RE = re.compile(r"\brec-(\d{3})\b")
+# Globally-unique rec uid: `r-<8 hex>` (lowercase). See `make_rec_uid`.
+_REC_UID_RE = re.compile(r"\br-([0-9a-f]{8})\b")
 
 
 _VERBS = ("implement", "skip", "modify", "merge")
@@ -618,8 +750,79 @@ def parse_user_action(payload: dict) -> tuple[str, list[str], list[str], str]:
     Both rec_ids and filter_keywords can be present — the agent applies the
     union when expanding to actual rec ids.
     """
-    body = (payload.get("body") or payload.get("text") or "").lower()
-    rec_ids = sorted({f"rec-{m.group(1)}" for m in _REC_ID_RE.finditer(body)})
+    raw_body = payload.get("body") or payload.get("text") or ""
+    # HTML emails (Outlook web/desktop) embed rec ids in <b>rec-001</b>;
+    # strip tags so the regex matches the inner text.
+    stripped = re.sub(r"<[^>]+>", " ", raw_body)
+    body = stripped.lower()
+
+    # Expand range syntax FIRST. Supports many forms:
+    #   "rec-001 - rec-007"   "rec-001-rec-007"
+    #   "rec-001 to rec-007"  "rec-001 thru rec-007"
+    #   "implement 1-7"       (BARE: digits without rec- prefix when
+    #                          the verb is implement/skip/modify/merge)
+    #   "implement 1, 3, 5"   (bare comma list — same verb context)
+    # All forms rewrite to the canonical " rec-NNN rec-NNN ..." string
+    # so the tokenizer below picks them up.
+    _RANGE_RE = re.compile(
+        r"\brec-(\d{3})\s*(?:-|–|—|to|thru|through)\s*rec-(\d{3})\b"
+    )
+    def _expand_range(m: 're.Match') -> str:
+        a, b = int(m.group(1)), int(m.group(2))
+        if b < a or (b - a) > 200:
+            return m.group(0)
+        return " ".join(f"rec-{i:03d}" for i in range(a, b + 1))
+    body = _RANGE_RE.sub(_expand_range, body)
+
+    # Bare-number forms: only AFTER a verb (implement/skip/modify/merge)
+    # to avoid matching random numbers like dates or counts. Window:
+    # from the verb up to the first reply-boundary (\n\n--, "from:", etc).
+    _BARE_VERB_RE = re.compile(r"\b(implement|skip|modify|merge)\b", re.IGNORECASE)
+    verb_m = _BARE_VERB_RE.search(body)
+    if verb_m:
+        # Slice from verb to nearest reply-boundary.
+        start = verb_m.end()
+        scan_end = len(body)
+        for boundary in ("\n\n--", "\n\n>", "\n----", "from:", "sent:",
+                         "wrote:", "on mon, ", "on tue, ", "on wed, ",
+                         "on thu, ", "on fri, ", "on sat, ", "on sun, "):
+            i = body.find(boundary, start)
+            if i > 0:
+                scan_end = min(scan_end, i)
+        scan = body[start:scan_end]
+        # Bare range: "1-7" / "1 - 7" / "1 to 7" / "1 thru 7"
+        _BARE_RANGE_RE = re.compile(
+            r"(?<!\brec-)(?<!\d)(\d{1,3})\s*(?:-|–|—|to|thru|through)\s*(?<!\brec-)(?<!\d)(\d{1,3})(?!\d)"
+        )
+        def _expand_bare_range(m: 're.Match') -> str:
+            a, b = int(m.group(1)), int(m.group(2))
+            if b < a or (b - a) > 200 or a < 1 or b > 999:
+                return m.group(0)
+            return " " + " ".join(f"rec-{i:03d}" for i in range(a, b + 1)) + " "
+        scan_expanded = _BARE_RANGE_RE.sub(_expand_bare_range, scan)
+        # Bare comma/space list: "1, 3, 5" / "1 3 5" — only if NOT inside
+        # any rec-NNN OR r-XXXXXXXX uid hex. Negative lookbehind/ahead
+        # against hex chars + hyphen rejects digits embedded in uids.
+        _BARE_LIST_RE = re.compile(
+            r"(?<![a-f0-9-])(\d{1,3})(?![a-f0-9])"
+        )
+        def _expand_bare_id(m: 're.Match') -> str:
+            n = int(m.group(1))
+            if 1 <= n <= 999:
+                return f"rec-{n:03d}"
+            return m.group(0)
+        scan_expanded = _BARE_LIST_RE.sub(_expand_bare_id, scan_expanded)
+        # Splice expanded scan back into body
+        body = body[:start] + scan_expanded + body[scan_end:]
+
+    # Collect both legacy `rec-NNN` tokens (per-email run-local) AND
+    # universally-unique `r-<8hex>` tokens. Both end up in rec_ids;
+    # the dispatcher resolves each form against the source recs.json
+    # (rec-NNN matches by `id`, r-XXXXXXXX matches by `rec_uid`).
+    rec_ids = sorted(
+        {f"rec-{m.group(1)}" for m in _REC_ID_RE.finditer(body)}
+        | {f"r-{m.group(1)}" for m in _REC_UID_RE.finditer(body)}
+    )
     verb = "unknown"
     for v in _VERBS:
         if re.search(rf"\b{v}\b", body):
@@ -666,6 +869,42 @@ def expand_filters_to_rec_ids(
     return sorted(out)
 
 
+def resolve_rec_ids(recs: list[dict], requested: list[str]) -> list[str]:
+    """Resolve a mixed list of rec selectors to canonical run-local ids.
+
+    Accepts:
+      • `rec-NNN`     — already canonical, used as-is
+      • `r-XXXXXXXX`  — globally-unique uid; looked up in `recs` and
+                        translated to the matching `rec-NNN` (for back-
+                        compat with downstream code that keys by `id`)
+
+    Unknown ids are dropped silently; callers should pre-warn the
+    operator if a requested id wasn't found.
+    """
+    if not requested:
+        return []
+    by_uid = {r.get("rec_uid"): r.get("id") for r in (recs or [])
+              if r.get("rec_uid") and r.get("id")}
+    by_id  = {r.get("id"): r.get("id") for r in (recs or []) if r.get("id")}
+    out: list[str] = []
+    for token in requested:
+        if not token:
+            continue
+        if token.startswith("r-") and len(token) == 10:    # uid form
+            mapped = by_uid.get(token)
+            if mapped:
+                out.append(mapped)
+        elif token.startswith("rec-") and token in by_id:
+            out.append(token)
+    # Preserve order, dedupe
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for x in out:
+        if x not in seen:
+            seen.add(x); deduped.append(x)
+    return deduped
+
+
 def apply_user_responses(
     *,
     responses: list[dict],
@@ -676,8 +915,17 @@ def apply_user_responses(
     pairs applied (precise rec-id matches AND bulk-filter expansions)."""
     if prior_recs_path is None or not prior_recs_path.is_file():
         return []
-    doc = json.loads(prior_recs_path.read_text())
-    recs = doc.get("recommendations", [])
+    raw = prior_recs_path.read_text().strip()
+    if not raw:
+        # Empty / truncated file — skip (don't crash the whole run).
+        return []
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        # Malformed file — skip with no apply, let the new run's recs
+        # supersede.
+        return []
+    recs = doc.get("recommendations", []) if isinstance(doc, dict) else []
     by_id = {r["id"]: r for r in recs}
     applied: list[dict] = []
     for resp in responses:

@@ -1122,6 +1122,67 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
     stack_hint = _detect_repo_stack(repo_path)
     stack_section = ("\n\n" + stack_hint) if stack_hint else ""
 
+    # ── SSR-mirror hint (2026-05-12) ─────────────────────────────────
+    # SEO-flavored recs that edit React components ONLY are silently
+    # invisible to crawlers — Google reads the SSR'd HTML, not the
+    # hydrated DOM. The implementer's post-LLM SSR-mismatch check
+    # ROLLS BACK such commits, costing 5-15min of work per defer.
+    # specpicks-seo-opportunity was at 40% success rate (6h window)
+    # due to this exact failure mode. Inject a per-rec hint when:
+    #   - dispatch_kind is "seo" / "pi" (PI also emits SEO recs), OR
+    #   - any rec has type matching {ctr-fix, meta-*, json-ld, sitemap,
+    #     title-tag, head-tag, og-tag, schema, structured-data}
+    # The hint also names the specific SSR files for this repo so the
+    # LLM doesn't have to grep for them.
+    _ssr_rec_types = {
+        "ctr-fix", "meta-description", "meta-title", "title-tag",
+        "head-tag", "json-ld", "sitemap", "schema",
+        "structured-data", "og-tag", "twitter-tag", "canonical",
+        "indexnow", "ssr-mismatch",
+    }
+    is_ssr_dispatch = (
+        (dispatch_kind or "").lower() in ("seo", "pi")
+        or any((r.get("type") or "").lower() in _ssr_rec_types for r in eligible_recs)
+    )
+    ssr_section = ""
+    if is_ssr_dispatch:
+        # Probe for the SSR files in this repo so we can name them.
+        ssr_candidates = [
+            "src/services/ssrHead.ts",
+            "src/services/ssrRender.ts",
+            "src/services/ssr-head.ts",
+            "src/services/ssr-render.ts",
+            "src/ssr/head.ts",
+            "src/ssr/render.ts",
+            "src/server/ssr.ts",
+        ]
+        found_ssr = [c for c in ssr_candidates if (repo_path / c).is_file()]
+        if found_ssr:
+            ssr_list = "\n".join(f"     - {f}" for f in found_ssr)
+            ssr_section = f"""
+
+⚠️  SEO-CRITICAL DISPATCH — SSR MIRROR REQUIRED ⚠️
+Google and other crawlers see ONLY the server-side-rendered HTML, NOT
+the React-hydrated DOM. A change to <head> / meta / JSON-LD / canonical
+in a React component file is INVISIBLE to bots if it doesn't also
+appear in the SSR layer.
+
+This repo emits SSR head/body via:
+{ssr_list}
+
+For every rec in this batch:
+  • If the rec changes <title>, <meta>, <link rel=canonical>, JSON-LD
+    <script type="application/ld+json">, OpenGraph/Twitter tags, or
+    robots/sitemap fields — you MUST mirror that change in the SSR
+    file(s) above as well as in the React component.
+  • If you edit ONLY the React component and not the SSR layer, the
+    post-LLM check WILL detect the mismatch, ROLL BACK your commit, and
+    the rec will be re-dispatched (wasted ~10 min of LLM time).
+  • If you're unsure whether the rec affects SSR-visible markup, err
+    on the side of editing the SSR file too — the cost is tiny."""
+        # When no SSR files found, dispatch_kind=seo on a non-SSR repo
+        # is suspicious (probably mobile / static-site). Leave hint off.
+
     prompt = f"""You are the implementer agent running in aider fallback mode.
 Your job: apply the {len(recs)} recommendation(s) below to the repo at
 `{repo_path}` (your CWD). Each rec is concrete, scoped, and self-contained.
@@ -1186,7 +1247,7 @@ Rules:
      visible change. That has happened in past dispatches and the
      follow-up cleanup is more expensive than doing it right the first
      time.
-{pre_dirty_section}{stack_section}
+{pre_dirty_section}{stack_section}{ssr_section}
 
 Site: {site}
 Dispatch kind: {dispatch_kind}

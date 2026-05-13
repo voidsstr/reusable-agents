@@ -1,6 +1,6 @@
 // AI provider config: list, add, delete, set defaults, agent overrides.
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface Provider {
   name: string
@@ -20,6 +20,25 @@ interface Defaults {
   default_provider: string
   default_model: string
   agent_overrides: Record<string, { provider?: string; model?: string }>
+}
+
+interface PoolProfile {
+  id: string
+  home: string
+  authenticated: boolean
+  in_use: number
+  total_uses: number
+  last_used_at: string
+  label: string
+  state: 'ready' | 'rate-limited' | 'no-auth'
+  limit_resets_at: string
+  limit_last_message: string
+}
+
+interface PoolTestResult {
+  done: boolean
+  ok: boolean
+  output: string
 }
 
 const KINDS = ['azure_openai', 'anthropic', 'ollama', 'copilot', 'openai'] as const
@@ -42,6 +61,188 @@ async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   }
   if (r.status === 204) return undefined as T
   return r.json()
+}
+
+function relativeTime(iso: string): string {
+  if (!iso) return ''
+  try {
+    const diff = Date.now() - new Date(iso).getTime()
+    const s = Math.floor(diff / 1000)
+    if (s < 60) return `${s}s ago`
+    const m = Math.floor(s / 60)
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    if (h < 24) return `${h}h ago`
+    return `${Math.floor(h / 24)}d ago`
+  } catch { return '' }
+}
+
+type TestState = 'idle' | 'queued' | 'running' | 'done'
+
+function ClaudeMaxSection() {
+  const [profiles, setProfiles] = useState<PoolProfile[]>([])
+  const [poolError, setPoolError] = useState('')
+  const [testState, setTestState] = useState<Record<string, TestState>>({})
+  const [testResults, setTestResults] = useState<Record<string, PoolTestResult>>({})
+  const pollRefs = useRef<Record<string, ReturnType<typeof setInterval>>>({})
+
+  const loadProfiles = useCallback(async () => {
+    try {
+      setProfiles(await api<PoolProfile[]>('/api/providers/claude-pool/profiles'))
+      setPoolError('')
+    } catch (e) {
+      setPoolError(String(e))
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadProfiles()
+    const t = setInterval(loadProfiles, 15_000)
+    return () => clearInterval(t)
+  }, [loadProfiles])
+
+  const runTest = async (profileId: string) => {
+    setTestState(s => ({ ...s, [profileId]: 'queued' }))
+    setTestResults(r => { const n = { ...r }; delete n[profileId]; return n })
+    try {
+      const { job_id } = await api<{ job_id: string }>(
+        `/api/providers/claude-pool/test/${profileId}`, { method: 'POST' }
+      )
+      setTestState(s => ({ ...s, [profileId]: 'running' }))
+      const started = Date.now()
+      pollRefs.current[profileId] = setInterval(async () => {
+        try {
+          const result = await api<PoolTestResult>(
+            `/api/providers/claude-pool/test-result/${job_id}`
+          )
+          if (result.done || Date.now() - started > 90_000) {
+            clearInterval(pollRefs.current[profileId])
+            setTestState(s => ({ ...s, [profileId]: 'done' }))
+            setTestResults(r => ({ ...r, [profileId]: result }))
+          }
+        } catch { /* keep polling */ }
+      }, 2000)
+    } catch (e) {
+      setTestState(s => ({ ...s, [profileId]: 'done' }))
+      setTestResults(r => ({ ...r, [profileId]: { done: true, ok: false, output: String(e) } }))
+    }
+  }
+
+  const stateBadge = (state: PoolProfile['state']) => {
+    if (state === 'ready') return 'bg-status-success-bg text-status-success-fg'
+    if (state === 'rate-limited') return 'bg-status-failure-bg text-status-failure-fg'
+    return 'bg-surface-subtle text-ink-500'
+  }
+
+  if (poolError && profiles.length === 0) {
+    return (
+      <section className="bg-surface-card border border-surface-divider rounded p-4 space-y-2">
+        <h2 className="text-sm font-bold text-ink-900">Claude Max Accounts</h2>
+        <div className="text-xs text-ink-500 bg-surface-subtle px-3 py-2 rounded font-mono">
+          {poolError}
+        </div>
+      </section>
+    )
+  }
+
+  if (profiles.length === 0) return null
+
+  return (
+    <section className="bg-surface-card border border-surface-divider rounded p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-ink-900">Claude Max Accounts</h2>
+          <p className="text-[11px] text-ink-400 mt-0.5">
+            Round-robin pool for the <code className="font-mono">claude-cli</code> provider ·{' '}
+            {profiles.filter(p => p.state === 'ready').length} of {profiles.length} ready
+          </p>
+        </div>
+        <button
+          onClick={loadProfiles}
+          className="px-2 py-1 text-xs bg-surface-subtle hover:bg-ink-200 rounded"
+        >refresh</button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {profiles.map(p => {
+          const ts = testState[p.id] ?? 'idle'
+          const result = testResults[p.id]
+          const busy = ts === 'queued' || ts === 'running'
+          return (
+            <div
+              key={p.id}
+              className={`border rounded p-3 space-y-2 ${
+                p.state === 'ready'
+                  ? 'border-surface-divider bg-surface-subtle/40'
+                  : p.state === 'rate-limited'
+                  ? 'border-status-failure-glow/40 bg-status-failure-bg/30'
+                  : 'border-surface-divider bg-surface-subtle/20'
+              }`}
+            >
+              {/* Header row */}
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="font-mono text-xs font-semibold text-ink-900">{p.id}</span>
+                    {p.label && p.label !== p.id && (
+                      <span className="text-[10px] text-ink-400">{p.label}</span>
+                    )}
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${stateBadge(p.state)}`}>
+                      {p.state}
+                    </span>
+                    {p.in_use > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-status-running-bg text-status-running-fg">
+                        {p.in_use} in use
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-ink-500 mt-1 space-y-0.5 font-mono">
+                    <div>{p.total_uses.toLocaleString()} runs{p.last_used_at ? ` · ${relativeTime(p.last_used_at)}` : ''}</div>
+                    {p.state === 'rate-limited' && p.limit_resets_at && (
+                      <div className="text-status-failure-fg">
+                        resets {p.limit_resets_at.slice(0, 19).replace('T', ' ')}
+                      </div>
+                    )}
+                    {!p.authenticated && (
+                      <div className="text-ink-400 break-all leading-tight">
+                        HOME={p.home} claude /login
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <button
+                  onClick={() => runTest(p.id)}
+                  disabled={busy || !p.authenticated}
+                  className={`flex-shrink-0 px-2 py-1 text-xs rounded transition-colors ${
+                    busy
+                      ? 'bg-status-running-bg text-status-running-fg cursor-wait'
+                      : p.authenticated
+                      ? 'bg-surface-subtle hover:bg-status-running-bg hover:text-status-running-fg'
+                      : 'bg-surface-subtle text-ink-400 opacity-40 cursor-not-allowed'
+                  }`}
+                >
+                  {ts === 'queued' ? 'queued…' : ts === 'running' ? 'testing…' : 'test'}
+                </button>
+              </div>
+
+              {/* Test result */}
+              {result && (
+                <div className={`rounded px-2.5 py-2 text-[11px] font-mono whitespace-pre-wrap break-words leading-relaxed ${
+                  result.ok
+                    ? 'bg-status-success-bg text-status-success-fg'
+                    : 'bg-status-failure-bg text-status-failure-fg'
+                }`}>
+                  {result.done
+                    ? result.output || (result.ok ? 'OK' : 'failed — no output')
+                    : 'waiting for result…'}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
 }
 
 export default function Providers() {
@@ -96,6 +297,8 @@ export default function Providers() {
 
   return (
     <div className="space-y-4">
+      <ClaudeMaxSection />
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold">AI Providers</h1>

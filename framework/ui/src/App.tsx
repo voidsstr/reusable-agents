@@ -18,8 +18,10 @@ const Confirmations     = lazy(() => import('./pages/Confirmations'))
 const Events            = lazy(() => import('./pages/Events'))
 const ImplementerQueue  = lazy(() => import('./pages/ImplementerQueue'))
 const Providers         = lazy(() => import('./pages/Providers'))
+const AgentLLMs         = lazy(() => import('./pages/AgentLLMs'))
 const Graph             = lazy(() => import('./pages/Graph'))
 const Goals             = lazy(() => import('./pages/Goals'))
+const Runs              = lazy(() => import('./pages/Runs'))
 const Settings          = lazy(() => import('./pages/Settings'))
 
 type NavItem = { to: string; label: string; icon: string; mobile?: boolean }
@@ -27,10 +29,12 @@ type NavItem = { to: string; label: string; icon: string; mobile?: boolean }
 const NAV: NavItem[] = [
   { to: '/',                   label: 'Agents',        icon: '⚙', mobile: true },
   { to: '/goals',              label: 'Goals',         icon: '🎯', mobile: true },
+  { to: '/runs',               label: 'Runs',          icon: '⏵', mobile: true },
   { to: '/graph',              label: 'Graph',         icon: '◇' },
   { to: '/confirmations',      label: 'Inbox',         icon: '✉' },
   { to: '/implementer-queue',  label: 'Queue',         icon: '⚒', mobile: true },
   { to: '/providers',          label: 'AI',            icon: '🧠' },
+  { to: '/llms',               label: 'LLMs',          icon: '🤖' },
   { to: '/events',             label: 'Events',        icon: '⏱' },
   { to: '/settings',           label: 'Settings',      icon: '⚙' },
 ]
@@ -46,10 +50,12 @@ export default function App() {
           <Route path="/agents/:id"          element={<Suspense fallback={<RouteSpinner />}><AgentDetail /></Suspense>} />
           <Route path="/goals"               element={<Suspense fallback={<RouteSpinner />}><Goals /></Suspense>} />
           <Route path="/goals/:agentId"      element={<Suspense fallback={<RouteSpinner />}><Goals /></Suspense>} />
+          <Route path="/runs"                element={<Suspense fallback={<RouteSpinner />}><Runs /></Suspense>} />
           <Route path="/graph"               element={<Suspense fallback={<RouteSpinner />}><Graph /></Suspense>} />
           <Route path="/confirmations"       element={<Suspense fallback={<RouteSpinner />}><Confirmations /></Suspense>} />
           <Route path="/implementer-queue"   element={<Suspense fallback={<RouteSpinner />}><ImplementerQueue /></Suspense>} />
           <Route path="/providers"           element={<Suspense fallback={<RouteSpinner />}><Providers /></Suspense>} />
+          <Route path="/llms"                element={<Suspense fallback={<RouteSpinner />}><AgentLLMs /></Suspense>} />
           <Route path="/events"              element={<Suspense fallback={<RouteSpinner />}><Events /></Suspense>} />
           <Route path="/settings"            element={<Suspense fallback={<RouteSpinner />}><Settings /></Suspense>} />
         </Route>

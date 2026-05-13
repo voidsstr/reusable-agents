@@ -48,7 +48,7 @@ const CATEGORY_EMOJI: Record<string, string> = {
 interface Props {
   agent: AgentSummary
   status?: AgentLiveStatus | null
-  onTrigger?: (id: string) => void
+  onTrigger?: (id: string) => void | Promise<void>
   onToggleEnabled?: (a: AgentSummary) => void
 }
 
@@ -74,8 +74,9 @@ function useTickingNow(active: boolean): number {
 }
 
 export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }: Props) {
+  const [triggering, setTriggering] = useState(false)
   const liveState = status?.state ?? agent.last_run_status ?? ''
-  const isActive = liveState === 'running' || liveState === 'starting'
+  const isActive = liveState === 'running' || liveState === 'starting' || triggering
   const rgb = STATE_RGB[liveState] ?? STATE_RGB['']
   const pill = STATE_PILL[liveState] ?? STATE_PILL.idle
   const emoji = CATEGORY_EMOJI[agent.category] ?? CATEGORY_EMOJI.misc
@@ -179,20 +180,33 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
           return (
             <button
               type="button"
-              onClick={(e) => {
+              onClick={async (e) => {
                 // CRITICAL on mobile: stopPropagation alone isn't enough —
                 // the parent <Link> still follows its href on click. Without
                 // preventDefault the page navigates mid-request, aborting
                 // the trigger fetch and showing an error toast.
                 e.preventDefault()
                 e.stopPropagation()
-                onTrigger?.(agent.id)
+                if (triggering || isActive) return
+                setTriggering(true)
+                try {
+                  await onTrigger?.(agent.id)
+                } finally {
+                  // Hold the spinner for 2s past the await so users see the
+                  // intent register even on snappy responses.
+                  setTimeout(() => setTriggering(false), 2000)
+                }
               }}
               className="btn-primary flex-1 !py-2 sm:!py-1.5 !px-3 !text-[12px] sm:!text-[11px] !min-h-[36px]"
               disabled={isActive}
-              title={isActive ? 'A run is already in progress' : 'Trigger a run now'}
+              title={triggering ? 'Triggering…' : isActive ? 'A run is already in progress' : 'Trigger a run now'}
             >
-              ▶ run
+              {triggering ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden />
+                  <span>starting…</span>
+                </span>
+              ) : '▶ run'}
             </button>
           )
         })()}
@@ -216,17 +230,48 @@ export default function AgentCard({ agent, status, onTrigger, onToggleEnabled }:
 function AgentAIBadge({ agent }: { agent: AgentSummary }) {
   // Distinguish LLM-using agents from pure script/cron agents — the user
   // wants this at-a-glance: claude usage = bills against Max plan.
+  //
+  // Two-line display when relevant:
+  //   1. CONFIGURED — what `ai_client_for(agent_id)` resolves to RIGHT NOW
+  //      (storage config + manifest + defaults). Shown as the main badge.
+  //   2. LAST USED — what the agent ACTUALLY used in its most recent
+  //      ai_chat() call. Shown as a smaller sub-badge ONLY when it
+  //      differs from configured (i.e. fallback chain transitioned, or
+  //      smart-tier auto-switched). Hidden when last-used == configured
+  //      to avoid badge clutter.
   const usesClaude = agent.ai_uses_claude
   const provider = agent.ai_provider || ''
   const kind = agent.ai_kind || ''
   const model = agent.ai_model || ''
+  const lastProv = agent.ai_last_provider || ''
+  const lastModel = agent.ai_last_model || ''
+  const lastAt = agent.ai_last_called_at || ''
+  const driftedAway = !!lastProv && (lastProv !== provider || (lastModel && model && lastModel !== model))
+
+  // Sub-badge for fallback/auto-switch drift. Shown beneath the primary.
+  function DriftBadge() {
+    if (!driftedAway) return null
+    const ago = lastAt ? humanAgo(lastAt) : ''
+    return (
+      <div className="mt-0.5">
+        <span
+          className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded-md font-medium bg-blue-50 text-blue-700 ring-1 ring-blue-200"
+          title={`Last call used ${lastProv}${lastModel ? ' / ' + lastModel : ''}${ago ? ' — ' + ago + ' ago' : ''}`}
+        >
+          <span aria-hidden>↪</span>
+          last: {lastProv}{lastModel ? ' ' + lastModel : ''}
+          {ago && <span className="opacity-60 font-normal">{ago}</span>}
+        </span>
+      </div>
+    )
+  }
 
   if (usesClaude) {
     return (
       <div className="mb-2">
         <span
           className="inline-flex items-center gap-1.5 text-[10px] px-1.5 py-0.5 rounded-md font-medium bg-gradient-to-r from-amber-50 to-orange-50 text-amber-800 ring-1 ring-amber-200"
-          title={`Uses Claude via ${kind}${model ? ' (' + model + ')' : ''}`}
+          title={`Configured: Claude via ${kind}${model ? ' (' + model + ')' : ''}`}
         >
           <span aria-hidden>🧠</span>
           {kind === 'claude-cli' ? 'Claude (Max)' : 'Claude API'}
@@ -234,6 +279,7 @@ function AgentAIBadge({ agent }: { agent: AgentSummary }) {
             <span className="text-amber-600/70 font-normal">{model.replace('claude-', '').replace(/-/g, ' ')}</span>
           )}
         </span>
+        <DriftBadge />
       </div>
     )
   }
@@ -243,16 +289,26 @@ function AgentAIBadge({ agent }: { agent: AgentSummary }) {
       <div className="mb-2">
         <span
           className="inline-flex items-center gap-1.5 text-[10px] px-1.5 py-0.5 rounded-md font-medium bg-status-starting-bg text-status-starting-fg ring-1 ring-status-starting-glow/30"
-          title={`Uses ${kind}${model ? ' / ' + model : ''}`}
+          title={`Configured: ${kind}${model ? ' / ' + model : ''}`}
         >
           <span aria-hidden>🤖</span>
           {kind || provider}
           {model && <span className="opacity-70 font-normal">{model}</span>}
         </span>
+        <DriftBadge />
       </div>
     )
   }
-  // No LLM — pure script / cron job
+  // No LLM — pure script / cron job. If the agent surprisingly recorded
+  // a last-ai-call (script-only badge but agent did use LLM), show only
+  // the drift line so the truth is visible.
+  if (lastProv) {
+    return (
+      <div className="mb-2">
+        <DriftBadge />
+      </div>
+    )
+  }
   return (
     <div className="mb-2">
       <span
@@ -264,6 +320,23 @@ function AgentAIBadge({ agent }: { agent: AgentSummary }) {
       </span>
     </div>
   )
+}
+
+function humanAgo(iso: string): string {
+  try {
+    const ms = Date.now() - new Date(iso).getTime()
+    if (ms < 0) return ''
+    const s = Math.floor(ms / 1000)
+    if (s < 60) return `${s}s`
+    const m = Math.floor(s / 60)
+    if (m < 60) return `${m}m`
+    const h = Math.floor(m / 60)
+    if (h < 48) return `${h}h`
+    const d = Math.floor(h / 24)
+    return `${d}d`
+  } catch {
+    return ''
+  }
 }
 
 

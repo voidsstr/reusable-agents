@@ -33,10 +33,23 @@ def _snapshot_once(s) -> dict:
     except Exception as e:
         log.warning("snapshot_updater: registry.list_agents failed: %s", e)
         return out
-    for m in agents:
+
+    # Parallel reads — sequential was 50 agents × 200ms = 10s per loop, so
+    # the loop never finished within its 5s interval and the snapshot got
+    # progressively staler. 16 concurrent reads finishes in <1s.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _read_one(agent_id: str) -> tuple[str, dict]:
         try:
-            status = s.read_json(f"agents/{m.id}/status.json") or {}
-            out["agents"][m.id] = {
+            return agent_id, (s.read_json(f"agents/{agent_id}/status.json") or {})
+        except Exception as e:
+            log.debug("snapshot_updater: %s status read failed: %s", agent_id, e)
+            return agent_id, {}
+
+    ids = [m.id for m in agents]
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for aid, status in ex.map(_read_one, ids):
+            out["agents"][aid] = {
                 "state":           status.get("state", ""),
                 "message":         status.get("message", ""),
                 "progress":        status.get("progress", 0),
@@ -46,8 +59,6 @@ def _snapshot_once(s) -> dict:
                 "current_run_ts":  status.get("current_run_ts"),
                 "iteration_count": status.get("iteration_count", 0),
             }
-        except Exception as e:
-            log.warning("snapshot_updater: %s status read failed: %s", m.id, e)
     return out
 
 

@@ -52,6 +52,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RA_REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="${RA_REPO}:${PYTHONPATH:-}"
+# All cron-fired agents call the prod API for status/dispatch/messaging.
+# 2026-05-11: localhost dashboard removed; prod is the sole API plane.
+export FRAMEWORK_API_URL="${FRAMEWORK_API_URL:-https://agents.happysky-24190067.eastus.azurecontainerapps.io}"
 
 # Route any `claude` invocation through the pool when configured. The
 # init step writes a `claude` shim at $CLAUDE_POOL_ROOT/bin/ that picks
@@ -60,6 +63,19 @@ export PYTHONPATH="${RA_REPO}:${PYTHONPATH:-}"
 CLAUDE_POOL_ROOT="${CLAUDE_POOL_ROOT:-$HOME/.reusable-agents/claude-pool}"
 if [ "${CLAUDE_POOL:-1}" != "0" ] && [ -x "$CLAUDE_POOL_ROOT/bin/claude" ]; then
     export PATH="$CLAUDE_POOL_ROOT/bin:$PATH"
+fi
+
+# Per-profile SOCKS5 proxy egress: when claude-via-proxy is installed,
+# point CLAUDE_POOL_REAL_CLAUDE at it so the pool dispatches through the
+# proxy wrapper. The wrapper reads $CLAUDE_PROXY_FOR_PROFILE (set by the
+# pool's _run_one_dispatch) and looks up the per-profile SOCKS5 URL in
+# $CLAUDE_POOL_ROOT/proxies.conf, giving each profile its own egress IP.
+# Without proxies.conf the wrapper falls back to the legacy WARP socket
+# on :40000, then to direct. Disable per-call with IMPLEMENTER_USE_PROXY=0
+# (legacy name kept for back-compat) or AGENT_USE_PROXY=0.
+if [ "${AGENT_USE_PROXY:-${IMPLEMENTER_USE_PROXY:-1}}" != "0" ] \
+        && [ -x "$HOME/.local/bin/claude-via-proxy" ]; then
+    export CLAUDE_POOL_REAL_CLAUDE="$HOME/.local/bin/claude-via-proxy"
 fi
 
 # RUN_TS — agents that use the framework can override by exporting their

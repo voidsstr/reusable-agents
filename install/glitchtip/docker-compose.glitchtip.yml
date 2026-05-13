@@ -1,0 +1,85 @@
+# GlitchTip — Sentry-API-compatible error tracker.
+#
+# Why GlitchTip (vs full Sentry self-hosted):
+#   - 3 services (web, worker, postgres) vs Sentry's 23+
+#   - ~300-500 MB RAM idle vs Sentry's 4-8 GB
+#   - SAME @sentry/react-native SDK + DSN format
+#   - SAME REST API contract — crash-watcher-agent works unchanged
+#
+# Bring up:
+#   cd install/glitchtip
+#   cp .env.example .env   # edit GLITCHTIP_SECRET_KEY + default-org details
+#   docker compose -f docker-compose.glitchtip.yml up -d
+#
+# First-run setup:
+#   1. http://localhost:8095 → register the operator account
+#   2. Create org + project (kind: React Native)
+#   3. Copy the DSN → set as EAS secret SENTRY_DSN in mobile/
+#   4. Create an API token (User → Profile → Auth Tokens) with org:read,
+#      project:read, event:read, member:read scopes
+#   5. Set env on framework host:
+#        SENTRY_API_TOKEN=<token>
+#        SENTRY_ORG_SLUG=<org>
+#        SENTRY_PROJECT_SLUG=<proj>
+#        SENTRY_API_BASE=http://localhost:8095/api/0   # NB: overrides default sentry.io
+#   6. Enable the crash-watcher-agent timer.
+
+services:
+  glitchtip-postgres:
+    image: postgres:15
+    container_name: glitchtip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_DB_PASSWORD:-glitchtip}
+      POSTGRES_DB: glitchtip
+    volumes:
+      - glitchtip-pgdata:/var/lib/postgresql/data
+
+  glitchtip-redis:
+    image: redis:7-alpine
+    container_name: glitchtip-redis
+    restart: unless-stopped
+
+  glitchtip-web:
+    image: glitchtip/glitchtip:latest
+    container_name: glitchtip-web
+    restart: unless-stopped
+    depends_on:
+      - glitchtip-postgres
+      - glitchtip-redis
+    ports:
+      - "8095:8000"
+    environment: &gt-env
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD:-glitchtip}@glitchtip-postgres:5432/glitchtip
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:?set GLITCHTIP_SECRET_KEY in .env}
+      PORT: "8000"
+      EMAIL_URL: ${GLITCHTIP_EMAIL_URL:-consolemail://}
+      GLITCHTIP_DOMAIN: ${GLITCHTIP_DOMAIN:-http://localhost:8095}
+      DEFAULT_FROM_EMAIL: ${GLITCHTIP_FROM_EMAIL:-glitchtip@localhost}
+      CELERY_WORKER_AUTOSCALE: "1,3"
+      CELERY_WORKER_MAX_TASKS_PER_CHILD: "10000"
+      REDIS_URL: redis://glitchtip-redis:6379/0
+      ENABLE_OBSERVABILITY_API: "true"
+
+  glitchtip-worker:
+    image: glitchtip/glitchtip:latest
+    container_name: glitchtip-worker
+    restart: unless-stopped
+    depends_on:
+      - glitchtip-postgres
+      - glitchtip-redis
+    command: ./bin/run-celery-with-beat.sh
+    environment: *gt-env
+
+  glitchtip-migrate:
+    image: glitchtip/glitchtip:latest
+    container_name: glitchtip-migrate
+    depends_on:
+      - glitchtip-postgres
+    command: ./manage.py migrate
+    environment: *gt-env
+    restart: "no"
+
+volumes:
+  glitchtip-pgdata:

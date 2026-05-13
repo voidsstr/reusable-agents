@@ -82,10 +82,101 @@ _SEVERITY_MAP = {
 }
 
 
+# Per-criterion migration templates. The implementer (LLM or
+# deterministic substitution) uses these instead of re-deriving SQL
+# from the audit script — small, structured, low-context. {ids}
+# expands to the comma-joined ref_ids from rec.evidence.
+#
+# Template KEYS:
+#   table       — target table for the UPDATE
+#   action      — short human label
+#   sql         — SQL with {ids} placeholder. WHERE clauses MUST be
+#                 idempotent (e.g. include is_active=true) so re-runs
+#                 are safe.
+#   filename    — base name (no ts prefix) for the migration file
+_AISLEPROMPT_TEMPLATES: dict[str, dict] = {
+    "recipe-image-present": {
+        "table": "recipe_catalog",
+        "action": "deactivate recipes with no image — backfill regenerates if scrapers find one later",
+        "sql": (
+            "UPDATE recipe_catalog\n"
+            "SET is_active = false\n"
+            "WHERE is_active = true\n"
+            "  AND (image_url IS NULL OR image_url = '')\n"
+            "  AND id IN ({ids});"
+        ),
+        "filename": "catalog-audit-recipe-image-present",
+    },
+    "recipe-image-valid-url": {
+        "table": "recipe_catalog",
+        "action": "null broken image_url so backfill re-fetches",
+        "sql": (
+            "UPDATE recipe_catalog\n"
+            "SET image_url = NULL\n"
+            "WHERE id IN ({ids})\n"
+            "  AND is_active = true;"
+        ),
+        "filename": "catalog-audit-recipe-image-valid-url",
+    },
+    "recipe-nutrition-sanity": {
+        "table": "recipe_catalog",
+        "action": "null implausible nutrition so enrichment regenerates",
+        "sql": (
+            "UPDATE recipe_catalog\n"
+            "SET calories = NULL, protein = NULL, carbs = NULL, fat = NULL\n"
+            "WHERE id IN ({ids})\n"
+            "  AND is_active = true;"
+        ),
+        "filename": "catalog-audit-recipe-nutrition-sanity",
+    },
+    "recipe-duplicate-source-url": {
+        "table": "recipe_catalog",
+        "action": "deactivate duplicates pointing at non-recipe domains",
+        "sql": (
+            "UPDATE recipe_catalog\n"
+            "SET is_active = false\n"
+            "WHERE id IN ({ids})\n"
+            "  AND is_active = true;"
+        ),
+        "filename": "catalog-audit-recipe-duplicate-source-url",
+    },
+    "product-image-present": {
+        "table": "kitchen_products",
+        "action": "deactivate products with no image",
+        "sql": (
+            "UPDATE kitchen_products\n"
+            "SET is_active = false\n"
+            "WHERE is_active = true\n"
+            "  AND (primary_image_url IS NULL OR primary_image_url = '')\n"
+            "  AND id IN ({ids});"
+        ),
+        "filename": "catalog-audit-product-image-present",
+    },
+    "product-schema-rich-results": {
+        "table": "kitchen_products",
+        "action": "flag products missing structured-data fields for manual review",
+        "sql": (
+            "-- Manual review required; structured-data field inference\n"
+            "-- isn't safe to automate. Listed ids: {ids}\n"
+            "-- (no UPDATE — write a notes row in product_review_queue\n"
+            "--  if that table exists, otherwise leave as DEFERRED.)"
+        ),
+        "filename": "catalog-audit-product-schema-rich-results",
+    },
+}
+
+
 def _findings_to_recs_aisleprompt(findings_doc: dict, max_recs: int = 30) -> list[dict]:
-    """Convert aisleprompt catalog-quality-audit.ts output → recs."""
+    """Convert aisleprompt catalog-quality-audit.ts output → recs.
+
+    Recs include a `migration_template` field per criterion so the
+    implementer can produce SQL with deterministic substitution. Recs
+    with no usable sample are skipped — un-actionable, would just waste
+    LLM tokens.
+    """
     findings = findings_doc.get("findings", [])
     recs: list[dict] = []
+    skipped_no_sample = 0
     for f in findings:
         count = int(f.get("count", 0))
         if count == 0:
@@ -93,11 +184,30 @@ def _findings_to_recs_aisleprompt(findings_doc: dict, max_recs: int = 30) -> lis
         crit = f.get("criterionId", "unknown")
         sev = _SEVERITY_MAP.get(f.get("severity", "low"), "low")
         sample = f.get("sample", []) or []
+        ref_ids: list[str] = []
+        evidence: list[dict] = []
+        for s in sample[:5]:
+            if isinstance(s, dict) and s.get("id") not in (None, ""):
+                rid = str(s.get("id"))
+                ref_ids.append(rid)
+                evidence.append({
+                    "ref_id": rid,
+                    "snippet": (s.get("title") or s.get("detail") or "")[:160],
+                })
+
+        # Skip recs with no concrete row IDs — the implementer can't act
+        # on them and we don't want to flood the dispatch queue with
+        # un-actionable work. The audit will keep flagging them on the
+        # next run; if the script is updated to capture samples for the
+        # criterion, it'll start emitting actionable recs.
+        if not ref_ids:
+            skipped_no_sample += 1
+            continue
+
         # Heuristic confidence: high when the audit caught it directly,
         # lower when it's a sampled subset (image url checks).
         conf = 0.95 if "valid-url" not in crit else 0.85
 
-        # Goal mapping — derive from criterion id prefix
         goal_ids = []
         if "miscategor" in crit or "category-in-allow" in crit or "categor" in crit:
             goal_ids.append("goal-zero-miscategorized-products")
@@ -108,37 +218,77 @@ def _findings_to_recs_aisleprompt(findings_doc: dict, max_recs: int = 30) -> lis
         if "title" in crit or "instructions" in crit or "ingredients" in crit:
             goal_ids.append("goal-content-completeness")
 
-        # Concrete evidence: first 5 sample items with their ids + titles
-        evidence = []
-        for s in sample[:5]:
-            if isinstance(s, dict):
-                evidence.append({
-                    "ref_id": str(s.get("id", "")),
-                    "snippet": (s.get("title") or s.get("detail") or "")[:160],
-                })
-
         title = f"Fix {count} {crit.replace('-', ' ')} issue(s)"
-        recs.append({
+        rec = {
             "category": crit,
             "check_id": crit,
             "severity": sev,
             "confidence": conf,
             "tier": score_tier(confidence=conf, severity=sev, threshold=0.92),
             "title": title[:160],
-            "rationale": f"Catalog audit found {count} rows failing the '{crit}' criterion.",
+            "rationale": f"Catalog audit found {count} rows failing the '{crit}' criterion. Sample evidence (first 5): {', '.join(ref_ids)}.",
             "evidence": evidence,
-            "implementation_outline": {
-                "approach": (
-                    f"For each item flagged in the evidence list above (and any "
-                    f"others matching criterion '{crit}'), edit the catalog data "
-                    f"or the scraper to fix the underlying issue. See the "
-                    f"audit script in scripts/catalog-quality-audit.ts for the "
-                    f"exact SQL the criterion uses."
-                ),
-            },
+            # Also surface the comma-joined IDs at top level so a
+            # deterministic substituter doesn't have to walk the
+            # evidence list — and so an LLM sees the IDs upfront.
+            "ref_ids": ref_ids,
             "implemented": False,
             "goal_ids": goal_ids,
-        })
+        }
+        # Attach migration template when we know the criterion. The
+        # implementer prompt + deterministic path both read this.
+        tmpl = _AISLEPROMPT_TEMPLATES.get(crit)
+        if tmpl:
+            rec["migration_template"] = {
+                **tmpl,
+                "sql_with_ids": tmpl["sql"].replace("{ids}", ", ".join(ref_ids)),
+            }
+            rec["implementation_outline"] = {
+                "approach": (
+                    f"Apply migration_template.sql_with_ids "
+                    f"(criterion={crit}, table={tmpl['table']}, "
+                    f"action={tmpl['action']}). Write the SQL to "
+                    f"db/migrations/<UTC-ts>_{tmpl['filename']}.sql."
+                ),
+            }
+            # Going-forward: surface the public URL each affected row
+            # corresponds to so the dashboard can show "what got fixed"
+            # without making the user click through. Maps the table name
+            # to its canonical public URL pattern for AislePrompt:
+            #   recipe_catalog → /recipes/<id>
+            #   kitchen_products → /products/<id>
+            # If a future table doesn't have a public surface, leave
+            # affected_urls unset so the UI just shows the IDs.
+            URL_PATTERNS = {
+                "recipe_catalog": "https://aisleprompt.com/recipes/{id}",
+                "kitchen_products": "https://aisleprompt.com/products/{id}",
+            }
+            pat = URL_PATTERNS.get(tmpl["table"])
+            if pat:
+                rec["affected_urls"] = [pat.format(id=rid) for rid in ref_ids[:20]]
+        else:
+            rec["implementation_outline"] = {
+                "approach": (
+                    f"Unknown criterion '{crit}' — no template registered. "
+                    f"Read scripts/catalog-quality-audit.ts to understand "
+                    f"the check, then write a SQL migration that targets "
+                    f"the listed ref_ids. Default shape: deactivate via "
+                    f"`is_active=false` for content quality failures, or "
+                    f"NULL the offending column for backfill regeneration."
+                ),
+            }
+        recs.append(rec)
+    if skipped_no_sample:
+        # Logged so the operator can see how many criteria are being
+        # silently dropped because the audit script doesn't capture a
+        # sample for them. (Fix: update catalog-quality-audit.ts to
+        # populate `sample` for that criterion's check query.)
+        import sys as _sys
+        print(
+            f"[catalog-audit-recs] skipped {skipped_no_sample} criteria "
+            f"with empty sample (no actionable row IDs)",
+            file=_sys.stderr,
+        )
     return recs[:max_recs]
 
 
@@ -258,6 +408,41 @@ class CatalogAuditAgent(AgentBase):
                     f"site={self.cfg.site_id} run_dir={self.run_dir} "
                     f"agent_id={self.agent_id}",
                     evidence={"site": self.cfg.site_id})
+
+    def signals(self) -> dict | None:
+        """Short-circuit when the latest findings file is unchanged since
+        last run. The audit script writes a YYYY-MM-DD.json (or per-day
+        CSV); if its mtime + size match what we hashed last time, the
+        conversion + email work is identical."""
+        try:
+            audit = self.cfg.get("audit") or {}
+            fmt = audit.get("findings_format", "aisleprompt-catalog-audit")
+            if fmt == "aisleprompt-catalog-audit":
+                findings_dir = Path(audit.get("findings_path", ""))
+                if not findings_dir.is_dir():
+                    return None
+                files = sorted(findings_dir.glob("*.json"))
+                if not files:
+                    return None
+                latest = files[-1]
+                st = latest.stat()
+                return {"site": self.cfg.site_id, "fmt": fmt,
+                        "file": latest.name, "size": st.st_size, "mtime": int(st.st_mtime)}
+            elif fmt == "specpicks-image-csv":
+                csv_glob = audit.get("findings_glob", "")
+                if not csv_glob:
+                    return None
+                import glob as _glob
+                paths = sorted(_glob.glob(csv_glob))
+                if not paths:
+                    return None
+                latest = Path(paths[-1])
+                st = latest.stat()
+                return {"site": self.cfg.site_id, "fmt": fmt,
+                        "file": latest.name, "size": st.st_size, "mtime": int(st.st_mtime)}
+        except Exception:
+            return None
+        return None
 
     def run(self) -> RunResult:
         cfg = self.cfg
@@ -445,12 +630,17 @@ class CatalogAuditAgent(AgentBase):
         try:
             from framework.core import dispatch
             rec_ids = [r["id"] for r in recs if r.get("id")]
-            handle = dispatch.dispatch_now(
+            handle = dispatch.gated_dispatch_now(
+                cfg=self.cfg, agent=self,
                 agent_id=self.agent_id, run_dir=str(self.run_dir),
                 rec_ids=rec_ids, action="implement",
                 site=self.cfg.site_id, subject_tag="catalog-audit",
                 request_id=request_id,
             )
+            if handle is None:
+                # auto_implement=false → awaiting email approval
+                # (gated_dispatch_now already logged the decision)
+                return  # skip the rest of the dispatch block
             label = "auto-queue fallback" if handle.fell_back_to_queue else "direct dispatch"
             self.decide("action",
                         f"dispatched {len(rec_ids)} rec(s) to implementer via {label} "

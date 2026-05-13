@@ -58,6 +58,12 @@ class RunResult:
     metrics: dict = field(default_factory=dict)
     progress: float = 1.0
     error_text: str = ""
+    # True when the agent took a no-LLM short-circuit path (signals
+    # unchanged, time-gate not yet expired, etc.). Surfaced to the
+    # dashboard so a "skipped via short-circuit" run is distinguishable
+    # from a real success in the run history. Status remains "success"
+    # so downstream pipeline stages don't treat it as a failure.
+    short_circuited: bool = False
 
 
 def _now() -> str:
@@ -91,6 +97,12 @@ class AgentBase:
     # improvement, competitor research) should set this to False so
     # operators don't get duplicates.
     send_run_summary_email: bool = True
+
+    # When True (default), a failed run() automatically enqueues an
+    # `agent-doctor` run focused on this agent's incident. The doctor
+    # itself overrides this to False so it doesn't try to doctor itself.
+    # Other agents may set False if they're already self-healing.
+    auto_recovery_enabled: bool = True
 
     def __init__(
         self,
@@ -279,6 +291,63 @@ class AgentBase:
     def run(self) -> RunResult:
         """OVERRIDE THIS. The actual agent work."""
         raise NotImplementedError("subclasses must implement run()")
+
+    # ------------------------------------------------------------------
+    # Auto short-circuit hook. Override `signals()` to return a dict of
+    # whatever inputs your agent reads. If the hash matches the prior
+    # successful run, the framework returns a short-circuited RunResult
+    # WITHOUT calling `run()` at all — no LLM call, no API hits, nothing.
+    #
+    # Per CLAUDE.md: every cron-driven agent that *sometimes* has no new
+    # work MUST implement this. Default returns None → no short-circuit,
+    # preserves existing behavior for agents that haven't opted in yet.
+    # ------------------------------------------------------------------
+    SIGNALS_STATE_KEY = "_auto_signals_hash"
+
+    def signals(self) -> dict | None:
+        """Return a JSON-serializable dict of the agent's input snapshot,
+        or None to disable auto short-circuit (default). Override in
+        subclasses. Example:
+
+            def signals(self):
+                return {
+                    "queue_len": self.storage.list_prefix("queue/").__len__(),
+                    "last_event_ts": (self.storage.read_json("events.json") or {}).get("ts"),
+                }
+
+        Only include INPUTS your run actually reads — never include a
+        timestamp or "now". The hash must be stable across ticks when
+        nothing has changed.
+        """
+        return None
+
+    def _check_short_circuit(self) -> Optional[RunResult]:
+        """Framework calls this from run_once() before run(). Returns a
+        short-circuited RunResult if the agent's signals() hash matches
+        the prior run, else None."""
+        try:
+            sig = self.signals()
+        except Exception as e:
+            self.decisions.observe(
+                f"signals() raised — proceeding with full run: {type(e).__name__}: {e}",
+            )
+            return None
+        if sig is None:
+            return None
+        from framework.core.short_circuit import signal_hash, should_skip
+        h = signal_hash(sig)
+        if should_skip(self.state, self.SIGNALS_STATE_KEY, h):
+            next_state = dict(self.state)
+            next_state[self.SIGNALS_STATE_KEY] = h
+            return RunResult(
+                status="success",
+                summary="short-circuited: signals unchanged since last successful run",
+                next_state=next_state,
+                short_circuited=True,
+            )
+        # No skip — persist the new hash so next run can compare.
+        self.state[self.SIGNALS_STATE_KEY] = h
+        return None
 
     def post_run(self, result: RunResult) -> None:
         """Framework-provided: persist run artifacts, update state, status."""
@@ -541,7 +610,7 @@ class AgentBase:
         )
         sender = os.environ.get(
             "AGENT_SUMMARY_SENDER",
-            "automation@northernsoftwareconsulting.com",
+            os.environ.get("OPERATOR_FROM_EMAIL", ""),
         )
         try:
             from shared.site_quality import send_via_msmtp  # type: ignore
@@ -701,9 +770,16 @@ class AgentBase:
             self._start_heartbeat()
             self.pre_run()
             try:
-                result = self.run()
-                if result is None:
-                    result = RunResult(status="success", summary="run() returned None")
+                # Auto short-circuit: if the agent's declared signals
+                # hash matches its last successful run, skip run() entirely.
+                # Opt-in per agent via signals() override.
+                sc_result = self._check_short_circuit()
+                if sc_result is not None:
+                    result = sc_result
+                else:
+                    result = self.run()
+                    if result is None:
+                        result = RunResult(status="success", summary="run() returned None")
             except ConfirmationPending as e:
                 self.decisions.warn(
                     f"Awaiting confirmation: {e.confirmation_id}",
@@ -735,6 +811,64 @@ class AgentBase:
                 )
             self._ended_at = _now()
             self.post_run(result)
+            # Framework-level auto-recovery: any failure path enqueues a
+            # doctor run focused on this agent. The doctor itself opts out
+            # via class attribute, and dedupe in invoke_doctor protects
+            # against tight failure loops. `blocked` (waiting for
+            # confirmation) and `cancelled` (operator rejected) are not
+            # failures — leave them alone.
+            if (
+                result.status == "failure"
+                and getattr(self, "auto_recovery_enabled", True)
+                and self.agent_id != "agent-doctor"
+            ):
+                try:
+                    from .resilience import invoke_doctor
+                    # Recreate an exception-shaped object so the doctor can
+                    # classify by error class even when run() returned a
+                    # RunResult instead of raising. We use a generic class
+                    # name based on the agent's summary when no traceback
+                    # is available.
+                    err_text = result.error_text or ""
+                    summary = result.summary or "agent run failed"
+                    inferred_class = "AgentRunFailure"
+                    if err_text:
+                        # First line of traceback is usually
+                        # "Traceback (most recent call last):" — pull the
+                        # exception class from the last "ClassName: ..." line.
+                        for line in reversed(err_text.strip().splitlines()):
+                            line = line.strip()
+                            m = None
+                            if line and ":" in line and " " not in line.split(":")[0]:
+                                cls_candidate = line.split(":", 1)[0].strip()
+                                if cls_candidate.isidentifier():
+                                    inferred_class = cls_candidate
+                                    break
+                    err = type(inferred_class, (Exception,), {})(summary)
+                    queued, detail = invoke_doctor(
+                        failed_agent_id=self.agent_id,
+                        error=err,
+                        context={
+                            "phase": "agent-base.post_run",
+                            "run_ts": self.run_ts,
+                            "triggered_by": self.triggered_by,
+                            "summary_md_excerpt": (result.summary_md or "")[:1000],
+                            "error_text_excerpt": err_text[-2000:] if err_text else "",
+                        },
+                        run_id=self.run_ts,
+                        severity="high",
+                        triggered_by=f"agent-base:{self.agent_id}",
+                    )
+                    if queued:
+                        logger.info(
+                            f"[{self.agent_id}] auto-recovery: queued doctor run ({detail})"
+                        )
+                    else:
+                        logger.info(
+                            f"[{self.agent_id}] auto-recovery: doctor not queued ({detail})"
+                        )
+                except Exception as e:
+                    logger.warning(f"[{self.agent_id}] auto-recovery enqueue failed: {e}")
             return result
         finally:
             self._stop_heartbeat()
@@ -752,6 +886,134 @@ class AgentBase:
 
     def decide(self, category: str, message: str, **kw: Any) -> None:
         self.decisions.record(category=category, message=message, **kw)
+
+    # ---- AI helpers (resolves provider via per-agent override + manifest,
+    #      auto-falls back claude-cli → copilot → azure_openai → openai →
+    #      anthropic → ollama on rate-limit / timeout / 5xx). Use this
+    #      instead of calling ai_client_for() + .chat() directly so an
+    #      agent inherits fallback behavior without per-site wiring.) ----
+
+    def ai_chat(self, messages: list[dict], *,
+                 tools: Optional[list[dict]] = None,
+                 tool_runner: Optional[Any] = None,
+                 use_default_tools: bool = False,
+                 max_tool_iterations: int = 12,
+                 max_tokens: int = 2000,
+                 temperature: float = 0.0,
+                 record_decision: bool = True,
+                 **kwargs: Any) -> str:
+        """One-shot chat with provider fallback. Returns plain text.
+
+        - Pass `tools=` to drive an OpenAI-style tool loop on backends
+          that support it. claude-cli ignores it (has WebFetch/web_search
+          natively).
+        - `use_default_tools=True` is a shortcut: passes the framework's
+          built-in web_search + web_fetch tools and runner. Equivalent to
+          `tools=OPENAI_TOOL_SPECS, tool_runner=default_runner`.
+        - Returns ONLY the text. If you also need to know which provider
+          actually answered (e.g., for logs / results.json), call
+          `self.ai_chat_resolved(...)` instead.
+        - Re-raises non-fallback errors (auth, malformed prompt) so
+          they're not silently masked.
+        """
+        text, _ = self.ai_chat_resolved(
+            messages, tools=tools, tool_runner=tool_runner,
+            use_default_tools=use_default_tools,
+            max_tool_iterations=max_tool_iterations,
+            max_tokens=max_tokens, temperature=temperature,
+            record_decision=record_decision, **kwargs,
+        )
+        return text
+
+    def ai_chat_resolved(self, messages: list[dict], *,
+                          tools: Optional[list[dict]] = None,
+                          tool_runner: Optional[Any] = None,
+                          use_default_tools: bool = False,
+                          max_tool_iterations: int = 12,
+                          max_tokens: int = 2000,
+                          temperature: float = 0.0,
+                          record_decision: bool = True,
+                          **kwargs: Any) -> tuple[str, Any]:
+        """Same as ai_chat() but also returns the resolved AIClient so
+        the caller can record provider/model on its result artifacts."""
+        from . import ai_providers  # local import — avoids loading SDKs at boot
+        if use_default_tools and tools is None:
+            from . import tools as _tools_mod
+            tools = _tools_mod.OPENAI_TOOL_SPECS
+            if tool_runner is None:
+                tool_runner = _tools_mod.default_runner
+        text, used = ai_providers.chat_with_fallback(
+            self.agent_id, messages,
+            tools=tools, tool_runner=tool_runner,
+            max_tool_iterations=max_tool_iterations,
+            max_tokens=max_tokens, temperature=temperature,
+            storage=self.storage,
+            **kwargs,
+        )
+        # Record the actually-used provider/model on the agent's status
+        # sidecar so the dashboard cards can show LIVE info — not just
+        # the configured override. Catches:
+        #   - fallback chain transitions (e.g. claude → copilot when
+        #     claude is rate-limited mid-batch)
+        #   - smart-tier auto-switches (sonnet → opus → haiku in the
+        #     implementer)
+        #   - per-call model overrides via kwargs
+        # Best-effort write — never block a successful call on telemetry.
+        try:
+            self._record_ai_call(
+                provider_name=used.provider.name,
+                provider_kind=used.provider.kind,
+                model=used.model,
+                input_chars=sum(len(m.get("content", "")) for m in messages),
+                output_chars=len(text),
+            )
+        except Exception:
+            pass
+        if record_decision:
+            try:
+                self.decide(
+                    "ai_call",
+                    f"provider={used.provider.name} kind={used.provider.kind} "
+                    f"model={used.model} chars_in≈{sum(len(m.get('content','')) for m in messages)} "
+                    f"chars_out={len(text)}",
+                )
+            except Exception:
+                pass
+        return text, used
+
+    def _record_ai_call(self, *, provider_name: str, provider_kind: str,
+                         model: str, input_chars: int = 0,
+                         output_chars: int = 0) -> None:
+        """Persist the LAST AI call this agent made — provider+model+timestamp
+        — to `agents/<id>/state/last-ai-call.json`. The dashboard reads
+        this to render the live "last-used" badge on each agent card,
+        independent of the configured-override resolution.
+
+        The sidecar file (not status.json) is read separately by the
+        dashboard so it can be updated on EVERY ai_chat() call without
+        thrashing the status writer's throttling logic, AND so its
+        cache-control can be aggressive (the dashboard polls every few
+        seconds; a 1-second TTL keeps the badge live)."""
+        try:
+            from datetime import datetime, timezone
+            payload = {
+                "schema_version": "1",
+                "agent_id": self.agent_id,
+                "provider": provider_name,
+                "kind": provider_kind,
+                "model": model,
+                "input_chars": int(input_chars),
+                "output_chars": int(output_chars),
+                "called_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "run_ts": self.run_ts,
+            }
+            self.storage.write_json(
+                f"agents/{self.agent_id}/state/last-ai-call.json", payload,
+                cache_control="public, max-age=1",
+            )
+        except Exception:
+            # Sidecar is observability-only — never let it bubble up.
+            pass
 
     def find_context(self, since: Optional[str] = None,
                      limit_chars: int = 20000) -> str:
@@ -774,6 +1036,46 @@ class AgentBase:
 
     def mark_message_read(self, message_id: str) -> bool:
         return messaging.mark_read(self.agent_id, message_id, self.storage)
+
+    def queue_recs(self, *, site: str, rec_ids: list[str],
+                   subject_tag: str = "", action: str = "implement",
+                   source: str = "auto-queue") -> str:
+        """Write the responder auto-queue file so the implementer
+        dispatches these recs on its next tick. Returns request_id."""
+        from . import implementation_queue as _iq
+        return _iq.queue_recs(
+            source_agent=self.agent_id, site=site, run_ts=self.run_ts,
+            rec_ids=rec_ids, subject_tag=subject_tag, action=action,
+            source=source, storage=self.storage,
+        )
+
+    def queue_for_digest(self, *, subject: str, body_html: str,
+                         to: Optional[list[str]] = None,
+                         sender: str = "", site: str = "",
+                         extra_headers: Optional[dict] = None) -> str:
+        """Funnel an email-shaped artifact into the periodic digest
+        rollup instead of sending it directly. Returns storage key."""
+        from . import digest_queue as _dq
+        return _dq.queue(
+            agent=self.agent_id, subject=subject, body_html=body_html,
+            to=to, sender=sender, site=site,
+            extra_headers=extra_headers, storage=self.storage,
+        )
+
+    def record_outbound(self, *, request_id: str, subject: str,
+                        body_hash: str = "", body_excerpt: str = "",
+                        to: Optional[list[str]] = None,
+                        expects_response: bool = False) -> str:
+        """Record an outbound email so the dashboard's Confirmations
+        page can show it. Returns storage key."""
+        from . import outbound_email as _oe
+        return _oe.record(
+            agent_id=self.agent_id, run_ts=self.run_ts,
+            request_id=request_id, subject=subject,
+            body_hash=body_hash, body_excerpt=body_excerpt,
+            to=to, expects_response=expects_response,
+            storage=self.storage,
+        )
 
     def commit_and_release(self, *, files: list[str], message: str,
                            repo_dir: str, branch: str = "", push: bool = True) -> dict:

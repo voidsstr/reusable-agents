@@ -9,7 +9,7 @@
   "enabled": false,
   "runbook": "AGENT.md",
   "skill": "",
-  "entry_command": "bash run.sh",
+  "entry_command": "IMPLEMENTER_ALLOW_REC_TYPES=duplicate-content,content-error,incorrect-categorization,outdated-reference,content-gap,parity-feature,ux-improvement,top5-target-page PYTHONPATH=/home/voidsstr/development/reusable-agents python3 /home/voidsstr/development/reusable-agents/agents/implementer/agent.py",
   "routine_id": "",
   "trigger_url": "",
   "trigger_token_env": "",

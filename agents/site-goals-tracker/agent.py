@@ -52,7 +52,13 @@ sys.path.insert(0, str(REPO))
 from framework.core import metric_helper, goals as goals_mod
 
 
-REFRESH_SCRIPT = (REPO / "agents" / "seo-data-collector" / "refresh-token.py").resolve()
+# 2026-05-11: the legacy `seo-data-collector` agent was retired in
+# favor of `seo-opportunity-agent` (CLAUDE.md pipeline collapse). The
+# refresh-token.py moved to the new location. Use the canonical path.
+REFRESH_SCRIPT = (
+    REPO / "agents" / "seo-opportunity-agent"
+         / "lib" / "collector" / "refresh-token.py"
+).resolve()
 OAUTH_FILE = Path(os.path.expanduser("~/.reusable-agents/seo/.oauth.json"))
 
 
@@ -132,41 +138,54 @@ def collect_metrics(profile: dict) -> dict[str, float]:
     start_30d = (today.replace(day=1) if False else _days_ago(today, 30)).isoformat()
     end_today = today.isoformat()
 
-    # --- GSC: organic clicks + impressions (30d) ---
+    # Fetch the access token ONCE up front. If this fails, both GSC and
+    # GA4 calls below are short-circuited gracefully. Previously the
+    # token was minted inside the GSC try-block, which meant a
+    # refresh-token failure left `token` unbound for the GA4 block →
+    # UnboundLocalError reported as `cannot access local variable
+    # 'token' where it is not associated with a value`.
+    token = None
     try:
         token = get_access_token()
-        gsc_resp = gsc_query(token, profile["gsc_site_url"], {
-            "startDate": start_30d, "endDate": end_today,
-            "dimensions": [],  # totals only
-            "rowLimit": 1, "type": "web",
-        })
-        rows = gsc_resp.get("rows") or []
-        if rows:
-            metrics["goal-organic-clicks-30d"] = float(rows[0].get("clicks", 0))
-            metrics["goal-organic-impressions-30d"] = float(rows[0].get("impressions", 0))
-        else:
-            metrics["goal-organic-clicks-30d"] = 0
-            metrics["goal-organic-impressions-30d"] = 0
     except Exception as e:
-        err(f"  GSC totals failed: {e}")
+        err(f"  access-token mint failed (GSC + GA4 will be skipped): {e}")
+
+    # --- GSC: organic clicks + impressions (30d) ---
+    if token:
+        try:
+            gsc_resp = gsc_query(token, profile["gsc_site_url"], {
+                "startDate": start_30d, "endDate": end_today,
+                "dimensions": [],  # totals only
+                "rowLimit": 1, "type": "web",
+            })
+            rows = gsc_resp.get("rows") or []
+            if rows:
+                metrics["goal-organic-clicks-30d"] = float(rows[0].get("clicks", 0))
+                metrics["goal-organic-impressions-30d"] = float(rows[0].get("impressions", 0))
+            else:
+                metrics["goal-organic-clicks-30d"] = 0
+                metrics["goal-organic-impressions-30d"] = 0
+        except Exception as e:
+            err(f"  GSC totals failed: {e}")
 
     # --- GA4: conversion events (30d) ---
-    try:
-        ga_resp = ga4_run_report(token, profile["ga4_property_id"], {
-            "dateRanges": [{"startDate": start_30d, "endDate": end_today}],
-            "dimensions": [{"name": "eventName"}],
-            "metrics": [{"name": "eventCount"}],
-        })
-        events = {row["dimensionValues"][0]["value"]: int(row["metricValues"][0]["value"])
-                  for row in (ga_resp.get("rows") or [])}
-        total_conv = 0
-        for ev in profile.get("conversion_events", []):
-            n = events.get(ev, 0)
-            metrics[f"goal-{_slug(ev)}-30d"] = float(n)
-            total_conv += n
-        metrics["goal-total-conversions-30d"] = float(total_conv)
-    except Exception as e:
-        err(f"  GA4 conversions failed: {e}")
+    if token:
+        try:
+            ga_resp = ga4_run_report(token, profile["ga4_property_id"], {
+                "dateRanges": [{"startDate": start_30d, "endDate": end_today}],
+                "dimensions": [{"name": "eventName"}],
+                "metrics": [{"name": "eventCount"}],
+            })
+            events = {row["dimensionValues"][0]["value"]: int(row["metricValues"][0]["value"])
+                      for row in (ga_resp.get("rows") or [])}
+            total_conv = 0
+            for ev in profile.get("conversion_events", []):
+                n = events.get(ev, 0)
+                metrics[f"goal-{_slug(ev)}-30d"] = float(n)
+                total_conv += n
+            metrics["goal-total-conversions-30d"] = float(total_conv)
+        except Exception as e:
+            err(f"  GA4 conversions failed: {e}")
 
     # --- DB: total active pages ---
     db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
@@ -393,10 +412,12 @@ def _short_site(profile: dict) -> str:
 
 
 def _db_fallback(profile: dict) -> str:
-    # Fallback to known-good DSN for these two sites — same as in sites.json
-    if profile["host"] == "aisleprompt.com":
-        return "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require"
-    return "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require"
+    """No fallback DSN — credentials must be supplied via env var.
+    Returns empty string so the caller raises with a clear 'set
+    <SITE>_DATABASE_URL in .env' error. Profiles in sites.json
+    declare `db_dsn_env` to point at the env var per site.
+    """
+    return ""
 
 
 if __name__ == "__main__":

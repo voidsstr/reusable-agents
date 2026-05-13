@@ -165,7 +165,66 @@ def mark_seen(conn: imaplib.IMAP4_SSL, uid: bytes) -> None:
 # Reply parsing
 # ---------------------------------------------------------------------------
 
-_REC_PATTERN = re.compile(r"\brec-\d{3}\b")
+# Accepts rec-NNN (used by SEO / catalog-audit / PI / CR / h2h) AND
+# art-NNN (used by article-author, both sites). The article-author
+# producer emits ids like `art-001` through `art-008`; before adding
+# `art` here, the responder silently ignored every article-reply
+# because findall returned []. (Discovered 2026-05-12.)
+_REC_PATTERN = re.compile(r"\b(?:rec|art)-\d{3}\b")
+# Globally-unique rec uid form: r-<8 hex>
+_REC_UID_PATTERN = re.compile(r"\br-[0-9a-f]{8}\b")
+# Range syntax: rec-001 - rec-007 / to / thru / through (with various dashes)
+_REC_RANGE_RE = re.compile(
+    r"\brec-(\d{3})\s*(?:-|–|—|to|thru|through)\s*rec-(\d{3})\b",
+    re.IGNORECASE,
+)
+# Bare-number range: 1-7 / 1 to 7 — only safe to expand AFTER a verb
+_BARE_RANGE_RE = re.compile(
+    r"(?<!\brec-)(?<!\d)(\d{1,3})\s*(?:-|–|—|to|thru|through)\s*(?<!\brec-)(?<!\d)(\d{1,3})(?!\d)",
+    re.IGNORECASE,
+)
+# Bare comma/space list: digits 1-999 not embedded in rec-NNN or r-XXXXXXXX
+_BARE_LIST_RE = re.compile(r"(?<![a-f0-9-])(\d{1,3})(?![a-f0-9])")
+
+
+def _expand_rec_id_forms(line: str) -> str:
+    """Rewrite a line so all rec-id forms (range, bare-number, uid) are
+    spelled out as space-separated rec-NNN tokens that _REC_PATTERN
+    can find. Idempotent: lines that already have only rec-NNN tokens
+    pass through unchanged.
+
+    Bare-number expansion happens only when an action verb is present
+    at the start (else random "see 12 pages" tokens would explode into
+    rec-012). Caller has already stripped leading prefix/whitespace.
+    """
+    # Range form: rec-NNN-rec-MMM
+    def _range_sub(m):
+        a, b = int(m.group(1)), int(m.group(2))
+        if b < a or (b - a) > 200: return m.group(0)
+        return " ".join(f"rec-{i:03d}" for i in range(a, b + 1))
+    line = _REC_RANGE_RE.sub(_range_sub, line)
+
+    # Detect verb at start; if present, expand bare numbers in remainder
+    line_lower = line.lower()
+    verb = None
+    for v in ("implement", "skip", "merge", "modify"):
+        if line_lower.startswith(v) and (len(line) == len(v) or not line[len(v)].isalnum()):
+            verb = v; break
+    if not verb:
+        return line
+    # Operate on the post-verb portion only
+    head = line[:len(verb)]
+    rest = line[len(verb):]
+    def _bare_range_sub(m):
+        a, b = int(m.group(1)), int(m.group(2))
+        if b < a or (b - a) > 200 or a < 1 or b > 999: return m.group(0)
+        return " " + " ".join(f"rec-{i:03d}" for i in range(a, b + 1)) + " "
+    rest = _BARE_RANGE_RE.sub(_bare_range_sub, rest)
+    def _bare_list_sub(m):
+        n = int(m.group(1))
+        return f"rec-{n:03d}" if 1 <= n <= 999 else m.group(0)
+    rest = _BARE_LIST_RE.sub(_bare_list_sub, rest)
+    return head + rest
 _PREFIX_PATTERN = re.compile(r"^\s*\[(?P<agent>[a-z0-9-]+)(?::(?P<site>[a-z0-9-]+))?\]\s*", re.I)
 
 
@@ -269,7 +328,12 @@ def _strip_quoted_text(body: str) -> str:
 
 
 # Lines that are >50% non-alphanumeric / suspicious are HTML residue, not user text
-_HTML_RESIDUE_RE = re.compile(r'[<>{}=/\\]')
+# Catches lines that look like raw HTML/template residue rather than
+# operator prose. Dropped `/` from the original set (2026-05-12) — it
+# rejected legitimate operator replies containing URLs like
+# "/reviews/audigy-2-zs-..." in parentheticals. Keep angle-brackets,
+# braces, equals, backslash as HTML-specific signals.
+_HTML_RESIDUE_RE = re.compile(r'[<>{}=\\]')
 
 
 _BULK_FILTERS = ("all", "auto", "review", "experimental",
@@ -298,50 +362,88 @@ def parse_actions(body: str, default_action: str = "implement") -> list[dict]:
     The body must already have quoted-reply content stripped; lines that
     smell like HTML residue (`<`, `>`, `{`, `=`, etc.) are rejected.
     """
+    # 2026-05-12 — Natural-prose splitter. Original parser required the
+    # verb to be at the start of a NEW LINE, which missed multi-intent
+    # replies written as natural sentences:
+    #
+    #   "Hey — implement art-001 art-003. Skip art-005. Defer the rest."
+    #     → 0 actions parsed (verb "implement" not at line start due to
+    #       leading "Hey —"; "Skip" mid-sentence is never seen)
+    #
+    # Pre-split each line on sentence-ending punctuation (period, !, ?, ;)
+    # so each verb gets its own phrase. We also break on leading filler
+    # like "Hey —" by splitting on em-dash + space at the start of a line.
+    _PHRASE_SPLIT_RE = re.compile(r'(?<=[.!?;])\s+|\s+—\s+|^[^—]*—\s+')
+
+    def _explode_line(raw_line: str) -> list[str]:
+        # Strip leading "Hey —" / "FYI —" framing first.
+        stripped = re.sub(r'^[^\n—]*—\s+', '', raw_line.strip())
+        # Then split on sentence-end punctuation. Keep the phrase intact —
+        # the existing per-line logic below handles verb detection on each.
+        parts = re.split(r'(?<=[.!?;])\s+', stripped)
+        return [p.strip().rstrip('.!?;,') for p in parts if p.strip()]
+
     actions: list[dict] = []
     for raw_line in body.splitlines():
-        line = raw_line.strip()
-        if not line:
+        line_phrases = _explode_line(raw_line)
+        if not line_phrases:
             continue
-        # Reject lines that smell like HTML residue
-        if _HTML_RESIDUE_RE.search(line):
-            continue
-        agent_prefix = None
-        site_prefix = None
-        m = _PREFIX_PATTERN.match(line)
-        if m:
-            agent_prefix = m.group("agent")
-            site_prefix = m.group("site")
-            line = line[m.end():].strip()
-        # Determine action verb
-        verb = default_action
-        line_lower = line.lower()
-        for cmd in ("implement", "skip", "merge", "modify"):
-            if line_lower.startswith(cmd) and (
-                len(line) == len(cmd) or not line[len(cmd)].isalnum()
-            ):
-                verb = cmd
-                line = line[len(cmd):].strip()
-                break
-        rec_ids = _REC_PATTERN.findall(line)
-        # Look for bulk-filter keywords on the same line.
-        # Only meaningful for implement/skip — modify/merge need explicit ids.
-        line_lower = line.lower()
-        filters: list[str] = []
-        if verb in ("implement", "skip"):
-            for kw in _BULK_FILTERS:
-                if re.search(rf"\b{kw}\b", line_lower):
-                    filters.append(kw)
-        if not rec_ids and not filters:
-            continue
-        actions.append({
-            "action": verb,
-            "rec_ids": rec_ids,
-            "filters": filters,
-            "prefix_agent": agent_prefix,
-            "prefix_site": site_prefix,
-            "raw_line": raw_line.strip(),
-        })
+        for raw_line_inner in line_phrases:
+            line = raw_line_inner
+            if not line:
+                continue
+            # Reject lines that smell like HTML residue
+            if _HTML_RESIDUE_RE.search(line):
+                continue
+            agent_prefix = None
+            site_prefix = None
+            m = _PREFIX_PATTERN.match(line)
+            if m:
+                agent_prefix = m.group("agent")
+                site_prefix = m.group("site")
+                line = line[m.end():].strip()
+            # Expand all rec-id forms (range, bare-number, uid) BEFORE
+            # extracting verb + ids. _expand_rec_id_forms operates on the
+            # full line so it can detect the leading verb and only expand
+            # bare numbers in that scoped context.
+            line = _expand_rec_id_forms(line)
+            # Determine action verb
+            verb = default_action
+            line_lower = line.lower()
+            for cmd in ("implement", "skip", "merge", "modify"):
+                if line_lower.startswith(cmd) and (
+                    len(line) == len(cmd) or not line[len(cmd)].isalnum()
+                ):
+                    verb = cmd
+                    line = line[len(cmd):].strip()
+                    break
+            rec_ids = _REC_PATTERN.findall(line)
+            # Also collect any rec-uid (r-XXXXXXXX) tokens — they get
+            # resolved to canonical rec-NNN ids downstream by the
+            # dispatcher (responder doesn't have rec metadata in scope here).
+            uid_matches = _REC_UID_PATTERN.findall(line)
+            # Append uids verbatim — apply_user_responses / dispatcher will
+            # translate them via the source recommendations.json's rec_uid
+            # field. Downstream code accepts both forms.
+            rec_ids = rec_ids + [u for u in uid_matches if u not in rec_ids]
+            # Look for bulk-filter keywords on the same line.
+            # Only meaningful for implement/skip — modify/merge need explicit ids.
+            line_lower = line.lower()
+            filters: list[str] = []
+            if verb in ("implement", "skip"):
+                for kw in _BULK_FILTERS:
+                    if re.search(rf"\b{kw}\b", line_lower):
+                        filters.append(kw)
+            if not rec_ids and not filters:
+                continue
+            actions.append({
+                "action": verb,
+                "rec_ids": rec_ids,
+                "filters": filters,
+                "prefix_agent": agent_prefix,
+                "prefix_site": site_prefix,
+                "raw_line": raw_line.strip(),
+            })
     return actions
 
 
@@ -1447,14 +1549,25 @@ def tick(cfg: dict, state: dict) -> dict:
     # Drain ANY auto-queue items that producers wrote as a fallback when
     # their direct dispatch failed. As of 2026-05-04 producer agents call
     # framework.core.dispatch.dispatch_now() at end-of-run instead of
-    # writing here — this drain is now strictly a safety net for the
-    # transitional period while we verify direct dispatch is reliable.
-    # Slated for removal in a future cleanup once the auto-queue dir
-    # stays empty for a couple of weeks.
-    try:
-        drain_auto_queue(cfg)
-    except Exception as e:
-        print(f"[responder] auto-queue drain failed (non-fatal): {e}", file=sys.stderr)
+    # writing here. The drain is now opt-in via RESPONDER_DRAIN_AUTO_QUEUE=1
+    # (or `responder.drain_auto_queue=true` in site cfg) — used only when
+    # an operator wants to flush stuck items. Default is OFF: producer
+    # agents call dispatch_now() directly and the auto-queue is solely a
+    # fallback target on transient dispatch failure.
+    drain_opt_in = (
+        os.environ.get("RESPONDER_DRAIN_AUTO_QUEUE") == "1"
+        or bool(((cfg.get("responder") or {}).get("drain_auto_queue")))
+    )
+    if drain_opt_in:
+        try:
+            drain_auto_queue(cfg)
+        except Exception as e:
+            print(f"[responder] auto-queue drain failed (non-fatal): {e}",
+                  file=sys.stderr)
+    else:
+        print("[responder] auto-queue drain skipped — responder is "
+              "email-only (set RESPONDER_DRAIN_AUTO_QUEUE=1 to override)",
+              file=sys.stderr)
 
     # Lazy import to avoid pulling resilience into anything that imports
     # this module just for parse_actions / regex helpers.

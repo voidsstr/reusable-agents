@@ -26,7 +26,7 @@ from framework.core.guardrails import declare  # noqa: E402
 
 AGENT_ID = "digest-rollup-agent"
 WINDOW_HOURS = 3
-OWNER = "mperry@northernsoftwareconsulting.com"
+OWNER = os.environ.get("OPERATOR_EMAIL", "")
 
 
 def _now() -> datetime:
@@ -92,9 +92,17 @@ def _drain_digest_queue(s, cutoff: datetime) -> tuple[list[dict], list[str]]:
 
 def _recent_shipped(s, cutoff: datetime) -> list[dict]:
     """Walk every recommendations.json across all agents; return rec
-    items where shipped_at OR implemented_at falls in the window."""
+    items where shipped_at OR implemented_at falls in the window.
+
+    Dedups by (agent, rec_id) — NOT (agent, rec_id, run_ts) — because the
+    same rec persists across multiple run snapshots once shipped (each
+    snapshot's recommendations.json keeps the rec with shipped=True). The
+    older (agent, rid, run_ts) key inflated counts ~10× when many runs
+    happened in the digest window. Always keeps the snapshot with the
+    most-recent shipped_at/implemented_at."""
     out: list[dict] = []
-    seen: set[tuple] = set()
+    seen: dict[tuple, datetime] = {}  # (agent, rid) → best_ts seen
+    accepted: dict[tuple, dict] = {}  # (agent, rid) → row to emit
     for k in s.list_prefix("agents/"):
         if not k.endswith("/recommendations.json"):
             continue
@@ -118,11 +126,12 @@ def _recent_shipped(s, cutoff: datetime) -> list[dict]:
             best = max((t for t in (ship_ts, impl_ts) if t), default=None)
             if best is None or best < cutoff:
                 continue
-            key = (agent, rid, run_ts)
-            if key in seen:
+            key = (agent, rid)
+            prior_ts = seen.get(key)
+            if prior_ts is not None and prior_ts >= best:
                 continue
-            seen.add(key)
-            out.append({
+            seen[key] = best
+            accepted[key] = {
                 "agent": agent,
                 "site": _agent_site(agent),
                 "run_ts": run_ts,
@@ -135,7 +144,8 @@ def _recent_shipped(s, cutoff: datetime) -> list[dict]:
                 "implemented_at": r.get("implemented_at") or "",
                 "public_url": r.get("public_url") or "",
                 "skipped": bool(r.get("skipped")),
-            })
+            }
+    out = list(accepted.values())
     return out
 
 
@@ -830,7 +840,8 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
                  queued: list[dict], runs: list[dict], failed_runs: list[dict],
                  escalations: list[dict], suppressed_count: int,
                  seo_metrics: list[dict] | None = None,
-                 handoff_metrics: dict | None = None) -> str:
+                 handoff_metrics: dict | None = None,
+                 suppressed_entries: list[dict] | None = None) -> str:
     now = _now()
     by_site_shipped: dict[str, list[dict]] = defaultdict(list)
     for r in shipped:
@@ -1027,12 +1038,38 @@ def _render_html(*, window_hours: int, shipped: list[dict], implemented_only: li
             f'margin-top:8px">{"".join(run_rows)}</table></details>'
         )
 
+    # ── Per-run SEO reports (inlined from digest-queue) ────────────
+    seo_entries = [
+        e for e in (suppressed_entries or [])
+        if (e.get("agent") or "") == "seo-reporter" and e.get("body_html")
+    ]
+    if seo_entries:
+        parts.append(
+            f'<h2 style="font-size:16px;color:{_INK_700};margin:28px 0 12px">'
+            f'SEO reports — {len(seo_entries)} run'
+            f'{"s" if len(seo_entries) != 1 else ""} this window</h2>'
+        )
+        for e in seo_entries:
+            site = (e.get("extra_headers") or {}).get("X-Reusable-Agent-Site", "")
+            subj = (e.get("subject") or "")[:140]
+            ts = (e.get("ts") or "")[:19]
+            label = f'{site} · {ts}' if site else ts
+            parts.append(
+                f'<details style="margin:8px 0;border:1px solid {_INK_200};'
+                f'border-radius:6px;padding:8px 12px"><summary style="cursor:pointer;'
+                f'font-size:13px;color:{_INK_700}">'
+                f'<b>{label}</b> — {subj}</summary>'
+                f'<div style="margin-top:10px;padding-top:10px;border-top:1px solid {_INK_200}">'
+                f'{e.get("body_html","")}</div></details>'
+            )
+
     # ── Suppressed individual emails ───────────────────────────────
-    if suppressed_count > 0:
+    other_suppressed = max(0, suppressed_count - len(seo_entries))
+    if other_suppressed > 0:
         parts.append(
             f'<p style="font-size:11px;color:{_INK_400};margin-top:24px">'
-            f'<i>{suppressed_count} individual agent email'
-            f'{"s" if suppressed_count != 1 else ""} '
+            f'<i>{other_suppressed} other individual agent email'
+            f'{"s" if other_suppressed != 1 else ""} '
             f'were suppressed in this window and rolled into this digest. '
             f'Set DIGEST_ONLY=0 in the agent host environment to re-enable individual emails.</i>'
             f'</p>'
@@ -1088,6 +1125,17 @@ class DigestRollupAgent(AgentBase):
                 "Delete digest-queue entries older than the rollup window",
                 confirmation_required=False, risk_level="low"),
     ]
+
+    def signals(self) -> dict | None:
+        """Short-circuit when no new digest-queue entries since last run.
+        The rollup is purely a function of digest-queue/* — if no agent
+        has appended anything new, our summary would be identical."""
+        try:
+            keys = self.storage.list_prefix("digest-queue/") or []
+        except Exception:
+            return None
+        # Hash just the filenames (which embed ts + content hash).
+        return {"queue_keys": sorted(keys)}
 
     def run(self) -> RunResult:
         now = _now()
@@ -1156,6 +1204,7 @@ class DigestRollupAgent(AgentBase):
             suppressed_count=len(suppressed),
             seo_metrics=seo_metrics,
             handoff_metrics=handoff_metrics,
+            suppressed_entries=suppressed,
         )
         queued_recs = sum(q["rec_count"] for q in queued)
         subject_parts = [f"{len(shipped)} shipped"]
@@ -1186,7 +1235,7 @@ class DigestRollupAgent(AgentBase):
             ok, detail = send_via_msmtp(
                 subject=subject, body_html=body_html,
                 to=[OWNER],
-                sender=f"NSC Agent Digest <automation@northernsoftwareconsulting.com>",
+                sender=os.environ.get("OPERATOR_FROM_EMAIL", ""),
                 msmtp_account="automation",
                 extra_headers={"X-Reusable-Agent": AGENT_ID},
                 bypass_digest=True,  # critical — we ARE the digest

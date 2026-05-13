@@ -116,3 +116,35 @@ for agent_id in ("aisleprompt-seo-opportunity-agent",
     print(f"  ✓ flipped {flipped} shipped flags from successful deploys")
 
 print("\nbackfill complete")
+
+
+# ── 3. DB-only dispatches: impl == shipped ────────────────────────
+# Catalog-audit + h2h dispatches don't go through docker build. Once
+# the implementer marks impl=true the change is live (DB INSERT/UPDATE).
+# Promote impl→shipped for these so they don't sit forever in the
+# "implemented, not shipped" bucket waiting for a deploy that doesn't
+# apply.
+import sys as _sys
+print()
+for agent_id in ("aisleprompt-catalog-audit-agent",
+                 "specpicks-catalog-audit-agent"):
+    print(f"=== {agent_id}: db-only — promoting impl→shipped ===", flush=True)
+    keys = s.list_prefix(f"agents/{agent_id}/runs/")
+    recs_keys = [k for k in keys if k.endswith("/recommendations.json")]
+    flipped = 0
+    for rk in recs_keys:
+        rd = s.read_json(rk)
+        if not isinstance(rd, dict): continue
+        recs = rd.get("recommendations") or []
+        changed = False
+        for r in recs:
+            if r.get("implemented") and not r.get("shipped"):
+                r["shipped"] = True
+                r["shipped_at"] = r.get("implemented_at") or r.get("shipped_at", "")
+                r["shipped_via"] = "db-only-dispatch"
+                changed = True
+                flipped += 1
+        if changed:
+            rd["recommendations"] = recs
+            s.write_json(rk, rd)
+    print(f"  ✓ flipped {flipped} flags ({agent_id})", flush=True)

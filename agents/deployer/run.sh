@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
-# Thin wrapper so callers (seo-implementer, dashboard, cron) can invoke
-# the deployer with a consistent interface.
+# Compat shim — production callers (implementer/run.sh) still invoke
+# this path. Forwards to the AgentBase entrypoint. Delete once every
+# caller has been migrated to call agent.py directly.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-exec python3 "$SCRIPT_DIR/deployer.py" "$@"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Honor --run-dir <path> by exporting RESPONDER_RUN_DIR (the env var
+# agent.py reads). Strip the flag from $@.
+RUN_DIR=""
+NEW_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --run-dir)
+            RUN_DIR="$2"; shift 2 ;;
+        --run-dir=*)
+            RUN_DIR="${1#*=}"; shift ;;
+        *)
+            NEW_ARGS+=("$1"); shift ;;
+    esac
+done
+if [ -n "$RUN_DIR" ]; then
+    export RESPONDER_RUN_DIR="$RUN_DIR"
+fi
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 "$SCRIPT_DIR/agent.py" "${NEW_ARGS[@]:-}"

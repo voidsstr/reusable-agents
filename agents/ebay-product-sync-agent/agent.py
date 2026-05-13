@@ -56,6 +56,9 @@ from framework.core.confirmations import (                            # noqa: E4
     write_confirmation,
 )
 from framework.core.email_codes import new_request_id, encode_subject # noqa: E402
+from framework.core.llm_json import (                                 # noqa: E402
+    extract_json_array, extract_json_object,
+)
 from framework.core.mailer import LogMailer                           # noqa: E402
 from framework.core.storage import get_storage                        # noqa: E402
 
@@ -239,7 +242,7 @@ def _format_samples(rows: list[dict]) -> str:
 
 
 def propose_mapping_via_claude(
-    ai,
+    chat_fn,
     products_columns: list[ColumnInfo],
     products_samples: list[dict],
     listings_columns: list[ColumnInfo],
@@ -252,6 +255,10 @@ def propose_mapping_via_claude(
     db_kind: str = "postgres",
     category_slugs: Optional[list[str]] = None,
 ) -> dict:
+    # `chat_fn` is a callable: (messages, **kwargs) -> str. Pass
+    # `self.ai_chat` so this function inherits the framework's
+    # claude→copilot→azure_openai fallback chain. (Was an AIClient
+    # instance pre-fallback; refactor preserves the call shape.)
     """Build the prompt + call Claude + parse JSON. Returns the v2 mapping doc.
     Raises on parse failure."""
     item_text = json.dumps(sample_ebay_item, indent=2, default=str)
@@ -287,24 +294,22 @@ include an idiomatic CREATE TABLE statement in `create_ddl` for that
 section. If the table already exists for that section, set
 `create_ddl: null` and only fill columns that exist."""
 
-    raw = ai.chat(
+    raw = chat_fn(
         [{"role": "system", "content": MAPPING_SYS},
          {"role": "user", "content": user_prompt}],
-        model="claude-sonnet-4-6",
         max_tokens=10000,
+        # claude-cli-only kwargs — OpenAI-shape clients ignore them:
         max_turns=4,
         timeout=600,
     )
-    s = raw.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[1] if "\n" in s else s[3:]
-        if s.endswith("```"):
-            s = s.rsplit("```", 1)[0]
-    i = s.find("{")
-    j = s.rfind("}")
-    if i < 0 or j <= i:
-        raise RuntimeError(f"Claude did not return a JSON object. Got: {s[:300]!r}")
-    return json.loads(s[i:j+1])
+    # Use raw_decode-based extractor — tolerates fenced blocks, prose
+    # preface/suffix, and trailing footnote-style references like [1].
+    # The old find('{')/rfind('}') approach broke when the model
+    # appended commentary containing `}` or `]`.
+    try:
+        return extract_json_object(raw)
+    except ValueError as e:
+        raise RuntimeError(f"Claude did not return a JSON object: {e}; got: {raw[:300]!r}")
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -514,16 +519,31 @@ def _products_lacking_listings(
             # products has `title` (not `name`); category_slug doesn't exist
             # — categories live in a sibling table joined via category_id FK.
             # Fall through cleanly on errors so the upsert path still works.
+            # Bias ordering: products whose most-recently-deactivated
+            # listing went inactive *recently* bubble to the top. Newly
+            # emptied products (audit just killed their last live listing)
+            # get backfilled in the same run instead of waiting for the
+            # round-robin to circle back around. NULLS LAST so products
+            # that have NEVER had a listing fall to the back — those are
+            # likely stale catalog rows we'll handle as remaining slots
+            # allow.
             cur.execute(f"""
-                SELECT p.id, p.title, COALESCE(c.slug, '') AS category_slug
+                SELECT p.id, p.title, COALESCE(c.slug, '') AS category_slug,
+                       last_seen_listing.last_updated
                   FROM {products_table} p
                   LEFT JOIN categories c ON c.id = p.category_id
+                  LEFT JOIN LATERAL (
+                      SELECT MAX(updated_at) AS last_updated
+                        FROM {listings_table} l
+                       WHERE l.{fk_col} = p.id
+                  ) last_seen_listing ON true
                  WHERE NOT EXISTS (
                      SELECT 1 FROM {listings_table} l
                       WHERE l.{fk_col} = p.id
                         AND l.is_active = true
                  )
-                 ORDER BY p.id
+                 ORDER BY last_seen_listing.last_updated DESC NULLS LAST,
+                          p.id
                  LIMIT %s
             """, (limit,))
             rows = cur.fetchall()
@@ -539,12 +559,18 @@ def _products_lacking_listings(
                 SELECT TOP (?) p.id, p.title, COALESCE(c.slug, '') AS category_slug
                   FROM {products_table} p
                   LEFT JOIN categories c ON c.id = p.category_id
+                  OUTER APPLY (
+                      SELECT MAX(updated_at) AS last_updated
+                        FROM {listings_table} l
+                       WHERE l.{fk_col} = p.id
+                  ) last_seen_listing
                  WHERE NOT EXISTS (
                      SELECT 1 FROM {listings_table} l
                       WHERE l.{fk_col} = p.id
                         AND l.is_active = 1
                  )
-                 ORDER BY p.id
+                 ORDER BY last_seen_listing.last_updated DESC,
+                          p.id
             """, (limit,))
             rows = cur.fetchall()
             cur.close()
@@ -595,6 +621,127 @@ def _ensure_item_end_date_column(adapter: DbAdapter, table: str) -> None:
             cur.close()
     except Exception as e:
         log.warning("ensure item_end_date column on %s failed: %s", table, e)
+
+
+def _audit_active_listings(adapter: DbAdapter, table: str, ebay,
+                            *, max_audit: int, fk_col: str) -> dict:
+    """Verify a slice of currently-active listings are still live on eBay
+    by hitting Browse API getItem. Mark any 404'd ones inactive so the
+    same run's backfill phase finds fresh replacements for the affected
+    products.
+
+    Why limit per run: getItem is ~1 request per listing. Default daily
+    quota is generous (5000/day on the basic Browse plan), but every
+    audit call competes with the search() calls used to discover new
+    listings. Default `max_audit=200/run × 24 runs/day = 4800` leaves
+    headroom. Tune via `audit_max_per_run` in site.yaml.
+
+    Selection: oldest `updated_at` first among `is_active=true` rows.
+    Listings that were just refreshed by the search phase get pushed
+    to the back of the line — no point re-verifying something we just
+    saw in a fresh search response.
+
+    Returns {checked, ended, errors}.
+    """
+    if max_audit <= 0:
+        return {"checked": 0, "ended": 0, "errors": 0}
+    if hasattr(adapter, "ensure_open"):
+        try: adapter.ensure_open()
+        except Exception: pass
+
+    # Pick which listings to verify: active, not just-refreshed.
+    rows: list[tuple] = []
+    try:
+        if adapter.kind == "postgres":
+            cur = adapter.conn.cursor()
+            cur.execute(f"""
+                SELECT ebay_item_id, {fk_col}, updated_at
+                  FROM {table}
+                 WHERE is_active = true
+                   AND ebay_item_id IS NOT NULL
+                   AND ebay_item_id <> ''
+                 ORDER BY updated_at ASC
+                 LIMIT %s
+            """, (int(max_audit),))
+            rows = cur.fetchall()
+            cur.close()
+        elif adapter.kind == "azure-sql":
+            cur = adapter.conn.cursor()
+            cur.execute(f"""
+                SELECT TOP (?) ebay_item_id, {fk_col}, updated_at
+                  FROM {table}
+                 WHERE is_active = 1
+                   AND ebay_item_id IS NOT NULL
+                   AND ebay_item_id <> ''
+                 ORDER BY updated_at ASC
+            """, (int(max_audit),))
+            rows = cur.fetchall()
+            cur.close()
+    except Exception as e:
+        log.warning("audit: select query failed: %s", e)
+        if adapter.kind == "postgres":
+            try: adapter.conn.rollback()
+            except Exception: pass
+        return {"checked": 0, "ended": 0, "errors": 0}
+
+    if not rows:
+        return {"checked": 0, "ended": 0, "errors": 0}
+
+    log.info("audit: verifying %d active listings against eBay getItem", len(rows))
+    ended_ids: list[str] = []
+    errors = 0
+    for r in rows:
+        item_id = r[0]
+        try:
+            result = ebay.get_item(item_id)
+            if result is None:  # 404 = ended/removed
+                ended_ids.append(item_id)
+        except Exception as e:
+            # Don't let one failed call abort the whole audit — the
+            # next run will retry these items. Log so we can spot a
+            # systemic issue (auth, rate-limit) in dashboard log tails.
+            errors += 1
+            if errors <= 5:
+                log.warning("audit: get_item(%s) error: %s", item_id, str(e)[:200])
+
+    # Apply the inactive marks. Use a single batched UPDATE — much faster
+    # than N round-trips, and it commits atomically so the backfill phase
+    # later in this run sees a coherent view of "what's still live".
+    if ended_ids:
+        try:
+            if adapter.kind == "postgres":
+                cur = adapter.conn.cursor()
+                cur.execute(f"""
+                    UPDATE {table}
+                       SET is_active = false,
+                           updated_at = NOW()
+                     WHERE is_active = true
+                       AND ebay_item_id = ANY(%s)
+                """, (ended_ids,))
+                adapter.conn.commit()
+                cur.close()
+            elif adapter.kind == "azure-sql":
+                # azure-sql doesn't support ARRAY params; chunk into IN-lists.
+                CHUNK = 200
+                cur = adapter.conn.cursor()
+                for i in range(0, len(ended_ids), CHUNK):
+                    chunk = ended_ids[i:i + CHUNK]
+                    placeholders = ",".join("?" * len(chunk))
+                    cur.execute(f"""
+                        UPDATE {table}
+                           SET is_active = 0,
+                               updated_at = SYSUTCDATETIME()
+                         WHERE is_active = 1
+                           AND ebay_item_id IN ({placeholders})
+                    """, tuple(chunk))
+                adapter.conn.commit()
+                cur.close()
+        except Exception as e:
+            log.warning("audit: bulk inactive update failed: %s", e)
+
+    log.info("audit: %d/%d listings ended (%d errors)",
+             len(ended_ids), len(rows), errors)
+    return {"checked": len(rows), "ended": len(ended_ids), "errors": errors}
 
 
 def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
@@ -937,11 +1084,10 @@ class EbayProductSyncAgent(AgentBase):
             raise RuntimeError("eBay search returned no items.")
         sample_item = sample_items[0]
 
-        ai = ai_client_for(self.agent_id)
-        log.info("calling Claude (%s) to propose v2 mapping", type(ai).__name__)
+        log.info("calling LLM (with framework fallback chain) to propose v2 mapping")
         site_id_value = site_constants.get("site_id")
         proposal = propose_mapping_via_claude(
-            ai,
+            self.ai_chat,
             products_columns=prod_cols, products_samples=prod_samples,
             listings_columns=list_cols, listings_samples=list_samples,
             sample_ebay_item=sample_item,
@@ -1179,9 +1325,12 @@ class EbayProductSyncAgent(AgentBase):
                      len(items))
             return out
 
-        # Pass 2: claude — only for items field-extraction couldn't handle
-        ai = ai_client_for(self.agent_id)
-        # Batch listings to amortize Claude calls — 8 per call works well.
+        # Pass 2: LLM — only for items field-extraction couldn't handle.
+        # Uses self.ai_chat so the framework's fallback chain
+        # (claude-cli → copilot → azure_openai → openai) auto-recovers
+        # when claude-cli is rate-limited. Was: ai_client_for + ai.chat,
+        # which had no fallback and would hang for hours when the
+        # claude-pool returned all-rate-limited.
         BATCH = 8
         claude_results: list[Optional[dict]] = []
         for i in range(0, len(claude_items), BATCH):
@@ -1194,26 +1343,27 @@ class EbayProductSyncAgent(AgentBase):
                     f"  short: {(it.get('shortDescription') or '')[:160]}\n\n"
                 )
             try:
-                raw = ai.chat(
+                raw = self.ai_chat(
                     [{"role": "system", "content": HYDRATION_SYS},
                      {"role": "user", "content": user_prompt}],
-                    model="claude-sonnet-4-6",
-                    max_tokens=4000, max_turns=2, timeout=300,
+                    max_tokens=4000,
+                    # claude-cli-only kwargs — OpenAI-shape clients ignore them:
+                    max_turns=2, timeout=300,
                 )
-                s = raw.strip()
-                if s.startswith("```"):
-                    s = s.split("\n", 1)[1] if "\n" in s else s[3:]
-                    if s.endswith("```"): s = s.rsplit("```", 1)[0]
-                ia = s.find("[")
-                ja = s.rfind("]")
-                if ia < 0 or ja <= ia:
-                    log.warning("hydration: non-array response, skipping batch")
+                # Robust JSON parse — see framework.core.llm_json. Old
+                # find('[')/rfind(']') broke when the model emitted
+                # trailing prose or footnote refs (`[1]`, `[CC]`),
+                # losing whole batches with "Extra data" errors.
+                try:
+                    arr = extract_json_array(raw)
+                except ValueError as e:
+                    log.warning("hydration: parse failed (%s), skipping batch", e)
                     claude_results.extend([None] * len(chunk))
                     continue
-                arr = json.loads(s[ia:ja+1])
-                if not isinstance(arr, list) or len(arr) != len(chunk):
-                    log.warning("hydration: array length mismatch (%d vs %d)", len(arr) if isinstance(arr, list) else 0, len(chunk))
-                    arr = (arr if isinstance(arr, list) else []) + [None] * (len(chunk) - (len(arr) if isinstance(arr, list) else 0))
+                if len(arr) != len(chunk):
+                    log.warning("hydration: array length mismatch (%d vs %d)",
+                                len(arr), len(chunk))
+                    arr = arr + [None] * max(0, len(chunk) - len(arr))
                 claude_results.extend(arr)
             except Exception as e:
                 log.warning("hydration batch failed: %s", e)
@@ -1409,6 +1559,29 @@ class EbayProductSyncAgent(AgentBase):
         listings_keys = lt.get("key_columns") or ["ebay_item_id"]
         fk_col = lt.get("fk_to_product_column") or "product_id"
 
+        # ── Audit pass — verify a slice of active listings are still live
+        # on eBay, mark any 404'd ones inactive. Runs BEFORE the coverage
+        # probe so products whose only active listing just sold (BIN sold
+        # in <72h time-staleness window) become eligible for backfill in
+        # this same run. Bounded by audit_max_per_run (default 200) to
+        # stay well under the eBay Browse API daily quota — see
+        # _audit_active_listings docstring.
+        if not dry_run:
+            audit_max = int((self._cfg or {}).get("audit_max_per_run", 200))
+            try:
+                audit_stats = _audit_active_listings(
+                    adapter, lt["name"], ebay,
+                    max_audit=audit_max, fk_col=fk_col,
+                )
+                stats["audit_checked"] = audit_stats["checked"]
+                stats["audit_ended"] = audit_stats["ended"]
+                stats["audit_errors"] = audit_stats["errors"]
+            except Exception as e:
+                log.warning("audit phase failed (non-fatal): %s", e)
+                if adapter.kind == "postgres":
+                    try: adapter.conn.rollback()
+                    except Exception: pass
+
         plan: list[tuple[Optional[str], str]] = []
         # Build coverage queue + seed queue separately, then INTERLEAVE
         # them so seeds (the curated retro-PC / retro-console keyword
@@ -1433,6 +1606,34 @@ class EbayProductSyncAgent(AgentBase):
                     priority_seed_queue.append((cat, q))
                 else:
                     seed_queue.append((cat, q))
+
+        # ── Inbound handoff bypass ──────────────────────────────────────
+        # When article-author publishes an article that mentions hardware
+        # products, it sends a handoff with `work_type=ebay_fetch_for_product`
+        # and `rec.product_query` / `rec.product_category` populated.
+        # Inject those queries into priority_seed_queue ahead of every-
+        # thing else so the next eBay tick fetches listings for the just-
+        # published article's mentions instead of waiting for the seed
+        # rotation to come around.
+        handoff_count = 0
+        for h in (self.inbound_handoffs or []):
+            if h.get("work_type") not in (
+                "ebay_fetch_for_product",
+                "ebay_on_demand_fetch",
+            ):
+                continue
+            rec = h.get("rec") or {}
+            q = rec.get("product_query") or rec.get("query")
+            cat = rec.get("product_category") or rec.get("category_slug")
+            if not q:
+                continue
+            priority_seed_queue.insert(0, (cat, q))
+            handoff_count += 1
+        if handoff_count:
+            self.decide(
+                "observation",
+                f"injected {handoff_count} handoff-driven query/queries "
+                f"into priority seed queue (from article-author publish)")
 
         coverage_count = len(coverage_targets)
         stats["coverage_targets"] = coverage_count
@@ -1624,12 +1825,30 @@ class EbayProductSyncAgent(AgentBase):
             except Exception as e:
                 log.warning("completion email failed: %s", e)
 
+        # Compute scalar success-rate metric for goal auto-track.
+        # Stats dict carries lots of nested non-scalar things — RunResult.metrics
+        # needs scalars to be useful, so we flatten the goal-relevant ones here.
+        items_seen = int(stats.get("items_seen", 0))
+        products_upserted = int(stats.get("products_upserted", 0))
+        errors_count = len(stats.get("errors") or [])
+        # Success rate = product upserts / items seen. ≥80% is healthy.
+        sync_success_rate_pct = round(
+            100.0 * products_upserted / max(items_seen, 1), 2
+        )
+        # Add the scalar keys directly to the stats dict so they show
+        # up alongside existing counters in RunResult.metrics.
+        stats["sync_success_rate_pct"] = sync_success_rate_pct
+        stats["errors_count"] = float(errors_count)
+        stats["products_upserted_count"] = float(products_upserted)
+        stats["items_seen_count"] = float(items_seen)
+
         return RunResult(
             status="success",
             summary=(f"queries={stats['queries_run']} items={stats['items_seen']} "
                      f"products={stats['products_upserted']} "
                      f"listings_in={stats['listings_inserted']} "
-                     f"listings_up={stats['listings_updated']}"),
+                     f"listings_up={stats['listings_updated']} "
+                     f"success_rate={sync_success_rate_pct}%"),
             metrics=stats,
         )
 

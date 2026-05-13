@@ -1,0 +1,25 @@
+{
+  "id": "backlog-dispatcher-agent",
+  "name": "Backlog dispatcher (implementer auto-feed)",
+  "description": "Walks every producer agent's accumulator + recent runs, queues open recs into the responder auto-queue. Decouples the implementer from producer agents \u2014 when producers are paused, the implementer still has work to ship. Throttled: small batches per tick, dedupe by accumulator id, short-circuits when nothing changed.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "* * * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "README.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/backlog-dispatcher-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/backlog-dispatcher-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/backlog-dispatcher-agent"
+  },
+  "runnable_modes": [
+    "cron",
+    "manual"
+  ]
+}
