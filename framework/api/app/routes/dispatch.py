@@ -216,14 +216,16 @@ def get_queue(limit: int = Query(20, le=100)):
     # blob copies stay frozen at status=pending until the batch_reaper
     # marks them abandoned at 6h. The heartbeat closes that gap.
     live_scopes: list[str] = []
+    live_scope_details: list[dict] = []
     live_scopes_age_s: int = -1
+    running_recs: list[dict] = []
     try:
         hb = s.read_json(
             "agents/backlog-dispatcher-agent/state/live-scopes.json")
         if isinstance(hb, dict):
             running_dispatches = int(hb.get("count") or 0)
             live_scopes = list(hb.get("scopes") or [])
-            # Compute heartbeat age so the UI can warn if stale
+            live_scope_details = list(hb.get("scope_details") or [])
             ts = hb.get("updated_at")
             if ts:
                 try:
@@ -233,6 +235,48 @@ def get_queue(limit: int = Query(20, le=100)):
                         (_dt.now(_tz.utc) - hb_dt).total_seconds())
                 except Exception:
                     pass
+            # Resolve each scope's rec_ids → rec details by reading the
+            # source agent's recommendations.json. This populates the
+            # dashboard's "Running" bucket.
+            try:
+                for sd in live_scope_details:
+                    aid = sd.get("source_agent_id") or ""
+                    rec_ids = sd.get("rec_ids") or []
+                    if not aid or not rec_ids:
+                        continue
+                    # Find the most recent recommendations.json for this
+                    # agent that contains any of these rec_ids.
+                    rec_keys = sorted(
+                        [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
+                         if k.endswith("/recommendations.json")],
+                        reverse=True,
+                    )[:8]  # cap depth
+                    found = set()
+                    for rk in rec_keys:
+                        try:
+                            doc = s.read_json(rk) or {}
+                            recs = doc.get("recommendations") or []
+                            for r in recs:
+                                rid = r.get("id") or r.get("rec_id")
+                                if rid in rec_ids and rid not in found:
+                                    run_ts_match = rk.split("/runs/")[1].split("/")[0]
+                                    running_recs.append({
+                                        "rec_id": rid,
+                                        "title": (r.get("title") or "")[:240],
+                                        "category": "running",
+                                        "agent_id": aid,
+                                        "run_ts": run_ts_match,
+                                        "run_dir_basename": sd.get(
+                                            "rundir_basename") or "",
+                                        "scope": sd.get("scope") or "",
+                                    })
+                                    found.add(rid)
+                            if len(found) >= len(rec_ids):
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
     except Exception:
         pass
     # Fallback to the legacy dispatch-batches scan if heartbeat unavailable
@@ -263,6 +307,13 @@ def get_queue(limit: int = Query(20, le=100)):
         # is > 180, the dispatcher itself is wedged; ignore the count.
         "live_scopes": live_scopes,
         "live_scopes_age_s": live_scopes_age_s,
+        # Per-scope details: source_agent_id + rec_ids in flight, used
+        # by the dashboard's "Running" bucket to show actual recs being
+        # worked on.
+        "live_scope_details": live_scope_details,
+        # Resolved rec details for each in-flight rec_id — directly
+        # consumable by the UI's RichRecDetails component.
+        "running_recs": running_recs,
     }
 
 

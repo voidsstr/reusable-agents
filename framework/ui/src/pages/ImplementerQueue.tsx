@@ -1179,6 +1179,9 @@ export default function ImplementerQueue() {
   // elimination on 2026-05-12.
   const [openRecsTotal, setOpenRecsTotal] = useState<number>(0)
   const [runningDispatches, setRunningDispatches] = useState<number>(0)
+  // Running-bucket recs: resolved server-side from the live-scopes
+  // heartbeat. Each entry maps to a rec currently being implemented.
+  const [runningRecs, setRunningRecs] = useState<RecItem[]>([])
 
   const refresh = async () => {
     try {
@@ -1197,6 +1200,7 @@ export default function ImplementerQueue() {
         setAccumulatorTotal(q.accumulator_total || 0)
         setOpenRecsTotal(q.open_recs_total || 0)
         setRunningDispatches(q.running_dispatches || 0)
+        setRunningRecs(((q.running_recs as unknown as RecItem[]) || []))
       }
       setRefreshedAt(new Date().toLocaleTimeString())
       setError('')
@@ -1297,13 +1301,34 @@ export default function ImplementerQueue() {
 
   const filteredRecs = useMemo(() => {
     if (!categoryFilter) return []
-    // Prefer the lifetime list (populated on tab click) so users see
-    // every matching rec, not just those in the current 20-chain window.
-    // Falls back to the windowed flatRecs while lifetime is loading or
-    // for in-flight buckets (running/queued — those only exist in active
-    // dispatches anyway).
-    if (categoryFilter === 'running' || categoryFilter === 'queued') {
-      return flatRecs.filter(f => f.category === categoryFilter)
+    // Bucket sources:
+    //   running → live heartbeat (runningRecs) populated each refresh.
+    //             Fallback to windowed flatRecs while heartbeat is empty
+    //             (e.g. dispatcher hasn't ticked since deploy).
+    //   queued  → lifetimeRecs['queued'] (server returns category=pending)
+    //             so the bucket lists the full 533-rec backlog, not just
+    //             dispatch-batches with status=pending in the window.
+    //   shipped/implemented/deferred → lifetime list (server-cached).
+    if (categoryFilter === 'running') {
+      if (runningRecs && runningRecs.length > 0) {
+        return runningRecs.map(r => {
+          const slim = r as RecItem & {
+            run_dir_basename?: string; run_ts?: string; agent_id?: string
+          }
+          return {
+            chain: {
+              run_dir_basename: slim.run_dir_basename || '',
+              source_agent:     slim.agent_id || '',
+              source_run_ts:    slim.run_ts || '',
+              site:             '',
+            } as Chain,
+            batch: { status: 'running' } as Chain['batches'][number],
+            rec: r,
+            category: 'running' as const,
+          }
+        })
+      }
+      return flatRecs.filter(f => f.category === 'running')
     }
     const ltList = lifetimeRecs[categoryFilter]
     if (ltList && ltList.length > 0) {
@@ -1330,16 +1355,25 @@ export default function ImplementerQueue() {
       })
     }
     return flatRecs.filter(f => f.category === categoryFilter)
-  }, [flatRecs, categoryFilter, lifetimeRecs])
+  }, [flatRecs, categoryFilter, lifetimeRecs, runningRecs])
 
   // When user selects a tab, fetch the full lifetime rec list for that
   // category. Cached server-side (60s TTL) so subsequent tab clicks are
   // sub-100ms.
+  //
+  // Bucket sources:
+  //   running  → runningRecs from /api/implementer/queue heartbeat
+  //              (always loaded — no extra fetch needed; effect skips it)
+  //   queued   → /recs-by-category?category=pending (the title-deduped
+  //              producer backlog) — fixes the "no recs in this bucket"
+  //              empty state when 533 open recs exist
+  //   shipped/implemented/deferred → /recs-by-category?category=<same>
   useEffect(() => {
-    if (!categoryFilter || categoryFilter === 'running' || categoryFilter === 'queued') return
-    if (lifetimeRecs[categoryFilter]) return  // already loaded
+    if (!categoryFilter || categoryFilter === 'running') return
+    if (lifetimeRecs[categoryFilter]) return
     setLifetimeRecsLoading(true)
-    api.implementerRecsByCategory(categoryFilter as 'shipped' | 'implemented' | 'deferred', 200)
+    const serverCategory = categoryFilter === 'queued' ? 'pending' : categoryFilter
+    api.implementerRecsByCategory(serverCategory as 'shipped' | 'implemented' | 'deferred' | 'pending', 200)
       .then(r => setLifetimeRecs(prev => ({ ...prev, [categoryFilter]: r.recs as unknown as RecItem[] })))
       .catch(() => { /* fall back to windowed */ })
       .finally(() => setLifetimeRecsLoading(false))

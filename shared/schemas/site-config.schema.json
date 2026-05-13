@@ -7,6 +7,10 @@
   "required": ["site", "data_sources"],
   "additionalProperties": false,
   "properties": {
+    "auto_implement": {
+      "type": "boolean",
+      "description": "When true (default), producer auto-ships recs via gated_dispatch_now(). When false, producer queues an operator-approval email and the responder dispatches after user replies `implement rec-NNN`."
+    },
     "site": {
       "type": "object",
       "required": ["id", "domain", "mode"],

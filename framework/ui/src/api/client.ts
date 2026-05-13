@@ -264,6 +264,10 @@ export const api = {
     open_recs_total?: number
     open_recs_by_agent?: Record<string, number>
     running_dispatches?: number
+    live_scopes?: string[]
+    live_scopes_age_s?: number
+    live_scope_details?: { scope: string; source_agent_id?: string; rundir_basename?: string; rec_ids?: string[] }[]
+    running_recs?: { rec_id: string; title: string; category: string; agent_id: string; run_ts: string; run_dir_basename: string; scope: string }[]
   }>(`/api/implementer/queue?limit=${limit}`),
   implementerDispatches: (limit = 20) => http<DispatchEntry[]>(`/api/implementer/dispatches?limit=${limit}`),
   getDispatchLog: (dispatchId: string, tailBytes = 32768) => http<DispatchEntry & { content: string }>(`/api/implementer/dispatches/${encodeURIComponent(dispatchId)}/log?tail_bytes=${tailBytes}`),

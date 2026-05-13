@@ -598,21 +598,35 @@ EOF
             esac
             set +e
             rc=75
+            # Per-tier wall-clock timeout. Overnight 2026-05-13: claude
+            # processes hung indefinitely when the Max account hit opus
+            # quota — claude-cli waits forever for an API response that
+            # never comes (or comes back as "rate limited" and the cli
+            # keeps retrying internally). Without an outer timeout,
+            # stuck scopes consume throttle slots for 30+ min until
+            # manually killed. `timeout 1500s` = 25 min. timeout exits
+            # rc=124 on kill, which we treat as tier-fall (same as 75).
+            CLAUDE_TIER_TIMEOUT_S="${CLAUDE_TIER_TIMEOUT_S:-1500}"
             for IMPL_MODEL in "${TIER_ORDER[@]}"; do
-                echo "[implementer] trying $IMPL_MODEL" >&2
-                claude --dangerously-skip-permissions \
+                echo "[implementer] trying $IMPL_MODEL (timeout=${CLAUDE_TIER_TIMEOUT_S}s)" >&2
+                timeout --signal=TERM --kill-after=10s "$CLAUDE_TIER_TIMEOUT_S" \
+                    claude --dangerously-skip-permissions \
                        --print --output-format text \
                        --model "$IMPL_MODEL" \
                        --max-turns "$IMPLEMENTER_MAX_TURNS" \
                        < "$PROMPT_FILE"
                 rc=$?
-                # rc=0 → success, stop. Otherwise (75 rate-limit, 1
-                # transient pool error, 2 bad-prompt, etc.) try the
-                # next tier — the auto-tier is a robustness device, not
-                # a smart router. If claude itself can't run at all, the
-                # framework chain catches it after we fall through.
+                # rc=0 → success, stop.
+                # rc=124 → hit the 25-min wall (claude hung). Tier-fall.
+                # rc=75 → claude-pool exhausted (all Max profiles rate-
+                #         limited for this model family). Tier-fall.
+                # Other → bad prompt / transient. Tier-fall.
                 [ "$rc" -eq 0 ] && break
-                echo "[implementer] $IMPL_MODEL rc=$rc; trying next tier" >&2
+                if [ "$rc" -eq 124 ]; then
+                    echo "[implementer] $IMPL_MODEL TIMED OUT after ${CLAUDE_TIER_TIMEOUT_S}s — likely API hang; trying next tier" >&2
+                else
+                    echo "[implementer] $IMPL_MODEL rc=$rc; trying next tier" >&2
+                fi
             done
             set -e
         fi
@@ -1898,6 +1912,47 @@ elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; th
     fi
     if [ -n "$GIT_SHA_NOW" ] && [ "$GIT_SHA_NOW" = "${GIT_SHA_BEFORE:-}" ]; then
         echo "[implementer] no commits this batch (HEAD unchanged ${GIT_SHA_NOW:0:8}) — skipping deployer"
+        # CRITICAL: claude no-op'd (rec was already-deferred / no actionable
+        # change). If we don't mark the source rec as deferred in
+        # recommendations.json, the backlog-dispatcher will re-dispatch
+        # the SAME rec on every subsequent tick, burning claude pool
+        # quota indefinitely. Overnight 2026-05-13: rec-001 "celery25678"
+        # re-dispatched ~50× over 2h producing zero commits. This block
+        # closes the loop by writing `deferred: true` + reason to each
+        # rec in this batch.
+        if [ -n "${RESPONDER_RUN_TS:-}" ] && [ -n "${RESPONDER_SOURCE_AGENT:-}" ] \
+                && [ -n "${RESPONDER_REC_IDS:-}" ]; then
+            PYTHONPATH=/home/voidsstr/development/reusable-agents python3 - <<MARK_DEFERRED
+import os, json
+from datetime import datetime, timezone
+from framework.core.storage import get_storage
+s = get_storage()
+key = f"agents/{os.environ['RESPONDER_SOURCE_AGENT']}/runs/{os.environ['RESPONDER_RUN_TS']}/recommendations.json"
+try:
+    doc = s.read_json(key) or {}
+except Exception as e:
+    print(f"[no-commit-mark] read failed: {e}")
+    raise SystemExit(0)
+recs = doc.get("recommendations") or []
+target_ids = set(os.environ["RESPONDER_REC_IDS"].split(","))
+updated = 0
+ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+for r in recs:
+    rid = str(r.get("id") or r.get("rec_id") or "")
+    if rid in target_ids and not (r.get("shipped") or r.get("implemented") or r.get("deferred")):
+        r["deferred"] = True
+        r["deferred_at"] = ts
+        r["deferred_reason"] = (
+            "implementer no-op: HEAD unchanged after claude pass — "
+            "rec is either already-deferred from a prior run or has no "
+            "actionable change. Marked deferred to prevent re-dispatch."
+        )
+        updated += 1
+if updated:
+    s.write_json(key, doc)
+    print(f"[no-commit-mark] marked {updated} rec(s) as deferred in {key}")
+MARK_DEFERRED
+        fi
     else
         echo "[implementer] batch complete — chaining to deployer (per-batch deploy, smoke tests only)"
         # Per-batch deploys ALWAYS run smoke tests, never the full suite.
@@ -2014,6 +2069,54 @@ elif [ -n "$APPLIED_REC_IDS" ]; then
 elif [ -n "$ALREADY_IMPLEMENTED_REC_IDS" ]; then
     COMPLETION_STATUS="completed"
     COMPLETION_REASON="already-implemented: ${ALREADY_IMPLEMENTED_REC_IDS//,/, }"
+fi
+
+# 2026-05-13: stamp `shipped=True` + `shipped_at` on the SOURCE producer's
+# recommendations.json when the implementer succeeds via applied-recs.json
+# (article-author DB-write convention) OR when claude marked recs as
+# already-implemented. Without this, the source producer's
+# recommendations.json keeps showing those recs as "open" forever even
+# after the article is LIVE on the site — the dashboard's pending count
+# stays inflated and the dispatcher relies entirely on the title-cache to
+# avoid re-dispatch (fragile: cache resets reintroduce loops).
+#
+# Symptom that prompted this fix: 6 sampled "pending" articles all
+# returned HTTP 200 on their public URLs but stayed marked open in their
+# producer's recommendations.json. Reality is shipping, producer state
+# was lying.
+if [ "$COMPLETION_STATUS" = "completed" ] && [ -f "$RECS_JSON" ]; then
+    MARK_IDS=""
+    if [ -n "$APPLIED_REC_IDS" ]; then
+        MARK_IDS="$APPLIED_REC_IDS"
+    elif [ -n "$ALREADY_IMPLEMENTED_REC_IDS" ]; then
+        MARK_IDS="$ALREADY_IMPLEMENTED_REC_IDS"
+    fi
+    if [ -n "$MARK_IDS" ]; then
+        python3 - "$RECS_JSON" "$MARK_IDS" "$RESPONDER_RUN_TS" "$COMPLETION_REASON" <<'PY' 2>&1 | sed 's/^/[mark-shipped] /' >&2 || true
+import json, sys
+from datetime import datetime, timezone
+path, ids_csv, run_ts, reason = sys.argv[1:5]
+ids = set(s.strip() for s in ids_csv.split(',') if s.strip())
+doc = json.load(open(path))
+recs = doc.get('recommendations') if isinstance(doc, dict) else doc
+if not recs: sys.exit(0)
+now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+marked = 0
+for r in recs:
+    if not isinstance(r, dict): continue
+    rid = r.get('id') or r.get('rec_id')
+    if rid in ids and not r.get('shipped'):
+        r['shipped'] = True
+        r['implemented'] = True
+        r.setdefault('shipped_at', now)
+        r.setdefault('shipped_via', reason or 'implementer')
+        r.setdefault('shipped_run_ts', run_ts)
+        marked += 1
+if marked:
+    open(path, 'w').write(json.dumps(doc, indent=2))
+print(f"marked shipped={marked}/{len(ids)} in source recommendations.json")
+PY
+    fi
 fi
 # Useful diagnostic: even when paused, surface that claude DID write
 # deferral-summary files so the user knows the LLM at least ran.
