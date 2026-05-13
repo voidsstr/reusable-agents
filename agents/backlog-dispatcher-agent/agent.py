@@ -109,31 +109,40 @@ def _site_from_agent_id(aid: str) -> str:
 def _classify_rec_backend(rec: dict, dispatch_kind: str = "") -> str:
     """Return the implementer backend best-suited to this rec.
 
-    Returns one of:
-      "claude" — long-form generation only (article-author body
-                 writing, head-to-head editorial). These need claude's
-                 voice/cohesion + long context handling.
-      "copilot-gpt-4.1" — everything else. Routes through the
-                 framework code-editor chain whose first hop is
-                 jcode-copilot (gpt-4.1 via github-copilot proxy),
-                 free under the user's Copilot subscription. The chain
-                 falls through to aider-github-copilot / aider-azure /
-                 jcode-ollama if gpt-4.1 isn't applicable.
+    Restricted policy (revised 2026-05-13 19:10 EDT after observing the
+    earlier aggressive default damaged marketing pages):
+      - aider-via-gpt-4.1 lacks the design sensibility for content/UI
+        edits — it stripped a 4-step icon grid into a text blob,
+        downgraded a hero subtitle from concrete value-prop to generic
+        copy, and "fixed" 2026 → 2024 (year hallucination).
+      - PI / SEO copy + marketing-page edits MUST go through claude.
+        Until claude pool resets we DEFER those (router returns
+        "claude" — dispatcher gates on claude_cap and skips).
+      - Safe for gpt-4.1 channel: catalog-audit DB-row fixes (well-
+        structured taxonomy/category/image-url updates that don't
+        require design judgment).
 
-    Aggressive policy (2026-05-13 evening, claude pool exhausted):
-    default to copilot-gpt-4.1. Only escalate to claude for long-form
-    content generation where opus-4-7's quality is essential.
+    Returns:
+      "claude" — default. Anything that touches frontend code, copy,
+                 or human-facing content. Until claude returns,
+                 dispatcher will hold these.
+      "copilot-gpt-4.1" — only catalog-audit dispatch_kind. Free,
+                 low-risk structured edits.
     """
+    # Anything explicitly long-form stays on claude.
     if dispatch_kind in ("article-author", "h2h"):
         return "claude"
+    # Catalog-audit recs are DB-row updates / migrations. Low blast
+    # radius, structured edits — safe for gpt-4.1 channel.
+    if dispatch_kind == "catalog-audit":
+        return "copilot-gpt-4.1"
     rec_type = (rec.get("type") or rec.get("rec_type") or "").lower()
-    if "article-author-proposal" in rec_type or "head-to-head" in rec_type:
-        return "claude"
-    # Anything else — including PI duplicate-content, SEO opp, catalog-
-    # audit row fixes, comp-research feature proposals — goes through
-    # the gpt-4.1 chain. The framework chain is robust enough to fall
-    # through on tool-specific failures.
-    return "copilot-gpt-4.1"
+    if "catalog-audit" in rec_type or "recipe-category" in rec_type \
+            or "product-image" in rec_type or "image-name-mismatch" in rec_type:
+        return "copilot-gpt-4.1"
+    # All other recs (PI duplicate-content, SEO copy fixes, anything
+    # that touches frontend or marketing copy) — keep on claude.
+    return "claude"
 
 
 def _count_inflight_by_backend() -> tuple[int, int]:
