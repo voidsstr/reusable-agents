@@ -262,6 +262,7 @@ def dispatch_now(
                     batch_index=batch_index,
                     batch_total=batch_total,
                     script=script,
+                    implementer_backend=implementer_backend,
                 )
                 return handle
             except DispatchTransient as e:
@@ -315,7 +316,8 @@ def dispatch_now(
 def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                        action: str, site: str, subject_tag: str,
                        request_id: str, batch_index: int, batch_total: int,
-                       script: str) -> DispatchHandle:
+                       script: str,
+                       implementer_backend: Optional[str] = None) -> DispatchHandle:
     """Spawn the implementer in a detached systemd-run --scope.
     Returns DispatchHandle on successful spawn. Raises DispatchTransient
     on retryable failures.
