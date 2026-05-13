@@ -75,7 +75,11 @@ MAX_PRODUCERS_PER_TICK = int(os.environ.get("BACKLOG_DISPATCHER_MAX_PRODUCERS", 
 # want more than N implementer scopes running concurrently anyway, so
 # we stop queuing once the existing queue is enough to keep them busy.
 MAX_QUEUE_DEPTH = int(os.environ.get("BACKLOG_DISPATCHER_MAX_QUEUE_DEPTH", "30"))
-MAX_INFLIGHT_SCOPES = int(os.environ.get("BACKLOG_DISPATCHER_MAX_INFLIGHT", "3"))
+# Two parallel channels (2026-05-13). Independent caps so the free
+# gpt-4.1 channel can keep working while the paid claude channel is
+# rate-limited (the recurring pattern overnight).
+MAX_INFLIGHT_SCOPES = int(os.environ.get("BACKLOG_DISPATCHER_MAX_INFLIGHT", "0"))
+MAX_INFLIGHT_COPILOT = int(os.environ.get("BACKLOG_DISPATCHER_MAX_COPILOT", "3"))
 
 
 # Producer agents we walk. Anything not in this list won't be touched
@@ -100,6 +104,91 @@ def _site_from_agent_id(aid: str) -> str:
         if aid.startswith(prefix + "-"):
             return prefix
     return ""
+
+
+def _classify_rec_backend(rec: dict, dispatch_kind: str = "") -> str:
+    """Return the implementer backend best-suited to this rec.
+
+    Returns one of:
+      "claude" — long-form generation only (article-author body
+                 writing, head-to-head editorial). These need claude's
+                 voice/cohesion + long context handling.
+      "copilot-gpt-4.1" — everything else. Routes through the
+                 framework code-editor chain whose first hop is
+                 jcode-copilot (gpt-4.1 via github-copilot proxy),
+                 free under the user's Copilot subscription. The chain
+                 falls through to aider-github-copilot / aider-azure /
+                 jcode-ollama if gpt-4.1 isn't applicable.
+
+    Aggressive policy (2026-05-13 evening, claude pool exhausted):
+    default to copilot-gpt-4.1. Only escalate to claude for long-form
+    content generation where opus-4-7's quality is essential.
+    """
+    if dispatch_kind in ("article-author", "h2h"):
+        return "claude"
+    rec_type = (rec.get("type") or rec.get("rec_type") or "").lower()
+    if "article-author-proposal" in rec_type or "head-to-head" in rec_type:
+        return "claude"
+    # Anything else — including PI duplicate-content, SEO opp, catalog-
+    # audit row fixes, comp-research feature proposals — goes through
+    # the gpt-4.1 chain. The framework chain is robust enough to fall
+    # through on tool-specific failures.
+    return "copilot-gpt-4.1"
+
+
+def _count_inflight_by_backend() -> tuple[int, int]:
+    """Returns (claude_count, copilot_count) of inflight implementer
+    scopes. Reads each scope's _backend.txt sidecar in its dispatch-
+    rundir on local FS. Falls back to "claude" when no sidecar exists.
+    Cheap — only opens small text files."""
+    import subprocess, os as _os
+    from pathlib import Path as _P
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "list-units",
+             "--no-pager", "--no-legend",
+             "--state=running", "--type=scope"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode != 0:
+            return (0, 0)
+    except Exception:
+        return (0, 0)
+    LOG_DIR = _P(_os.environ.get(
+        "AGENT_LOG_DIR", "/tmp/reusable-agents-logs"))
+    rundir_root = LOG_DIR / "dispatch-rundirs"
+    claude_n = copilot_n = 0
+    scope_names = [
+        line.lstrip("● ").split()[0]
+        for line in out.stdout.splitlines()
+        if "agent-dispatch-implementer-" in line
+    ]
+    # Each rundir has format rundir-<aid>-<run_ts>-<hash>. Find the
+    # rundir associated with each scope by matching mtime proximity.
+    rundirs = []
+    if rundir_root.is_dir():
+        for d in rundir_root.iterdir():
+            if d.is_dir():
+                try: rundirs.append((d.stat().st_mtime, d))
+                except Exception: continue
+    rundirs.sort(reverse=True)
+    used = set()
+    for _ in scope_names:
+        # Pick the newest unused rundir as a heuristic match.
+        backend = "claude"
+        for mt, d in rundirs:
+            if d in used: continue
+            backend_file = d / "_backend.txt"
+            if backend_file.is_file():
+                try: backend = backend_file.read_text().strip()
+                except Exception: pass
+            used.add(d)
+            break
+        if backend == "copilot-gpt-4.1":
+            copilot_n += 1
+        else:
+            claude_n += 1
+    return (claude_n, copilot_n)
 
 
 def _list_inflight_scopes() -> list[str]:
@@ -517,20 +606,24 @@ class BacklogDispatcher(AgentBase):
         # the live in-flight count. Must run every tick (even on throttle)
         # so a freshly-completed scope clears within ~60s.
         _write_live_scopes_heartbeat(s, inflight_scopes)
-        # Auto-throttle when claude-pool has fewer healthy profiles than
-        # the configured cap. Default `opus` family — switch via env
-        # IMPLEMENTER_MODEL_FAMILY=sonnet if implementer is rolled back.
+        # Two-channel cap (2026-05-13). Claude scopes throttle on
+        # MAX_INFLIGHT_SCOPES (gated by claude-pool health via auto-
+        # cap-tune). Copilot/gpt-4.1 scopes throttle on
+        # MAX_INFLIGHT_COPILOT independently (free, no pool draw).
+        # Total dispatch budget = sum of both.
         family = os.environ.get("IMPLEMENTER_MODEL_FAMILY", "opus")
-        effective_cap, throttle_reason = _effective_cap(
+        claude_cap, throttle_reason = _effective_cap(
             MAX_INFLIGHT_SCOPES, family)
         if throttle_reason:
             self.decide("observation", throttle_reason)
-        if inflight >= effective_cap:
+        total_cap = claude_cap + MAX_INFLIGHT_COPILOT
+        effective_cap = total_cap  # for legacy heartbeat consumers
+        if inflight >= total_cap:
             self.decide(
                 "observation",
                 f"backpressure: {inflight} implementer scope(s) running "
-                f"(effective_cap={effective_cap}, configured={MAX_INFLIGHT_SCOPES}) "
-                "— skipping tick",
+                f"(total_cap={total_cap}, claude={claude_cap}, "
+                f"copilot={MAX_INFLIGHT_COPILOT}) — skipping tick",
             )
             # CRITICAL: preserve queued_ids across throttled ticks.
             # Without this next_state, AgentBase's post_run() persists
@@ -563,11 +656,12 @@ class BacklogDispatcher(AgentBase):
             # in one tick and we end up with 5+ scopes against a cap
             # of 3.
             inflight_now = _count_inflight_scopes()
-            if inflight_now >= MAX_INFLIGHT_SCOPES:
+            if inflight_now >= total_cap:
                 self.decide(
                     "observation",
                     f"mid-loop throttle: {inflight_now} scope(s) running "
-                    f"≥ cap {MAX_INFLIGHT_SCOPES} — stopping at this point",
+                    f"≥ total_cap {total_cap} (claude={claude_cap}, "
+                    f"copilot={MAX_INFLIGHT_COPILOT}) — stopping",
                 )
                 break
 
@@ -628,6 +722,15 @@ class BacklogDispatcher(AgentBase):
                     if r.get("shipped") or r.get("implemented") \
                             or r.get("deferred"):
                         continue
+                    # Skip recs awaiting operator review (comp-research
+                    # strategic proposals, multi-feature builds, anything
+                    # tagged review_required). Operator must set
+                    # `confirmed_for_implementation=true` to release.
+                    # 2026-05-13: added so 904 comp-research strategic
+                    # proposals stop showing in the implementer queue.
+                    if r.get("review_required") and not r.get(
+                            "confirmed_for_implementation"):
+                        continue
                     rid = r.get("id") or r.get("rec_id") or r.get("rec_uid")
                     if not rid:
                         continue
@@ -654,17 +757,33 @@ class BacklogDispatcher(AgentBase):
                     if title_key and title_key in already:
                         # Same logical rec already dispatched (different run_ts)
                         continue
-                    cands.append((rid, dedup_key, title_key or ""))
+                    # Priority key (lower = higher priority).
+                    # Severity: critical=0, high=1, medium=2, low=3, -=4
+                    SEV_ORDER = {"critical": 0, "high": 1, "medium": 2,
+                                 "low": 3}
+                    sev = (r.get("severity") or "").lower()
+                    tier = (r.get("tier") or "").lower()
+                    # Auto-tier recs go before review-tier within same severity.
+                    tier_score = 0 if tier == "auto" else 1
+                    sev_score = SEV_ORDER.get(sev, 9)
+                    cands.append((rid, dedup_key, title_key or "",
+                                  (sev_score, tier_score)))
                     if len(cands) >= MAX_RECS_PER_PRODUCER_PER_TICK:
                         break
                 if cands:
+                    # Sort by priority before dispatching so the highest-
+                    # value rec hits the implementer first this tick.
+                    # Sorting key = (severity_score, tier_score). Stable
+                    # so producers emitting in deterministic order get
+                    # deterministic dispatch.
+                    cands.sort(key=lambda x: x[3])
                     picked_run = run_ts
-                    picked_rec_ids = [rid for (rid, _, _) in cands]
+                    picked_rec_ids = [rid for (rid, _, _, _) in cands]
                     # Persist BOTH the per-run-ts dedup AND the title
                     # dedup so future ticks honor "we already shipped
                     # this logical rec".
                     picked_dedup_keys = []
-                    for (_, dk, tk) in cands:
+                    for (_, dk, tk, _prio) in cands:
                         picked_dedup_keys.append(dk)
                         if tk:
                             picked_dedup_keys.append(tk)
@@ -701,6 +820,48 @@ class BacklogDispatcher(AgentBase):
                 # past this run() because dispatch_now() spawns systemd-
                 # run --scope --no-block (async).
                 req_id = f"r-{picked_run}-{_subject_tag_from_agent_id(aid)}-{site or 'unknown'}"
+                # Classifier: send simple structured edits to the free
+                # gpt-4.1 channel; everything complex to claude. Looks
+                # at the FIRST rec in the batch as representative
+                # (dispatcher groups recs per producer-run anyway).
+                _first_rec = None
+                try:
+                    _all_recs = (s.read_json(
+                        f"agents/{aid}/runs/{picked_run}/recommendations.json")
+                                 or {}).get("recommendations") or []
+                    _pset = set(picked_rec_ids)
+                    for _r in _all_recs:
+                        if isinstance(_r, dict) and (
+                                _r.get("id") in _pset
+                                or _r.get("rec_id") in _pset):
+                            _first_rec = _r
+                            break
+                except Exception:
+                    pass
+                _dispatch_kind = _subject_tag_from_agent_id(aid)
+                _backend = _classify_rec_backend(
+                    _first_rec or {}, _dispatch_kind)
+                # Backend capacity gate. If classifier wants claude
+                # but claude is rate-limited (claude_cap=0), SKIP this
+                # batch rather than fail rc=1. The rec stays in the
+                # producer's recommendations.json open + un-queued; the
+                # next tick will reconsider when claude resets.
+                # copilot-gpt-4.1 has its own cap (MAX_INFLIGHT_COPILOT)
+                # that's independent — gates here too.
+                if _backend == "claude" and claude_cap == 0:
+                    self.decide(
+                        "observation",
+                        f"skipping batch for {aid} — classifier→claude "
+                        f"but claude rate-limited (claude_cap=0). Recs "
+                        f"stay open for next tick.",
+                    )
+                    import shutil
+                    shutil.rmtree(td, ignore_errors=True)
+                    continue
+                if _backend == "copilot-gpt-4.1" and MAX_INFLIGHT_COPILOT == 0:
+                    import shutil
+                    shutil.rmtree(td, ignore_errors=True)
+                    continue
                 try:
                     handle = _dispatch.dispatch_now(
                         agent_id=aid,
@@ -708,10 +869,11 @@ class BacklogDispatcher(AgentBase):
                         rec_ids=picked_rec_ids,
                         action="implement",
                         site=site,
-                        subject_tag=_subject_tag_from_agent_id(aid),
+                        subject_tag=_dispatch_kind,
                         request_id=req_id,
                         fallback_to_queue=False,  # no queue — fail fast on site-lock contention
                         notify_on_failure=False,
+                        implementer_backend=_backend if _backend != "claude" else None,
                     )
                 except Exception as e:
                     self.decide("error", f"dispatch_now failed for {aid}: {e}")

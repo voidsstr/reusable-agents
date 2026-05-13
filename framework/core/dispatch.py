@@ -189,6 +189,7 @@ def dispatch_now(
     fallback_to_queue: bool = True,
     notify_on_failure: bool = True,
     lock_timeout_s: int = 1800,
+    implementer_backend: Optional[str] = None,
 ) -> DispatchHandle:
     """Dispatch a list of rec ids to the implementer.
 
@@ -398,6 +399,12 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     env["RESPONDER_AGENT_ID"] = agent_id
     env["RESPONDER_SOURCE_AGENT"] = agent_id
     env["RESPONDER_SUBJECT_TAG"] = subject_tag
+    if implementer_backend:
+        # Selects the LLM channel the implementer's run.sh uses.
+        # Default (unset) → claude-cli pool (legacy path).
+        # `copilot-gpt-4.1` → aider + gpt-4.1 via github-copilot proxy
+        # (no claude-pool draw; free under user's subscription).
+        env["IMPLEMENTER_BACKEND"] = implementer_backend
     if batch_total:
         env["RESPONDER_BATCH_INDEX"] = str(batch_index)
         env["RESPONDER_BATCH_TOTAL"] = str(batch_total)

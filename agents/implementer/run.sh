@@ -577,7 +577,17 @@ EOF
         # end-to-end on a real rec without burning Max profile quota.
         # Default: 0 (use claude pool first; fall back automatically on
         # rc=75 = all Max profiles rate-limited).
-        if [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
+        if [ "${IMPLEMENTER_BACKEND:-}" = "copilot-gpt-4.1" ]; then
+            # New parallel channel (2026-05-13). Dispatcher routes "simple"
+            # recs here so they can ship continuously even when the claude
+            # pool is rate-limited. Goes straight to framework code-editor
+            # chain (aider + gpt-4.1 via github-copilot proxy) — no claude
+            # pool draw, free under user's Copilot subscription.
+            echo "[implementer] IMPLEMENTER_BACKEND=copilot-gpt-4.1 — skipping claude, using aider+gpt-4.1" >&2
+            export IMPLEMENTER_FORCE_FALLBACK_BACKEND=aider-github-copilot
+            export IMPLEMENTER_FORCE_FALLBACK_MODEL=gpt-4.1-2025-04-14
+            rc=75
+        elif [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
             echo "[implementer] IMPLEMENTER_FORCE_FALLBACK=1 — skipping claude, forcing framework code-editor chain" >&2
             rc=75
         else
