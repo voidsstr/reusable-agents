@@ -600,8 +600,21 @@ class ProgressiveImprovementAgent(AgentBase):
             ),
             "recommendations": recs,
         }
+        # Producer-history dedup: drop recs whose titles this agent has
+        # already emitted in prior runs. Backed by rolling 1000-entry
+        # cache. Prevents the "same topic re-proposed every tick"
+        # pattern (e.g. keto meal plan emitted 8 times across 5 days).
+        before = len(recs_doc["recommendations"])
+        recs_doc["recommendations"] = self.filter_proposals_against_history(
+            recs_doc["recommendations"])
+        dropped = before - len(recs_doc["recommendations"])
+        if dropped:
+            recs_doc["summary"] = (
+                f"{recs_doc.get('summary','')} [producer-history dedup "
+                f"dropped {dropped}]")
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
+        self.record_emitted_proposals(recs_doc["recommendations"])
 
         subject, html = render_recs_email(
             cfg=cfg, agent_id=self.agent_id, request_id=request_id,

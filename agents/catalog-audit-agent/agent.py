@@ -532,8 +532,12 @@ class CatalogAuditAgent(AgentBase):
             ),
             "recommendations": recs,
         }
+        # Producer-history dedup — see AgentBase.filter_proposals_against_history.
+        recs_doc["recommendations"] = self.filter_proposals_against_history(
+            recs_doc["recommendations"])
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
+        self.record_emitted_proposals(recs_doc["recommendations"])
 
         # ── 5. Email — use self.agent_id (per-site) so the responder routes ─
         # auto_queued=True swaps the "Reply to ship" block for an "auto-queued"

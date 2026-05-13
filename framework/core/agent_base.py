@@ -1085,6 +1085,49 @@ class AgentBase:
             storage=self.storage,
         )
 
+    def filter_proposals_against_history(
+        self, proposals: list[dict], *, title_key: str = "title",
+    ) -> list[dict]:
+        """Drop proposals whose title-signature matches anything this agent
+        has already emitted in a prior run. Layer atop any agent-local
+        dedup (e.g. against published DB rows / accumulator). Backed by
+        a rolling 1000-entry cache at
+        `agents/<id>/state/emitted-titles.json`.
+
+        Call this RIGHT BEFORE persisting recommendations.json:
+
+            proposals = self._generate_proposals(...)
+            proposals = self.filter_proposals_against_history(proposals)
+            # ... write recommendations.json ...
+            self.record_emitted_proposals(proposals)
+        """
+        from . import producer_history as _ph
+        skipped = []
+        kept = _ph.filter_proposals(
+            proposals, self.agent_id, self.storage,
+            title_key=title_key,
+            on_skip=lambda t: skipped.append(t),
+        )
+        if skipped:
+            self.decide(
+                "observation",
+                f"producer-history dedup: dropped {len(skipped)} proposals "
+                "whose titles this agent already emitted in a prior run",
+                evidence={"dropped_titles": skipped[:15]},
+            )
+        return kept
+
+    def record_emitted_proposals(
+        self, proposals: list[dict], *, title_key: str = "title",
+    ) -> int:
+        """Persist the titles of `proposals` to the emitted-titles cache so
+        future ticks of THIS agent can dedup against them. Call right
+        after writing recommendations.json. Returns # new entries added."""
+        from . import producer_history as _ph
+        return _ph.record_emitted(
+            proposals, self.agent_id, self.storage, title_key=title_key,
+        )
+
     def ai_client(self, *, provider: Optional[str] = None,
                   model: Optional[str] = None,
                   call: Optional[str] = None):

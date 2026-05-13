@@ -723,8 +723,11 @@ class CompetitorResearchAgent(AgentBase):
             "recommendations": recs,
             "accumulator_counts": accum_counts,
         }
+        recs_doc["recommendations"] = self.filter_proposals_against_history(
+            recs_doc["recommendations"])
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
+        self.record_emitted_proposals(recs_doc["recommendations"])
 
         # Render email from the FULL open list, not just this run.
         # assign_rec_ids re-numbers in priority order so the user's
