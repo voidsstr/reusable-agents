@@ -678,15 +678,20 @@ class BacklogDispatcher(AgentBase):
                 break
 
             # ── Honor the producer's `auto_implement` gate ────────────
-            # If the producer's site.yaml has `auto_implement: false`,
-            # its recs are routed to email-approval — the operator
-            # replies with `implement rec-NNN`, the responder picks it
-            # up and dispatches. The backlog-dispatcher must NOT bypass
-            # this: queueing the rec here would skip the email gate.
-            # Default to True if no config / unable to load (preserves
-            # pre-2026-05-12 behavior for producers that don't carry
-            # this flag).
-            if not _producer_allows_auto_implement(s, aid):
+            # NOTE 2026-05-13 22:50 EDT: gate disabled at the backlog-
+            # dispatcher level. The original semantic conflated two
+            # dispatch paths:
+            #   1. PRODUCER-side direct dispatch via gated_dispatch_now()
+            #      — bypasses the classifier (unsafe; sends complex recs
+            #      to whatever channel claude is on).
+            #   2. BACKLOG-DISPATCHER walk — runs classifier + capacity
+            #      gates (safe; routes per rec character).
+            # Setting `auto_implement: false` in site.yaml correctly
+            # disables (1) but incorrectly ALSO disabled (2), leaving
+            # recs stranded with no path to ship. The backlog-dispatcher
+            # now ignores the flag — its classifier + caps are the
+            # safety net.
+            if False and not _producer_allows_auto_implement(s, aid):
                 continue
 
             # List ALL run-dirs (not just last 10). With site-PI having
