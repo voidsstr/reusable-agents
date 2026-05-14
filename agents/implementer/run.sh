@@ -599,7 +599,7 @@ EOF
             # through to the framework chain (rc=75). The claude-pool shim
             # picks the right profile per family on each call. Override the
             # start tier via IMPLEMENTER_CLAUDE_MODEL.
-            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-opus-4-7}"
+            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-sonnet-4-6}"
             TIER_ORDER=("$START_MODEL")
             case "$START_MODEL" in
                 *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;

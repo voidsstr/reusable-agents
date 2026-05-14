@@ -78,7 +78,7 @@ MAX_QUEUE_DEPTH = int(os.environ.get("BACKLOG_DISPATCHER_MAX_QUEUE_DEPTH", "30")
 # Two parallel channels (2026-05-13). Independent caps so the free
 # gpt-4.1 channel can keep working while the paid claude channel is
 # rate-limited (the recurring pattern overnight).
-MAX_INFLIGHT_SCOPES = int(os.environ.get("BACKLOG_DISPATCHER_MAX_INFLIGHT", "0"))
+MAX_INFLIGHT_SCOPES = int(os.environ.get("BACKLOG_DISPATCHER_MAX_INFLIGHT", "1"))
 MAX_INFLIGHT_COPILOT = int(os.environ.get("BACKLOG_DISPATCHER_MAX_COPILOT", "3"))
 
 
@@ -620,7 +620,10 @@ class BacklogDispatcher(AgentBase):
         # cap-tune). Copilot/gpt-4.1 scopes throttle on
         # MAX_INFLIGHT_COPILOT independently (free, no pool draw).
         # Total dispatch budget = sum of both.
-        family = os.environ.get("IMPLEMENTER_MODEL_FAMILY", "opus")
+        # Default to sonnet (2026-05-13 evening): opus quota exhausted
+        # until May 16 across all 5 profiles. Sonnet has 3 healthy as of
+        # 17:48 EDT reset. Override via IMPLEMENTER_MODEL_FAMILY.
+        family = os.environ.get("IMPLEMENTER_MODEL_FAMILY", "sonnet")
         claude_cap, throttle_reason = _effective_cap(
             MAX_INFLIGHT_SCOPES, family)
         if throttle_reason:
