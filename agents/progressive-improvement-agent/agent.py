@@ -612,6 +612,11 @@ class ProgressiveImprovementAgent(AgentBase):
             recs_doc["summary"] = (
                 f"{recs_doc.get('summary','')} [producer-history dedup "
                 f"dropped {dropped}]")
+        # Per-rec safety tag — tells dispatcher which implementer
+        # backend is safe (claude vs gpt-4.1). PI recs default to
+        # DESIGN_JUDGMENT (claude) since they touch UI/copy.
+        self.stamp_implementer_safety(
+            recs_doc["recommendations"], dispatch_kind="pi")
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
         self.record_emitted_proposals(recs_doc["recommendations"])

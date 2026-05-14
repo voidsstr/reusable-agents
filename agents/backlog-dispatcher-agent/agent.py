@@ -107,42 +107,16 @@ def _site_from_agent_id(aid: str) -> str:
 
 
 def _classify_rec_backend(rec: dict, dispatch_kind: str = "") -> str:
-    """Return the implementer backend best-suited to this rec.
+    """Thin wrapper around framework.core.implementer_safety.backend_for.
 
-    Restricted policy (revised 2026-05-13 19:10 EDT after observing the
-    earlier aggressive default damaged marketing pages):
-      - aider-via-gpt-4.1 lacks the design sensibility for content/UI
-        edits — it stripped a 4-step icon grid into a text blob,
-        downgraded a hero subtitle from concrete value-prop to generic
-        copy, and "fixed" 2026 → 2024 (year hallucination).
-      - PI / SEO copy + marketing-page edits MUST go through claude.
-        Until claude pool resets we DEFER those (router returns
-        "claude" — dispatcher gates on claude_cap and skips).
-      - Safe for gpt-4.1 channel: catalog-audit DB-row fixes (well-
-        structured taxonomy/category/image-url updates that don't
-        require design judgment).
-
-    Returns:
-      "claude" — default. Anything that touches frontend code, copy,
-                 or human-facing content. Until claude returns,
-                 dispatcher will hold these.
-      "copilot-gpt-4.1" — only catalog-audit dispatch_kind. Free,
-                 low-risk structured edits.
+    Reads `rec.implementer_safety` (set by producer) if present and
+    valid. Otherwise infers from check_id / rec.type / dispatch_kind.
+    Default route is "claude" (DESIGN_JUDGMENT) — gpt-4.1 only handles
+    explicitly-tagged STRUCTURED recs. See implementer_safety.py for
+    the policy + lesson-history.
     """
-    # Anything explicitly long-form stays on claude.
-    if dispatch_kind in ("article-author", "h2h"):
-        return "claude"
-    # Catalog-audit recs are DB-row updates / migrations. Low blast
-    # radius, structured edits — safe for gpt-4.1 channel.
-    if dispatch_kind == "catalog-audit":
-        return "copilot-gpt-4.1"
-    rec_type = (rec.get("type") or rec.get("rec_type") or "").lower()
-    if "catalog-audit" in rec_type or "recipe-category" in rec_type \
-            or "product-image" in rec_type or "image-name-mismatch" in rec_type:
-        return "copilot-gpt-4.1"
-    # All other recs (PI duplicate-content, SEO copy fixes, anything
-    # that touches frontend or marketing copy) — keep on claude.
-    return "claude"
+    from framework.core.implementer_safety import backend_for
+    return backend_for(rec, dispatch_kind)
 
 
 def _count_inflight_by_backend() -> tuple[int, int]:
@@ -615,17 +589,35 @@ class BacklogDispatcher(AgentBase):
         # the live in-flight count. Must run every tick (even on throttle)
         # so a freshly-completed scope clears within ~60s.
         _write_live_scopes_heartbeat(s, inflight_scopes)
-        # Two-channel cap (2026-05-13). Claude scopes throttle on
-        # MAX_INFLIGHT_SCOPES (gated by claude-pool health via auto-
-        # cap-tune). Copilot/gpt-4.1 scopes throttle on
-        # MAX_INFLIGHT_COPILOT independently (free, no pool draw).
-        # Total dispatch budget = sum of both.
-        # Default to sonnet (2026-05-13 evening): opus quota exhausted
-        # until May 16 across all 5 profiles. Sonnet has 3 healthy as of
-        # 17:48 EDT reset. Override via IMPLEMENTER_MODEL_FAMILY.
+        # Two-channel cap. Claude throttles on MAX_INFLIGHT_SCOPES
+        # gated by claude-pool health (auto-cap-tune). Copilot/gpt-4.1
+        # throttles on MAX_INFLIGHT_COPILOT independently. Total
+        # dispatch budget = sum.
+        #
+        # Auto-recovery: when claude was exhausted earlier and the
+        # dispatcher fell back to copilot-only, the auto-cap-tune
+        # detects the pool returning to healthy on the next tick
+        # (reads claude-pool/state.json `limit_resets_at` vs now) and
+        # raises claude_cap automatically — no manual intervention.
+        # We log the transition for audit.
         family = os.environ.get("IMPLEMENTER_MODEL_FAMILY", "sonnet")
         claude_cap, throttle_reason = _effective_cap(
             MAX_INFLIGHT_SCOPES, family)
+        # Pool-health transition log (cheap state-on-disk compare)
+        try:
+            prev_state = (self.state or {})
+            prev_cap = int(prev_state.get("last_claude_cap", -1))
+            if prev_cap != claude_cap:
+                self.decide(
+                    "observation",
+                    f"claude-pool health changed: claude_cap {prev_cap} → "
+                    f"{claude_cap} (family={family}). When ≥1 the implementer "
+                    "auto-resumes claude as primary; when 0 the dispatcher "
+                    "holds DESIGN_JUDGMENT/LONG_FORM recs and only drains "
+                    "STRUCTURED recs via copilot-gpt-4.1.",
+                )
+        except Exception:
+            pass
         if throttle_reason:
             self.decide("observation", throttle_reason)
         total_cap = claude_cap + MAX_INFLIGHT_COPILOT
@@ -937,6 +929,8 @@ class BacklogDispatcher(AgentBase):
         new_state_queued = list(already | set(queued_now))[-2000:]
         next_state = dict(self.state or {})
         next_state["queued_ids"] = new_state_queued
+        # Persist claude_cap so we can detect transitions next tick.
+        next_state["last_claude_cap"] = claude_cap
         # Also stash the hash so the auto short-circuit logic in
         # AgentBase._check_short_circuit notices when accumulator changes.
 

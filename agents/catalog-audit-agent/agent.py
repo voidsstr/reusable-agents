@@ -535,6 +535,12 @@ class CatalogAuditAgent(AgentBase):
         # Producer-history dedup — see AgentBase.filter_proposals_against_history.
         recs_doc["recommendations"] = self.filter_proposals_against_history(
             recs_doc["recommendations"])
+        # Safety tag — catalog-audit recs are well-bounded DB-row
+        # updates, safe for the gpt-4.1 channel. The framework's
+        # implementer_safety primitive infers STRUCTURED from
+        # dispatch_kind="catalog-audit".
+        self.stamp_implementer_safety(
+            recs_doc["recommendations"], dispatch_kind="catalog-audit")
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
         self.record_emitted_proposals(recs_doc["recommendations"])

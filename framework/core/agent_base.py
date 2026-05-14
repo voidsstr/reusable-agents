@@ -1128,6 +1128,23 @@ class AgentBase:
             proposals, self.agent_id, self.storage, title_key=title_key,
         )
 
+    def stamp_implementer_safety(
+        self, proposals: list[dict], *, dispatch_kind: str = "",
+    ) -> int:
+        """Stamp `implementer_safety` on every rec lacking a valid tag.
+        See framework.core.implementer_safety for the policy.
+
+        Producers that know their recs are safe for gpt-4.1 (e.g.,
+        catalog-audit emits structured DB-row updates) should call this
+        BEFORE persisting recommendations.json so the dispatcher's
+        gpt-4.1 channel can drain them when claude is down.
+
+            recs = self._generate_recs(...)
+            self.stamp_implementer_safety(recs, dispatch_kind="catalog-audit")
+        """
+        from . import implementer_safety as _is
+        return _is.stamp_safety(proposals, dispatch_kind=dispatch_kind)
+
     def ai_client(self, *, provider: Optional[str] = None,
                   model: Optional[str] = None,
                   call: Optional[str] = None):

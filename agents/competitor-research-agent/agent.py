@@ -725,6 +725,12 @@ class CompetitorResearchAgent(AgentBase):
         }
         recs_doc["recommendations"] = self.filter_proposals_against_history(
             recs_doc["recommendations"])
+        # Safety tag — competitor-research recs are strategic feature
+        # proposals (often review_required). Default DESIGN_JUDGMENT
+        # so they route to claude; operator should mark each
+        # individually if it's confirmed for implementation.
+        self.stamp_implementer_safety(
+            recs_doc["recommendations"], dispatch_kind="comp-research")
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
         self.record_emitted_proposals(recs_doc["recommendations"])
