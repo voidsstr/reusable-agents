@@ -693,9 +693,25 @@ class BacklogDispatcher(AgentBase):
             # 160 run-dirs each at 15 recs/run = 2,400 potential recs,
             # we still cap dispatch volume below.
             try:
+                # Two run_ts shapes coexist for legacy reasons:
+                #   - `20260514T023123Z` (plain ISO compact)
+                #   - `rundir-<aid>-<src_run_ts>-<hash>` (older runs that
+                #     were dispatched via the persisted-rundir pattern)
+                # Alphabetic sort puts "rundir-" AFTER digits, so a naive
+                # reverse-sort would put the OLD rundir-* entries first
+                # and never reach the new plain-timestamp ones within
+                # the scan budget. Extract the embedded ISO timestamp
+                # from either form and sort by that.
+                import re as _re
+                ts_re = _re.compile(r"(\d{8}T\d{6}Z)")
+                def _extract_ts(k: str) -> str:
+                    seg = k.split("/runs/")[1].split("/")[0]
+                    m = ts_re.search(seg)
+                    return m.group(1) if m else seg
                 run_keys = sorted(
                     [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
                      if k.endswith("/recommendations.json")],
+                    key=_extract_ts,
                     reverse=True,
                 )
             except Exception as e:
