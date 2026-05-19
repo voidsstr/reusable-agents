@@ -739,6 +739,74 @@ than reinventing. Failing to use them costs tokens AND introduces drift:
 **Rule of thumb:** if you're about to add a `for item in items: client.chat(...)`
 loop, stop and ask whether you can do it in one batched call instead.
 
+## ⚠️ ARTICLE + NEWS WRITING — OPUS-ONLY HARD REQUIREMENT ⚠️
+
+**Every code path that GENERATES the body of an editorial article, news
+piece, or long-form review MUST use Claude Opus (currently
+`claude-opus-4-7`) and MUST defer rather than fall back to a smaller
+model when Opus is unavailable.** This applies to:
+
+- `article-author` agents on every site (specpicks, aisleprompt, future)
+- News-rewrite / news-author code paths (e.g.
+  `specpicks/scripts/rewrite-news-as-commentary.ts`)
+- Any agent emitting recs with `dispatch_kind` in
+  `{article-author, news-author, news-rewrite}`
+- Long-form review writers, head-to-head commentary, buying-guide
+  per-pick rationale generation
+
+**The mechanism is `framework/core/required_model.py`** + the storage
+config `config/required-models.json`. Resolution order:
+
+1. `rec.required_model_tier` (per-rec override)
+2. `config/required-models.json.by_dispatch_kind[<kind>]`
+3. `config/required-models.json.by_agent_id[<source_agent>]`
+4. None — falls through to soft `recommended_model_tier`
+
+**The current config (in Azure blob `agents/config/required-models.json`):**
+
+```json
+{
+  "by_dispatch_kind": {
+    "article-author":  "opus",
+    "news-author":     "opus",
+    "news-rewrite":    "opus"
+  },
+  "by_agent_id": {
+    "specpicks-article-author-agent":  "opus",
+    "aisleprompt-article-author-agent": "opus",
+    "specpicks-news-writer":            "opus"
+  }
+}
+```
+
+**Implementer behavior when Opus is unavailable:** the
+`required_model_for_batch()` helper returns `("opus",
+"claude-opus-4-7")`; if the implementer can't reach Opus (rate-limit,
+auth failure, etc.) it SKIPS the rec with reason
+`required-model-unavailable` and the rec stays in the queue. We
+intentionally lose throughput rather than ship sonnet-quality prose.
+
+**Why:** prose quality matters more than throughput for any text a
+human reader will judge. Sonnet drafts read as flatter, repeat
+generic-CMS phrasing, and lose the differentiated voice of each site.
+Opus 4.7 produces the editorial voice the sites are graded on.
+
+**One-off scripts MUST honor this rule too.** Any new ts/py script in
+`<site>/scripts/` that calls claude-cli or the framework chat client
+to write article-shaped output should hard-code `claude-opus-4-7` in
+the `--model` flag (NOT `claude-sonnet-4-6` or downgrade chains).
+Reference impl: `specpicks/scripts/rewrite-news-as-commentary.ts`.
+
+**Anti-patterns to refuse on sight:**
+
+- ❌ Adding a `chat_with_fallback(...)` call to article-author code
+  (the fallback chain includes sonnet + haiku).
+- ❌ Hard-coding `claude-sonnet-4-6` in any article/news writer.
+- ❌ Adding entries to `recommended_model_tier` for these
+  dispatch_kinds (recommended is soft; required is hard — use
+  required).
+- ❌ Skipping `required_model_for_batch()` in a custom implementer.
+
 ## LLM provider routing — chat vs code-editor
 
 The framework has TWO independent LLM systems. Don't conflate them:
@@ -905,3 +973,83 @@ customer apps, **don't refactor the framework itself** unless the user
 explicitly asks. Submit framework changes as PRs to the
 reusable-agents repo and pull them via `git pull` in the framework
 checkout.
+
+## ⚠️ INFRA SCRIPTS ARE THE SOURCE OF TRUTH — READ EVERY SESSION ⚠️
+
+**Any change to deployment behavior MUST land in the deploy scripts in
+the same change.** No ad-hoc CLI commands, no "I'll commit it later",
+no "this is just a one-off." If you ran an `aws`, `az`, `docker`, or
+`gh` command that materially changed how the app gets deployed, it
+belongs in a script before you call the work done.
+
+**Where things live:**
+
+| Change                              | Script(s) to update                                  |
+|-------------------------------------|------------------------------------------------------|
+| Framework provisioning (VPC, RDS,   | `install/deploy-aws.sh` + `install/deploy-azure.sh`  |
+| ECR/ACR, S3/blob, ALB, IAM, secrets,| (keep cloud-agnostic phases parallel)                |
+| ECS cluster)                        |                                                      |
+| Framework image build/push          | `install/deploy-aws.sh` `phase_images` +             |
+| (api / ui)                          | `install/deploy-azure.sh` matching block             |
+| Per-app image build/push/redeploy   | `<repo>/aws/deploy.sh` + `<repo>/azure/deploy.sh`    |
+| New env var the app reads           | Both deploy scripts (env passthrough) + the          |
+|                                     | Secrets Manager / Container App secret block         |
+| New custom domain                   | Both `phase_dns` (AWS) and the Azure equivalent      |
+| New cloud target (GCP, Cloudflare)  | New `install/deploy-<cloud>.sh` mirroring the same   |
+|                                     | phase shape; no per-cloud logic in agents/framework  |
+
+**Decision rule before every PR that touches deployment:**
+
+1. **"Did I run a cloud CLI command that the deploy script doesn't
+   already do?"** If yes, add it to the script in the same change.
+2. **"If a teammate ran `bash install/deploy-aws.sh provision` on a
+   fresh AWS account tomorrow, would they end up in the same state
+   I did?"** If no, the script is incomplete — fix it.
+3. **"If we add a new cloud, would this still work?"** All cloud-
+   specific code lives in `install/deploy-<cloud>.sh` and
+   `<repo>/<cloud>/deploy.sh`. Framework and agent code stays
+   cloud-neutral.
+
+**Anti-patterns to refuse on sight:**
+
+- Manual `aws ecs update-service` (or `az containerapp update`)
+  invocations not wrapped by a script in the relevant repo.
+- "Workaround" commits that fix prod without updating the deployer.
+- New cloud resource (e.g. SQS queue, ElastiCache, Key Vault) referenced
+  in agent code without a provisioning block in
+  `install/deploy-<cloud>.sh`.
+- One cloud's deploy script gains a feature (e.g. ALB rules); the
+  other cloud's lags. Both stay parallel — if AWS gets it, so does
+  Azure (and vice-versa).
+- Updating `<repo>/aws/deploy.sh` without checking that
+  `<repo>/azure/deploy.sh` still works with the same env contract.
+
+**State file contract:** `install/deploy-aws.sh provision` writes
+`~/.aws-deploy/state.env` (VPC, subnets, cluster, ALB, RDS endpoint,
+ECR registry). Every per-app `<repo>/aws/deploy.sh` reads that file.
+Same shape on the Azure side via `install/deploy-azure.sh` (state lives
+in the Azure resource group, which is itself the contract). Do not add
+fields to one side without the other.
+
+## Deploying to AWS (parallel cloud target)
+
+`install/deploy-aws.sh` is the AWS equivalent of `install/deploy-azure.sh`.
+Same idempotent shape, phased:
+
+```
+bash install/deploy-aws.sh provision   # VPC, RDS, ECR, S3, ALB, IAM, Secrets, ECS cluster
+bash install/deploy-aws.sh secrets     # populate Secrets Manager entries
+bash install/deploy-aws.sh images      # build + push framework api/ui images
+bash install/deploy-aws.sh services    # create/update ECS task defs + services for all apps
+bash install/deploy-aws.sh dns         # print CNAME records for the ALB
+bash install/deploy-aws.sh all         # full pipeline
+```
+
+Per-app images (aisleprompt, specpicks, hearthnote, nsc-website,
+application-research) live in their own repos under `<repo>/aws/deploy.sh`
+— each script reads `~/.aws-deploy/state.env` from the framework
+provisioner so it knows the cluster + service name to push to.
+
+**Don't add AWS-specific branching to existing agents.** Everything that's
+cloud-specific lives in the deploy scripts and the framework storage
+backend factory. Agent code is cloud-neutral.
