@@ -449,9 +449,25 @@ class ProgressiveImprovementAgent(AgentBase):
             user_prompt = _format_pages_for_prompt(batch, cfg.what_we_do)
             try:
                 system_prompt = ANALYSIS_SYSTEM
+                # Surface site-specific QA detection rules from
+                # analyzer.qa_detection_rules in site.yaml. Each rule's
+                # summary line becomes a numbered bullet the LLM is
+                # told to actively look for.
+                qa_rules = ((cfg.get("analyzer") or {}).get("qa_detection_rules") or [])
+                if qa_rules:
+                    rule_lines = [
+                        f"  - [{(r.get('severity') or 'medium').upper()}] "
+                        f"{r.get('id','rule')}: {r.get('summary','')}"
+                        for r in qa_rules if isinstance(r, dict)
+                    ]
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n--- SITE-SPECIFIC QA RULES (file recs when you see these) ---\n"
+                        + "\n".join(rule_lines)
+                    )
                 if adaptive_block:
                     system_prompt = (
-                        ANALYSIS_SYSTEM
+                        system_prompt
                         + "\n\n--- ADAPTIVE CONTEXT (recent work + outcomes) ---\n"
                         + adaptive_block
                     )
@@ -566,6 +582,62 @@ class ProgressiveImprovementAgent(AgentBase):
         if skipped_dupe:
             self.decide("observation",
                         f"deduped {skipped_dupe} rec(s) already shipped/skipped in prior runs")
+
+        # ── Handoff `incorrect-categorization` recs to catalog-audit ──
+        # PI surfaces miscategorized recipes but can't fix them — that's
+        # DB-level recategorization work owned by catalog-audit-agent.
+        # Send these as typed handoffs instead of emitting through the
+        # implementer channel (where they'd just defer with
+        # "owned by catalog-audit-agent"). Per-site target resolves via
+        # site config; falls back to the blueprint id if no override.
+        miscat_recs = [r for r in recs if r.get("category") == "incorrect-categorization"]
+        recs = [r for r in recs if r.get("category") != "incorrect-categorization"]
+        if miscat_recs:
+            try:
+                from framework.core.handoff import send_handoff
+                # Per-site catalog-audit if the PI instance is itself per-site.
+                # e.g. aisleprompt-progressive-improvement-agent → aisleprompt-catalog-audit-agent.
+                target = "catalog-audit-agent"
+                for prefix in ("aisleprompt-", "specpicks-"):
+                    if self.agent_id.startswith(prefix):
+                        target = f"{prefix}catalog-audit-agent"
+                        break
+                for r in miscat_recs:
+                    send_handoff(
+                        from_agent=self.agent_id,
+                        to_agent=target,
+                        work_type="quality_audit_fix",
+                        rec_id=r.get("id", ""),
+                        rec={
+                            "type":                "incorrect-categorization",
+                            "title":               r.get("title", ""),
+                            "rationale":           r.get("rationale", ""),
+                            "evidence":            r.get("evidence", []),
+                            "affected_urls":       r.get("affected_urls", []),
+                            "fix_suggestion":      (r.get("implementation_outline") or {}).get("approach", ""),
+                            "severity":            r.get("severity", ""),
+                            "confidence":          r.get("confidence", 0),
+                        },
+                        source_run_ts=self.run_ts,
+                        source_agent=self.agent_id,
+                        rationale=f"PI surfaced miscategorization; catalog-audit owns the fix",
+                        storage=self.storage,
+                    )
+                self.decide(
+                    "handoff",
+                    f"routed {len(miscat_recs)} incorrect-categorization rec(s) to {target}",
+                )
+            except Exception as e:
+                # Don't lose the work — fall back to emitting through the
+                # rec channel as a deferred item with a clear handoff note.
+                self.decide("error", f"handoff to catalog-audit failed: {e}")
+                for r in miscat_recs:
+                    r["deferred"] = True
+                    r["deferred_reason"] = (
+                        f"Wrong-agent: needs DB recategorization, owned by "
+                        f"catalog-audit-agent. Handoff dispatch failed: {e}"
+                    )
+                recs.extend(miscat_recs)
 
         # Sort: severity (critical→low), then confidence desc, then tier (auto first)
         sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}

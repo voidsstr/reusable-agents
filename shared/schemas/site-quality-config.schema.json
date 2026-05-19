@@ -66,6 +66,20 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Override the default category list. Use to focus the agent on specific concerns (e.g., only 'incorrect-categorization' for a catalog site)."
+        },
+        "qa_detection_rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "summary"],
+            "properties": {
+              "id": { "type": "string", "description": "Stable rule id (kebab-case)" },
+              "summary": { "type": "string", "description": "What to look for + when to file a rec. Surfaced verbatim in the analyzer system prompt." },
+              "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"], "default": "medium" }
+            }
+          },
+          "description": "Site-specific QA patterns the analyzer should watch for on every crawled page, in addition to the base issue_categories. Each rule's summary is injected into the analyzer's system prompt so the LLM gets explicit instructions to flag the pattern."
         }
       }
     },
