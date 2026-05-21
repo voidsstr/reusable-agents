@@ -396,6 +396,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
         )
     except Exception as _e:
         _log(f"[dispatch] failed to write dispatch-batches.json: {_e}")
+
     env["RESPONDER_RUN_DIR"] = str(run_dir)
     env["RESPONDER_REQUEST_ID"] = request_id
     env["RESPONDER_AGENT_ID"] = agent_id
@@ -419,6 +420,12 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     # implementer Runs tab). Same value as the systemd unit suffix —
     # makes log → run mapping trivial.
     env["IMPLEMENTER_RUN_TS"] = ts
+
+    # ── In-flight visibility hook (2026-05-18, deferred) ──────────
+    # Planned: push producer recs to Azure NOW (currently waits for
+    # post-run sync). Stub left here intentionally for the follow-up
+    # commit; full implementation depends on `_publish_inflight_recs_to_azure`
+    # being added with stamp-and-overwrite semantics.
 
     use_systemd_run = bool(shutil.which("systemd-run"))
     try:

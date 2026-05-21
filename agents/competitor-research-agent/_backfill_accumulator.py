@@ -46,6 +46,21 @@ def backfill(agent_id: str, dry_run: bool = False) -> dict:
     if not rec_keys:
         return {"agent_id": agent_id, "scanned": 0, "added": 0, "refreshed": 0}
 
+    # Hold the accumulator lock for the full backfill so a concurrent
+    # producer run can't race the load → re-shape → save and clobber
+    # the backfill's work.
+    from framework.core.locks import accumulator_lock
+    _lock_cm = accumulator_lock(agent_id) if not dry_run else _nullcontext()
+    with _lock_cm:
+        return _backfill_impl(s, agent_id, rec_keys, dry_run)
+
+
+def _nullcontext():
+    from contextlib import nullcontext
+    return nullcontext()
+
+
+def _backfill_impl(s, agent_id: str, rec_keys: list, dry_run: bool) -> dict:
     accum = load_active(s, agent_id)
     by_id: dict[str, dict] = {p["proposal_id"]: p for p in accum.get("proposals", [])
                               if isinstance(p, dict) and p.get("proposal_id")}

@@ -394,8 +394,16 @@ def _summary(m: registry.AgentManifest,
 # Endpoints
 # ---------------------------------------------------------------------------
 
+_LIST_ALL_CACHE: dict = {"data": None, "ts": 0.0}
+_LIST_ALL_CACHE_TTL_S = 5.0  # tab-flip / refresh absorbing without lag
+
+
 @router.get("", response_model=list[AgentSummary])
 def list_all():
+    import time as _t
+    _now = _t.monotonic()
+    if _LIST_ALL_CACHE.get("data") is not None and (_now - _LIST_ALL_CACHE.get("ts", 0.0)) < _LIST_ALL_CACHE_TTL_S:
+        return _LIST_ALL_CACHE["data"]
     s = get_storage()
     # Module-level 60s cache — eliminates the 2 per-request blob reads.
     providers_cache, defaults_cache = _get_config_caches()
@@ -459,13 +467,16 @@ def list_all():
         for aid, la in ex.map(_fetch_last_ai, [m.id for m in manifests]):
             last_ai_calls[aid] = la
 
-    return [
+    resp = [
         _summary(m, providers_cache=providers_cache,
                  defaults_cache=defaults_cache,
                  status=statuses.get(m.id, {}),
                  last_ai=last_ai_calls.get(m.id, {}))
         for m in manifests
     ]
+    _LIST_ALL_CACHE["data"] = resp
+    _LIST_ALL_CACHE["ts"] = _t.monotonic()
+    return resp
 
 
 @router.post("/register", response_model=AgentSummary)

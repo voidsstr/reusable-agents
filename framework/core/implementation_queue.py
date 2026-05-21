@@ -79,5 +79,24 @@ def queue_recs(
         "queued_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": source,
     }
-    s.write_json(f"agents/responder-agent/auto-queue/{request_id}.json", payload)
+    # The auto-queue key is unique-per-run via run_ts+tag+site. If a
+    # caller somehow re-emits the same request_id (e.g. a manual rerun
+    # of the same agent's same run_ts), the second write merges its
+    # rec_ids into the existing payload rather than overwriting — so
+    # the responder doesn't lose work. Atomic from the responder's POV
+    # because the SAME file is touched (no double-pickup risk).
+    key = f"agents/responder-agent/auto-queue/{request_id}.json"
+    existing = None
+    try:
+        existing = s.read_json(key)
+    except Exception:
+        existing = None
+    if isinstance(existing, dict):
+        merged_ids = list(dict.fromkeys(list(existing.get("rec_ids") or []) + list(rec_ids)))
+        payload["rec_ids"] = merged_ids
+        # Preserve original queued_at for traceability; record the
+        # merge event so dashboard logs show the collision.
+        payload["queued_at"] = existing.get("queued_at") or payload["queued_at"]
+        payload["merged_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    s.write_json(key, payload)
     return request_id

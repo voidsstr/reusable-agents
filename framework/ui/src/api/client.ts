@@ -339,20 +339,35 @@ export const api = {
       shipped: number
       implemented: number
       deferred: number
+      duplicate?: number
+      pending_approval?: number
       pending: number
       total: number
       by_agent: Record<string, {
         shipped: number; implemented: number; deferred: number;
+        duplicate?: number; pending_approval?: number;
         pending: number; total: number
       }>
     }>(`/api/implementer/lifetime-stats`),
 
+  // Approve a `review_required` rec for implementation. Flips
+  // `confirmed_for_implementation=true` on the source rec so the
+  // backlog dispatcher releases it to the implementer.
+  implementerApproveRec: (source_agent: string, source_run_ts: string, rec_id: string) =>
+    http<{
+      ok: boolean
+      rec_id: string
+      source_agent: string
+      source_run_ts: string
+      already_approved: boolean
+    }>(`/api/implementer/recs/${encodeURIComponent(source_agent)}/${encodeURIComponent(source_run_ts)}/${encodeURIComponent(rec_id)}/approve`,
+       { method: 'POST' }),
+
   // Lifetime per-category rec list — backs the queue page's tab
   // drill-downs. Returns the latest rec snapshot for every rec in
-  // the requested category (shipped|implemented|deferred|pending),
-  // capped at 200/bucket. Same cache as lifetime-stats so it's
-  // always a hit after the first cold compute.
-  implementerRecsByCategory: (category: 'shipped' | 'implemented' | 'deferred' | 'pending', limit = 100) =>
+  // the requested category, capped at 200/bucket. Same cache as
+  // lifetime-stats so it's always a hit after the first cold compute.
+  implementerRecsByCategory: (category: 'shipped' | 'implemented' | 'deferred' | 'duplicate' | 'pending_approval' | 'pending', limit = 100) =>
     http<{
       category: string
       count: number

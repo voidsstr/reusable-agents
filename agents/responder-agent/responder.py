@@ -664,6 +664,35 @@ def record_action(runs_roots: list[Path], site: str, run_ts: str, run_dir: Path,
                 "notes": notes,
             },
         )
+        # 1a. If the user's action is `implement` and the source rec is
+        # gated on `review_required`, flip `confirmed_for_implementation`
+        # on the source recommendations.json so the backlog dispatcher
+        # releases it on the next tick. Mirrors the dashboard's Approve
+        # button.
+        if action == "implement" and source_agent and run_ts:
+            try:
+                src_key = f"agents/{source_agent}/runs/{run_ts}/recommendations.json"
+                src_doc = s.read_json(src_key)
+                if isinstance(src_doc, dict):
+                    recs = src_doc.get("recommendations") or []
+                    changed = False
+                    for r in recs:
+                        if not isinstance(r, dict):
+                            continue
+                        if (r.get("id") == rec_id or r.get("rec_id") == rec_id) \
+                                and r.get("review_required") \
+                                and not r.get("confirmed_for_implementation"):
+                            r["confirmed_for_implementation"] = True
+                            r["approved_at"] = ts
+                            r["approved_via"] = "email-reply"
+                            changed = True
+                            break
+                    if changed:
+                        s.write_json(src_key, src_doc)
+                        print(f"  [approved] {source_agent}/{run_ts} {rec_id} via email reply",
+                              file=sys.stderr)
+            except Exception as e:
+                print(f"  [warn] approval-flip failed for {rec_id}: {e}", file=sys.stderr)
     except Exception as e:
         print(f"  [warn] framework-queue write failed for {rec_id}: {e}", file=sys.stderr)
 
@@ -1351,9 +1380,27 @@ def drain_auto_queue(cfg: dict) -> int:
     try:
         from framework.core.storage import get_storage
         from framework.core.run_dir import RunDir
+        from framework.core.locks import responder_drain_lock
     except Exception as e:
         print(f"[responder] auto-queue: framework imports failed: {e}", file=sys.stderr)
         return 0
+
+    # Global drain lock — non-blocking. If another responder process
+    # is already draining (e.g. manual /trigger fired while cron is
+    # running), skip this tick. The waiting items will be picked up
+    # on the next tick. Without this lock, both responders LIST the
+    # same auto-queue keys and dispatch the same recs → double-ship.
+    with responder_drain_lock(blocking=False) as _got_lock:
+        if not _got_lock:
+            print("[responder] auto-queue: another responder is draining, skipping this tick",
+                  file=sys.stderr)
+            return 0
+        return _drain_auto_queue_impl(cfg)
+
+
+def _drain_auto_queue_impl(cfg: dict) -> int:
+    from framework.core.storage import get_storage
+    from framework.core.run_dir import RunDir
     s = get_storage()
     prefix = "agents/responder-agent/auto-queue/"
     try:

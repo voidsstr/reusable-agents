@@ -201,8 +201,21 @@ def transition_state(
     return False
 
 
-def open_proposals(doc: dict) -> list[dict]:
-    """Return open proposals sorted: severity → tier → confidence desc → first_proposed_at desc."""
+def open_proposals(doc: dict, max_open: int | None = None) -> list[dict]:
+    """Return open proposals sorted: severity → tier → confidence desc → first_proposed_at desc.
+
+    When `max_open` is set (via `analyzer.max_open_proposals` in the
+    site.yaml), the result is sliced to the top-N. The accumulator file
+    itself still retains ALL open proposals — pruning here is purely a
+    presentation/dispatch concern. Items that fall below the cut on one
+    run can re-enter the top-N on a later run when fresh evidence
+    elevates their rank, since the title-hash proposal_id is stable.
+
+    This implements the "maintain a fixed-size pending-approval queue"
+    behaviour: each run refines & ranks, only top-N are visible/
+    dispatchable, and when one transitions to implemented/deferred/
+    skipped, the next-best automatically backfills the slot.
+    """
     sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     tier_order = {"auto": 0, "review": 1, "experimental": 2}
     out = [p for p in doc.get("proposals", []) if p.get("state", "open") == "open"]
@@ -214,6 +227,8 @@ def open_proposals(doc: dict) -> list[dict]:
         -(int(p.get("first_proposed_at", "0").replace("-", "")
               .replace(":", "").replace("T", "")[:14] or 0)),
     ))
+    if max_open is not None and max_open > 0:
+        out = out[:max_open]
     return out
 
 

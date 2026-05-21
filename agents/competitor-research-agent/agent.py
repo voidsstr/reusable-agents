@@ -691,9 +691,17 @@ class CompetitorResearchAgent(AgentBase):
         # save back to storage. The accumulator is the source of truth
         # for the email body — it holds every still-open proposal across
         # all prior runs.
-        accum = load_active(self.storage, self.agent_id)
-        accum = merge_run(accum, new_recs=recs, site_id=cfg.site_id, run_ts=self.run_ts)
-        save_active(self.storage, self.agent_id, accum)
+        #
+        # Held under accumulator_lock so the responder (processing an
+        # email reply transitioning a rec to implemented/deferred/
+        # skipped) and the implementer's mark-shipped CLI can't
+        # interleave with our load → merge → save. Without the lock
+        # the LATER save() overwrites the EARLIER state change.
+        from framework.core.locks import accumulator_lock
+        with accumulator_lock(self.agent_id):
+            accum = load_active(self.storage, self.agent_id)
+            accum = merge_run(accum, new_recs=recs, site_id=cfg.site_id, run_ts=self.run_ts)
+            save_active(self.storage, self.agent_id, accum)
         accum_counts = accum_stats(accum)
         self.decide(
             "accumulator",
@@ -726,11 +734,18 @@ class CompetitorResearchAgent(AgentBase):
         recs_doc["recommendations"] = self.filter_proposals_against_history(
             recs_doc["recommendations"])
         # Safety tag — competitor-research recs are strategic feature
-        # proposals (often review_required). Default DESIGN_JUDGMENT
-        # so they route to claude; operator should mark each
-        # individually if it's confirmed for implementation.
+        # proposals. Default DESIGN_JUDGMENT so they route to claude;
+        # operator should mark each individually if it's confirmed for
+        # implementation.
         self.stamp_implementer_safety(
             recs_doc["recommendations"], dispatch_kind="comp-research")
+        # Strategic proposals are gated for operator review — the
+        # dispatcher only releases them once `confirmed_for_implementation`
+        # is true (via the Approve button in the dashboard or via the
+        # responder flow's `implement rec-XXX` email reply).
+        for _r in recs_doc["recommendations"]:
+            if isinstance(_r, dict) and not _r.get("confirmed_for_implementation"):
+                _r["review_required"] = True
         validate_recs_doc(recs_doc)
         self._save_artifact("recommendations.json", recs_doc)
         self.record_emitted_proposals(recs_doc["recommendations"])
@@ -740,7 +755,16 @@ class CompetitorResearchAgent(AgentBase):
         # reply syntax (`implement rec-005`) maps cleanly. We also
         # persist the (rec_id → proposal_id) map alongside the email
         # so the responder can update the accumulator on reply.
-        open_list = open_proposals(accum)
+        #
+        # `analyzer.max_open_proposals` caps the pending-approval queue
+        # to top-N. This implements the "maintain a fixed-size pending
+        # list" behaviour: each run refines & ranks, only the top-N are
+        # visible/dispatchable, and when one transitions to implemented
+        # or deferred or skipped the next-best automatically backfills.
+        # When unset, the queue grows unbounded (original behavior).
+        max_open = analyzer_cfg.get("max_open_proposals")
+        max_open_int = int(max_open) if max_open is not None else None
+        open_list = open_proposals(accum, max_open=max_open_int)
         # Cap email body to keep it readable. The full backlog is
         # always visible on the dashboard's accumulator view; the email
         # surfaces the top-N most-actionable.
@@ -1062,32 +1086,38 @@ class CompetitorResearchAgent(AgentBase):
                         f"rec_id→proposal_id map found — skipping accumulator update")
             return
 
-        accum = load_active(self.storage, self.agent_id)
-        applied = 0
-        for resp in responses:
-            action = (resp.get("action") or "").lower()
-            rec_id = resp.get("rec_id") or ""
-            pid = prior_map.get(rec_id)
-            if not pid:
-                continue
-            target_state = {
-                "implement": "implemented",
-                "ship": "implemented",
-                "skip": "skipped",
-                "defer": "deferred",
-            }.get(action)
-            if not target_state:
-                continue
-            if transition_state(accum, pid, target_state,
-                                reason=f"user reply '{action} {rec_id}'"):
-                applied += 1
-                self.decide(
-                    "accumulator-state",
-                    f"{rec_id} ({pid}) → {target_state}",
-                )
-        if applied:
-            save_active(self.storage, self.agent_id, accum)
-            self.decide("accumulator", f"applied {applied} state change(s) from user replies")
+        # Lock the accumulator across the entire load → transition →
+        # save block so a concurrent producer run (cron just fired) or
+        # implementer mark-shipped CLI can't race the user-reply
+        # transitions and overwrite them.
+        from framework.core.locks import accumulator_lock
+        with accumulator_lock(self.agent_id):
+            accum = load_active(self.storage, self.agent_id)
+            applied = 0
+            for resp in responses:
+                action = (resp.get("action") or "").lower()
+                rec_id = resp.get("rec_id") or ""
+                pid = prior_map.get(rec_id)
+                if not pid:
+                    continue
+                target_state = {
+                    "implement": "implemented",
+                    "ship": "implemented",
+                    "skip": "skipped",
+                    "defer": "deferred",
+                }.get(action)
+                if not target_state:
+                    continue
+                if transition_state(accum, pid, target_state,
+                                    reason=f"user reply '{action} {rec_id}'"):
+                    applied += 1
+                    self.decide(
+                        "accumulator-state",
+                        f"{rec_id} ({pid}) → {target_state}",
+                    )
+            if applied:
+                save_active(self.storage, self.agent_id, accum)
+                self.decide("accumulator", f"applied {applied} state change(s) from user replies")
 
 
 if __name__ == "__main__":

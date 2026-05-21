@@ -310,6 +310,40 @@ PY
     fi
 fi
 
+# ── Article-author resume filter (2026-05-19) ──────────────────────────
+# When the implementer is dispatched with rec_ids that include articles
+# already rewritten in the DB (e.g. a re-dispatch after a previous scope
+# crashed mid-batch), filter the rec_id list to drop the already-done
+# ones. Saves LLM tokens producing duplicate UPSERTs.
+#
+# Article-author is identified later by source_agent_id ending in
+# -article-author-agent. We do the filter here BEFORE that detection
+# because the same logic applies: if a rec's target slug is already a
+# full body in DB, no point regenerating it.
+if [ -n "${RESPONDER_REC_IDS:-}" ] \
+        && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ] \
+        && [ "${IMPLEMENTER_DISABLE_ARTICLE_PROGRESS_FILTER:-0}" != "1" ]; then
+    PROGRESS_KEEPS=$(
+        PYTHONPATH="$REPO_ROOT" \
+        RESPONDER_RUN_DIR="$RESPONDER_RUN_DIR" \
+        RESPONDER_REC_IDS="$RESPONDER_REC_IDS" \
+        DATABASE_URL="${DATABASE_URL:-}" \
+        python3 -m framework.core.article_progress filter 2>&1
+    )
+    # Separate stderr (diagnostic) from stdout (the filtered ids) — module
+    # writes diagnostic to stderr which Python conflates by `2>&1`. Take
+    # the LAST line as the actual filter result.
+    PROGRESS_KEEPS_CLEAN=$(echo "$PROGRESS_KEEPS" | tail -1)
+    if [ -z "$PROGRESS_KEEPS_CLEAN" ]; then
+        echo "[article-progress] all rec(s) already done in DB — nothing to ship"
+        exit 0
+    fi
+    if [ "$PROGRESS_KEEPS_CLEAN" != "$RESPONDER_REC_IDS" ]; then
+        echo "[article-progress] filtered RESPONDER_REC_IDS: $RESPONDER_REC_IDS → $PROGRESS_KEEPS_CLEAN"
+        export RESPONDER_REC_IDS="$PROGRESS_KEEPS_CLEAN"
+    fi
+fi
+
 # ── Pre-run git SHA capture ─────────────────────────────────────────────────
 # Used at end-of-run to verify a NEW commit happened — the only reliable
 # signal that claude actually shipped code (vs. bailing out asking for
@@ -599,13 +633,115 @@ EOF
             # through to the framework chain (rc=75). The claude-pool shim
             # picks the right profile per family on each call. Override the
             # start tier via IMPLEMENTER_CLAUDE_MODEL.
-            START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-claude-sonnet-4-6}"
+            # Stake-aware model tier (2026-05-18). Ask
+            # framework.core.implementer_safety which Claude tier this
+            # batch warrants based on rec stakes — opus for landing-page
+            # / monetization / critical edits, sonnet for default,
+            # haiku for mechanical structured work. Falls back to the
+            # env override IMPLEMENTER_CLAUDE_MODEL if set.
+            # Required-model gate (2026-05-19). Ask
+            # framework.core.required_model whether this batch has a HARD
+            # tier requirement. If so, that tier becomes the ONLY allowed
+            # model (no fallback) and the script exits with
+            # NO_FALLBACK_DEFER if the model is unavailable. Otherwise
+            # falls through to the stake-aware soft tier picker.
+            REQUIRED_MODEL=""
+            if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "${RESPONDER_RUN_DIR}" ] \
+                    && [ "${IMPLEMENTER_DISABLE_REQUIRED_TIER:-0}" != "1" ]; then
+                REQUIRED_MODEL=$(
+                    PYTHONPATH="$REPO_ROOT" \
+                    RUN_DIR="$RESPONDER_RUN_DIR" \
+                    DISPATCH_KIND="$DISPATCH_KIND" \
+                    REC_IDS="$RESPONDER_REC_IDS" \
+                    SOURCE_AGENT="${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_AGENT_ID:-}}" \
+                    python3 - <<'PY' 2>/dev/null
+import json, os, sys
+from pathlib import Path
+try:
+    from framework.core.required_model import required_model_for_batch
+except Exception:
+    sys.exit(0)
+rd = Path(os.environ.get('RUN_DIR') or '')
+recs_doc = rd / 'recommendations.json'
+if not recs_doc.exists():
+    sys.exit(0)
+try:
+    doc = json.loads(recs_doc.read_text())
+except Exception:
+    sys.exit(0)
+wanted = set(filter(None, (os.environ.get('REC_IDS') or '').split(',')))
+all_recs = doc.get('recommendations') or []
+batch = [r for r in all_recs if isinstance(r, dict)
+         and (not wanted or r.get('id') in wanted or r.get('rec_id') in wanted)]
+if not batch:
+    sys.exit(0)
+result = required_model_for_batch(
+    batch,
+    dispatch_kind=os.environ.get('DISPATCH_KIND') or '',
+    source_agent_id=os.environ.get('SOURCE_AGENT') or '',
+)
+if result:
+    tier, model_id = result
+    print(model_id)
+PY
+                )
+            fi
+
+            STAKE_AWARE_MODEL=""
+            if [ -z "${IMPLEMENTER_CLAUDE_MODEL:-}" ] && [ -z "$REQUIRED_MODEL" ] \
+                    && [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "${RESPONDER_RUN_DIR}" ] \
+                    && [ "${IMPLEMENTER_DISABLE_STAKE_TIER:-0}" != "1" ]; then
+                STAKE_AWARE_MODEL=$(
+                    PYTHONPATH="$REPO_ROOT" \
+                    RUN_DIR="$RESPONDER_RUN_DIR" \
+                    DISPATCH_KIND="$DISPATCH_KIND" \
+                    REC_IDS="$RESPONDER_REC_IDS" \
+                    python3 - <<'PY' 2>/dev/null
+import json, os, sys
+from pathlib import Path
+try:
+    from framework.core.implementer_safety import recommended_model_for_batch
+except Exception:
+    sys.exit(0)
+rd = Path(os.environ.get('RUN_DIR') or '')
+recs_doc = rd / 'recommendations.json'
+if not recs_doc.exists():
+    sys.exit(0)
+try:
+    doc = json.loads(recs_doc.read_text())
+except Exception:
+    sys.exit(0)
+wanted = set(filter(None, (os.environ.get('REC_IDS') or '').split(',')))
+all_recs = doc.get('recommendations') or []
+batch = [r for r in all_recs if isinstance(r, dict)
+         and (not wanted or r.get('id') in wanted or r.get('rec_id') in wanted)]
+if not batch:
+    sys.exit(0)
+tier, model_id = recommended_model_for_batch(
+    batch, dispatch_kind=os.environ.get('DISPATCH_KIND') or '')
+print(model_id)
+PY
+                )
+            fi
+            # Decide which model — required (hard) > env override > stake-aware (soft) > default
+            if [ -n "$REQUIRED_MODEL" ]; then
+                START_MODEL="$REQUIRED_MODEL"
+                echo "[implementer] REQUIRED model: $REQUIRED_MODEL (no fallback — will defer if unavailable)" >&2
+            else
+                START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-${STAKE_AWARE_MODEL:-claude-sonnet-4-6}}"
+                if [ -n "$STAKE_AWARE_MODEL" ] && [ -z "${IMPLEMENTER_CLAUDE_MODEL:-}" ]; then
+                    echo "[implementer] stake-aware tier: $STAKE_AWARE_MODEL (batch: $RESPONDER_REC_IDS)" >&2
+                fi
+            fi
             TIER_ORDER=("$START_MODEL")
-            case "$START_MODEL" in
-                *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;
-                *opus*)   TIER_ORDER+=("claude-sonnet-4-6" "claude-haiku-4-5") ;;
-                *haiku*)  TIER_ORDER+=("claude-opus-4-7" "claude-sonnet-4-6") ;;
-            esac
+            # Soft fallback chain — ONLY when no hard requirement is set.
+            if [ -z "$REQUIRED_MODEL" ]; then
+                case "$START_MODEL" in
+                    *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;
+                    *opus*)   TIER_ORDER+=("claude-sonnet-4-6" "claude-haiku-4-5") ;;
+                    *haiku*)  TIER_ORDER+=("claude-sonnet-4-6" "claude-opus-4-7") ;;
+                esac
+            fi
             set +e
             rc=75
             # Per-tier wall-clock timeout. Overnight 2026-05-13: claude
@@ -639,6 +775,34 @@ EOF
                 fi
             done
             set -e
+        fi
+
+        # ── REQUIRED-model defer path (2026-05-19) ─────────────────
+        # If a hard model requirement is set and the model is unavailable
+        # (rc=75 = rate-limited, rc=124 = timeout/hang), skip the framework
+        # code-editor fallback entirely. The required-tier semantics demand
+        # "wait for opus rather than ship sonnet-quality" — falling
+        # through to aider/copilot would defeat that. Write a defer record
+        # so the dispatcher knows to retry later.
+        if [ -n "$REQUIRED_MODEL" ] && [ "$rc" -ne 0 ]; then
+            echo "[implementer] required model ($REQUIRED_MODEL) unavailable (rc=$rc); deferring all recs (no fallback per required-model policy)" >&2
+            DEFER_REASON="required model $REQUIRED_MODEL unavailable (rc=$rc); will retry when capacity returns"
+            if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "$RESPONDER_RUN_DIR" ]; then
+                cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFEOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "$DEFER_REASON",
+  "rec_ids": "${RESPONDER_REC_IDS:-}",
+  "required_model": "$REQUIRED_MODEL",
+  "exit_code": $rc,
+  "next_action": "retry on next dispatcher tick — pool will refresh as profiles' monthly opus quotas reset"
+}
+DEFEOF
+            fi
+            # Exit cleanly (rc=0) so the wrapper records this as a deferred
+            # (not failed) run. The dispatcher sees deferred.json and skips
+            # the recs without re-dispatch unless the producer re-emits.
+            exit 0
         fi
 
         # ── Pool-exhausted fallback path ─────────────────────────────────
@@ -1282,6 +1446,62 @@ PY
 
                     set +e
                     if [ "$CE_NEW_COUNT" -gt 0 ]; then
+                    # ── Edit guards (2026-05-18) ────────────────────
+                    # Pre-commit sanity check: catch LLM date-regression
+                    # hallucinations (year YYYY replaced with older YYYY)
+                    # and critical-element disappearance (selectors named
+                    # in site.yaml `implementer.critical_elements`).
+                    # Revert any flagged file in the working copy before
+                    # `git add` so the bad change never lands.
+                    if [ "${IMPLEMENTER_DISABLE_EDIT_GUARDS:-0}" != "1" ]; then
+                        GUARD_REPORT=$(
+                            REPO_ROOT="$REPO_ROOT" \
+                            PYTHONPATH="$REPO_ROOT" \
+                            REPO_PATH="$IMPLEMENTER_REPO_PATH" \
+                            CHANGED_FILES_LIST="$CE_NEW_FILES" \
+                            SITE_CONFIG_PATH="${SEO_AGENT_CONFIG:-}" \
+                            python3 -m framework.core.edit_guards 2>/dev/null
+                        )
+                        if [ -n "$GUARD_REPORT" ]; then
+                            GUARD_OK=$(echo "$GUARD_REPORT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("ok",True))' 2>/dev/null)
+                            if [ "$GUARD_OK" = "False" ]; then
+                                echo "[implementer] edit-guards triggered:" >&2
+                                echo "$GUARD_REPORT" | python3 -m json.tool 2>/dev/null | head -40 >&2
+                                # Revert each flagged file in the working
+                                # copy so it stays out of the commit.
+                                FLAGGED_FILES=$(echo "$GUARD_REPORT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("\n".join(d.get("files_to_revert") or []))' 2>/dev/null)
+                                if [ -n "$FLAGGED_FILES" ]; then
+                                    while IFS= read -r gf; do
+                                        [ -z "$gf" ] && continue
+                                        echo "[edit-guards] revert: $gf" >&2
+                                        git -C "$IMPLEMENTER_REPO_PATH" checkout -- "$gf" 2>/dev/null
+                                    done <<EOF
+$FLAGGED_FILES
+EOF
+                                    # Rewrite CE_NEW_FILES dropping flagged entries
+                                    _gtmp=$(mktemp)
+                                    while IFS= read -r f; do
+                                        skip=0
+                                        while IFS= read -r gf; do
+                                            [ "$f" = "$gf" ] && skip=1 && break
+                                        done <<EOF
+$FLAGGED_FILES
+EOF
+                                        [ "$skip" -eq 0 ] && [ -n "$f" ] && echo "$f" >> "$_gtmp"
+                                    done < "$CE_NEW_FILES"
+                                    mv "$_gtmp" "$CE_NEW_FILES"
+                                    CE_NEW_COUNT=$(grep -c . "$CE_NEW_FILES" 2>/dev/null || echo 0)
+                                fi
+                                # Persist the guard report for dashboard visibility.
+                                if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "$RESPONDER_RUN_DIR" ]; then
+                                    echo "$GUARD_REPORT" > "$RESPONDER_RUN_DIR/edit-guards-report.json"
+                                fi
+                            fi
+                        fi
+                    fi
+                    if [ "$CE_NEW_COUNT" -eq 0 ]; then
+                        echo "[implementer] every touched file was flagged by edit-guards — nothing to commit" >&2
+                    fi
                     while IFS= read -r f; do
                         [ -n "$f" ] && [ -e "$f" ] && git add "$f"
                     done < "$CE_NEW_FILES"

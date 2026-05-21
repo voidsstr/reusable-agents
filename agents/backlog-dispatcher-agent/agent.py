@@ -726,7 +726,8 @@ class BacklogDispatcher(AgentBase):
             picked_rec_ids: list[str] = []
             picked_dedup_keys: list[str] = []
 
-            for run_key in run_keys[:50]:  # scan budget — was 10
+            _scan_budget = int(os.environ.get("BACKLOG_DISPATCHER_RUN_DIR_SCAN", "200"))
+            for run_key in run_keys[:_scan_budget]:  # scan budget — was 10, then 50
                 doc = s.read_json(run_key) or {}
                 recs = doc if isinstance(doc, list) else (doc.get("recommendations") or [])
                 if not isinstance(recs, list) or not recs:
@@ -745,7 +746,7 @@ class BacklogDispatcher(AgentBase):
                     # path now writes deferred=true on these to break
                     # the loop, but the dispatcher must also respect it.
                     if r.get("shipped") or r.get("implemented") \
-                            or r.get("deferred"):
+                            or r.get("deferred") or r.get("duplicate"):
                         continue
                     # Skip recs awaiting operator review (comp-research
                     # strategic proposals, multi-feature builds, anything
@@ -756,6 +757,24 @@ class BacklogDispatcher(AgentBase):
                     if r.get("review_required") and not r.get(
                             "confirmed_for_implementation"):
                         continue
+                    # ── Implementer capability gate (2026-05-14) ──────
+                    # Read storage config to find which rec handlers the
+                    # implementer can currently ship. During Azure→AWS
+                    # migration the live DB is locked to Azure-postgres,
+                    # so DB-mutating handlers (article-author, h2h,
+                    # product-hydration) are excluded until RDS is hot.
+                    # Default allow = all (back-compat).
+                    try:
+                        from framework.core.work_types import handler_for
+                        cfg = s.read_json("config/implementer-allowed-handlers.json") or {}
+                        allow_list = cfg.get("allow")
+                        if isinstance(allow_list, list):
+                            rt = r.get("type") or r.get("rec_type") or ""
+                            _, handler = handler_for(rt)
+                            if handler not in allow_list and "*" not in allow_list:
+                                continue
+                    except Exception:
+                        pass
                     rid = r.get("id") or r.get("rec_id") or r.get("rec_uid")
                     if not rid:
                         continue
@@ -774,7 +793,26 @@ class BacklogDispatcher(AgentBase):
                     # variable hex/count prefix on each tick that would
                     # otherwise look like a different title.
                     title_norm = " ".join(title.split())
-                    title_key = f"title:{aid}:{title_norm}" if title_norm else None
+                    # URL-discriminated title-key (2026-05-18): include
+                    # affected_url so per-page recs don't dedup against
+                    # each other. Caught the case where 7 different
+                    # broken-page recs (one per unique URL) all had
+                    # similar titles ("broken page: <URL> returned 404")
+                    # and a previous PI tick's title-keys blocked all of
+                    # them. Aggregate recs without a URL keep the bare-
+                    # title dedup (still catches the "publish 50 pages"
+                    # repeat-emission pattern).
+                    affected_url = (r.get("affected_url") or "").strip().lower()
+                    if not affected_url:
+                        urls_list = r.get("affected_urls") or []
+                        if isinstance(urls_list, list) and urls_list:
+                            affected_url = str(urls_list[0]).strip().lower()
+                    if title_norm and affected_url:
+                        title_key = f"title:{aid}:{title_norm}:{affected_url}"
+                    elif title_norm:
+                        title_key = f"title:{aid}:{title_norm}"
+                    else:
+                        title_key = None
                     # Already queued by us on a prior tick (and not yet
                     # marked shipped by the producer/post-ship hook).
                     if dedup_key in already:

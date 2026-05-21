@@ -945,11 +945,12 @@ function VerificationModal({
 // ──────────────────────────────────────────────────────────────────────────
 // Filtered rec list — shown when a stat card is clicked
 
-type CategoryFilter = 'shipped' | 'implemented' | 'queued' | 'running' | 'deferred' | null
+type CategoryFilter = 'shipped' | 'implemented' | 'queued' | 'running' | 'deferred' | 'pending_approval' | null
 
 const CATEGORY_LABELS: Record<Exclude<CategoryFilter, null>, { title: string; help: string; chip: string }> = {
   running:     { title: '⏳ Running recs',     help: 'Currently being worked on by the implementer.',                                       chip: 'text-blue-700 bg-blue-50 ring-blue-200' },
   queued:      { title: '⋯ Queued recs',       help: 'Auto-queued from email or reply; waiting for the implementer to pick them up.',         chip: 'text-ink-700 bg-ink-50 ring-ink-200' },
+  pending_approval: { title: '👥 Pending approval', help: 'Strategic proposals (competitor research, parity features) that need operator approval before the implementer can pick them up. Approve via the button on each rec or reply `implement rec-XXX` to the source email.', chip: 'text-purple-700 bg-purple-50 ring-purple-200' },
   implemented: { title: '✅ Implemented recs', help: 'Code committed locally — either fresh in this run, or already-in-code (verified pre-existing).', chip: 'text-emerald-700 bg-emerald-50 ring-emerald-200' },
   shipped:     { title: '🚀 Shipped recs',     help: 'Code is live in production (deployer pushed, or marked already-in-prod via pre-existing).',       chip: 'text-blue-700 bg-blue-50 ring-blue-200' },
   deferred:    { title: '⏭ Deferred recs',     help: 'Implementer declined to act — either the rec was junk data, or it required human investigation.', chip: 'text-amber-700 bg-amber-50 ring-amber-200' },
@@ -991,6 +992,27 @@ function FilteredRecList({
 }) {
   const meta = CATEGORY_LABELS[category]
   const [verifying, setVerifying] = useState<{ runDirBasename: string; recId: string } | null>(null)
+  // Recs the user has just approved (optimistic — hide from this list
+  // until the next refresh confirms server-side).
+  const [approving, setApproving] = useState<Set<string>>(new Set())
+  const [approved, setApproved] = useState<Set<string>>(new Set())
+  const [approveError, setApproveError] = useState<string>('')
+
+  const approveOne = async (agent: string, runTs: string, recId: string) => {
+    const key = `${agent}/${runTs}/${recId}`
+    setApproveError('')
+    setApproving(prev => new Set(prev).add(key))
+    try {
+      await api.implementerApproveRec(agent, runTs, recId)
+      setApproved(prev => new Set(prev).add(key))
+    } catch (e) {
+      setApproveError(String((e as Error)?.message || e))
+    } finally {
+      setApproving(prev => {
+        const n = new Set(prev); n.delete(key); return n
+      })
+    }
+  }
 
   // Group by source_agent so the user can drill into "what each agent
   // has shipped/implemented/queued/running/deferred" instead of scanning
@@ -1045,6 +1067,11 @@ function FilteredRecList({
           recId={verifying.recId}
           onClose={() => setVerifying(null)}
         />
+      )}
+      {approveError && (
+        <div className="px-3 py-2 bg-status-failure-bg border border-status-failure-glow/40 rounded text-xs text-status-failure-fg">
+          Approve failed: {approveError}
+        </div>
       )}
       {recs.length === 0 ? (
         <p className="text-sm text-ink-500 italic">No recs in this bucket.</p>
@@ -1126,6 +1153,35 @@ function FilteredRecList({
                               <span>verify</span>
                             </button>
                           )}
+                          {category === 'pending_approval' && (() => {
+                            const k = `${chain.source_agent}/${chain.source_run_ts}/${rec.rec_id}`
+                            const isApproving = approving.has(k)
+                            const isApproved  = approved.has(k)
+                            return (
+                              <button
+                                type="button"
+                                disabled={isApproving || isApproved}
+                                onClick={(e) => {
+                                  e.preventDefault(); e.stopPropagation()
+                                  approveOne(chain.source_agent, chain.source_run_ts, rec.rec_id)
+                                }}
+                                className={
+                                  'px-3 self-stretch text-[11px] border-l border-surface-divider whitespace-nowrap flex items-center gap-1 ' +
+                                  (isApproved
+                                    ? 'text-emerald-700 bg-emerald-50 cursor-default'
+                                    : isApproving
+                                      ? 'text-purple-400 cursor-wait'
+                                      : 'text-purple-700 hover:bg-purple-50 hover:text-purple-900')
+                                }
+                                title={isApproved
+                                  ? 'Approved — will be picked up on the next dispatcher tick (within 60s)'
+                                  : 'Approve this strategic proposal for implementation. The backlog dispatcher releases it to the implementer on the next tick.'}
+                              >
+                                <span>{isApproved ? '✓' : '✅'}</span>
+                                <span>{isApproved ? 'approved' : isApproving ? 'approving…' : 'approve'}</span>
+                              </button>
+                            )
+                          })()}
                         </div>
                       </li>
                     ))}
@@ -1150,7 +1206,7 @@ export default function ImplementerQueue() {
   // the latest-N page.
   const [lifetime, setLifetime] = useState<{
     shipped: number; implemented: number; deferred: number;
-    pending: number; total: number;
+    pending_approval: number; pending: number; total: number;
   } | null>(null)
   const [error, setError] = useState('')
   const [refreshedAt, setRefreshedAt] = useState('')
@@ -1193,7 +1249,9 @@ export default function ImplementerQueue() {
       setChains(r.chains)
       if (lt) setLifetime({
         shipped: lt.shipped, implemented: lt.implemented,
-        deferred: lt.deferred, pending: lt.pending, total: lt.total,
+        deferred: lt.deferred,
+        pending_approval: lt.pending_approval ?? 0,
+        pending: lt.pending, total: lt.total,
       })
       if (q) {
         setAccumulatorByAgent(q.accumulator_by_agent || {})
@@ -1247,7 +1305,8 @@ export default function ImplementerQueue() {
   // hasn't loaded yet.
   const totals = useMemo(() => {
     const windowed = { shipped: 0, implemented: 0, deferred: 0,
-                       queued: 0, running: 0, untouched: 0 }
+                       queued: 0, running: 0, untouched: 0,
+                       pending_approval: 0 }
     for (const c of (chains || [])) {
       for (const b of c.batches) {
         for (const r of b.rec_items) {
@@ -1275,6 +1334,7 @@ export default function ImplementerQueue() {
       shipped:     lifetime ? lifetime.shipped     : windowed.shipped,
       implemented: lifetime ? lifetime.implemented : windowed.implemented,
       deferred:    lifetime ? lifetime.deferred    : windowed.deferred,
+      pending_approval: lifetime ? lifetime.pending_approval : 0,
       untouched:   windowed.untouched,
     }
   }, [chains, lifetime, accumulatorTotal, openRecsTotal, runningDispatches])
@@ -1373,7 +1433,10 @@ export default function ImplementerQueue() {
     if (lifetimeRecs[categoryFilter]) return
     setLifetimeRecsLoading(true)
     const serverCategory = categoryFilter === 'queued' ? 'pending' : categoryFilter
-    api.implementerRecsByCategory(serverCategory as 'shipped' | 'implemented' | 'deferred' | 'pending', 200)
+    api.implementerRecsByCategory(
+      serverCategory as 'shipped' | 'implemented' | 'deferred' | 'pending_approval' | 'pending',
+      200,
+    )
       .then(r => setLifetimeRecs(prev => ({ ...prev, [categoryFilter]: r.recs as unknown as RecItem[] })))
       .catch(() => { /* fall back to windowed */ })
       .finally(() => setLifetimeRecsLoading(false))
@@ -1410,13 +1473,14 @@ export default function ImplementerQueue() {
       <LivePanel targetAgent={liveTarget} />
 
       {/* Top stats — click any card to drill into the recs in that bucket */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 sm:gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 sm:gap-3">
         {([
-          { label: 'Running',     value: totals.running,     color: 'text-blue-600',    bg: 'bg-blue-50/60',    key: 'running'     as const },
-          { label: 'Queued',      value: totals.queued,      color: 'text-ink-700',     bg: 'bg-surface-card',  key: 'queued'      as const },
-          { label: 'Implemented', value: totals.implemented, color: 'text-emerald-700', bg: 'bg-emerald-50/40', key: 'implemented' as const },
-          { label: 'Shipped',     value: totals.shipped,     color: 'text-blue-700',    bg: 'bg-blue-50/40',    key: 'shipped'     as const },
-          { label: 'Deferred',    value: totals.deferred,    color: 'text-amber-600',   bg: 'bg-amber-50/60',   key: 'deferred'    as const },
+          { label: 'Running',          value: totals.running,          color: 'text-blue-600',    bg: 'bg-blue-50/60',    key: 'running'          as const },
+          { label: 'Queued',           value: totals.queued,           color: 'text-ink-700',     bg: 'bg-surface-card',  key: 'queued'           as const },
+          { label: 'Pending approval', value: totals.pending_approval, color: 'text-purple-700',  bg: 'bg-purple-50/60',  key: 'pending_approval' as const },
+          { label: 'Implemented',      value: totals.implemented,      color: 'text-emerald-700', bg: 'bg-emerald-50/40', key: 'implemented'      as const },
+          { label: 'Shipped',          value: totals.shipped,          color: 'text-blue-700',    bg: 'bg-blue-50/40',    key: 'shipped'          as const },
+          { label: 'Deferred',         value: totals.deferred,         color: 'text-amber-600',   bg: 'bg-amber-50/60',   key: 'deferred'         as const },
         ]).map(stat => {
           const active = categoryFilter === stat.key
           return (

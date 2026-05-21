@@ -9,6 +9,63 @@
 > structured-data leak across the entire `/reviews/*` corpus, and zero
 > FAQ rich-results in Google.
 >
+> ## 🔗 Recipe links in body_md MUST be canonical (`<slug>-<id>`)
+>
+> Every internal `/recipes/...` link in `body_md` MUST end with the
+> recipe's numeric id, in the canonical form
+> `/recipes/<slug>-<id>`. Articles emitted with slug-only links
+> (`/recipes/sheet-pan-chicken-vegetables`) silently mis-route — the
+> live route handler does fuzzy fallback but may land on the wrong
+> recipe.
+>
+> Before writing each link:
+>
+> 1. Query `recipe_catalog` with the article-author's `expected_recipe_slugs[i]`:
+>    ```sql
+>    SELECT id, title FROM recipe_catalog
+>    WHERE is_active = TRUE
+>      AND substring(trim(both '-' from regexp_replace(lower(title), '[^a-z0-9]+', '-', 'g')), 1, 80) = $1
+>    ORDER BY (rating IS NULL), rating DESC NULLS LAST, rating_count DESC NULLS LAST
+>    LIMIT 1;
+>    ```
+> 2. If no exact match, fall back to fuzzy token-overlap (tokenize the
+>    slug; pick the catalog row whose title contains the most tokens):
+>    ```sql
+>    SELECT id, title FROM recipe_catalog WHERE is_active = TRUE
+>      AND ( (CASE WHEN lower(title) LIKE '%t1%' THEN 1 ELSE 0 END) + ... ) >= GREATEST(2, ceil(N*0.6))
+>    ORDER BY (CASE WHEN lower(title) LIKE '%t1%' THEN 1 ELSE 0 END) + ... DESC,
+>             (rating IS NULL), rating DESC NULLS LAST
+>    LIMIT 1;
+>    ```
+> 3. Render the link as `[<recipe title>](/recipes/<slugify(title)>-<id>)`.
+> 4. If no fuzzy match scores high enough, **drop the link** rather
+>    than emit a 404-prone bare slug.
+>
+> ## 🖼️ Hero image MUST be vision-verified and archived to blob
+>
+> Every `hero_image_url` inserted into `editorial_articles` MUST flow
+> through the same verify+archive pipeline that recipe images use:
+>
+> 1. Vision-verify with `gpt-4o-mini` on Azure deployment `vision-mini`
+>    (low detail). Prompt asks: `{safe, is_food_or_food_related,
+>    matches_article_topic, quality_ok}`. All four must be true.
+> 2. Download the bytes and upload to
+>    `nscagentstorage/recipe-images/article-<id>.<ext>` (or
+>    `nscagentstorage/article-images/` if you prefer a separate
+>    container — pick one and stay consistent).
+> 3. Set the row's `hero_image_url` to the **blob URL** (not the
+>    upstream URL). Persistence > provenance for editorial assets.
+> 4. If verification fails, search again with the article's primary
+>    keyword + `food photo high quality` and retry up to 3 times. If
+>    no candidate passes, fall back to gpt-image-2 generation themed
+>    to the article topic.
+>
+> The `aisleprompt-recipe-image-verifier` agent's gpt-4o-mini deployment
+> is the reference impl; reuse its endpoint and the same SYSTEM_PROMPT
+> scaffold, swapping `matches_recipe` → `matches_article_topic`.
+>
+> ## Original checklist (still in force)
+>
 > **Every INSERT INTO editorial_articles MUST populate ALL of:**
 >
 > - `faqs` — JSONB array of ≥5 objects, each `{question, answer}`.
@@ -133,7 +190,35 @@ If your draft is short, add:
 - A "Common pitfalls" or "Gotchas" section with 3-5 specific failure
   modes you've seen for this hardware/topic
 - A "When NOT to" section with a clear no-fit case
-- Comparison tables (markdown tables; render fine on the site)
+- Comparison tables (markdown tables — see formatting rule below)
+
+### Markdown table formatting — MANDATORY shape
+
+Tables MUST be written with one row per line. The SSR markdown parser
+expects this exact shape; collapsing rows onto one line produces
+garbled output where pipes and dashes show as literal text.
+
+✅ CORRECT (one row per line, blank line before/after):
+
+```
+| Protein | Calories | Protein (g) | Omega-3 (mg) |
+|---|---|---|---|
+| Atlantic salmon | 206 | 20 | 2,200 |
+| Sockeye salmon | 168 | 23 | 1,300 |
+| Chicken breast | 165 | 31 | 30 |
+```
+
+❌ FORBIDDEN (rows joined on one line — actual bug shipped to
+production 2026-05-13 on `/blog/how-to-cook-salmon-...`):
+
+```
+| Protein | Calories | | --- | --- | | Salmon | 206 | | Chicken | 165 |
+```
+
+When emitting tables in `body_md`, ensure each row ends with `\n`
+(literal newline in the JSON string). Watch for JSON-escaping tools
+that strip newlines — re-add them before INSERT if any pass converts
+`\n` to spaces.
 - 2-3 worked examples / mini-case-studies
 
 A 2000-word article is ~3 pages at typical reading speed (220 wpm =

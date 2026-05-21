@@ -355,6 +355,18 @@ class AgentBase:
 
         ended_at = self._ended_at or _now()
 
+        # Auto-reconcile dashboard LLM badge for agents that call LLMs
+        # directly via env-driven config (bypassing ai_client_for()).
+        # Reads PROVIDER + companion model env each tick, finds the
+        # matching registered provider, and updates the agent override
+        # so the dashboard tile shows what the agent ACTUALLY uses —
+        # not the framework default. Silent no-op for agents that don't
+        # set PROVIDER, or where no matching provider is registered.
+        try:
+            self._reconcile_dashboard_llm_badge()
+        except Exception as e:
+            logger.debug(f"[{self.agent_id}] llm-badge reconcile skipped: {e}")
+
         # Progress + metrics
         self.storage.write_json(run_dir_prefix + "progress.json", {
             "schema_version": "1",
@@ -401,6 +413,51 @@ class AgentBase:
         except Exception as e:
             logger.warning(f"[{self.agent_id}] run-index update failed: {e}")
 
+        # ── Auto-dedup pass (2026-05-15) ─────────────────────────
+        # Mark recs whose normalized title was already emitted by THIS
+        # producer in a PRIOR run as `duplicate=true`. The dispatcher
+        # skips those, and downstream consumers (dashboard counts, etc.)
+        # treat them as out-of-pool. Producers that already call
+        # `filter_proposals_against_history` see this as a no-op
+        # (history has no overlap with the proposals they just wrote);
+        # producers that don't get dedup for free.
+        recs_doc = self.storage.read_json(run_dir_prefix + "recommendations.json") or {}
+        recs_list = recs_doc.get("recommendations") if isinstance(recs_doc, dict) else None
+        if isinstance(recs_list, list) and recs_list:
+            try:
+                from . import producer_history as _ph
+                history = _ph.load_history(self.agent_id, self.storage)
+                started_at = self._started_at or ""
+                # Titles known BEFORE this run started — i.e. not added
+                # by this same run's optional pre-write record_emitted.
+                seen_before: set[str] = {
+                    sig for sig, e in history.items()
+                    if (e.get("first_emitted_at") or "9999") < started_at
+                } if started_at else set(history.keys())
+                changed = False
+                for r in recs_list:
+                    if not isinstance(r, dict):
+                        continue
+                    if r.get("duplicate") or r.get("shipped") or r.get("implemented"):
+                        continue
+                    title = (r.get("title") or "").strip()
+                    sig = _ph._sig_str(title)
+                    if sig and sig in seen_before:
+                        r["duplicate"] = True
+                        r["dedup_reason"] = "title already emitted in prior run by this producer"
+                        changed = True
+                if changed:
+                    self.storage.write_json(
+                        run_dir_prefix + "recommendations.json", recs_doc
+                    )
+                # Record new (non-duplicate) titles to history so the
+                # next run dedups against them.
+                non_dup = [r for r in recs_list if isinstance(r, dict) and not r.get("duplicate")]
+                if non_dup:
+                    _ph.record_emitted(non_dup, self.agent_id, self.storage)
+            except Exception as e:
+                logger.warning(f"[{self.agent_id}] auto-dedup failed: {e}")
+
         # Verification scripts — for any rec marked shipped (or implemented
         # without a deployer step), auto-generate a per-rec verification
         # doc at agents/<id>/runs/<run_ts>/verifications/<rec_id>.json.
@@ -408,7 +465,10 @@ class AgentBase:
         # provided so agents don't each invent their own format.
         try:
             from . import verifications as _verifs
-            recs_doc = self.storage.read_json(run_dir_prefix + "recommendations.json") or {}
+            # recs_doc loaded above by the auto-dedup pass; re-read if
+            # it wasn't (the dedup block early-exited).
+            if not isinstance(recs_doc, dict):
+                recs_doc = self.storage.read_json(run_dir_prefix + "recommendations.json") or {}
             site_hint = ""
             for prefix in ("specpicks-", "aisleprompt-", "reusable-agents-"):
                 if self.agent_id.startswith(prefix):
@@ -760,6 +820,79 @@ class AgentBase:
 
     def teardown(self) -> None:
         """Override for final cleanup."""
+
+    def _reconcile_dashboard_llm_badge(self) -> None:
+        """Map this agent's env-driven LLM selection to a dashboard
+        agent override so the AgentCard tile reflects reality.
+
+        Looks at PROVIDER + a kind-specific model var (OLLAMA_MODEL /
+        AZURE_OPENAI_VISION_DEPLOYMENT / COPILOT_MODEL), finds a
+        registered Provider whose `kind` matches and (for ollama)
+        whose base_url matches OLLAMA_HOST. If found, sets
+        `agent_overrides[<id>] = {provider: <name>, model: <model>}`.
+
+        Called from post_run() every tick — env changes propagate on
+        the next successful run. Cheap: one read + (only on change)
+        one write of config/ai-defaults.json.
+        """
+        import os
+        provider_env = (os.environ.get("PROVIDER") or "").lower().strip()
+        if not provider_env:
+            return
+        try:
+            from . import ai_providers as _ap
+        except Exception:
+            return
+        # Kind-specific model var + provider-kind we want to match.
+        if provider_env == "ollama":
+            wanted_kind = "ollama"
+            model = (os.environ.get("OLLAMA_MODEL") or "").strip()
+            base_url = (os.environ.get("OLLAMA_HOST") or "").strip().rstrip("/")
+        elif provider_env in ("azure", "azure_openai"):
+            wanted_kind = "azure_openai"
+            model = (os.environ.get("AZURE_OPENAI_VISION_DEPLOYMENT") or
+                     os.environ.get("AZURE_OPENAI_DEPLOYMENT") or "").strip()
+            base_url = ""
+        elif provider_env == "copilot":
+            wanted_kind = "copilot"
+            model = (os.environ.get("COPILOT_MODEL") or "").strip()
+            base_url = ""
+        elif provider_env == "anthropic":
+            wanted_kind = "anthropic"
+            model = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+            base_url = ""
+        else:
+            return
+        # Find a matching registered provider. For ollama, prefer one
+        # whose base_url matches OLLAMA_HOST. Honor an explicit
+        # OLLAMA_PROVIDER_NAME env var first (used when multiple
+        # providers share the same URL — e.g. ollama-small vs
+        # ollama-4080 both pointing at the same box).
+        match = None
+        preferred_name = (os.environ.get("OLLAMA_PROVIDER_NAME") or "").strip()
+        candidates = [p for p in _ap.list_providers()
+                      if getattr(p, "kind", "") == wanted_kind]
+        if wanted_kind == "ollama" and base_url:
+            candidates = [p for p in candidates
+                          if (getattr(p, "base_url", "") or "").rstrip("/") == base_url]
+        if preferred_name:
+            match = next((p for p in candidates if p.name == preferred_name), None)
+        if match is None and candidates:
+            match = candidates[0]
+        if match is None:
+            return
+        # Only write when something actually changes (avoid hot-path
+        # blob churn).
+        cur_defaults = _ap.read_defaults(self.storage)
+        cur = (cur_defaults.agent_overrides or {}).get(self.agent_id) or {}
+        if cur.get("provider") == match.name and cur.get("model") == model:
+            return
+        _ap.set_agent_override(self.agent_id, provider=match.name,
+                               model=model, storage=self.storage)
+        logger.info(
+            f"[{self.agent_id}] dashboard llm-badge reconciled: "
+            f"provider={match.name} model={model}"
+        )
 
     # ---- Orchestration ----
 

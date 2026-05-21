@@ -280,6 +280,74 @@ class AzureBlobStorage(StorageBackend):
                 break
         return out
 
+    @contextmanager
+    def lock(self, key: str, timeout_s: float = 30.0) -> Iterator[bool]:
+        """Multi-host advisory lock backed by Azure Blob Leases.
+
+        Creates a tiny sentinel blob at `<key>.lock` and acquires a
+        60-second renewable lease on it. The lease auto-releases when
+        the process exits (Azure breaks idle leases after the lease
+        duration elapses without a renewal).
+
+        Why this exists: the framework runs on a single host today,
+        and `framework.core.locks.FileLock` (fcntl-based) covers all
+        intra-host races. If we ever scale to multiple framework hosts
+        (e.g. an HA pair for the dashboard, or per-cloud workers), the
+        fcntl lock becomes useless — only Azure-side coordination
+        prevents races. This method is the multi-host fallback.
+
+        Yields True on acquisition, False on timeout. Lease is released
+        in the finally block. On process crash, the lease expires
+        naturally after 60s (no manual cleanup needed).
+        """
+        from azure.core.exceptions import HttpResponseError, ResourceExistsError
+        lock_blob_name = f"{key}.lock"
+        lock_blob = self._container.get_blob_client(lock_blob_name)
+        # Ensure the sentinel exists. Idempotent — ignore if it's
+        # already there. Use a tiny payload so we don't pay storage.
+        try:
+            lock_blob.upload_blob(
+                b"lock", overwrite=False,
+                content_settings=self._ContentSettings(content_type="application/octet-stream"),
+            )
+        except ResourceExistsError:
+            pass
+        except Exception:
+            # Best-effort — if create fails for any other reason we
+            # still attempt the lease. The lease itself surfaces real
+            # errors.
+            pass
+
+        # 60s lease duration is the SDK's max for a fixed-length lease.
+        # We don't auto-renew (single short operation expected); if
+        # callers need longer-held leases, raise the lease duration
+        # via the underlying SDK and add a renewer thread.
+        deadline = time.monotonic() + timeout_s
+        lease = None
+        acquired = False
+        while time.monotonic() < deadline:
+            try:
+                lease = lock_blob.acquire_lease(lease_duration=60)
+                acquired = True
+                break
+            except HttpResponseError as e:
+                # 409 LeaseAlreadyPresent — someone else holds it.
+                if getattr(e, "status_code", None) == 409:
+                    time.sleep(0.5)
+                    continue
+                # Any other error: surface it.
+                raise
+        try:
+            yield acquired
+        finally:
+            if acquired and lease is not None:
+                try:
+                    lease.release()
+                except Exception:
+                    # Lease will expire naturally in ≤60s if release
+                    # fails — not worth surfacing here.
+                    pass
+
 
 # ---------------------------------------------------------------------------
 # Local filesystem backend (for tests / dev)

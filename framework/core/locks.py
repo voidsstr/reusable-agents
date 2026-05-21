@@ -147,6 +147,90 @@ class FileLock:
 
 
 @contextmanager
+def responder_drain_lock(*, timeout_s: int = 600, blocking: bool = False):
+    """Global lock to prevent two responder processes from draining the
+    auto-queue at the same time.
+
+    The responder agent is a single registered .service so systemd
+    typically serializes cron triggers. But a manual `/trigger` from
+    the dashboard can fire while cron is running — both would LIST
+    the same auto-queue keys and dispatch the same recs, resulting
+    in double-shipped work + duplicate Anthropic API spend.
+
+    Usage:
+        from framework.core.locks import responder_drain_lock
+        with responder_drain_lock(blocking=False) as got:
+            if not got:
+                return 0  # another responder is draining; skip this tick
+            drain_auto_queue(cfg)
+
+    blocking=False (default): non-blocking — yields False if the lock
+    is held, so the caller can soft-skip. This is the right choice for
+    drain ticks; the next tick will catch up.
+
+    blocking=True: waits up to timeout_s for the lock. Use when you
+    NEED the drain to happen this call (e.g. operator manually invoked
+    a flush).
+    """
+    lock = FileLock("responder-drain", timeout_s=timeout_s)
+    if blocking:
+        lock.acquire(timeout_s=timeout_s)
+        try:
+            yield True
+        finally:
+            lock.release()
+    else:
+        got = lock.try_acquire()
+        try:
+            yield got
+        finally:
+            if got:
+                lock.release()
+
+
+@contextmanager
+def accumulator_lock(agent_id: str, *, timeout_s: int = 120):
+    """Per-agent cross-process lock for the rec/proposal accumulator.
+
+    Producer agents (competitor-research, crash-watcher, app-store-
+    opportunity, …) accumulate proposed recs across runs at
+    `agents/<agent_id>/proposals/active.json` (or .../state/accumulator.json
+    for rec_memory). The pattern is load → mutate → save, which is
+    NOT atomic — a producer mid-cycle can race with:
+
+      * the responder agent applying an email reply's
+        `implement rec-NNN` / `defer rec-NNN` / `skip rec-NNN`
+      * the implementer shelling out to
+        `framework.cli.mark_shipped_in_accumulator` after a rec ships
+      * the backfill CLI re-shaping old runs
+      * a second triggered run (cron + manual /trigger overlap)
+
+    Without serialization the LATER `save_active()` overwrites the
+    EARLIER state transition — so a rec the user shipped via email
+    reply pops back to "open" on the next producer run, and the
+    implementer ships it AGAIN.
+
+    Wrap EVERY load_active → mutate → save_active sequence in this
+    context. Timeout default is 120s — producer runs hold the lock
+    only for the merge step (~1s), and responder/CLI transitions are
+    sub-second. Hitting the timeout means something is wedged; surface
+    it loudly so the operator can investigate.
+
+    Per-agent lock key: different agents (specpicks-competitor-research
+    vs aisleprompt-competitor-research) don't share the file, so they
+    don't share the lock either — full parallelism across agents.
+    """
+    if not agent_id:
+        raise ValueError("accumulator_lock requires non-empty agent_id")
+    lock = FileLock(f"accumulator-{_safe(agent_id)}", timeout_s=timeout_s)
+    lock.acquire()
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
+@contextmanager
 def site_dispatch_lock(site: str, *, timeout_s: int = 1800):
     """Site-keyed dispatch lock — at most one implementer dispatch per
     site at a time. Different sites run in parallel.

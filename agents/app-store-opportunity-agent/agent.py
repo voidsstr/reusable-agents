@@ -385,6 +385,14 @@ class AppStoreOpportunityAgent(AgentBase):
             app["rank_signals"] = {k: round(v, 4) for k, v in parts.items()}
 
         # ---- 5. Apply user replies BEFORE merge ----
+        # Hold the accumulator lock across load → transitions → merge →
+        # cap → save (released after save_active ~30 lines below). The
+        # responder + implementer mark-shipped CLI also mutate this
+        # file; without serialization their changes get overwritten.
+        # Manual __enter__/__exit__ to avoid re-indenting the block.
+        from framework.core.locks import accumulator_lock as _acc_lock
+        _accum_ctx = _acc_lock(self.agent_id)
+        _accum_ctx.__enter__()
         accum = load_active(self.storage, self.agent_id)
         self._apply_responses(accum)
 
@@ -414,6 +422,7 @@ class AppStoreOpportunityAgent(AgentBase):
             self._generate_blueprints(accum, cfg, bp_max_per_run, bp_regen_days)
 
         save_active(self.storage, self.agent_id, accum)
+        _accum_ctx.__exit__(None, None, None)
         counts = accum_stats(accum)
         self.status("emailing", current_action=f"{counts['open']} open", progress=0.85)
 

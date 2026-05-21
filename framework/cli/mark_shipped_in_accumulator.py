@@ -99,29 +99,33 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     # Load the producer's accumulator + flip matching entries.
-    accum = rec_memory.load_active(s, args.source_agent)
-    flipped = 0
-    titles_to_match = set(shipped_titles.values())
-    for prop in accum.get("proposals", []):
-        if prop.get("state") != "open":
-            continue
-        if _norm_title(prop.get("title") or "") in titles_to_match:
-            ok = rec_memory.transition(
-                accum, prop["id"],
-                to_state="implemented",
-                run_ts=args.source_run_ts,
-                implementation_sha=args.implementation_sha or None,
-            )
-            if ok:
-                flipped += 1
+    # Lock so a concurrent producer run (cron just fired) can't race
+    # this transition and overwrite the implemented-state flip.
+    from framework.core.locks import accumulator_lock
+    with accumulator_lock(args.source_agent):
+        accum = rec_memory.load_active(s, args.source_agent)
+        flipped = 0
+        titles_to_match = set(shipped_titles.values())
+        for prop in accum.get("proposals", []):
+            if prop.get("state") != "open":
+                continue
+            if _norm_title(prop.get("title") or "") in titles_to_match:
+                ok = rec_memory.transition(
+                    accum, prop["id"],
+                    to_state="implemented",
+                    run_ts=args.source_run_ts,
+                    implementation_sha=args.implementation_sha or None,
+                )
+                if ok:
+                    flipped += 1
 
-    if flipped:
-        rec_memory.save_active(s, args.source_agent, accum)
-        print(f"[mark-shipped] flipped {flipped} accumulator entry(ies) "
-              f"to implemented for {args.source_agent} sha={args.implementation_sha[:8] if args.implementation_sha else '?'}")
-    elif args.verbose:
-        print(f"[mark-shipped] no accumulator entries matched (already shipped?) for {args.source_agent}",
-              file=sys.stderr)
+        if flipped:
+            rec_memory.save_active(s, args.source_agent, accum)
+            print(f"[mark-shipped] flipped {flipped} accumulator entry(ies) "
+                  f"to implemented for {args.source_agent} sha={args.implementation_sha[:8] if args.implementation_sha else '?'}")
+        elif args.verbose:
+            print(f"[mark-shipped] no accumulator entries matched (already shipped?) for {args.source_agent}",
+                  file=sys.stderr)
     return 0
 
 

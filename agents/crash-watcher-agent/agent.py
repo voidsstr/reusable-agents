@@ -180,7 +180,14 @@ class CrashWatcher(AgentBase):
 
         self.decide("observation", f"Sentry returned {len(issues)} unresolved issues")
 
-        # Load our accumulator (skipped/implemented dedup)
+        # Load our accumulator (skipped/implemented dedup).
+        # Acquire the accumulator lock here and release it explicitly
+        # right after save_active() ~30 lines below — manual __enter__/
+        # __exit__ to avoid re-indenting the entire merge block. fcntl
+        # releases on process exit anyway so a crash still cleans up.
+        from framework.core.locks import accumulator_lock as _acc_lock
+        _accum_ctx = _acc_lock(self.agent_id)
+        _accum_ctx.__enter__()
         accum = load_active(self.storage, self.agent_id)
         seen_ids = {p.get("id") for p in accum.get("proposals", [])}
 
@@ -219,6 +226,7 @@ class CrashWatcher(AgentBase):
             })
 
         save_active(self.storage, self.agent_id, accum)
+        _accum_ctx.__exit__(None, None, None)
 
         # Persist a per-run recommendations.json so the implementer's
         # dispatch_now() pipeline can read it.

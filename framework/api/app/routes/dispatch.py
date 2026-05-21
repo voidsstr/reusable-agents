@@ -116,6 +116,14 @@ def _list_dispatches(limit: int = 20) -> list[dict]:
     return results
 
 
+# Response cache for /queue — same shape as agent_summary cache.
+# 8s is short enough that the dashboard feels live (in-flight scopes
+# update within a single page paint) but long enough to absorb the
+# 5s-ish blob fan-out that used to time out at 60s.
+_QUEUE_CACHE: dict = {"data": None, "ts": 0.0}
+_QUEUE_CACHE_TTL_S = 8.0
+
+
 @router.get("/queue")
 def get_queue(limit: int = Query(20, le=100)):
     """Return pending responses-queue items + recent dispatches.
@@ -124,6 +132,14 @@ def get_queue(limit: int = Query(20, le=100)):
     directly (cheap), then reads only the most recent `limit` items
     (avoids fanning out 400+ blob GETs that timed out the endpoint).
     """
+    import time as _t
+    _now = _t.monotonic()
+    # Short cache by request limit (different `limit` query → different cache key)
+    cached = _QUEUE_CACHE.get(f"data_{limit}")
+    cached_ts = _QUEUE_CACHE.get(f"ts_{limit}", 0.0)
+    if cached is not None and (_now - cached_ts) < _QUEUE_CACHE_TTL_S:
+        return cached
+
     s = get_storage()
 
     # 1. List keys across all known queue-owning agents (cheap — one
@@ -237,20 +253,25 @@ def get_queue(limit: int = Query(20, le=100)):
                     pass
             # Resolve each scope's rec_ids → rec details by reading the
             # source agent's recommendations.json. This populates the
-            # dashboard's "Running" bucket.
+            # dashboard's "Running" bucket. Parallelize the per-scope
+            # list+read so 4-8 in-flight scopes don't serialize ~10s of
+            # Azure blob fan-out into the request critical path.
             try:
-                for sd in live_scope_details:
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                def _resolve_scope(sd):
+                    out = []
                     aid = sd.get("source_agent_id") or ""
                     rec_ids = sd.get("rec_ids") or []
                     if not aid or not rec_ids:
-                        continue
-                    # Find the most recent recommendations.json for this
-                    # agent that contains any of these rec_ids.
-                    rec_keys = sorted(
-                        [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
-                         if k.endswith("/recommendations.json")],
-                        reverse=True,
-                    )[:8]  # cap depth
+                        return out
+                    try:
+                        rec_keys = sorted(
+                            [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
+                             if k.endswith("/recommendations.json")],
+                            reverse=True,
+                        )[:8]
+                    except Exception:
+                        return out
                     found = set()
                     for rk in rec_keys:
                         try:
@@ -260,7 +281,7 @@ def get_queue(limit: int = Query(20, le=100)):
                                 rid = r.get("id") or r.get("rec_id")
                                 if rid in rec_ids and rid not in found:
                                     run_ts_match = rk.split("/runs/")[1].split("/")[0]
-                                    running_recs.append({
+                                    out.append({
                                         "rec_id": rid,
                                         "title": (r.get("title") or "")[:240],
                                         "category": "running",
@@ -275,6 +296,11 @@ def get_queue(limit: int = Query(20, le=100)):
                                 break
                         except Exception:
                             continue
+                    return out
+
+                with _TPE(max_workers=8) as ex:
+                    for chunk in ex.map(_resolve_scope, live_scope_details):
+                        running_recs.extend(chunk)
             except Exception:
                 pass
     except Exception:
@@ -291,30 +317,23 @@ def get_queue(limit: int = Query(20, le=100)):
         except Exception:
             pass
 
-    return {
+    resp = {
         "pending": pending,
         "pending_total": len(all_keys),
         "dispatches": dispatches,
-        # New: rec-memory backlog (open proposals across all producers)
         "accumulator_by_agent": accumulator_by_agent,
         "accumulator_total": accumulator_total,
-        # Phase-2 truth: producer-side open recs + active dispatches
         "open_recs_total": open_rec_total,
         "open_recs_by_agent": open_recs_by_agent,
         "running_dispatches": running_dispatches,
-        # Live heartbeat from the host's systemd — names of currently-
-        # running implementer scopes. Stale-detector: if `live_scopes_age_s`
-        # is > 180, the dispatcher itself is wedged; ignore the count.
         "live_scopes": live_scopes,
         "live_scopes_age_s": live_scopes_age_s,
-        # Per-scope details: source_agent_id + rec_ids in flight, used
-        # by the dashboard's "Running" bucket to show actual recs being
-        # worked on.
         "live_scope_details": live_scope_details,
-        # Resolved rec details for each in-flight rec_id — directly
-        # consumable by the UI's RichRecDetails component.
         "running_recs": running_recs,
     }
+    _QUEUE_CACHE[f"data_{limit}"] = resp
+    _QUEUE_CACHE[f"ts_{limit}"] = _t.monotonic()
+    return resp
 
 
 @router.get("/dispatches")
@@ -519,13 +538,14 @@ def _compute_lifetime_stats():
     s = get_storage()
     counts = {
         "shipped": 0, "implemented": 0, "deferred": 0,
-        "pending": 0, "total": 0,
+        "duplicate": 0, "pending_approval": 0, "pending": 0, "total": 0,
         "by_agent": {},  # {agent_id: {shipped, implemented, ...}}
     }
     # Per-category rec list, populated alongside counts. Bounded to
     # _LIFETIME_RECS_CAP per bucket so we don't ship huge JSON to the UI.
     recs_by_category: dict[str, list[dict]] = {
-        "shipped": [], "implemented": [], "deferred": [], "pending": [],
+        "shipped": [], "implemented": [], "deferred": [],
+        "duplicate": [], "pending_approval": [], "pending": [],
     }
 
     # Walk every rundir under agents/*/runs/*/recommendations.json. Use
@@ -601,23 +621,45 @@ def _compute_lifetime_stats():
     rec_latest: dict[tuple[str, str], dict] = {}
     rec_latest_run: dict[tuple[str, str], str] = {}
 
+    # Phase 1: collect all (agent_id, rk) tuples to read. Sequential
+    # list_prefix calls (one per agent, ~8 agents) — fast enough.
+    read_tasks: list[tuple[str, str]] = []
     for agent_id in sorted(rec_emitting_agents):
         try:
             keys = s.list_prefix(f"agents/{agent_id}/runs/")
         except Exception:
             continue
-        # Sort run keys so newer runs override older ones for the
-        # rec_latest snapshot (keeps the rich fields fresh).
         recs_keys = sorted(
             [k for k in keys if k.endswith("/recommendations.json")]
         )
         for rk in recs_keys:
-            try:
-                rd = s.read_json(rk) or {}
-            except Exception:
+            read_tasks.append((agent_id, rk))
+
+    # Phase 2: parallel-fetch every recommendations.json via a thread pool.
+    # Each Azure blob read is ~150-300ms; with 240+ tasks this was the
+    # 60-80s bottleneck for lifetime-stats compute. Parallelism=16 drops
+    # the IO phase to ~3-6 seconds.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _read_one(task: tuple[str, str]):
+        agent_id, rk = task
+        try:
+            rd = s.read_json(rk) or {}
+        except Exception:
+            return (agent_id, rk, None)
+        return (agent_id, rk, rd if isinstance(rd, dict) else None)
+
+    fetched: list[tuple[str, str, dict]] = []
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        for fut in as_completed([ex.submit(_read_one, t) for t in read_tasks]):
+            agent_id, rk, rd = fut.result()
+            if rd is None:
                 continue
-            if not isinstance(rd, dict):
-                continue
+            fetched.append((agent_id, rk, rd))
+
+    # Phase 3: sequential dedup/state-coalesce pass over the in-memory
+    # docs (this part must stay serial because it builds shared dicts).
+    for agent_id, rk, rd in fetched:
             recs = rd.get("recommendations") or []
             if not isinstance(recs, list):
                 continue
@@ -654,6 +696,7 @@ def _compute_lifetime_stats():
                 key = (agent_id, dedup_id)
                 cur_state = rec_state.get(key) or {
                     "shipped": False, "implemented": False, "deferred": False,
+                    "duplicate": False, "pending_approval": False,
                 }
                 # OR across all rundirs — once a rec is shipped, it's
                 # shipped lifetime, even if an older rundir's snapshot
@@ -663,6 +706,19 @@ def _compute_lifetime_stats():
                 if r.get("deferred") or \
                    "deferred" in str(r.get("status", "")).lower():
                     cur_state["deferred"] = True
+                # `duplicate=true` is set by AgentBase.post_run when a
+                # producer re-emits a title it already proposed in a
+                # prior run. Treat as a terminal state on par with
+                # deferred — hidden from `pending`, counted separately.
+                if r.get("duplicate"):
+                    cur_state["duplicate"] = True
+                # `review_required && !confirmed_for_implementation` —
+                # strategic proposals (comp-research, etc.) gated for
+                # operator approval. Surfaced in the "Pending approval"
+                # section of the dashboard with an Approve action.
+                if r.get("review_required") and not r.get(
+                        "confirmed_for_implementation"):
+                    cur_state["pending_approval"] = True
                 rec_state[key] = cur_state
                 # Always update latest — newer runs have richer fields
                 # (commit_sha after implementer ships, shipped_at after
@@ -735,10 +791,12 @@ def _compute_lifetime_stats():
                 pass
 
     # Bucket each rec exactly once — same precedence as the UI's
-    # classifyRec(): shipped > implemented > deferred > pending.
+    # classifyRec():
+    #   shipped > implemented > deferred > duplicate > pending_approval > pending.
     for (agent_id, rid), state in rec_state.items():
         agent_counts = counts["by_agent"].setdefault(agent_id, {
             "shipped": 0, "implemented": 0, "deferred": 0,
+            "duplicate": 0, "pending_approval": 0,
             "pending": 0, "total": 0,
         })
         agent_counts["total"] += 1
@@ -756,6 +814,14 @@ def _compute_lifetime_stats():
             agent_counts["deferred"] += 1
             counts["deferred"] += 1
             category = "deferred"
+        elif state.get("duplicate"):
+            agent_counts["duplicate"] = agent_counts.get("duplicate", 0) + 1
+            counts["duplicate"] = counts.get("duplicate", 0) + 1
+            category = "duplicate"
+        elif state.get("pending_approval"):
+            agent_counts["pending_approval"] = agent_counts.get("pending_approval", 0) + 1
+            counts["pending_approval"] = counts.get("pending_approval", 0) + 1
+            category = "pending_approval"
         else:
             agent_counts["pending"] += 1
             counts["pending"] += 1
@@ -814,7 +880,7 @@ _LIFETIME_RECS_BY_CATEGORY: dict = {"data": None}
 
 @router.get("/recs-by-category")
 def get_recs_by_category(
-    category: str = Query(..., pattern="^(shipped|implemented|deferred|pending)$"),
+    category: str = Query(..., pattern="^(shipped|implemented|deferred|duplicate|pending_approval|pending)$"),
     limit: int = Query(100, le=200),
 ):
     """Return up to `limit` lifetime recs in the requested category.
@@ -1205,6 +1271,63 @@ def _refresh_batches_cache() -> list[dict]:
         return manifests
     finally:
         _BATCHES_REFRESH_LOCK.release()
+
+
+@router.post("/recs/{source_agent}/{source_run_ts}/{rec_id}/approve")
+def approve_rec_for_implementation(
+    source_agent: str, source_run_ts: str, rec_id: str
+):
+    """Flip `confirmed_for_implementation=true` on a `review_required` rec
+    so the backlog dispatcher releases it to the implementer.
+
+    Updates the source agent's runs/<run_ts>/recommendations.json in
+    place. Idempotent — re-approving is a no-op. Returns the updated
+    rec + the source location so the UI can refresh.
+    """
+    # Validate path components — only allow agent-id chars, ISO ts, rec-id.
+    if not re.match(r"^[A-Za-z0-9_-]+$", source_agent):
+        return {"error": "invalid source_agent"}
+    if not re.match(r"^\d{8}T\d{6}Z$", source_run_ts):
+        return {"error": "invalid source_run_ts"}
+    if not re.match(r"^[A-Za-z0-9_.-]+$", rec_id):
+        return {"error": "invalid rec_id"}
+    # Strip optional @run_ts synthetic suffix.
+    if "@" in rec_id:
+        rec_id = rec_id.split("@", 1)[0]
+    s = get_storage()
+    doc_key = f"agents/{source_agent}/runs/{source_run_ts}/recommendations.json"
+    doc = s.read_json(doc_key)
+    if not isinstance(doc, dict):
+        return {"error": "recommendations.json not found", "key": doc_key}
+    recs = doc.get("recommendations") or []
+    target = None
+    for r in recs:
+        if isinstance(r, dict) and (r.get("id") == rec_id or r.get("rec_id") == rec_id):
+            target = r
+            break
+    if target is None:
+        return {"error": "rec not found", "rec_id": rec_id}
+    already = bool(target.get("confirmed_for_implementation"))
+    target["confirmed_for_implementation"] = True
+    target["approved_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    target["approved_via"] = "dashboard"
+    if not already:
+        s.write_json(doc_key, doc)
+    # Invalidate dashboard caches so the next /lifetime-stats /
+    # /recs-by-category response reflects the change.
+    try:
+        _LIFETIME_CACHE["data"] = None
+        _LIFETIME_CACHE["ts"] = 0
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "rec_id": rec_id,
+        "source_agent": source_agent,
+        "source_run_ts": source_run_ts,
+        "already_approved": already,
+        "rec": target,
+    }
 
 
 @router.get("/batches/{run_dir_basename}/rec/{rec_id}")
