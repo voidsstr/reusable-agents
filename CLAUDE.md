@@ -212,6 +212,73 @@
 > status; aisleprompt and specpicks are reference deployments, not
 > privileged.
 
+## ⚠️ RETRO / PRE-2012 HARDWARE → EBAY, NOT AMAZON — READ EVERY SESSION ⚠️
+
+**Hardware released before 2012 must default to eBay buy-links, not
+Amazon.** Amazon doesn't stock active listings for 20+ year-old SKUs
+(GeForce 4 Ti 4600, Voodoo3, Pentium 4, Audigy 2 ZS, etc.); the used /
+refurbished retro market lives on eBay. Surfacing "Buy on Amazon →"
+for a 2002 GPU sends users to a dead page; the affiliate click earns
+nothing and the user-trust hit is severe.
+
+**Decision rule applied EVERYWHERE that a hardware buy-CTA renders:**
+
+1. **Is `release_year < 2012` OR `era == 'retro'` OR slug indicates retro
+   (`retro-*`, `voodoo*`, `geforce-[1-4]-*`, `pentium-*`, `audigy-*`,
+   `radeon-[1-9]xxx`, etc.)?**
+   → eBay search CTA via `ebay_search_url`, NEVER Amazon.
+
+2. **Else if active Amazon listing exists (`is_active=true`, `price
+   IS NOT NULL`)?**
+   → Amazon affiliate CTA with `tag=specpicks-20`.
+
+3. **Else if hardware is modern but temporarily out of stock?**
+   → "Check Amazon for current price" with affiliate link (still earns
+     commission on the click-through even if Amazon shows OOS).
+
+**Where this rule must be enforced:**
+
+- `/benchmarks/<slug>` hero CTA + FAQ "Where can I buy" answer
+- `/product/<ASIN>` hero CTA (when Amazon has no live price + the
+  product matches retro-era patterns)
+- `/category/retro-*` editor's top pick + product cards
+- `/buying-guide/retro-*` per-pick buy buttons
+- Article body cross-links (when the article-author injects a product
+  link to a retro SKU)
+- Homepage Editor's Picks rail (no retro hardware should appear in
+  the modern picks; if it does, route the buy button to eBay)
+
+**Why this matters operationally:**
+
+- **Revenue**: Amazon links for unavailable products = $0 commission.
+  eBay's Partner Network pays commission on retro buys; we already
+  have the affiliate setup.
+- **User trust**: Hitting a "Buy on Amazon" CTA that lands on an empty
+  Amazon search or 404 reads as a broken site.
+- **SEO**: Google's product rich-result validator flags Offer JSON-LD
+  pointing at unavailable products as "deceptive structured data" —
+  same manual-action class as misleading prices.
+
+**Agent enforcement:**
+
+- `specpicks-product-hydration-agent` populates `ebay_search_url` on
+  every retro product at ingest time; verify it's running:
+  `systemctl --user list-timers | grep ebay-product-sync`.
+- `specpicks-progressive-improvement-agent` has a `retro-hardware-no-
+  ebay-cta` detection rule (added 2026-05-22) that flags any
+  retro-era page rendering an Amazon CTA without an eBay alternative.
+- New agents/code surfaces that render hardware buy-CTAs MUST consult
+  `release_year` + `era` + slug pattern before choosing the link.
+
+**Anti-patterns to refuse on sight:**
+
+- Hardcoded `${SITE_DOMAIN}/dp/${asin}` Amazon URL on any benchmark /
+  category / product surface without a release-year guard.
+- "Buy on Amazon" CTA copy on a page with `release_year < 2012`.
+- Article body autolink injecting a /product/<ASIN> link for retro
+  hardware that resolves to a stub PDP with no price (route to eBay
+  search by hardware name instead).
+
 ## What this repo is
 
 A self-hostable framework for running scheduled / triggered LLM agents.
