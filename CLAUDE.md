@@ -1037,6 +1037,117 @@ than reinventing. Failing to use them costs tokens AND introduces drift:
 **Rule of thumb:** if you're about to add a `for item in items: client.chat(...)`
 loop, stop and ask whether you can do it in one batched call instead.
 
+## ⚠️ DISPATCH-KIND PAUSE — OPERATOR-PAUSEABLE WORK ⚠️
+
+**The implementer can be pinned to a subset of dispatch_kinds** so an
+operator manually editing the site repo (or another agent) doesn't get
+its work interleaved with framework-driven edits. Storage config:
+
+`config/implementer-allowed-dispatch-kinds.json`:
+
+```json
+{
+  "schema_version": "1",
+  "allow": ["article-author", "news-author", "news-rewrite"],
+  "_history": [
+    {"set_at": "2026-05-24T16:35:00Z",
+     "value": ["article-author", "news-author", "news-rewrite"],
+     "reason": "Operator manually editing both sites — pause SEO/PI"}
+  ]
+}
+```
+
+When `allow` is a list, the **backlog-dispatcher** (not the implementer
+itself) filters recs at dispatch time — non-matching recs are left in
+their producer's run-dir and re-evaluated on the next tick. SEO opp /
+PI / catalog-audit recs simply queue up until the restriction is lifted.
+
+**To pause all non-authoring work** (typical use):
+
+```json
+{"allow": ["article-author", "news-author", "news-rewrite"]}
+```
+
+**To allow everything** (default / unrestricted):
+
+```json
+{"allow": ["*"]}
+```
+
+**Why this lives at the dispatcher, not the implementer**: cheaper +
+safer. The dispatcher's per-tick walk skips disallowed recs in <1ms;
+running the implementer scope just to immediately defer wastes a
+systemd-run launch + the run.sh boot. Also keeps the implementer's
+run-history clean (no "deferred: not in allow-list" rows polluting
+the dashboard).
+
+**Where the gate is enforced**: `agents/backlog-dispatcher-agent/agent.py`
+inside the candidate-collection loop, right after the rec-handler
+allowlist gate. Producer agent_id → dispatch_kind mapping is inlined
+(seo-opportunity → seo, progressive-improvement → pi, article-author
+→ article-author, catalog-audit → catalog-audit, comp-research →
+comp-research, news-author/news-writer → news-author). Individual recs
+can override via `rec.dispatch_kind`.
+
+## ⚠️ IMAGE GENERATION — LOCAL ONLY — READ EVERY SESSION ⚠️
+
+**All text-to-image generation MUST use the local SDXL-Turbo daemon at
+`http://127.0.0.1:7861/generate`.** This is a hard rule. Paid
+providers (Azure OpenAI gpt-image-1, OpenAI DALL-E, fal.ai, Replicate,
+Stability, Together, etc.) are forbidden — see the 2026-05-24 incident
+where Azure gpt-image-1 was burning ~$190/day at the 8-RPM quota cap.
+
+**Why local-only**:
+- Cost: ~$0.0003/img electricity vs $0.042/img paid (140× cheaper).
+- Throughput: ~6,000 img/hour on the RTX 5090 vs 8 RPM Azure cap.
+- Quality: SDXL-Turbo (and FLUX-schnell when wired up) produces
+  food-photography output that beats the paid path for our use case.
+
+**The daemon**: `/home/voidsstr/development/reusable-agents/services/local-image-gen/`
+runs under `local-image-gen.service` systemd unit. Default port 7861,
+bearer-token auth. See its `README.md` for full API + ops notes.
+
+**The hard rules**:
+
+1. **Any new code that needs an image MUST POST `localhost:7861/generate`.**
+   No exceptions. If you need a different model for a specific use case
+   (different style, higher quality), run a SECOND instance of the
+   daemon with `LOCAL_IMAGE_GEN_MODEL=...` on a different port.
+2. **No paid fallback.** If the daemon is down, the operation fails or
+   defers (e.g. the refiller agent retries next tick). Silent failover
+   to a paid API is what caused the 2026-05-24 incident.
+3. **The live API (Azure-hosted simple-server.ts) does NOT generate
+   images in the hot path.** It can't reach localhost. New recipes
+   start with `image_url = NULL`; the dev-box-hosted refiller agent
+   picks them up within 5 minutes.
+4. **No `images/generations` calls to ANY hosted provider in any
+   service or agent.** Grep before merging: `azureOpenAIGenerateImage`,
+   `gpt-image`, `dall-e`, `dalle`, `/images/generations`,
+   `AZURE_OPENAI_IMAGE_*`, `fal.ai`, `replicate.com`, `together.xyz/v1/images`.
+5. **If the local daemon needs to be reached from Azure** (rare), add
+   a Cloudflare tunnel ingress for `images.aisleprompt.com → localhost:7861`
+   via the Cloudflare Zero Trust dashboard. DO NOT reintroduce a
+   paid provider just because the tunnel is missing.
+
+**Anti-patterns to refuse on sight**:
+
+- ❌ `await azureOpenAIGenerateImage(...)` anywhere — function should
+  not exist; the slot in simple-server.ts is a tombstone comment.
+- ❌ `process.env.AZURE_OPENAI_IMAGE_*` references — those env vars are
+  removed from every deployment. Referring to them is dead code.
+- ❌ "Optional fallback to fal.ai/Replicate when the local daemon is
+  down" — explicitly banned. Operational hygiene is to keep the daemon
+  running, not to add paid escape hatches.
+- ❌ Adding a new `images/generations` HTTP call to Azure OpenAI in any
+  new code, even "just for testing".
+- ❌ Re-creating the deleted `aisleprompt-ai-img` Azure OpenAI image
+  deployment without an explicit cost review + rollback plan.
+
+**Reference implementation**: `agents/recipe-image-refiller` →
+`scripts/_refill-missing-images.ts` → `localGenerateImage()` shows the
+canonical client pattern. The cookware cross-sell strip, article
+hero images, and any future image flow use the SAME endpoint.
+
 ## ⚠️ ARTICLE + NEWS WRITING — OPUS-ONLY HARD REQUIREMENT ⚠️
 
 **Every code path that GENERATES the body of an editorial article, news
@@ -1084,6 +1195,32 @@ auth failure, etc.) it SKIPS the rec with reason
 `required-model-unavailable` and the rec stays in the queue. We
 intentionally lose throughput rather than ship sonnet-quality prose.
 
+**The defer happens BEFORE any fallback chain runs.** As of 2026-05-24
+the implementer's `run.sh` lifts `REQUIRED_MODEL` computation to the
+TOP of the dispatch flow — before the `IMPLEMENTER_FORCE_FALLBACK` /
+`IMPLEMENTER_BACKEND=copilot-gpt-4.1` shortcuts. When a required-model
+batch hits one of those shortcut paths (e.g. claude-pool probe
+returned all-dead), the implementer writes `deferred.json` immediately
+and exits cleanly. The framework code-editor chain (`jcode-copilot`,
+`aider-github-copilot`, `aider-azure`, `jcode-ollama`) is NEVER
+allowed to satisfy a required-model batch — those backends can't run
+Opus, and shipping their output to an article body would violate the
+editorial quality contract. The rec stays in the queue and the
+dispatcher retries on the next tick.
+
+**Multi-account claude-pool rotation (2026-05-24).** When you have
+multiple Max accounts in different orgs (`profile-1` through
+`profile-5`), one being disabled at the org level does NOT mean the
+pool is dead. The `_AUTH_DEAD_PATTERNS` in
+`framework/cli/claude_pool.py` recognizes the org-disabled message
+("Your organization has disabled Claude subscription access") and
+marks ONLY that profile dead; the pool rotates to the next profile
+automatically. The implementer's probe in `run.sh` walks ALL profiles
+before declaring the pool dead — a single org-disabled profile is
+not a pool-wide outage. To re-enable a disabled profile, the org
+admin restores Claude Code access in the Anthropic console (the
+profile's auth blob is still valid — just the org-level toggle).
+
 **Why:** prose quality matters more than throughput for any text a
 human reader will judge. Sonnet drafts read as flatter, repeat
 generic-CMS phrasing, and lose the differentiated voice of each site.
@@ -1104,6 +1241,91 @@ Reference impl: `specpicks/scripts/rewrite-news-as-commentary.ts`.
   dispatch_kinds (recommended is soft; required is hard — use
   required).
 - ❌ Skipping `required_model_for_batch()` in a custom implementer.
+
+## ⚠️ H2H COMMENTARY ALSO OPUS-ONLY — READ EVERY SESSION ⚠️
+
+**Head-to-head verdict + 600-word performance prose is editorial content
+at the same quality bar as articles/news.** As of 2026-05-24 the
+required-models config in storage adds:
+
+```json
+"by_dispatch_kind": {
+  "h2h":              "opus",
+  "h2h-commentary":   "opus",
+  "comparison_page_generation": "opus"
+},
+"by_agent_id": {
+  "specpicks-head-to-head-agent": "opus"
+}
+```
+
+This means the implementer skips h2h recs rather than ship sonnet-quality
+verdicts. The same rule applies to any future site that adopts the
+head-to-head-agent blueprint.
+
+## Copilot-opus bridge — required-opus fallback when claude-pool is broken
+
+**When the Claude Max profiles are unusable** (rate-limit, weekly-cap
+exhaustion, or — as happened starting ~2026-05-04 — an organizational
+disable of Claude Code: `"Your organization has disabled Claude
+subscription access for Claude Code"`), the implementer's required-opus
+deferral has a second-chance branch (added 2026-05-24, in
+`agents/implementer/run.sh` around line 725) — **opt-in via
+`IMPLEMENTER_COPILOT_OPUS_BRIDGE=1` in `~/.reusable-agents/secrets.env`
+because as of 2026-05-24 the proxy was returning 402 quota_exceeded for
+both opus AND sonnet, so the bridge would consume the deferral path
+without actually shipping prose**:
+
+1. Probe the GitHub Copilot proxy at `localhost:4141/v1/models`
+2. If `claude-opus-4.7` is listed, route the `claude --print` loop
+   through that proxy by setting `ANTHROPIC_BASE_URL=http://localhost:4141`
+   and removing `claude-pool/bin` from PATH (so the real claude CLI
+   binary is used, not the pool shim — the shim ignores
+   `ANTHROPIC_BASE_URL` because it always routes to authenticated profile
+   dirs).
+
+**This is why h2h commentary stopped producing new entries between
+2026-05-01 and 2026-05-24.** All 5 claude-pool profiles had
+`auth_error_message: "Your organization has disabled..."`. The
+implementer's required-opus gate deferred every h2h batch because
+`IMPLEMENTER_FORCE_FALLBACK=1` (set in `~/.reusable-agents/secrets.env`)
+plus opus-required = "no path to satisfy quality bar." The Copilot
+bridge is the unblocker.
+
+**Operator checklist when h2h / article / news writing stalls:**
+
+```bash
+# 1. Is the Copilot proxy serving opus?
+curl -sf http://localhost:4141/v1/models | grep claude-opus-4.7
+
+# 2. Is the pool still showing auth errors?
+jq '."profile-1".auth_error_message' \
+  ~/.reusable-agents/claude-pool/state.json
+
+# 3. Are recs being deferred for required-model-unavailable?
+find ~/.reusable-agents/data -name "deferred.json" -mtime -1 -exec cat {} \;
+
+# 4. Is the implementer picking up the Copilot bridge?
+grep -A1 "copilot-opus path available" \
+  /tmp/reusable-agents-logs/agent-implementer.log | tail
+```
+
+**If Copilot proxy is dead**, start it (the user's own setup, varies),
+or provision `ANTHROPIC_API_KEY` with real opus access and the regular
+claude CLI will route through that instead.
+
+**Anti-patterns to refuse on sight:**
+
+- ❌ Removing the Copilot bridge "because claude-pool is back" — leave it
+  as defense-in-depth. The bridge only fires when claude-pool is
+  force-disabled.
+- ❌ Hard-coding `claude-opus-4.7` model name in the bridge instead of
+  reading it from the proxy's `/v1/models` list (the proxy may rename
+  to `claude-opus-5.0` next year; the probe should adapt).
+- ❌ Pointing `ANTHROPIC_BASE_URL` at the Copilot proxy globally (i.e.
+  in systemd Environment=). That would route ALL claude calls — not
+  just required-opus ones — through Copilot, defeating the
+  rate-budgeting the Max profiles provide for non-opus work.
 
 ## LLM provider routing — chat vs code-editor
 

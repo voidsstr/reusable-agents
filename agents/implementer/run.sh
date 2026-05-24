@@ -611,50 +611,78 @@ EOF
         # end-to-end on a real rec without burning Max profile quota.
         # Default: 0 (use claude pool first; fall back automatically on
         # rc=75 = all Max profiles rate-limited).
-        if [ "${IMPLEMENTER_BACKEND:-}" = "copilot-gpt-4.1" ]; then
-            # New parallel channel (2026-05-13). Dispatcher routes "simple"
-            # recs here so they can ship continuously even when the claude
-            # pool is rate-limited. Goes straight to framework code-editor
-            # chain (aider + gpt-4.1 via github-copilot proxy) — no claude
-            # pool draw, free under user's Copilot subscription.
-            echo "[implementer] IMPLEMENTER_BACKEND=copilot-gpt-4.1 — skipping claude, using aider+gpt-4.1" >&2
-            export IMPLEMENTER_FORCE_FALLBACK_BACKEND=aider-github-copilot
-            export IMPLEMENTER_FORCE_FALLBACK_MODEL=gpt-4.1-2025-04-14
-            rc=75
-        elif [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
-            echo "[implementer] IMPLEMENTER_FORCE_FALLBACK=1 — skipping claude, forcing framework code-editor chain" >&2
-            rc=75
-        else
-            # 2026-05-11: Smart model-tier auto-switch. Anthropic enforces
-            # PER-MODEL seven-day caps (seven_day_sonnet / seven_day_opus /
-            # seven_day_haiku — separate quota pools). Start with Sonnet
-            # (price/quality sweet spot), auto-downgrade to Opus if Sonnet
-            # is family-capped, then Haiku as last claude resort, then fall
-            # through to the framework chain (rc=75). The claude-pool shim
-            # picks the right profile per family on each call. Override the
-            # start tier via IMPLEMENTER_CLAUDE_MODEL.
-            # Stake-aware model tier (2026-05-18). Ask
-            # framework.core.implementer_safety which Claude tier this
-            # batch warrants based on rec stakes — opus for landing-page
-            # / monetization / critical edits, sonnet for default,
-            # haiku for mechanical structured work. Falls back to the
-            # env override IMPLEMENTER_CLAUDE_MODEL if set.
-            # Required-model gate (2026-05-19). Ask
-            # framework.core.required_model whether this batch has a HARD
-            # tier requirement. If so, that tier becomes the ONLY allowed
-            # model (no fallback) and the script exits with
-            # NO_FALLBACK_DEFER if the model is unavailable. Otherwise
-            # falls through to the stake-aware soft tier picker.
-            REQUIRED_MODEL=""
-            if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "${RESPONDER_RUN_DIR}" ] \
-                    && [ "${IMPLEMENTER_DISABLE_REQUIRED_TIER:-0}" != "1" ]; then
-                REQUIRED_MODEL=$(
-                    PYTHONPATH="$REPO_ROOT" \
-                    RUN_DIR="$RESPONDER_RUN_DIR" \
-                    DISPATCH_KIND="$DISPATCH_KIND" \
-                    REC_IDS="$RESPONDER_REC_IDS" \
-                    SOURCE_AGENT="${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_AGENT_ID:-}}" \
-                    python3 - <<'PY' 2>/dev/null
+        # Probe whether claude-pool is usable at all. Anthropic can
+        # disable Claude Code subscription access org-wide (we hit this
+        # 2026-05-24 — every profile started returning "Your
+        # organization has disabled Claude subscription access for
+        # Claude Code"). When that happens the tier-walk wastes 5s
+        # before falling through; pre-probe once and skip the whole
+        # claude attempt when it's clearly dead. Cached at
+        # /tmp/claude-pool-disabled-probe for 15 min so we don't
+        # re-probe every dispatch.
+        _CP_PROBE=/tmp/claude-pool-disabled-probe
+        _CP_PROBE_TTL=900  # 15 min
+        if [ "${IMPLEMENTER_DISABLE_CLAUDE_PROBE:-0}" != "1" ] \
+                && [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" != "1" ]; then
+            _now=$(date +%s)
+            _last=0
+            if [ -f "$_CP_PROBE" ]; then
+                _last=$(stat -c %Y "$_CP_PROBE" 2>/dev/null || echo 0)
+            fi
+            if [ $((_now - _last)) -gt $_CP_PROBE_TTL ]; then
+                # Probe via the claude-pool shim so the SHIM's profile
+                # rotation does the work — its auth-dead patterns
+                # ("disabled Claude subscription access", "Not logged
+                # in", etc.) automatically skip failed profiles and
+                # retry until one succeeds or the pool is exhausted.
+                # 3 Max accounts live in different Anthropic orgs;
+                # one org disabling Claude Code doesn't kill the pool.
+                _probe_out=$(timeout 12 \
+                    /home/voidsstr/.reusable-agents/claude-pool/bin/claude \
+                    --dangerously-skip-permissions --print --output-format text \
+                    --model claude-haiku-4-5 --max-turns 1 'ping' 2>&1 || true)
+                # ALIVE if the shim got a response from ANY profile
+                # (the shim prints "[claude-pool] → profile-N" for
+                # the winning profile and then the model's response).
+                if echo "$_probe_out" | grep -qE \
+                        "^\[claude-pool\] → profile-[0-9]+ \(home=" \
+                    && echo "$_probe_out" | grep -vqE \
+                        "(disabled Claude subscription|Not logged in|no longer a member|auth revoked|auth-dead)$"; then
+                    # At least one profile responded with usable output
+                    echo "[implementer] probe: claude-pool is ALIVE" >&2
+                    rm -f "$_CP_PROBE" 2>/dev/null
+                else
+                    # Either the shim returned no working profile, or
+                    # the only response was an auth-dead error.
+                    echo "[implementer] probe: claude-pool unreachable — forcing fallback for next ${_CP_PROBE_TTL}s" >&2
+                    touch "$_CP_PROBE"
+                    export IMPLEMENTER_FORCE_FALLBACK=1
+                fi
+            elif [ -f "$_CP_PROBE" ]; then
+                echo "[implementer] probe: claude-pool still in cooldown (cached probe)" >&2
+                export IMPLEMENTER_FORCE_FALLBACK=1
+            fi
+        fi
+        # ── REQUIRED-model gate (LIFTED to top, 2026-05-24) ──────────────
+        # Compute the hard model requirement BEFORE any branch decision so
+        # the FORCE_FALLBACK / IMPLEMENTER_BACKEND shortcuts can honor it.
+        # Article-author / news-author / news-rewrite batches have
+        # required_model=opus per config/required-models.json — when opus
+        # isn't reachable (claude-pool disabled, rate-limited, etc.) we
+        # MUST defer, not fall through to the framework chain (aider /
+        # copilot / azure / ollama) which would ship sonnet-grade prose
+        # under an opus-quality required surface. See CLAUDE.md's
+        # ARTICLE+NEWS WRITING OPUS-ONLY hard rule.
+        REQUIRED_MODEL=""
+        if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "${RESPONDER_RUN_DIR}" ] \
+                && [ "${IMPLEMENTER_DISABLE_REQUIRED_TIER:-0}" != "1" ]; then
+            REQUIRED_MODEL=$(
+                PYTHONPATH="$REPO_ROOT" \
+                RUN_DIR="$RESPONDER_RUN_DIR" \
+                DISPATCH_KIND="$DISPATCH_KIND" \
+                REC_IDS="$RESPONDER_REC_IDS" \
+                SOURCE_AGENT="${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_AGENT_ID:-}}" \
+                python3 - <<'PY' 2>/dev/null
 import json, os, sys
 from pathlib import Path
 try:
@@ -684,8 +712,114 @@ if result:
     tier, model_id = result
     print(model_id)
 PY
-                )
+            )
+        fi
+        if [ -n "$REQUIRED_MODEL" ]; then
+            echo "[implementer] required model gate: ${REQUIRED_MODEL} (dispatch_kind=${DISPATCH_KIND})" >&2
+            # When the required model is opus AND the claude-pool is
+            # known-unusable (FORCE_FALLBACK=1 from probe), defer
+            # immediately — the framework chain CANNOT satisfy an
+            # opus-only requirement, falling through would write
+            # sonnet/copilot-grade prose to an article body and break
+            # the editorial quality contract.
+            if [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ] \
+                    || [ "${IMPLEMENTER_BACKEND:-}" = "copilot-gpt-4.1" ]; then
+                # 2026-05-24: Before deferring, probe the GitHub Copilot proxy
+                # at localhost:4141 — which serves real claude-opus-4.7 under
+                # a Copilot subscription, no Claude Max session required.
+                # If the proxy responds and the required tier is opus, route
+                # `claude --print` through it via ANTHROPIC_BASE_URL so the
+                # downstream prompt path stays identical. Unblocks article/
+                # news/h2h writing while the org-side "Claude Code disabled"
+                # block remains in effect on the Max profiles.
+                COPILOT_OPUS_OK=0
+                # 2026-05-24: opt-in via IMPLEMENTER_COPILOT_OPUS_BRIDGE=1
+                # because as of that date the Copilot proxy on :4141 was
+                # returning 402 quota_exceeded for opus AND sonnet calls
+                # despite advertising them in /v1/models. Set the env flag
+                # only after confirming the proxy can actually serve a tiny
+                # opus completion (see CLAUDE.md "Copilot-opus bridge").
+                if [ "${IMPLEMENTER_COPILOT_OPUS_BRIDGE:-0}" = "1" ] \
+                        && [ "$REQUIRED_MODEL" = "opus" ] \
+                        && [ -x "$HOME/.local/bin/claude" ] \
+                        && curl -sf --max-time 3 http://localhost:4141/v1/models 2>/dev/null \
+                           | grep -q 'claude-opus-4\.7'; then
+                    echo "[implementer] copilot-opus path available — routing required-opus batch through localhost:4141" >&2
+                    # Bypass the claude-pool shim by removing its bin dir
+                    # from PATH for the rest of this run. The pool shim
+                    # routes to authenticated Max profiles and ignores
+                    # ANTHROPIC_BASE_URL; the real claude CLI honors it.
+                    PATH=$(echo "$PATH" | tr ':' '\n' | grep -v claude-pool/bin | paste -sd: -)
+                    export PATH
+                    export ANTHROPIC_BASE_URL="http://localhost:4141"
+                    # Copilot proxy accepts any bearer; the value is ignored
+                    # but the CLI requires the var to be present.
+                    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-copilot-proxy-no-auth}"
+                    export ANTHROPIC_AUTH_TOKEN="copilot-proxy-no-auth"
+                    export IMPLEMENTER_CLAUDE_MODEL="claude-opus-4.7"
+                    # Skip the FORCE_FALLBACK / copilot-gpt-4.1 gates and
+                    # fall through into the regular claude --print loop
+                    # below. Unset FORCE_FALLBACK locally so the next
+                    # if/elif picks the claude path.
+                    unset IMPLEMENTER_FORCE_FALLBACK
+                    if [ "${IMPLEMENTER_BACKEND:-}" = "copilot-gpt-4.1" ]; then
+                        unset IMPLEMENTER_BACKEND
+                    fi
+                    COPILOT_OPUS_OK=1
+                fi
+                if [ "$COPILOT_OPUS_OK" -eq 0 ]; then
+                    echo "[implementer] required model ${REQUIRED_MODEL} unavailable (claude-pool forced off; copilot-opus proxy not reachable); deferring all recs" >&2
+                    if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "$RESPONDER_RUN_DIR" ]; then
+                        cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFEOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "required model $REQUIRED_MODEL unavailable (claude-pool forced off via FORCE_FALLBACK; copilot proxy on :4141 not serving opus); framework chain cannot satisfy opus-only required-model — will retry when claude-pool returns or copilot proxy is restored",
+  "rec_ids": "${RESPONDER_REC_IDS:-}",
+  "required_model": "$REQUIRED_MODEL",
+  "exit_code": 75,
+  "next_action": "retry on next dispatcher tick — re-enable Claude Code org access OR provision an Anthropic API key with opus access OR start the github-copilot proxy on :4141"
+}
+DEFEOF
+                    fi
+                    # exit 0 → wrapper records as deferred (not failed), so the
+                    # dispatcher's queued_ids stay clean and the rec is retried
+                    # on the next tick when the pool returns.
+                    exit 0
+                fi
             fi
+        fi
+        if [ "${IMPLEMENTER_BACKEND:-}" = "copilot-gpt-4.1" ]; then
+            # New parallel channel (2026-05-13). Dispatcher routes "simple"
+            # recs here so they can ship continuously even when the claude
+            # pool is rate-limited. Goes straight to framework code-editor
+            # chain (aider + gpt-4.1 via github-copilot proxy) — no claude
+            # pool draw, free under user's Copilot subscription.
+            # GUARDED above against required-model batches.
+            echo "[implementer] IMPLEMENTER_BACKEND=copilot-gpt-4.1 — skipping claude, using aider+gpt-4.1" >&2
+            export IMPLEMENTER_FORCE_FALLBACK_BACKEND=aider-github-copilot
+            export IMPLEMENTER_FORCE_FALLBACK_MODEL=gpt-4.1-2025-04-14
+            rc=75
+        elif [ "${IMPLEMENTER_FORCE_FALLBACK:-0}" = "1" ]; then
+            echo "[implementer] IMPLEMENTER_FORCE_FALLBACK=1 — skipping claude, forcing framework code-editor chain" >&2
+            rc=75
+        else
+            # 2026-05-11: Smart model-tier auto-switch. Anthropic enforces
+            # PER-MODEL seven-day caps (seven_day_sonnet / seven_day_opus /
+            # seven_day_haiku — separate quota pools). Start with Sonnet
+            # (price/quality sweet spot), auto-downgrade to Opus if Sonnet
+            # is family-capped, then Haiku as last claude resort, then fall
+            # through to the framework chain (rc=75). The claude-pool shim
+            # picks the right profile per family on each call. Override the
+            # start tier via IMPLEMENTER_CLAUDE_MODEL.
+            # Stake-aware model tier (2026-05-18). Ask
+            # framework.core.implementer_safety which Claude tier this
+            # batch warrants based on rec stakes — opus for landing-page
+            # / monetization / critical edits, sonnet for default,
+            # haiku for mechanical structured work. Falls back to the
+            # env override IMPLEMENTER_CLAUDE_MODEL if set.
+            # REQUIRED_MODEL is computed above the if/elif/else now, so
+            # both the FORCE_FALLBACK branch and the stake-aware tier
+            # picker can honor it. See the lifted block earlier.
 
             STAKE_AWARE_MODEL=""
             if [ -z "${IMPLEMENTER_CLAUDE_MODEL:-}" ] && [ -z "$REQUIRED_MODEL" ] \
@@ -784,7 +918,7 @@ PY
         # "wait for opus rather than ship sonnet-quality" — falling
         # through to aider/copilot would defeat that. Write a defer record
         # so the dispatcher knows to retry later.
-        if [ -n "$REQUIRED_MODEL" ] && [ "$rc" -ne 0 ]; then
+        if [ -n "${REQUIRED_MODEL:-}" ] && [ "$rc" -ne 0 ]; then
             echo "[implementer] required model ($REQUIRED_MODEL) unavailable (rc=$rc); deferring all recs (no fallback per required-model policy)" >&2
             DEFER_REASON="required model $REQUIRED_MODEL unavailable (rc=$rc); will retry when capacity returns"
             if [ -n "${RESPONDER_RUN_DIR:-}" ] && [ -d "$RESPONDER_RUN_DIR" ]; then
@@ -1790,6 +1924,45 @@ for rid, body_p, meta_p in pairs:
             errors.append((rid, f"body too short ({word_count} words "
                                 "< 400 floor) — skipping insert"))
             continue
+        # ── INLINE-LINK GUARD ──────────────────────────────────────
+        # The proposal carries `expected_recipe_slugs` /
+        # `expected_kitchen_slugs`. The wrapper enforces that the
+        # body contains at least N inline `/recipes/<slug>` and
+        # `/k/<slug>` links — articles that DON'T link to the catalog
+        # are content dead-ends (no on-site session expansion, no
+        # internal-link equity, no conversion path). Aisleprompt
+        # defaults: 5 recipe links + 2 kitchen-category links.
+        # Specpicks: 0/0 (no recipes/, kitchen recs surfaced via PDP).
+        try:
+            from framework.core.article_link_guard import verify_body
+            _rec_for_guard = recs_doc.get(rid) or {}
+            _proposal_for_guard = (_rec_for_guard.get("proposal")
+                                   or _rec_for_guard.get("article_proposal")
+                                   or {})
+            _site_hint = (_rec_for_guard.get("agent_id") or
+                          _proposal_for_guard.get("site") or "")
+            _is_aisleprompt = "specpicks" not in _site_hint
+            _audit = verify_body(body_md, _proposal_for_guard,
+                                  min_recipes=5 if _is_aisleprompt else 0,
+                                  min_kits=2 if _is_aisleprompt else 0)
+            if not _audit.passes:
+                errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
+                                    f"(recipes={_audit.recipe_links}, "
+                                    f"kitchen={_audit.kitchen_links}, "
+                                    f"matched={_audit.matched_expected_recipes}"
+                                    f"/{_audit.expected_recipe_total} expected) "
+                                    f"— refusing INSERT; re-queue with addendum"))
+                print(f"[article-insert] {rid}: ✗ LINK-GUARD "
+                      f"recipes={_audit.recipe_links}/{_audit.min_recipes} "
+                      f"kits={_audit.kitchen_links}/{_audit.min_kits} — SKIP",
+                      file=sys.stderr)
+                continue
+        except ImportError:
+            pass  # primitive not available in this checkout
+        except Exception as _le:
+            print(f"[article-insert] {rid}: link-guard error: {_le} (continuing)",
+                  file=sys.stderr)
+
         # ── INTEGRITY CHECK: body H1 must match proposal title ──────
         # Defends against the cross-run rec_id collision class that
         # shipped 4 mismatched specpicks articles (wrong body content
