@@ -212,6 +212,112 @@
 > status; aisleprompt and specpicks are reference deployments, not
 > privileged.
 
+## ⚠️ ARTICLE AUTHORING — TIMELY > EVERGREEN — READ EVERY SESSION ⚠️
+
+**Articles must hook into what's happening NOW** — seasonal moments,
+holidays, trending searches — not just evergreen "Best X Guide" pages.
+A `seasonal-occasion` bucket without a Memorial Day cookout guide on
+Memorial Day weekend is a failure even if 50 other articles shipped
+that week. Same for trending-ai on a CES launch day, or news on a
+major model release. Three framework primitives back this contract:
+
+1. **`framework/core/seasonal_calendar.py`** — anchored US calendar
+   covering fixed-date (Cinco de Mayo, July 4th) AND relative-date
+   (`last-weekday:monday:5` = Memorial Day, `nth-weekday:4:thursday:11`
+   = Thanksgiving) holidays. Three windows: **NOW** (today ± 3d),
+   **IMMINENT** (4–14d out), **UPCOMING** (15–60d out). Each occasion
+   carries `recipe_keywords`, `link_categories`, `bucket_hints`,
+   `audience` (food / tech / general). Article-author agents call
+   `active_signal(today, audience=...)` and inject
+   `build_prompt_block(...)` into the LLM user-message so the model
+   sees "🔥 SHIP NOW — Memorial Day Weekend in 2d." Without this block
+   the LLM defaults to evergreen titles.
+
+2. **`framework/core/trends_signal.py`** — Google Trends RSS +
+   audience-appropriate Reddit RSS (`r/cooking` for food, `r/buildapc`
+   for tech, `r/gaming` for gaming). Cached 6h per agent at
+   `agents/<id>/state/trends-cache.json` to avoid pounding the RSS
+   feeds. Article-author agents call `fetch_trends_cached(self.storage,
+   self.agent_id, audience=...)` and the `TRENDING TODAY` block in the
+   prompt biases new proposals toward search demand the catalog
+   doesn't yet cover.
+
+3. **`framework/core/featured_rotation.py`** — promotes
+   `editorial_articles.featured = true` for any article tagged
+   `holiday:<id>` when that holiday is NOW or IMMINENT in the
+   seasonal calendar. Demotes stale holiday features (so January's
+   Christmas piece doesn't stay featured in May). Operator-pinned
+   features (featured=true with no `holiday:` tag) are left alone.
+   Runs at the end of each article-author tick via
+   `cycle_homepage_features(self._db_dsn, audience=..., max_features=N)`.
+
+4. **`framework/core/article_link_guard.py`** — enforces that every
+   shipped article contains ≥5 inline `/recipes/<slug>` links and ≥2
+   `/k/<slug>` links (aisleprompt defaults; specpicks is 0/0 since
+   PDP recs use `/product/`). Hooked into the implementer's
+   `run.sh` post-write step — articles failing the link contract are
+   skipped from INSERT and re-queued with a failure addendum that
+   tells the LLM exactly which slugs to add. Articles without inline
+   links are content dead-ends — no internal-link equity, no
+   on-session expansion, no conversion path.
+
+**Hard rules for any new article-author / news-author / editorial
+proposer:**
+
+- ❌ Don't roll your own holiday list per agent — call
+  `seasonal_calendar.active_signal()`.
+- ❌ Don't roll your own RSS scraper per agent — call
+  `trends_signal.fetch_trends_cached()`.
+- ❌ Don't ship the proposer without a `holiday:<id>` tag rule in
+  its system prompt — without it `featured_rotation` has nothing to
+  cycle.
+- ❌ Don't accept LLM output that omits `expected_recipe_slugs` /
+  `expected_kitchen_slugs` — the implementer's link-guard will
+  reject the article anyway.
+- ❌ Don't loosen the link-guard minima per-site without a real
+  reason. Higher floor = better SEO + revenue path.
+
+**Article-author dedup tuning** — the title-similarity dedup *must*
+exempt holiday-bearing proposals (memorial, july, thanksgiving, …) or
+seasonal titles get killed as "near-dup of existing meal-prep
+article" because they share the `Recipes + Shopping List` suffix
+pattern. Aisleprompt's `_dedup_proposals_by_title` has the holiday
+exemption; copy that pattern when adding new bucket types.
+
+**SSR markdown renderers MUST support GFM tables.** Per-site SSR has
+its own `mdToHtml`-style function. If a site's renderer only handles
+headings + lists + paragraphs, every `| header | header |` table in
+shipped articles renders as `<p>literal pipes</p>` — visually broken,
+breaks AggregateRating + the comparison-table content the SEO audit
+expects. Aisleprompt's `simple-server.ts:mdToHtml` shipped without
+table support until 2026-05-24; the live `best-grilling-tools` page
+was the trigger. Specpicks's `ssrRender.ts:mdToHtml` already had it.
+**On every new site onboarding, render a test article with a table and
+verify `<table>` appears in the SSR output before declaring done.**
+Reference impl: both sites now emit `<table class="md-table">` /
+`<table class="ssr-table">` with `<thead>` + `<tbody>`.
+
+**Article hero images — `article-hero-image-curator` is the safety net.**
+The article-author picks a hero image at proposal time via SearxNG
+(`_search_blog_image`), but that call is best-effort — when the query
+returns nothing or returns a junk image (e.g. `medbay.jpeg` for a
+"grilling tools" article), the article still ships with `NULL`
+hero_image_url. The `article-hero-image-curator` agent runs every
+15 min, vision-verifies + replaces failed images, and mirrors winners
+to Azure Blob Storage so link-rot from upstream CDNs doesn't leave the
+article hero-less. Two requirements:
+- Reject patterns must include `medbay`, `scifi`, `spaceship`,
+  `medical`, `hospital`, NSFW words (`porn`, `xxx`, `nsfw`, `sexy`,
+  `lingerie`, `nudity`, `erotic`, `fetish`), and people patterns
+  (`headshot`, `portrait`, `staff`, `bio`, `profile`).
+- Minimum size 50KB — anything smaller is a thumbnail / spinner /
+  icon. `tiny` images render at 80×80 thumb on the homepage rail and
+  look broken.
+- See `framework/agents/aisleprompt/article-hero-image-curator/` for
+  the SearxNG query + score chain. Bulk-fix utility:
+  `/tmp/reimage-bulk.py --site <site> --table editorial_articles
+  --include broken,tiny --commit`.
+
 ## ⚠️ RETRO / PRE-2012 HARDWARE → EBAY, NOT AMAZON — READ EVERY SESSION ⚠️
 
 **Hardware released before 2012 must default to eBay buy-links, not
@@ -278,6 +384,131 @@ nothing and the user-trust hit is severe.
 - Article body autolink injecting a /product/<ASIN> link for retro
   hardware that resolves to a stub PDP with no price (route to eBay
   search by hardware name instead).
+
+## ⚠️ PRICING INTEGRITY — NEVER PROMOTE PRODUCTS WITH INVALID PRICE ⚠️
+
+**The site must never crown a Top Pick or buying-guide pick with a
+broken or misleading price.** Audit-found incidents:
+
+- Indian-marketplace (INR) listing showing "$659.00" on the CTA
+  button while the page header said "₹659.00" — user thought USD
+  until checkout.
+- $0 / null-price products surfacing as Editor's Top Pick — page
+  looks broken.
+- $0.01 / $0.02 prices on Atari 2600 games (scraper cents/dollars
+  bug).
+- "Save -$50" negative discounts (original_price < price corruption).
+- Foreign-marketplace listings (CAD/GBP/EUR/INR/AUD/SGD) shown in
+  US-affiliate hubs — non-actionable for US-targeted users.
+
+**The mandatory filters at every visible-pick query layer:**
+
+```sql
+WHERE p.is_active = true
+  AND p.price IS NOT NULL AND p.price >= 1.0        -- no null/$0/sub-$1
+  AND (p.currency IS NULL OR p.currency = 'USD')    -- US-marketplace only
+  AND (p.original_price IS NULL OR p.original_price >= p.price)  -- no neg-discount
+  AND COALESCE(p.category_confidence, 0) >= 0.5     -- categorically-correct
+```
+
+Already enforced in `buyingGuideFallback` + `/api/categories` LATERAL
+hero. Apply the same in any NEW query that picks a "visible Top Pick"
+across categories.
+
+**Currency display at render time** — `priceLabel()` and `priceHtml()`
+in `src/services/ssrRender.ts` carry a per-currency symbol map
+(USD=$, CAD=CA$, GBP=£, EUR=€, JPY=¥, INR=₹, SGD=S$, BRL=R$, MXN=MX$).
+Use these helpers — never hardcode `$${price.toFixed(2)}` in a CTA
+or sticky-bar render. Audit will catch hardcoded `$` prefix on
+non-USD products.
+
+**Bulk catalog hygiene patterns (reuse via SQL when issues accumulate):**
+
+```sql
+-- Demote foreign-marketplace products (deactivate or mark for cleanup)
+UPDATE products SET is_active = false,
+       quality_flags = COALESCE(quality_flags,'[]'::jsonb)
+                     || '["foreign-marketplace-YYYY-MM-DD"]'::jsonb
+ WHERE is_active = true AND currency IS NOT NULL AND currency != 'USD';
+
+-- Demote null/$0/sub-$1 priced products from Top-Pick surfaces
+UPDATE products SET category_confidence = 0.3
+ WHERE is_active = true
+   AND (price IS NULL OR price < 1.0)
+   AND COALESCE(category_confidence, 1.0) >= 0.5;
+
+-- Clear negative-discount data corruption
+UPDATE products SET category_confidence = 0.3, original_price = NULL
+ WHERE original_price IS NOT NULL AND price IS NOT NULL
+   AND original_price < price;
+
+-- Clear sub-50¢ scraper bugs (cents/dollars confusion)
+UPDATE products SET category_confidence = 0.3, price = NULL
+ WHERE is_active = true AND price < 0.50 AND price > 0;
+```
+
+## ⚠️ EBAY API IS WIRED — USE IT FOR RETRO/PRE-2012 LISTINGS ⚠️
+
+**The eBay developer credentials are present and the eBay sync agent
+is running.** Don't tell the user "we'd need eBay API access" — we have
+it. Use it.
+
+**Credentials location:**
+- `~/.reusable-agents/secrets.env` (loaded by host-worker systemd
+  service via `EnvironmentFile`)
+- `<specpicks-repo>/agents/ebay-product-sync-agent/.env` (gitignored;
+  loaded by the ingestion agent at startup via
+  `EBAY_PRODUCT_SYNC_CONFIG=...site.yaml`)
+- Env vars exposed: `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET`,
+  `EBAY_DEV_ID`, `EBAY_ENV` (production/sandbox),
+  `EBAY_MARKETPLACE_ID` (default EBAY_US), optionally
+  `EBAY_CAMPAIGN_ID` for affiliate attribution
+- OAuth: `framework/agents/ebay-product-sync-agent/ebay_client.py`
+  handles the `client_credentials` grant against
+  `https://api.ebay.com/identity/v1/oauth2/token` and caches tokens
+- Browse API base: `https://api.ebay.com/buy/browse/v1`
+
+**The agent:** `specpicks-ebay-product-sync-agent` (systemd timer,
+runs at `:30` past every hour). Ingests fresh listings for 16 retro
+PC hardware categories + retro consoles, handhelds, cartridges,
+controllers, emulation hardware, CRT/upscalers. Inserts as
+`asin = 'EBAY_<item_id>'` so they don't collide with Amazon ASINs.
+
+**DB markers for retro products (the contract):**
+- `era = 'retro'` — set on all products in `retro-*` categories +
+  any product linked to `hardware_specs` with `release_year < 2012`
+- `listing_preference = 'ebay'` — primary buy channel
+- `ebay_search_url` — fallback search URL (auto-backfilled from title
+  via `regexp_replace(title, '[^A-Za-z0-9+]', '', 'g')` when null)
+- `ebay_url` — direct item URL when known (populated by the sync agent)
+
+**Periodic bulk SQL to maintain the era/preference flags as new
+products land in retro categories:**
+
+```sql
+UPDATE products SET era='retro', listing_preference='ebay'
+ WHERE category_id IN (SELECT id FROM categories WHERE slug LIKE 'retro-%' OR slug='handheld-consoles')
+   AND is_active=true
+   AND (era IS NULL OR listing_preference IS NULL);
+
+UPDATE products SET ebay_search_url =
+       'https://www.ebay.com/sch/i.html?_nkw='
+       || regexp_replace(replace(title, ' ', '+'), '[^A-Za-z0-9+]', '', 'g')
+       || '&_sacat=27386'
+ WHERE era='retro' AND ebay_search_url IS NULL AND title IS NOT NULL;
+```
+
+**Render-time routing — every hardware-buy CTA across SSR:**
+1. `era='retro'` OR `listing_preference='ebay'` OR linked-hardware
+   `release_year<2012` → eBay-primary CTA (uses `ebay_url` ||
+   `ebay_search_url` || synthesized search by title)
+2. Else if Amazon listing has valid USD price → Amazon-primary
+3. Else → "Check Amazon for current price" affiliate link
+
+Applied in: PDP hero (`productBody`), benchmark page hero
+(`benchmarkHardwareBody`), vertical landing picks (`verticalBody`
+`ssr-vpick-ctas`), article body cross-sell cards
+(`testbenchArticleBody`'s inline-cross-sell strip).
 
 ## What this repo is
 
