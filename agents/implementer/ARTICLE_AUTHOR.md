@@ -256,6 +256,31 @@ on a published article is a high-priority rec the implementer would
 have to fix on the next run anyway. Save the cycle: write absolute
 paths from the start.
 
+### Inline-link minima — HARD GATE (enforced by the wrapper)
+
+The implementer's wrapper (`run.sh`) calls
+`framework.core.article_link_guard.verify_body()` AFTER the LLM exits
+and counts distinct inline `/recipes/<slug>` + `/k/<slug>` markdown
+links. If the body falls short of the per-site minima, the article is
+NOT inserted, the rec is re-queued, and the LLM is re-prompted with
+`render_failure_addendum()` listing the exact gap.
+
+| Site         | Min `/recipes/` links | Min `/k/` links |
+|--------------|----------------------:|----------------:|
+| aisleprompt  |                     5 |               2 |
+| specpicks    |                     0 |               0 |
+
+Why this exists: articles that don't link to the catalog are content
+dead-ends — no internal-link equity, no on-site session expansion, no
+conversion path. Inline links earn the article its place in the cluster.
+Bottom-of-page "related" rails don't count — the wrapper measures
+inline links inside the body prose.
+
+The directive is also INJECTED into the LLM prompt up-front via
+`render_link_directive(proposal, min_recipes=N, min_kits=M)` so the
+model knows the contract before it writes a single word — see
+`agents/implementer/build-aider-invocation.py`.
+
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial
   site — readers are technical buyers, not novices.
@@ -427,6 +452,15 @@ right at write-time.
 You have access to the Bash tool. Connect with the `DATABASE_URL` env
 var that the implementer sets for you. Use `psql` or a small Python
 snippet via `python3 -c "import psycopg2; ..."`.
+
+> ⚠️ **Before you INSERT — re-read the "Markdown table formatting —
+> MANDATORY shape" rule above.** Every pipe table in `body_md` MUST
+> have one row per line, with a blank line before and after. The
+> implementer post-processes body_md with a reflow regex as a safety
+> net (audit 2026-05-28: 36 articles, 105 garbled tables were
+> backfilled across both sites because the LLM ignored the rule), but
+> you should still emit well-formed tables — the regex only handles
+> the most common single-line failure mode, not every variant.
 
 **INSERT pattern (editorial_articles):**
 

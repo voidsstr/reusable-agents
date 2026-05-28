@@ -1903,9 +1903,43 @@ import psycopg2
 conn = psycopg2.connect(dsn)
 inserted_ids: list[tuple[str, int, str]] = []
 errors: list[tuple[str, str]] = []
+def _reflow_inline_pipe_tables(s: str) -> tuple[str, int]:
+    """Self-heal markdown pipe tables that the LLM shipped on a single
+    line (`| h | h | |---|---| | r | r | | r | r |`). The SSR renderer
+    on aisleprompt.com / specpicks.com expects rows separated by
+    newlines; without them the entire block renders as a literal
+    paragraph of pipes and dashes. The ARTICLE_AUTHOR.md prompt has a
+    MANDATORY rule against this shape, but LLM outputs still violate
+    it intermittently (audited 2026-05-28: 36 articles, 105 garbled
+    tables across both sites). This pass is the implementer-side
+    safety net so storage is always well-formed regardless of the
+    LLM's drift. The same regex lives in
+    aisleprompt/scripts/_fix-garbled-article-tables.ts for one-shot
+    backfills.
+    """
+    import re as _re
+    n = 0
+    def _fix(m):
+        nonlocal n
+        n += 1
+        return "\n\n" + _re.sub(r"\|\s+\|", "|\n|", m.group(0)).strip() + "\n\n"
+    out = _re.sub(
+        r"(\|[^\n|]+){2,}\|\s*\|\s*-{2,}\s*(?:\|\s*-{2,}\s*)+\|"
+        r"(?:\s*(?:\|[^\n|]+){2,}\|)+",
+        _fix, s)
+    return out, n
+
 for rid, body_p, meta_p in pairs:
     try:
         body_md = body_p.read_text()
+        # Markdown-table self-heal — runs BEFORE word-count + link
+        # guards so all downstream checks see the normalized form.
+        # See _reflow_inline_pipe_tables() docstring above.
+        body_md, _tbl_fixed = _reflow_inline_pipe_tables(body_md)
+        if _tbl_fixed:
+            print(f"[article-insert] {rid}: reflowed {_tbl_fixed} "
+                  "inline pipe-table(s) before INSERT",
+                  file=sys.stderr)
         # Anti-hallucination gate (lifted from leaked Claude Code prompt:
         # "if you can't verify, say so explicitly rather than claiming
         # success"). The LLM is instructed to write
