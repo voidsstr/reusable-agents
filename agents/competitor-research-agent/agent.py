@@ -150,14 +150,26 @@ Rules:
 - Every blueprint MUST have at least 2 entries in ui_changes, backend_changes,
   edge_cases_and_failure_modes. If you can't fill those, the rec isn't
   ready — don't emit it.
-- tier=auto only for narrow, mechanical, fully-derivable changes (e.g., "add
-  JSON-LD product schema"). Default review for feature additions, default
-  experimental for "what if we built X" speculation.
+- tier=auto only for narrow, mechanical, fully-derivable changes. Default
+  review for feature additions, default experimental for "what if we built X"
+  speculation.
 - De-duplicate. One rec per distinct feature, even if 4 competitors have it.
 - Confidence calibrated: 0.95+ means any reasonable reader would agree.
 - competitive-advantage recs MUST be speculation grounded in observed gaps,
   not just brainstorming. If our site already has the feature in any form,
   do NOT propose it as a competitive-advantage.
+- NEVER recommend infrastructure that the page evidence shows we already
+  have. The page records include JSONLD_TYPES, HEAD (og/twitter/canonical/
+  robots), canonical URL, H1, title, and the visible body. Before emitting
+  any rec, scan our pages for direct evidence: e.g. before "add JSON-LD
+  Product schema" check JSONLD_TYPES for `Product`; before "add FAQ
+  schema" check for `FAQPage`; before "add OG cards" check the HEAD line
+  for og:type; before "add canonical tags" check the HEAD line for
+  canonical=. If the evidence is there, the rec is HALLUCINATED and must
+  not be emitted. Cite the page URL + the exact signal (e.g.
+  "JSONLD_TYPES contains Product,Offer,AggregateRating on /product/X") in
+  rationale when you're proposing additions to an area that overlaps with
+  existing infrastructure.
 - Prefer 5-10 thoroughly-blueprinted recs over 15 shallow ones. Quality > quantity.
 - If a rec's blueprint can't fit in a single rec object's budget without
   cutting detail, split into multiple recs (e.g. "phase 1 — UI" + "phase 2 —
@@ -292,15 +304,37 @@ def _scan_codebase(codebase_cfg: dict) -> str:
     return "".join(chunks) or "(no files matched the configured globs)"
 
 
-def _format_pages(pages: list[Page], cap_chars: int = 1500) -> str:
+def _format_pages(pages: list[Page], cap_chars: int = 7000) -> str:
+    # 2026-05-31: raised body cap 1500→7000 (matches Page.to_dict's own 8000
+    # cap less metadata overhead) and surfaced JSON-LD types + other head
+    # signals. Was producing false-positive "site lacks schema/OG/canonical"
+    # recs because the LLM saw a <10% body excerpt with all <script> blocks
+    # stripped by the crawler.
     parts = []
     for p in pages:
         body = (p.body_text or "")[:cap_chars]
+        jsonld_types = getattr(p, "jsonld_types", None) or []
+        jsonld_count = getattr(p, "jsonld_count", 0) or 0
+        og_type = getattr(p, "og_type", "") or ""
+        robots_meta = getattr(p, "robots_meta", "") or ""
+        twitter_card = getattr(p, "twitter_card", "") or ""
+        schema_line = (
+            f"JSONLD_BLOCKS: {jsonld_count}  JSONLD_TYPES: {', '.join(jsonld_types) or '(none)'}"
+            if (jsonld_count or jsonld_types) else "JSONLD: (none detected)"
+        )
+        extra_head = []
+        if og_type: extra_head.append(f"og:type={og_type}")
+        if twitter_card: extra_head.append(f"twitter:card={twitter_card}")
+        if robots_meta: extra_head.append(f"robots={robots_meta}")
+        if p.canonical: extra_head.append(f"canonical={p.canonical}")
+        head_line = "HEAD: " + ("; ".join(extra_head) if extra_head else "(none)")
         parts.append(f"""
 URL: {p.url}
 TITLE: {p.title}
 DESC: {p.description}
 H1: {p.h1}
+{schema_line}
+{head_line}
 BODY: {body}
 ---""")
     return "".join(parts)
@@ -431,7 +465,7 @@ class CompetitorResearchAgent(AgentBase):
                 path_excludes=crawler_cfg.get("path_excludes") or [],
                 request_timeout_s=int(crawler_cfg.get("request_timeout_s", 15)),
                 user_agent=crawler_cfg.get("user_agent",
-                                            "reusable-agents-competitor-research/1.0"),
+                                            "Mozilla/5.0 (compatible; ReusableAgentsCompetitorResearch/1.0; +https://github.com/voidsstr/reusable-agents)bot"),
                 throttle_ms=int(crawler_cfg.get("throttle_ms", 500)),
             ):
                 if 200 <= page.status_code < 300 and page.body_text:
@@ -462,7 +496,7 @@ class CompetitorResearchAgent(AgentBase):
                     max_depth=0,
                     max_pages=per_comp_pages,
                     request_timeout_s=int(crawler_cfg.get("request_timeout_s", 15)),
-                    user_agent="reusable-agents-competitor-research/1.0",
+                    user_agent="Mozilla/5.0 (compatible; ReusableAgentsCompetitorResearch/1.0; +https://github.com/voidsstr/reusable-agents)bot",
                     throttle_ms=int(crawler_cfg.get("throttle_ms", 500)),
                 ):
                     if 200 <= page.status_code < 300 and page.body_text:
@@ -548,9 +582,11 @@ class CompetitorResearchAgent(AgentBase):
         # ── 4. Compare → recommendations ────────────────────────────────────
         self.status("comparing + writing recommendations", progress=0.65)
         # Cap recs to keep the blueprint output budget tractable.
-        # Thorough blueprints take ~600-900 tokens each; 8 recs ≈ 6500
-        # tokens which fits comfortably in claude-sonnet's response time.
-        max_recs = min(int(analyzer_cfg.get("max_recs_per_run", 8)), 8)
+        # Thorough blueprints take ~600-900 tokens each. Default 8 keeps a
+        # claude-sonnet 600s budget; site.yaml's analyzer.max_recs_per_run
+        # is the operator override. Was hardcoded `min(..., 8)` which
+        # silently capped the configured 15 → 8 on the first pass.
+        max_recs = int(analyzer_cfg.get("max_recs_per_run", 8))
 
         # ── Memory: pass the accumulator's existing proposals to the LLM
         # so it doesn't re-emit recs that were already proposed (and

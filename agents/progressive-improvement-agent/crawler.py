@@ -37,6 +37,16 @@ class Page:
     error: str = ""
     depth: int = 0
     content_type: str = ""
+    # 2026-05-31: surface signals that lived only in <script>/<head> so
+    # downstream LLM-fed extractors (competitor-research, PI analyzers)
+    # don't conclude a page lacks schema/OG/etc when it has them — the
+    # exact bug behind the "SpecPicks emits no JSON-LD" hallucination
+    # the competitor-research-agent produced.
+    jsonld_types: list[str] = field(default_factory=list)   # e.g. ['Product','Offer','FAQPage']
+    jsonld_count: int = 0                                   # number of <script type="application/ld+json"> blocks
+    og_type: str = ""                                       # og:type meta (article/website/product/etc)
+    robots_meta: str = ""                                   # <meta name="robots"> directives
+    twitter_card: str = ""                                  # twitter:card meta value
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -83,6 +93,65 @@ def _extract(html: str, url: str) -> dict:
     h1el = soup.find("h1")
     if h1el:
         h1 = h1el.get_text(" ", strip=True)[:300]
+
+    # 2026-05-31: capture JSON-LD + other head signals BEFORE the script-
+    # stripping below decomposes them. Previously the agent was blind to
+    # all <script type="application/ld+json"> blocks (so the LLM
+    # confidently recommended "add JSON-LD" on a site already emitting it).
+    jsonld_types: list[str] = []
+    jsonld_count = 0
+    try:
+        import json as _json
+        for sc in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            txt = sc.string or sc.get_text() or ""
+            if not txt.strip():
+                continue
+            jsonld_count += 1
+            try:
+                parsed = _json.loads(txt)
+            except Exception:
+                continue
+            # @graph wrapper unrolls into its node list; otherwise a single
+            # object or an array of objects. Collect every @type.
+            def _collect(node):
+                if isinstance(node, dict):
+                    g = node.get("@graph")
+                    if isinstance(g, list):
+                        for x in g:
+                            _collect(x)
+                    t = node.get("@type")
+                    if isinstance(t, str):
+                        jsonld_types.append(t)
+                    elif isinstance(t, list):
+                        for tt in t:
+                            if isinstance(tt, str):
+                                jsonld_types.append(tt)
+                    for v in node.values():
+                        if isinstance(v, (dict, list)):
+                            _collect(v)
+                elif isinstance(node, list):
+                    for x in node:
+                        _collect(x)
+            _collect(parsed)
+    except Exception:
+        pass
+    # Dedup while preserving discovery order
+    jsonld_types = list(dict.fromkeys(jsonld_types))[:40]
+
+    # Other head signals worth surfacing
+    og_type = ""
+    ogt = soup.find("meta", attrs={"property": "og:type"})
+    if ogt and ogt.get("content"):
+        og_type = ogt["content"].strip()[:60]
+    robots_meta = ""
+    rm = soup.find("meta", attrs={"name": "robots"})
+    if rm and rm.get("content"):
+        robots_meta = rm["content"].strip()[:120]
+    twitter_card = ""
+    tc = soup.find("meta", attrs={"name": "twitter:card"})
+    if tc and tc.get("content"):
+        twitter_card = tc["content"].strip()[:60]
+
     # Strip nav/footer/script/style for cleaner body
     for tag in soup(["script", "style", "noscript", "nav", "footer", "header"]):
         tag.decompose()
@@ -95,6 +164,9 @@ def _extract(html: str, url: str) -> dict:
     return {
         "title": title, "description": desc, "canonical": canon, "h1": h1,
         "body_text": body_text, "links": list(dict.fromkeys(links)),
+        "jsonld_types": jsonld_types, "jsonld_count": jsonld_count,
+        "og_type": og_type, "robots_meta": robots_meta,
+        "twitter_card": twitter_card,
     }
 
 
@@ -200,6 +272,11 @@ def crawl(
             page.h1 = extracted["h1"]
             page.body_text = extracted["body_text"]
             page.links = extracted["links"]
+            page.jsonld_types = extracted.get("jsonld_types", []) or []
+            page.jsonld_count = extracted.get("jsonld_count", 0) or 0
+            page.og_type = extracted.get("og_type", "") or ""
+            page.robots_meta = extracted.get("robots_meta", "") or ""
+            page.twitter_card = extracted.get("twitter_card", "") or ""
             import hashlib as _h
             page.body_hash = _h.sha1(page.body_text.encode("utf-8")).hexdigest()[:16]
         except Exception as e:
