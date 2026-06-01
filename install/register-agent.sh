@@ -58,6 +58,12 @@ payload = {
     "repo_dir": agent_dir,
     "entry_command": m.get("entry_command", ""),
     "autowire_cron": True,
+    # target_metric — the site-goals-tracker goal this agent is meant
+    # to move. Empty string when the manifest doesn't declare one.
+    # Added 2026-06-01 after every aisleprompt + specpicks manifest
+    # got a target_metric value but the field was being dropped by
+    # this loader.
+    "target_metric": m.get("target_metric", ""),
     "metadata": m.get("metadata", {}),
     "depends_on": m.get("depends_on", []),
     "runnable_modes": m.get("runnable_modes", ["cron", "manual"]),

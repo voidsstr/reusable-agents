@@ -161,6 +161,12 @@ class AgentSummary(BaseModel):
     ai_last_provider: str = ""
     ai_last_model: str = ""
     ai_last_called_at: Optional[str] = None
+    # Goal the agent is meant to move (one of the per-site site-goals-tracker
+    # metric IDs). Set on every manifest 2026-06-01. Empty string means the
+    # agent's manifest didn't declare a target. Dashboard groups agents by
+    # this field so 'has the rec stream from competitor-research moved
+    # instacart-clicks?' is answerable at a glance.
+    target_metric: str = ""
 
 
 class AgentDetail(AgentSummary):
@@ -200,6 +206,7 @@ class RegisterRequest(BaseModel):
     entry_command: str = ""
     owner: str = ""
     autowire_cron: bool = True
+    target_metric: str = ""  # see registry.AgentManifest.target_metric
     metadata: dict = Field(default_factory=dict)
     depends_on: list[dict] = Field(default_factory=list)
     runnable_modes: list[str] = Field(default_factory=lambda: ["cron", "manual"])
@@ -387,6 +394,7 @@ def _summary(m: registry.AgentManifest,
         ai_last_provider=str((last_ai or {}).get("provider") or ""),
         ai_last_model=str((last_ai or {}).get("model") or ""),
         ai_last_called_at=(last_ai or {}).get("called_at"),
+        target_metric=getattr(m, "target_metric", "") or "",
     )
 
 
@@ -488,6 +496,7 @@ def register(req: RegisterRequest):
         timezone=req.timezone, enabled=req.enabled, repo_dir=req.repo_dir,
         runbook_path=req.runbook_path, skill_path=req.skill_path,
         entry_command=req.entry_command, owner=req.owner,
+        target_metric=req.target_metric or "",
         metadata=req.metadata,
         depends_on=list(req.depends_on or []),
         runnable_modes=list(req.runnable_modes or ["cron", "manual"]),

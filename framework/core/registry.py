@@ -92,6 +92,25 @@ class AgentManifest:
     (default) to defer to the storage config patterns. See
     framework/core/priority.py for the resolution order."""
 
+    target_metric: str = ""
+    """The site-goals-tracker metric this agent is meant to move.
+    Agents fall into one of the canonical goal IDs the per-site
+    site-goals-tracker reports: goal-organic-impressions-30d,
+    goal-organic-clicks-30d, goal-indexed-pages-pct,
+    goal-active-pages-count, goal-instacart-clicks-30d,
+    goal-instacart-cart-30d, goal-amazon-clicks-30d,
+    goal-ebay-clicks-30d, goal-total-conversions-30d.
+
+    Set on every agent manifest 2026-06-01 — before then the field
+    was unset everywhere and the dashboard could not group agents by
+    the metric they were supposed to move. The framework still does
+    NOT auto-attribute metric movement to any one agent (most metrics
+    are second-order outputs of many agents' work together) — this
+    field is purely the dashboard's grouping/sort key and the
+    SEO-opportunity / goals-tracker / progressive-improvement agents'
+    prioritization input ('A change that does not move our
+    target_metric did not happen' — CLAUDE.md North Star)."""
+
     code_editor_chain: list[str] = field(default_factory=list)
     """Optional override for the LLM-driven code-editor backend chain
     (used by implementer + any agent that edits files via an LLM).
