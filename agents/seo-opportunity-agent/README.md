@@ -288,12 +288,32 @@ That string is a phase label, not an error. If the dashboard says
 `failure` with that message, the agent crashed before the first phase
 status update. Almost always config validation — same fix as above.
 
-### Collector errors on GSC / GA4
+### Collector errors on GSC / GA4 — OAuth token storage + refresh
 
-OAuth tokens auto-refresh via `lib/collector/refresh-token.py`. If
-they expired beyond refresh, run
-`python3 lib/collector/refresh-token.py --bootstrap` once
-interactively to re-grant. New scopes (e.g. Ads) require re-bootstrap.
+The shared OAuth refresh_token lives at **`~/.reusable-agents/seo/.oauth.json`**
+(`{client_id, client_secret, refresh_token}`, mode 600) and powers every
+Google-data consumer: both `*-seo-opportunity-agent`, `gsc-coverage-auditor`,
+`oauth-heartbeat-agent`, the sitemap submitter, and SpecPicks'
+`scripts/gsc-crawl-tracker.js`.
+
+Google **Testing-mode** apps revoke the refresh_token after **7 days of
+non-use** → the collector fails with `Token refresh failed: HTTP Error 400
+invalid_grant`. Use the operator wrapper (preferred):
+
+```bash
+bash install/refresh-gsc-token.sh status     # is it alive? (no browser)
+bash install/refresh-gsc-token.sh refresh    # mint fresh access token, reset 7-day clock
+bash install/refresh-gsc-token.sh reauth     # full re-consent — needs a browser/GUI session, NOT SSH-only
+```
+
+`reauth` reuses the non-expiring client_id/client_secret and re-runs consent
+(wraps `install/reauth-google-oauth.sh` → `lib/collector/refresh-token.py
+--bootstrap`). New scopes (e.g. Ads) require `reauth`. After it completes both
+SEO agents recover on the next 2h cron (or `systemctl --user start
+agent-specpicks-seo-opportunity-agent.service`). **Permanent fix:** set the
+OAuth consent screen to "In production" in Google Cloud Console so the 7-day
+revocation clock stops. The daily `oauth-heartbeat-agent` calls `refresh` to
+keep the clock from ever reaching 7 days — keep it healthy.
 
 ### Analyzer skipped an LLM check / wrote no recs
 
