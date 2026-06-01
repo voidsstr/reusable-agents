@@ -228,6 +228,7 @@ class PatchRequest(BaseModel):
     enabled: Optional[bool] = None
     entry_command: Optional[str] = None
     owner: Optional[str] = None
+    target_metric: Optional[str] = None
     runbook_body: Optional[str] = None
     skill_body: Optional[str] = None
 
@@ -695,7 +696,7 @@ def patch(agent_id: str, req: PatchRequest):
     patch_dict = {
         k: v for k, v in req.dict().items()
         if k in {"name", "description", "category", "cron_expr", "timezone",
-                 "enabled", "entry_command", "owner"}
+                 "enabled", "entry_command", "owner", "target_metric"}
         and v is not None
     }
     if patch_dict:
