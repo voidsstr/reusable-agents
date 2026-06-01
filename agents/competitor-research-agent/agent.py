@@ -155,9 +155,30 @@ Rules:
   speculation.
 - De-duplicate. One rec per distinct feature, even if 4 competitors have it.
 - Confidence calibrated: 0.95+ means any reasonable reader would agree.
-- competitive-advantage recs MUST be speculation grounded in observed gaps,
-  not just brainstorming. If our site already has the feature in any form,
-  do NOT propose it as a competitive-advantage.
+- ★ EXISTING-FEATURE GATE (applies to EVERY rec category, including
+  parity-feature, not just competitive-advantage). Before emitting any
+  recommendation, you MUST first inventory the features visible in the
+  OUR FEATURES + CURRENT_STATE_INVENTORY blocks. Then per-competitor
+  feature, write a one-line Y/N: do we already have something
+  substantively equivalent in our app? Emit recs ONLY for the N rows.
+  If the operator's site.yaml ships a `current_state_inventory` block,
+  trust it as ground truth — the human curator has explicit knowledge
+  the crawler couldn't see (deeply-nested pages, API endpoints,
+  background workers, feature-flagged surfaces). Hallucinating a "we
+  should add pantry deduction" rec when /pantry + /meal-plan already
+  subtract pantry items is the failure mode this rule prevents. Common
+  false-positives to specifically scan for before emitting:
+    * "add pantry / inventory tracking" — check for /pantry, pantry_items table, pantry deduction
+    * "add recipe import from URLs/TikTok/Instagram" — check for /recipe-importer, /api/recipes/import-url
+    * "add meal planning" — check for /meal-plan, /meal-prep
+    * "add shopping list" — check for /shoppinglist, /api/shopping
+    * "add Instacart / cart handoff" — check for instacart_clicks, /api/instacart/create-list
+    * "add family / household sharing" — check for /family, /api/family
+    * "add photo / scan input" — check for pantry-scan, recipe-scan endpoints
+    * "add chat / AI assistant" — check for /chat, /api/chat
+    * "add voice input" — check for voice-to-cart references in /
+  If your inventory shows ANY of these in our app, the corresponding
+  parity-feature rec is HALLUCINATED — do not emit it.
 - NEVER recommend infrastructure that the page evidence shows we already
   have. The page records include JSONLD_TYPES, HEAD (og/twitter/canonical/
   robots), canonical URL, H1, title, and the visible body. Before emitting
@@ -614,16 +635,51 @@ class CompetitorResearchAgent(AgentBase):
                 + "\n".join(prior_summary_lines[:120])
             )
 
+        # Operator-curated ground truth for what our app actually has.
+        # Crawls miss feature-flagged, API-only, or deeply-nested surfaces
+        # (e.g. AislePrompt's pantry-deduction logic that runs inside
+        # /api/instacart/create-list, never visible from a homepage crawl).
+        # Without this block the LLM hallucinated "add pantry-aware grocery
+        # list" against a site that has shipped pantry deduction since
+        # April 2026. SiteQualityConfig inherits from dict, so a plain
+        # .get() reads any unknown top-level YAML key. The block is a
+        # YAML list of strings; we pass them verbatim into the prompt and
+        # the EXISTING-FEATURE GATE makes them ground truth.
+        try:
+            inventory = cfg.get("current_state_inventory", []) or []
+        except Exception:
+            inventory = []
+        inventory_block = ""
+        if inventory:
+            inv_lines = "\n".join(f"  - {str(x)}" for x in inventory[:120])
+            inventory_block = (
+                "\n\nCURRENT_STATE_INVENTORY (operator-curated ground truth — "
+                "every line below is SHIPPED on our site. Trust this over "
+                "the crawled OUR FEATURES block when they disagree. If a "
+                "competitor feature is substantively equivalent to any line "
+                "below, you MUST mark it as 'already have' and skip the "
+                "rec):\n" + inv_lines
+            )
+
         compare_user = (
             f"Our site: {cfg.domain}\n"
             f"What we do: {cfg.what_we_do or '(not specified)'}\n\n"
             f"OUR FEATURES:\n{json.dumps(ours_features, indent=2)}\n\n"
             f"COMPETITOR FEATURES:\n{json.dumps(theirs_features, indent=2)}"
+            f"{inventory_block}"
             f"{prior_block}\n\n"
-            f"Produce up to {max_recs} thoroughly-blueprinted recommendations. "
-            f"Quality > quantity — fewer fully-specified recs beats many shallow ones. "
-            f"NEVER propose a feature substantively equivalent to anything in the "
-            f"PREVIOUSLY-PROPOSED list above — pick a different gap instead."
+            "STEP 1 — Before proposing anything, mentally walk through every "
+            "competitor feature in COMPETITOR FEATURES above and tag each "
+            "one Y/N against OUR FEATURES + CURRENT_STATE_INVENTORY. Pantry "
+            "tracking, recipe import from URLs, meal planning, shopping "
+            "list, Instacart handoff, family sharing, photo input, chat — "
+            "these are the most-common false-positives. If any are tagged "
+            "Y, do not propose adding them.\n"
+            f"STEP 2 — Produce up to {max_recs} thoroughly-blueprinted "
+            "recommendations for the N-tagged gaps. Quality > quantity — "
+            "fewer fully-specified recs beats many shallow ones. NEVER "
+            "propose a feature substantively equivalent to anything in the "
+            "PREVIOUSLY-PROPOSED list above — pick a different gap instead."
         )
         try:
             # Use AgentBase's chat_with_fallback so claude→copilot→ollama
