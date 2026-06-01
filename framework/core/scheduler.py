@@ -130,6 +130,14 @@ After=network.target
 [Service]
 Type=oneshot
 WorkingDirectory={working_directory}
+# Source the host's secrets file (DATABASE_URL_<SITE>, API keys, etc).
+# The leading `-` makes systemd tolerant of an absent file, so dev
+# boxes that haven't seeded ~/.reusable-agents/secrets.env still boot.
+# Without this line, regenerated units lose every DB credential, which
+# broke aisleprompt-recipe-generator-agent from 2026-05-21 → 2026-05-31
+# (50/50 runs failed with "DATABASE_URL not set") and silently breaks
+# every other agent that reads DATABASE_URL_<SITE> from the host.
+EnvironmentFile=-/home/voidsstr/.reusable-agents/secrets.env
 ExecStart={exec_start}
 Environment=AGENT_ID={agent_id}
 Environment=AGENT_TRIGGERED_BY=cron

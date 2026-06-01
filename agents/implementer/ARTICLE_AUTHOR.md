@@ -314,7 +314,30 @@ INSERT verbatim; do NOT re-derive.
 | `related_article_slugs` | runbook (pick from sitemap) | drives related-articles rail + cluster graph |
 | `faqs` | **proposal — 5 Q/A pairs, ≥40 words each** | drives FAQPage JSON-LD; analyzer.faq-quality-thin |
 | `outbound_citations` | **proposal — 3 authoritative URLs** | analyzer.eeat-outbound-citation-count; you MUST also link to each inside body_md |
-| `author` | always `"Mike Perry"` (SpecPicks) or `"AislePrompt Team"` (AislePrompt) | E-E-A-T |
+| `author` | always `"Mike Perry"` (BOTH SpecPicks and AislePrompt — never `"AislePrompt Team"` or `"AislePrompt"` alone — see byline-fix note below) | E-E-A-T |
+
+### Byline — MUST be a real Person, never an Organization
+
+Both sites use `author = "Mike Perry"`. Audit 2026-05-31 found
+AislePrompt articles were emitting `author = "AislePrompt Team"`
+(Organization), which Google's HCU and Perplexity's citation
+ranker downrank vs Person bylines on recipe + health content.
+
+The corresponding SSR template `BlogPosting.author` field MUST
+render as Person, NOT Organization:
+
+```json
+"author": {
+  "@type": "Person",
+  "name": "Mike Perry",
+  "url": "https://aisleprompt.com/about",
+  "jobTitle": "Founder, AislePrompt — home cook + recipe-data engineer"
+}
+```
+
+If the SSR template currently emits Organization, file an inline
+fix to `src/services/ssrHead.ts` (or wherever the BlogPosting block
+is built) in the same rec.
 | `status` | `"published"` | filter |
 | `published_at` / `written_at` | `now()` | dateModified ≥30% |
 

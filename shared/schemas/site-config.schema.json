@@ -136,6 +136,27 @@
         }
       }
     },
+    "geo": {
+      "type": "object",
+      "description": "GEO / AI-citation optimization. When present, the analyzer emits geo-ai-citation recs that make money pages extractable + citable by AI search (ChatGPT/Claude/Perplexity) — the channel that actually converts for thin-affiliate sites. Optional; sites without this block are unaffected.",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Master switch; treated as true when the block is present unless set false." },
+        "llms_txt_url": { "type": "string", "description": "Expected path of llms.txt; analyzer emits a geo-llms-txt rec if it's absent from the sitemap." },
+        "citation_page_types": { "type": "array", "items": { "type": "string" }, "description": "Page-type labels (matching coverage_targets keys) that should be AI-citation-ready." },
+        "requirements": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Which citation-readiness elements each page type should have.",
+          "properties": {
+            "direct_answer_block": { "type": "boolean", "description": "A TL;DR / direct-answer summary near the top of the page." },
+            "faq_schema": { "type": "boolean", "description": "FAQPage / QAPage JSON-LD." },
+            "comparison_table": { "type": "boolean", "description": "A structured comparison table for AI extraction." }
+          }
+        },
+        "max_recs": { "type": "integer", "minimum": 0, "description": "Cap on geo recs emitted per run." }
+      }
+    },
     "revenue_focus": {
       "type": ["object", "null"],
       "description": "Optional: drives Amazon-affiliate-revenue-aware audits. When enabled, the analyzer scans article bodies for product mentions missing tagged Amazon links, boosts rec priority for changes touching is_featured products, and biases new-page recs toward content that names featured products. Leave out (or enabled=false) for sites that don't monetize via Amazon Associates.",
@@ -185,7 +206,7 @@
     },
     "analyzer": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "primary_objective": {
           "type": "string",
