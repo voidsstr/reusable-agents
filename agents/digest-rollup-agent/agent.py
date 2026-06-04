@@ -1235,7 +1235,12 @@ class DigestRollupAgent(AgentBase):
             ok, detail = send_via_msmtp(
                 subject=subject, body_html=body_html,
                 to=[OWNER],
-                sender=os.environ.get("OPERATOR_FROM_EMAIL", ""),
+                # 2026-06-03: an empty sender made msmtp reject the digest →
+                # status=failure → the unit showed "failed" whenever the window
+                # had content. Default to the standard automation From the other
+                # agents use so the send succeeds.
+                sender=(os.environ.get("OPERATOR_FROM_EMAIL")
+                        or "automation@northernsoftwareconsulting.com"),
                 msmtp_account="automation",
                 extra_headers={"X-Reusable-Agent": AGENT_ID},
                 bypass_digest=True,  # critical — we ARE the digest
