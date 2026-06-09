@@ -499,6 +499,73 @@ systemctl --user enable --now auto-queue-drainer.service \
                                 agent-responder-agent.timer
 ```
 
+### Prioritization — how recs are ordered in the auto-queue
+
+Defined in `framework/core/priority.py`. Re-evaluated on **every drain tick**
+so newly-arrived high-tier items always jump ahead of waiting low-tier items.
+
+**Default tier ladder** (operator-overridable via storage config
+`config/priority-config.json` — currently empty so defaults apply):
+
+| Tier | Label | Agents |
+|---|---|---|
+| **1** | SEO + ranking signals | `*-seo-opportunity-agent`, `*-progressive-improvement-agent`, `*-competitor-research-agent`, `seo-implementer`, `seo-analyzer` |
+| **2** | AislePrompt content | `aisleprompt-article-proposal-agent`, `aisleprompt-head-to-head-agent` |
+| **3** | SpecPicks content | `specpicks-article-proposal-agent`, `specpicks-head-to-head-agent` |
+| **4** | Research / catalog hygiene | `*-catalog-audit-agent`, `*-product-hydration-agent`, `*-benchmark-research-agent`, `*-ebay-product-sync-agent`, etc. |
+| **5** | Ops / housekeeping (default) | `agent-doctor`, `digest-rollup-agent`, `*-scraper-watchdog` |
+
+Sort key: **`(tier_int, run_ts, key)`** — lower tier first, oldest first within tier.
+
+**Override per-agent:** push `manifest.priority_tier: N` in the agent's
+manifest, OR push a `config/priority-config.json` override naming the
+agent under the desired tier number.
+
+### Dynamic adjustments at drain time (2026-06-09)
+
+The drainer applies two LIVE adjustments on top of the static tier:
+
+**1. Pool-aware demotion** — `priority.effective_tier_with_pool_pressure()`
+   When the claude-pool has no opus headroom (every authenticated profile
+   is rate-limited until later than NOW + 15 min), any rec with
+   `required_model=opus` is **demoted to tier 9** (sinks below everything
+   else). This stops opus-required article batches from blocking
+   non-opus T1 SEO + T4 catalog work behind them. As soon as ANY profile
+   has opus available, the demotion lifts on the next drain tick.
+
+**2. Per-site starvation rebalance** — `priority.site_starvation_boost()`
+   Queries `editorial_articles` count per site over last 7d (cached 5
+   min). If one site has 0–1 articles while the peer has >10, the
+   starved site's tier gets a **−2 boost** (jumps ahead). 2–5 articles
+   while peer has >20 → **−1 boost**. The final tier is capped at 1
+   (never displaces top-priority SEO).
+
+**3. Per-rec defer-backoff** — `framework.core.defer_backoff`
+   Recs that defer (e.g. `required-model-unavailable`) get exponential
+   backoff: 1m → 5m → 30m → 2h → 6h → 12h (cap). The backlog-dispatcher
+   calls `defer_backoff.should_skip(rec_id, agent_id)` before adding a
+   rec to the dispatch candidates; in-cooldown recs are skipped (no
+   re-queue, no log spam). On success the dispatcher should call
+   `defer_backoff.record_success(rec_id, agent_id)` to clear the cooldown.
+   The implementer's required-model-unavailable defer path calls
+   `record_defer()` automatically. Storage:
+   `framework/defer-backoff/<source_agent_id>.json`.
+
+**Operator overrides for the dynamic layer:**
+- Force-clear a stuck defer cooldown: `python3 -c "from framework.core
+  import defer_backoff; defer_backoff.reset_all('aisleprompt-article-proposal-agent')"`
+- Disable pool-aware demotion: set `POOL_OPUS_GRACE_S=999999` in the
+  drainer's environment (in `framework/cli/auto_queue_drainer.py` env)
+- Bypass starvation boost: pass an empty `sites=()` tuple to
+  `site_starvation_boost()` — or unset `DATABASE_URL_<site>` envs
+
+**Refuse on sight:**
+- A new agent that re-implements tier logic inline (use `tier_for_agent`)
+- A code path that re-queues a deferred rec without checking
+  `defer_backoff.should_skip()` first
+- Hardcoded `if site == "aisleprompt"` priority boosts in framework
+  code (use `priority-config.json` or the starvation primitive)
+
 ## Implementer path-scope — keep agents in their lane
 
 The implementer runs aider/claude-cli/copilot against the whole site repo.

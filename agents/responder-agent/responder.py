@@ -1421,6 +1421,7 @@ def _drain_auto_queue_impl(cfg: dict) -> int:
     try:
         from framework.core.priority import (
             tier_for_agent, load_priority_config,
+            effective_tier_with_pool_pressure,
         )
         prio_cfg = load_priority_config(storage=s)
     except Exception as e:
@@ -1428,6 +1429,18 @@ def _drain_auto_queue_impl(cfg: dict) -> int:
               f"falling back to FIFO", file=sys.stderr)
         tier_for_agent = None
         prio_cfg = None
+        effective_tier_with_pool_pressure = None
+
+    # Per-site starvation rebalance: if one site's article-proposal queue
+    # is severely starved (e.g. <2 articles in 7d while the other ships
+    # 100+), boost the starved site by 1 tier so its recs jump ahead of
+    # the healthy site. Added 2026-06-09 after AislePrompt went 5 days
+    # at 0 articles while SpecPicks shipped 148.
+    try:
+        from framework.core.priority import site_starvation_boost
+        starvation_boosts = site_starvation_boost(storage=s)  # dict: site → tier_delta (negative)
+    except Exception:
+        starvation_boosts = {}
 
     keys_with_meta: list[tuple[int, str, str]] = []
     for key in keys:
@@ -1435,10 +1448,22 @@ def _drain_auto_queue_impl(cfg: dict) -> int:
             payload_peek = s.read_json(key) or {}
             src = payload_peek.get("source_agent", "")
             run_ts = payload_peek.get("run_ts", "") or ""
+            site = payload_peek.get("site", "")
+            required_model = (payload_peek.get("required_model")
+                              or payload_peek.get("required_model_tier")
+                              or "")
             if tier_for_agent is not None:
                 tier = tier_for_agent(src, config=prio_cfg)
             else:
                 tier = 5
+            # Pool-aware demotion: opus-required recs sink to T9 when
+            # opus capacity is >15min from returning.
+            if effective_tier_with_pool_pressure is not None and required_model:
+                tier = effective_tier_with_pool_pressure(tier, required_model)
+            # Per-site starvation boost: starved site → smaller (better)
+            # tier number. boost is negative (e.g. -1 to jump one tier up).
+            boost = starvation_boosts.get(site, 0) if site else 0
+            tier = max(1, tier + boost)
             keys_with_meta.append((tier, run_ts, key))
         except Exception:
             keys_with_meta.append((5, "", key))

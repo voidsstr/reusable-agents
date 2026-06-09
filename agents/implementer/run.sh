@@ -781,6 +781,19 @@ PY
 }
 DEFEOF
                     fi
+                    # Record per-rec exponential backoff (2026-06-09)
+                    # so the dispatcher doesn't redispatch this rec
+                    # every minute while opus is exhausted.
+                    PYTHONPATH="$REPO_ROOT" python3 -c "
+import sys, os
+sys.path.insert(0, os.environ['PYTHONPATH'])
+from framework.core import defer_backoff
+src = os.environ.get('SOURCE_AGENT_ID_FROM_RECS','') or os.environ.get('RESPONDER_AGENT_ID','')
+for rid in (os.environ.get('RESPONDER_REC_IDS','') or '').split(','):
+    rid = rid.strip()
+    if rid and src:
+        defer_backoff.record_defer(rid, src, 'required-model-unavailable: ${REQUIRED_MODEL}')
+" 2>&1 | head -3 || true
                     # exit 0 → wrapper records as deferred (not failed), so the
                     # dispatcher's queued_ids stay clean and the rec is retried
                     # on the next tick when the pool returns.

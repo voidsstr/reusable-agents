@@ -840,6 +840,19 @@ class BacklogDispatcher(AgentBase):
                     if not rid:
                         continue
                     rid = str(rid)
+                    # ── Defer-backoff gate (2026-06-09) ────────────────
+                    # Recs that repeatedly defer get exponential backoff
+                    # via framework.core.defer_backoff. Without this, a
+                    # stuck opus-required article rec gets re-dispatched
+                    # ~1,440 times/day even though the implementer
+                    # immediately re-defers.
+                    try:
+                        from framework.core import defer_backoff
+                        _skip, _why = defer_backoff.should_skip(rid, aid)
+                        if _skip:
+                            continue
+                    except Exception:
+                        pass  # never break the dispatcher on a state read
                     dedup_key = f"{run_ts}:{rid}"
                     # TITLE-DEDUP (2026-05-12): same logical rec gets
                     # re-emitted across many run_ts when the underlying

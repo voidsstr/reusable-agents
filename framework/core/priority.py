@@ -273,3 +273,180 @@ def sort_by_tier(
         key=lambda it: (tier_for_agent(agent_id_fn(it), config=cfg),
                         secondary_fn(it)),
     )
+
+
+# ── Pool-aware tier skip (2026-06-09) ─────────────────────────────────────
+# When the claude-pool has no opus headroom (every authenticated profile
+# is rate-limited until later than NOW + some grace window), any drained
+# rec that REQUIRES opus is going to immediately defer. To stop opus-
+# required recs from blocking non-opus T4/T5 work behind them in the
+# tier sort, the drainer can call `effective_tier_with_pool_pressure()`
+# which DEMOTES opus-required recs to tier 9 when opus is unreachable.
+#
+# Schedule:
+#   - When opus IS reachable in <15min: no demotion (normal priority)
+#   - When opus next-reset is >15min away: demote opus-required to tier 9
+#
+# This lets SEO + non-opus content recs ship continuously while opus is
+# exhausted, instead of having T2/T3 article recs sit at the head of
+# the queue blocking everything.
+
+POOL_OPUS_GRACE_S = 900  # 15 min — how soon opus needs to be back to not demote
+
+
+def _pool_opus_reachable_within(grace_s: int = POOL_OPUS_GRACE_S) -> bool:
+    """True iff at least one authenticated claude-pool profile has opus
+    available NOW or within `grace_s` seconds. Defensive — returns True
+    on any read error so we don't accidentally demote when state.json
+    is just missing or transiently locked.
+    """
+    import os
+    from datetime import datetime, timezone
+    try:
+        # State path defaults to ~/.reusable-agents/claude-pool/state.json
+        # (see framework.cli.claude_pool.ROOT). The drainer runs on the
+        # host that owns the pool, so this file is readable.
+        path = os.environ.get(
+            "CLAUDE_POOL_ROOT",
+            os.path.expanduser("~/.reusable-agents/claude-pool"),
+        )
+        state_file = os.path.join(path, "state.json")
+        if not os.path.exists(state_file):
+            return True
+        import json as _j
+        with open(state_file) as f:
+            state = _j.load(f)
+        now = datetime.now(timezone.utc)
+        for pid, info in state.items():
+            if pid.startswith("__") or not isinstance(info, dict):
+                continue
+            if not info.get("authenticated"):
+                continue
+            limits = info.get("limit_resets_at") or {}
+            opus_reset = limits.get("opus", "")
+            if not opus_reset:
+                # No recorded opus limit → assume reachable
+                return True
+            try:
+                t = datetime.fromisoformat(opus_reset)
+            except Exception:
+                return True
+            if (t - now).total_seconds() <= grace_s:
+                return True
+        return False
+    except Exception:
+        return True
+
+
+# Tier number a demoted opus-required rec gets relegated to. Picked larger
+# than any default tier so it sorts behind everything else.
+OPUS_DEMOTED_TIER = 9
+
+
+def effective_tier_with_pool_pressure(
+    base_tier: int,
+    required_model: str = "",
+    *,
+    grace_s: int = POOL_OPUS_GRACE_S,
+) -> int:
+    """If the rec needs opus and opus isn't coming back within `grace_s`,
+    demote to OPUS_DEMOTED_TIER. Otherwise return base_tier unchanged.
+    """
+    if not required_model:
+        return base_tier
+    rm = required_model.lower()
+    needs_opus = "opus" in rm
+    if not needs_opus:
+        return base_tier
+    if _pool_opus_reachable_within(grace_s):
+        return base_tier
+    return max(base_tier, OPUS_DEMOTED_TIER)
+
+
+# ── Per-site starvation rebalance (2026-06-09) ────────────────────────────
+# When one site's content-production pipeline has stalled (capacity caps,
+# stuck recs, transient infra failures) while the other site is shipping
+# normally, the priority sort doesn't notice — it just sees the tier
+# numbers. Result: the starved site stays starved as long as the healthy
+# site keeps emitting recs.
+#
+# This helper queries `editorial_articles` per site over the last 7 days
+# and returns a per-site tier ADJUSTMENT to apply during drain:
+#   - Site shipped 0–1 articles in 7d and the other shipped >10 → boost -2
+#   - Site shipped 2–5 and the other shipped >20 → boost -1
+#   - Otherwise → boost 0 (no change)
+#
+# A negative boost makes the starved site sort EARLIER (lower tier
+# number). The drainer caps the final tier at 1 so a starved T3 won't
+# leapfrog a non-starved T1 (SEO/PI keep top priority always).
+#
+# Cached for 5 min so we don't hammer the DB on every drain tick.
+
+import time as _time
+_STARVATION_CACHE: dict = {"computed_at": 0, "boosts": {}}
+_STARVATION_TTL_S = 300  # 5 min
+
+# DB envs to consult — one per site. The site_id label is the bit between
+# "DATABASE_URL_" and the end (lowercased). Add new sites by exporting
+# DATABASE_URL_<UPPERCASE_SITEID>.
+_STARVATION_SITES = (
+    "aisleprompt",
+    "specpicks",
+)
+
+
+def _read_articles_7d(site_id: str) -> Optional[int]:
+    """Return count of editorial_articles rows created in the last 7d for
+    this site, or None on any error (don't poison the boost calc)."""
+    import os
+    dsn = os.environ.get(f"DATABASE_URL_{site_id.upper()}")
+    if not dsn:
+        return None
+    try:
+        import psycopg2
+    except ImportError:
+        return None
+    try:
+        with psycopg2.connect(dsn, connect_timeout=4) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM editorial_articles "
+                    "WHERE created_at > now() - interval '7 days'"
+                )
+                return int(cur.fetchone()[0])
+    except Exception:
+        return None
+
+
+def site_starvation_boost(
+    *,
+    storage: Optional[StorageBackend] = None,
+    sites: tuple = _STARVATION_SITES,
+    now: Optional[float] = None,
+) -> dict:
+    """Returns {site_id: tier_delta} where tier_delta is negative for
+    starved sites. Cached for `_STARVATION_TTL_S` seconds. Safe to call
+    on every drain tick.
+    """
+    now = now or _time.time()
+    if now - _STARVATION_CACHE["computed_at"] < _STARVATION_TTL_S:
+        return _STARVATION_CACHE["boosts"]
+    counts: dict = {}
+    for site in sites:
+        n = _read_articles_7d(site)
+        if n is not None:
+            counts[site] = n
+    if len(counts) < 2:
+        # Can't decide who's starved without at least two sites' data.
+        _STARVATION_CACHE.update({"computed_at": now, "boosts": {}})
+        return {}
+    boosts: dict = {}
+    others_max = lambda this: max(c for s, c in counts.items() if s != this)
+    for site, n in counts.items():
+        peer_n = others_max(site)
+        if n <= 1 and peer_n > 10:
+            boosts[site] = -2  # severe starvation
+        elif n <= 5 and peer_n > 20:
+            boosts[site] = -1  # mild starvation
+    _STARVATION_CACHE.update({"computed_at": now, "boosts": boosts})
+    return boosts
