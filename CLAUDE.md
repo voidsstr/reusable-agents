@@ -936,6 +936,31 @@ just runs the shell commands), so K8s / GCP Cloud Run / Cloudflare Workers
 above. Don't hardcode cloud-specific logic in `deployer.py` — a wanted
 per-cloud branch means the recipe is missing a knob.
 
+## Git workflow — commit straight to main, no feature branches
+
+The operator works `main`-first. The default Claude Code rule ("if on the
+default branch, branch first") is **overridden** for this repo and for
+the two sibling site repos (aisleprompt, specpicks):
+
+- **Do NOT create a feature branch** unless the operator explicitly
+  asks ("branch this", "open a PR for…", "isolate in a worktree", etc.).
+- Default action when the operator says "commit" or "merge": `git add` +
+  `git commit` on whatever branch you're currently on (almost always
+  `main`).
+- `git push` only when explicitly asked. The operator pulls + reviews
+  locally before pushing.
+- If you find yourself already on a feature branch from an earlier
+  session and the operator says "commit", finish the work on that
+  branch + ask whether to merge or push — don't silently switch.
+
+Why: the three repos are tightly coupled (framework rename touches site
+code; site cron changes are noticed by the framework reporter), so a
+branch-per-change creates merge friction. The operator reviews via
+`git log -p` + reverts unwanted commits with `git reset` / `git revert`.
+
+Refuse on sight: `git checkout -b` "to be safe"; opening a PR without
+being asked; pushing without being asked.
+
 ## Hosting note
 
 This codebase is shared. When working in nsc-assistant, specpicks, or
