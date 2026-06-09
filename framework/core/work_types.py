@@ -28,7 +28,7 @@ Sites can override the default routing in `site.yaml`:
 
     handoff_routes:
       article-orphan-boost: aisleprompt-progressive-improvement-agent
-      content-expansion: specpicks-article-author-agent
+      content-expansion: specpicks-article-proposal-agent
 
 Lookup precedence: site override > default mapping > "implementer".
 """
@@ -40,21 +40,21 @@ from __future__ import annotations
 # These are the agent IDs of the *blueprint* implementations. Per-site
 # instances are resolved at call time by the analyzer's site config:
 #
-#   if rec_type maps to "article-author-agent" and site is "specpicks",
+#   if rec_type maps to "article-proposal-agent" and site is "specpicks",
 #   the analyzer looks up site.yaml's handoff_routes for an override
-#   like "specpicks-article-author-agent" and uses that. If no override
+#   like "specpicks-article-proposal-agent" and uses that. If no override
 #   is set, the rec falls through to the implementer (which has graceful
 #   handling for orphan handoffs).
 DEFAULT_REC_ROUTING: dict[str, tuple[str, str]] = {
     # === NEW-page creation — only thing article-author actually handles ===
     # The agent generates fresh articles from a topic + bucket. Both
     # underscore and hyphen variants since the analyzer has used both.
-    "new-page-buying_guide":             ("new_article_creation", "article-author-agent"),
-    "new-page-buying-guide":             ("new_article_creation", "article-author-agent"),
-    "new-page-use_case":                 ("new_article_creation", "article-author-agent"),
-    "new-page-use-case":                 ("new_article_creation", "article-author-agent"),
-    "new-page-troubleshooting":          ("new_article_creation", "article-author-agent"),
-    "new-page-brand":                    ("new_article_creation", "article-author-agent"),
+    "new-page-buying_guide":             ("new_article_creation", "article-proposal-agent"),
+    "new-page-buying-guide":             ("new_article_creation", "article-proposal-agent"),
+    "new-page-use_case":                 ("new_article_creation", "article-proposal-agent"),
+    "new-page-use-case":                 ("new_article_creation", "article-proposal-agent"),
+    "new-page-troubleshooting":          ("new_article_creation", "article-proposal-agent"),
+    "new-page-brand":                    ("new_article_creation", "article-proposal-agent"),
     "new-page-comparison":               ("comparison_page_generation", "head-to-head-agent"),
 
     # === Body / template / linking edits to EXISTING pages ===
@@ -105,7 +105,7 @@ DEFAULT_REC_ROUTING: dict[str, tuple[str, str]] = {
     # article-author handles content rewrites for thin pages; the
     # indexnow-submitter handles "URL is unknown to Google" by re-firing
     # bulk submission. ===
-    "gsc-coverage-not-indexed":          ("body_md_edit", "article-author-agent"),
+    "gsc-coverage-not-indexed":          ("body_md_edit", "article-proposal-agent"),
     "gsc-coverage-discovered":           ("internal_link_addition", ""),
     "gsc-coverage-redirect":             ("code_edit", ""),
     "gsc-coverage-unknown":              ("index_submission", "indexnow-submitter"),

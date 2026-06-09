@@ -1079,9 +1079,9 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
         # writes to ~/.reusable-agents/seo/runs/<site>/<run_ts>/ on local FS).
         elif agent_hint and agent_hint.lower() == "seo" and site:
             candidate_source_agent = f"{site}-seo-opportunity-agent"
-        # ARTICLE short-tag mapping (specpicks-article-author-agent).
+        # ARTICLE short-tag mapping (specpicks-article-proposal-agent).
         elif agent_hint and agent_hint.lower() == "article" and site:
-            candidate_source_agent = f"{site}-article-author-agent"
+            candidate_source_agent = f"{site}-article-proposal-agent"
         if not site:
             print(f"  [skip] no site for action {action_obj['raw_line']!r}", file=sys.stderr)
             continue
@@ -1297,7 +1297,7 @@ def process_message(cfg: dict, msg: Message, runs_roots: list[Path]) -> int:
                 if ah == "h2h" and site_a:
                     src_candidates.append(f"{site_a}-head-to-head-agent")
                 if ah == "article" and site_a:
-                    src_candidates.append(f"{site_a}-article-author-agent")
+                    src_candidates.append(f"{site_a}-article-proposal-agent")
                 # Walk each candidate's outbound-emails and find matching ones
                 for src_agent in src_candidates:
                     prefix = f"agents/{src_agent}/outbound-emails/"

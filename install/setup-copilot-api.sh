@@ -172,19 +172,19 @@ Stop      : bash $(realpath "$0") --stop
 
 The framework already has the 'copilot' provider registered. To route
 an agent through it instead of claude-cli/anthropic, PATCH its
-agent_overrides entry. Example for aisleprompt-article-author-agent:
+agent_overrides entry. Example for aisleprompt-article-proposal-agent:
 
   curl -X POST -H "Authorization: Bearer \$FRAMEWORK_API_TOKEN" \\
     -H "Content-Type: application/json" \\
     http://localhost:8093/api/providers/agent-override \\
-    -d '{"agent_id":"aisleprompt-article-author-agent","provider":"copilot","model":"claude-sonnet-4"}'
+    -d '{"agent_id":"aisleprompt-article-proposal-agent","provider":"copilot","model":"claude-sonnet-4"}'
 
 Or via the dashboard's Providers page (http://localhost:8091/providers)
 — pick the agent, set provider=copilot, model=claude-sonnet-4 (or
 gpt-4o for unlimited Pro budget).
 
 Recommended assignments to ease pool pressure:
-  - aisleprompt-article-author-agent  → copilot/claude-sonnet-4
+  - aisleprompt-article-proposal-agent  → copilot/claude-sonnet-4
   - specpicks-benchmark-research      → copilot/gpt-4o (high-volume)
   - reusable-agents-competitor-research-agent → already copilot? check
   - leave specpicks-article-author + h2h on claude-cli (they're working)

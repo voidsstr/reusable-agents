@@ -23,8 +23,8 @@ Config shape (config/required-models.json in storage):
         "article-author": "opus"
       },
       "by_agent_id": {
-        "specpicks-article-author-agent": "opus",
-        "aisleprompt-article-author-agent": "opus"
+        "specpicks-article-proposal-agent": "opus",
+        "aisleprompt-article-proposal-agent": "opus"
       }
     }
 

@@ -10,7 +10,7 @@
 // given backend (e.g., the manifest says claude-cli but an override
 // pinned it to copilot/gpt-4o).
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { AgentSummary } from '../api/types'
 
@@ -758,40 +758,203 @@ function UsageSection() {
         })}
       </div>
 
-      {/* Per-agent usage */}
-      <h3 className="text-sm font-semibold text-ink-700 mb-2 uppercase tracking-wide">By agent</h3>
-      <div className="bg-surface rounded-lg border border-surface-divider overflow-hidden mb-4">
-        <table className="w-full text-sm">
-          <thead className="bg-surface-subtle text-[11px] uppercase tracking-wide text-ink-500">
-            <tr>
-              <th className="px-3 py-2 text-left">Agent</th>
-              <th className="px-3 py-2 text-right">Calls</th>
-              <th className="px-3 py-2 text-right">Input tokens</th>
-              <th className="px-3 py-2 text-right">Output tokens</th>
-              <th className="px-3 py-2 text-right">Est. cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.by_agent.map(a => (
-              <tr key={a.agent_id} className="border-t border-surface-divider hover:bg-surface-subtle/40">
-                <td className="px-3 py-2 font-mono text-xs text-ink-900">{a.agent_id}</td>
-                <td className="px-3 py-2 text-right tabular-nums">{fmtNum(a.calls)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.input_tokens)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.output_tokens)}</td>
-                <td className="px-3 py-2 text-right tabular-nums">
-                  {a.est_cost_usd === 0 ? <span className="text-ink-400">—</span> : `$${a.est_cost_usd.toFixed(4)}`}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Per-agent usage — decision-oriented view. Sortable, drillable,
+          and flags the trust level so the user knows when a row is
+          backed by live recording vs heuristic backfill. */}
+      <ByAgentSection data={data} />
+
       <p className="text-[11px] text-ink-400">
         Token counts are estimates (chars/4). Cost estimates apply only to per-token-billed providers
         (Anthropic API, Azure OpenAI). Calls via Claude Max CLI (claude-cli), GitHub Copilot, and local
         Ollama show as <em>subscription</em> — flat-fee plans with no per-call charge.
       </p>
     </div>
+  )
+}
+
+// ── By-agent breakdown — sortable + drillable + trust-flagged ─────────
+// Each row can expand to show that agent's provider×model split, so the
+// operator can decide where to act: throttle the cron, swap the model,
+// disable the agent entirely. Heuristic-attributed rows (run-ts-dir
+// best-of-N tiebreaker) get a "best-guess" badge so decisions are made
+// on trustworthy data.
+type AgentSort = 'calls' | 'trusted' | 'input' | 'output' | 'cost' | 'name'
+
+interface ByAgentRow {
+  agent_id: string
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  est_cost_usd: number
+  trusted_calls?: number
+  heuristic_calls?: number
+  heuristic_fraction?: number
+  by_provider_model?: {
+    provider: string; kind_provider: string; model: string
+    calls: number; input_tokens: number; output_tokens: number; est_cost_usd: number
+  }[]
+}
+
+function ByAgentSection({ data }: { data: { by_agent: ByAgentRow[]; totals: { calls: number } } }) {
+  const [sort, setSort] = useState<AgentSort>('calls')
+  const [showHeuristic, setShowHeuristic] = useState(true)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  const rows = useMemo(() => {
+    let r = [...data.by_agent]
+    if (!showHeuristic) {
+      // Filter out rows where >50% of calls are heuristic-only.
+      r = r.filter(x => (x.heuristic_fraction ?? 0) < 0.5)
+    }
+    const key: Record<AgentSort, (x: ByAgentRow) => number | string> = {
+      calls: (x) => -x.calls,
+      trusted: (x) => -(x.trusted_calls ?? 0),
+      input: (x) => -x.input_tokens,
+      output: (x) => -x.output_tokens,
+      cost: (x) => -x.est_cost_usd,
+      name: (x) => x.agent_id,
+    }
+    return r.sort((a, b) => {
+      const ka = key[sort](a); const kb = key[sort](b)
+      if (typeof ka === 'string' && typeof kb === 'string') return ka.localeCompare(kb)
+      return (ka as number) - (kb as number)
+    })
+  }, [data.by_agent, sort, showHeuristic])
+
+  const totalCalls = Math.max(data.totals.calls, 1)
+  const toggle = (aid: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(aid) ? next.delete(aid) : next.add(aid)
+      return next
+    })
+  }
+
+  return (
+    <div className="mt-2 mb-6">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h3 className="text-sm font-semibold text-ink-700 uppercase tracking-wide">By agent</h3>
+          <p className="text-[11px] text-ink-400 mt-0.5">
+            Click a row to see provider/model breakdown. Click headers to sort.
+            <span className="ml-2 px-1.5 py-0.5 bg-amber-50 text-amber-800 rounded text-[10px] font-medium">best-guess</span>
+            {' '}rows are from 2026-06-09 heuristic backfill — treat as upper-bound estimates.
+          </p>
+        </div>
+        <label className="flex items-center gap-1.5 text-[11px] text-ink-500 cursor-pointer">
+          <input type="checkbox" checked={showHeuristic} onChange={e => setShowHeuristic(e.target.checked)}
+                 className="rounded border-surface-divider" />
+          Show best-guess rows
+        </label>
+      </div>
+      <div className="bg-surface rounded-lg border border-surface-divider overflow-hidden">
+        <table className="w-full text-sm">
+          <thead className="bg-surface-subtle text-[11px] uppercase tracking-wide text-ink-500 select-none">
+            <tr>
+              <AgentSortTh label="Agent"        currentSort={sort} sortKey="name"    onClick={setSort} align="left" />
+              <AgentSortTh label="Calls"        currentSort={sort} sortKey="calls"   onClick={setSort} align="right" />
+              <AgentSortTh label="Trusted"      currentSort={sort} sortKey="trusted" onClick={setSort} align="right"
+                           title="Calls recorded live (with explicit agent_id) or matched to AgentBase progress.json. Untrusted rows are heuristic backfill from before 2026-06-09." />
+              <AgentSortTh label="% of total"   currentSort={sort} sortKey="calls"   onClick={setSort} align="right" />
+              <AgentSortTh label="Input tok"    currentSort={sort} sortKey="input"   onClick={setSort} align="right" />
+              <AgentSortTh label="Output tok"   currentSort={sort} sortKey="output"  onClick={setSort} align="right" />
+              <AgentSortTh label="Est. cost"    currentSort={sort} sortKey="cost"    onClick={setSort} align="right" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(a => {
+              const pct = (a.calls / totalCalls) * 100
+              const heur = (a.heuristic_fraction ?? 0)
+              const isExpanded = expanded.has(a.agent_id)
+              const bpm = a.by_provider_model || []
+              return (
+                <Fragment key={a.agent_id}>
+                  <tr className={`border-t border-surface-divider hover:bg-surface-subtle/40 cursor-pointer ${isExpanded ? 'bg-surface-subtle/30' : ''}`}
+                      onClick={() => toggle(a.agent_id)}>
+                    <td className="px-3 py-2 font-mono text-xs text-ink-900">
+                      <span className="text-ink-400 mr-1">{isExpanded ? '▼' : '▶'}</span>
+                      {a.agent_id ? (
+                        <a href={`/agents/${a.agent_id}`} className="text-accent-700 hover:underline" onClick={e => e.stopPropagation()}>
+                          {a.agent_id}
+                        </a>
+                      ) : <span className="italic text-ink-400">(unattributed)</span>}
+                      {heur >= 0.5 && (
+                        <span className="ml-2 px-1.5 py-0.5 bg-amber-50 text-amber-800 rounded text-[10px] font-medium"
+                              title={`${Math.round(heur * 100)}% heuristic-attributed — treat as best-guess`}>
+                          best-guess
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtNum(a.calls)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      <span className="text-ink-900">{fmtNum(a.trusted_calls ?? a.calls)}</span>
+                      {(a.heuristic_calls ?? 0) > 0 && (
+                        <span className="text-ink-400 text-[10px] ml-1">/ +{fmtNum(a.heuristic_calls!)}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-ink-600">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span>{pct.toFixed(1)}%</span>
+                        <div className="w-12 h-1.5 bg-surface-subtle rounded-full overflow-hidden">
+                          <div className="h-full bg-accent-500" style={{ width: `${Math.min(pct, 100)}%` }} />
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.input_tokens)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-ink-500">{fmtNum(a.output_tokens)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {a.est_cost_usd === 0 ? <span className="text-ink-400">—</span> : `$${a.est_cost_usd.toFixed(4)}`}
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr className="border-t border-surface-divider bg-surface-subtle/10">
+                      <td colSpan={7} className="px-6 py-3">
+                        {bpm.length === 0 ? (
+                          <p className="text-[11px] text-ink-400 italic">No provider/model breakdown available for this agent.</p>
+                        ) : (
+                          <div className="space-y-1">
+                            <p className="text-[10px] uppercase tracking-wide text-ink-500 mb-1">Provider × model split</p>
+                            {bpm.map(p => (
+                              <div key={`${p.provider}|${p.model}`} className="flex items-center text-xs gap-3 py-1">
+                                <span className="font-mono w-56 truncate">
+                                  <span className="text-accent-700">{p.provider}</span>
+                                  <span className="text-ink-400 mx-1">/</span>
+                                  {p.model}
+                                </span>
+                                <span className="tabular-nums w-20 text-right">{fmtNum(p.calls)} calls</span>
+                                <span className="tabular-nums w-28 text-right text-ink-500">{fmtNum(p.input_tokens)} in</span>
+                                <span className="tabular-nums w-28 text-right text-ink-500">{fmtNum(p.output_tokens)} out</span>
+                                <span className="tabular-nums w-20 text-right">
+                                  {p.est_cost_usd === 0 ? <span className="text-ink-400">—</span> : `$${p.est_cost_usd.toFixed(4)}`}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function AgentSortTh({ label, currentSort, sortKey, onClick, align, title }: {
+  label: string; currentSort: AgentSort; sortKey: AgentSort;
+  onClick: (k: AgentSort) => void; align: 'left' | 'right'; title?: string
+}) {
+  const active = currentSort === sortKey
+  return (
+    <th className={`px-3 py-2 cursor-pointer hover:text-ink-700 ${align === 'right' ? 'text-right' : 'text-left'}`}
+        onClick={() => onClick(sortKey)} title={title}>
+      <span className={active ? 'text-ink-900' : ''}>{label}</span>
+      {active && <span className="ml-1">▼</span>}
+    </th>
   )
 }
 

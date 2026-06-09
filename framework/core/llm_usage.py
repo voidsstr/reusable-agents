@@ -279,15 +279,41 @@ def aggregate_usage(
         if r.get("ts") and r["ts"] > ent["last_ts"]:
             ent["last_ts"] = r["ts"]
 
-        # by agent
+        # by agent — track attribution provenance so the UI can show
+        # the user how trustworthy each agent's counts are. Three modes:
+        #   live              — recorded with explicit agent_id (gold)
+        #   window-corr…      — AgentBase progress.json correlation (gold)
+        #   run-ts-dir…       — heuristic, "best-of-N" overlap tiebreaker
+        # The 2026-06-09 attribution backfill (see CLAUDE.md "attribution
+        # chase") filled ~26k historical rows via run-ts heuristic; until
+        # those age out, the UI must flag them so decisions aren't based
+        # on noise. ALSO break the agent's calls down by (provider, model)
+        # so each row in the by-agent table is drillable.
+        attr = r.get("_attribution", "") or "live"
+        is_trusted = (attr == "live") or attr.startswith("window-correlation")
         ae = ag_idx.setdefault(ag, {
             "agent_id": ag, "calls": 0, "input_tokens": 0,
             "output_tokens": 0, "est_cost_usd": 0.0,
+            "trusted_calls": 0, "heuristic_calls": 0,
+            "by_provider_model": {},  # tuple(pm,kp,m) → {calls, in_tok, out_tok, cost}
         })
         ae["calls"] += 1
         ae["input_tokens"] += in_t
         ae["output_tokens"] += out_t
         ae["est_cost_usd"] += cost
+        if is_trusted:
+            ae["trusted_calls"] += 1
+        else:
+            ae["heuristic_calls"] += 1
+        pm_key = f"{prov}|{kp}|{mdl}"
+        bpm = ae["by_provider_model"].setdefault(pm_key, {
+            "provider": prov, "kind_provider": kp, "model": mdl,
+            "calls": 0, "input_tokens": 0, "output_tokens": 0, "est_cost_usd": 0.0,
+        })
+        bpm["calls"] += 1
+        bpm["input_tokens"] += in_t
+        bpm["output_tokens"] += out_t
+        bpm["est_cost_usd"] += cost
 
         # by day
         de = day_idx.setdefault(day, {
@@ -315,6 +341,17 @@ def aggregate_usage(
     by_agent = sorted(ag_idx.values(), key=lambda x: -x["calls"])
     for x in by_agent:
         x["est_cost_usd"] = round(x["est_cost_usd"], 4)
+        # Convert by_provider_model dict → sorted list for JSON
+        # serialization, descending by calls.
+        bpm_list = list(x["by_provider_model"].values())
+        for e in bpm_list:
+            e["est_cost_usd"] = round(e["est_cost_usd"], 4)
+        bpm_list.sort(key=lambda e: -e["calls"])
+        x["by_provider_model"] = bpm_list
+        # Convenience: how much of this agent's count is heuristic.
+        x["heuristic_fraction"] = (
+            round(x["heuristic_calls"] / x["calls"], 3) if x["calls"] else 0.0
+        )
 
     by_day = sorted(day_idx.values(), key=lambda x: x["date"])
     for x in by_day:

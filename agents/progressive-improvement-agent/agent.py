@@ -260,6 +260,32 @@ class ProgressiveImprovementAgent(AgentBase):
             kwargs.setdefault("agent_id", env_id)
         super().__init__(*args, **kwargs)
 
+    def signals(self) -> dict | None:
+        """Run-level short-circuit (added 2026-06-09 after pool burn audit).
+
+        The crawler+analyzer already partition_by_hash per-page inside
+        the run (line 385 `Skip the LLM analysis for pages whose body
+        hash matches`). This adds a coarser hook: if NEITHER the crawl
+        target inventory nor the prior rec backlog has changed, return
+        early in <1s instead of spinning up the crawler at all.
+        """
+        try:
+            queue_keys = sorted(self.storage.list_prefix("queue/") or [])
+        except Exception:
+            queue_keys = []
+        try:
+            # Use the most recent prior run's published-at as a freshness
+            # token. If no new content has been published since last
+            # successful run, all crawl signals are stable.
+            ctx = self.storage.read_json("context-index.json") or {}
+            last_published = (ctx.get("recent") or [{}])[0].get("ended_at", "")
+        except Exception:
+            last_published = ""
+        return {
+            "implementer_queue": queue_keys,
+            "last_published":    last_published,
+        }
+
     def setup(self) -> None:
         self.cfg = load_quality_config_from_env("PROGRESSIVE_IMPROVEMENT_CONFIG")
         self.run_dir = self.cfg.run_dir_for_now(self.agent_id)

@@ -68,8 +68,8 @@ REC_EMITTING_AGENTS = (
     "specpicks-seo-opportunity-agent",
     "aisleprompt-catalog-audit-agent",
     "specpicks-catalog-audit-agent",
-    "aisleprompt-article-author-agent",
-    "specpicks-article-author-agent",
+    "aisleprompt-article-proposal-agent",
+    "specpicks-article-proposal-agent",
 )
 
 
