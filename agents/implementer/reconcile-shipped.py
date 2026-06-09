@@ -82,12 +82,12 @@ def main():
             continue
         # Walk both local rundirs and the data/agents storage path
         patterns = [
-            f"/home/voidsstr/.reusable-agents/data/agents/{site}-article-author-agent/runs/*/recommendations.json",
+            f"/home/voidsstr/.reusable-agents/data/agents/{site}-article-proposal-agent/runs/*/recommendations.json",
             f"/home/voidsstr/.reusable-agents/{site}-article-author/runs/{site}/*/recommendations.json",
-            f"/home/voidsstr/.reusable-agents/{site}-article-author-agent/runs/*/recommendations.json",
+            f"/home/voidsstr/.reusable-agents/{site}-article-proposal-agent/runs/*/recommendations.json",
             f"/home/voidsstr/.reusable-agents/{site}-article-author/runs/{site}/*/recommendations.json",
-            f"/home/voidsstr/.reusable-agents/data/agents/{site}-article-author-agent/runs/*/recommendations.json",
-            f"/tmp/rundir-{site}-article-author-agent-*/recommendations.json",
+            f"/home/voidsstr/.reusable-agents/data/agents/{site}-article-proposal-agent/runs/*/recommendations.json",
+            f"/tmp/rundir-{site}-article-proposal-agent-*/recommendations.json",
         ]
         for pat in patterns:
             for path in glob.glob(pat):

@@ -317,7 +317,7 @@ fi
 # ones. Saves LLM tokens producing duplicate UPSERTs.
 #
 # Article-author is identified later by source_agent_id ending in
-# -article-author-agent. We do the filter here BEFORE that detection
+# -article-proposal-agent. We do the filter here BEFORE that detection
 # because the same logic applies: if a rec's target slug is already a
 # full body in DB, no point regenerating it.
 if [ -n "${RESPONDER_REC_IDS:-}" ] \
@@ -497,7 +497,7 @@ except Exception:
 fi
 case "$SOURCE_AGENT_ID_FROM_RECS" in
     *-head-to-head-agent)   DISPATCH_KIND="h2h" ;;
-    *-article-author-agent) DISPATCH_KIND="article-author" ;;
+    *-article-proposal-agent) DISPATCH_KIND="article-author" ;;
     *-catalog-audit-agent)  DISPATCH_KIND="catalog-audit" ;;
 esac
 # Belt-and-braces: article-author also marks its recs with

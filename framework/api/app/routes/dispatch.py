@@ -48,8 +48,8 @@ _ACCUMULATOR_AGENT_IDS = (
     "aisleprompt-progressive-improvement-agent",
     "specpicks-seo-opportunity-agent",
     "aisleprompt-seo-opportunity-agent",
-    "specpicks-article-author-agent",
-    "aisleprompt-article-author-agent",
+    "specpicks-article-proposal-agent",
+    "aisleprompt-article-proposal-agent",
     "specpicks-catalog-audit-agent",
     "aisleprompt-catalog-audit-agent",
     "specpicks-competitor-research-agent",
@@ -571,7 +571,7 @@ def _compute_lifetime_stats():
                 if any(suffix in aid for suffix in (
                     "-seo-opportunity-agent",
                     "-progressive-improvement-agent",
-                    "-article-author-agent",
+                    "-article-proposal-agent",
                     "-catalog-audit-agent",
                     "-competitor-research-agent",
                     "-user-growth-strategist",
@@ -583,13 +583,13 @@ def _compute_lifetime_stats():
     # so a missing/empty registry doesn't drop them.
     for aid in (
         "aisleprompt-seo-opportunity-agent",
-        "aisleprompt-article-author-agent",
+        "aisleprompt-article-proposal-agent",
         "aisleprompt-progressive-improvement-agent",
         "aisleprompt-catalog-audit-agent",
         "aisleprompt-competitor-research-agent",
         "aisleprompt-user-growth-strategist",
         "specpicks-seo-opportunity-agent",
-        "specpicks-article-author-agent",
+        "specpicks-article-proposal-agent",
         "specpicks-progressive-improvement-agent",
         "specpicks-catalog-audit-agent",
         "specpicks-competitor-research-agent",
@@ -606,7 +606,7 @@ def _compute_lifetime_stats():
     _VALID_SUFFIXES = (
         "-seo-opportunity-agent",
         "-progressive-improvement-agent",
-        "-article-author-agent",
+        "-article-proposal-agent",
         "-catalog-audit-agent",
         "-competitor-research-agent",
         "-user-growth-strategist",
@@ -1258,7 +1258,7 @@ def _refresh_batches_cache() -> list[dict]:
             site = ""
             for suffix in ("-seo-opportunity-agent", "-progressive-improvement-agent",
                             "-competitor-research-agent", "-catalog-audit-agent",
-                            "-head-to-head-agent", "-article-author-agent"):
+                            "-head-to-head-agent", "-article-proposal-agent"):
                 if source_agent.endswith(suffix):
                     site = source_agent[: -len(suffix)]
                     break

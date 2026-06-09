@@ -358,7 +358,7 @@
     },
     "site_handler_overrides": {
       "type": "object",
-      "description": "Resolves generic blueprint handler ids (e.g. 'article-author-agent', 'progressive-improvement-agent', 'product-hydration-agent') to the per-site instance ids registered with the framework (e.g. 'specpicks-article-author-agent'). The analyzer applies this when tagging a rec's handoff_target so the handoff lands at the right per-site agent. Without overrides, generic ids are used verbatim — works only if a non-namespaced instance is registered.",
+      "description": "Resolves generic blueprint handler ids (e.g. 'article-author-agent', 'progressive-improvement-agent', 'product-hydration-agent') to the per-site instance ids registered with the framework (e.g. 'specpicks-article-proposal-agent'). The analyzer applies this when tagging a rec's handoff_target so the handoff lands at the right per-site agent. Without overrides, generic ids are used verbatim — works only if a non-namespaced instance is registered.",
       "additionalProperties": { "type": "string" }
     }
   }

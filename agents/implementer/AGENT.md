@@ -166,7 +166,7 @@ breaks the Live LLM tab + cost reporting.
          Open one URL in GSC's URL Inspection UI, read the specific
          issue, fix in the template/SSR layer (most common: missing
          required Recipe/Article schema fields, missing image alt).
-       - `gsc-coverage-not-indexed` is routed to article-author-agent
+       - `gsc-coverage-not-indexed` is routed to article-proposal-agent
          (content rewrite, not your job).
        - `gsc-coverage-unknown` is routed to indexnow-submitter (re-fire,
          not your job).

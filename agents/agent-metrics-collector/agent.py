@@ -185,7 +185,7 @@ def m_competitor_research(site: str) -> dict[str, float]:
 
 
 def m_article_author(site: str) -> dict[str, float]:
-    agent_id = f"{site}-article-author-agent"
+    agent_id = f"{site}-article-proposal-agent"
     metrics = {}
     try:
         with db(site) as conn:
@@ -411,8 +411,8 @@ AGENT_METRIC_FNS: dict[str, Callable[[], dict[str, float]]] = {
     "specpicks-progressive-improvement-agent":   lambda: m_progressive_improvement("specpicks"),
     "aisleprompt-competitor-research-agent":     lambda: m_competitor_research("aisleprompt"),
     "specpicks-competitor-research-agent":       lambda: m_competitor_research("specpicks"),
-    "aisleprompt-article-author-agent":          lambda: m_article_author("aisleprompt"),
-    "specpicks-article-author-agent":            lambda: m_article_author("specpicks"),
+    "aisleprompt-article-proposal-agent":          lambda: m_article_author("aisleprompt"),
+    "specpicks-article-proposal-agent":            lambda: m_article_author("specpicks"),
     "aisleprompt-catalog-audit-agent":           lambda: m_catalog_audit("aisleprompt"),
     "specpicks-catalog-audit-agent":             lambda: m_catalog_audit("specpicks"),
     "aisleprompt-kitchen-scraper":               m_kitchen_scraper,

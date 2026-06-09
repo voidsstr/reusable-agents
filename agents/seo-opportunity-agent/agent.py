@@ -70,6 +70,41 @@ class SEOOpportunityAgent(AgentBase):
     # AgentBase boilerplate run-summary email.
     send_run_summary_email = False
 
+    def signals(self) -> dict | None:
+        """Run-level short-circuit (added 2026-06-09 after pool burn audit).
+
+        Skip the whole run when none of our INPUT signals have changed
+        since the prior successful run:
+          - page inventory mtime (new pages indexed)
+          - latest GSC data day (fresh search-console data)
+          - implementer queue state (whether prior recs are still pending)
+
+        The analyzer already does in-run per-page partition_by_hash for
+        the LLM call layer, but a full SEO tick still spins up the
+        collector + analyzer (~30-90s) and walks ~200 pages even when
+        nothing changed. With the cron now at every-6h instead of 2h,
+        any all-stable tick is a complete waste — this hook makes those
+        ticks return in <1s.
+        """
+        try:
+            inv_path = self.storage.read_json("inputs/page-inventory.json") or {}
+            inv_count = len(inv_path.get("pages", inv_path.get("urls", [])))
+        except Exception:
+            inv_count = 0
+        try:
+            gsc_latest = (self.storage.read_json("inputs/gsc-coverage.json") or {}).get("latest_data_day", "")
+        except Exception:
+            gsc_latest = ""
+        try:
+            queue_keys = sorted(self.storage.list_prefix("queue/") or [])
+        except Exception:
+            queue_keys = []
+        return {
+            "page_inventory_count": inv_count,
+            "gsc_latest_data_day":  gsc_latest,
+            "implementer_queue":    queue_keys,
+        }
+
     def run(self) -> RunResult:
         cfg = load_config_from_env()
         site_id = getattr(cfg, "site_id", "")

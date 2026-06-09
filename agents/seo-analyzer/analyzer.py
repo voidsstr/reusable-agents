@@ -4396,14 +4396,14 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
         # using the optional site_handler_overrides map. Allows config
         # like:
         #   handoff_routes:
-        #     article-orphan-boost: specpicks-article-author-agent
+        #     article-orphan-boost: specpicks-article-proposal-agent
         for _r in recs:
             rt = _r.get("type") or ""
             wt, handler = _handler_for(rt, site_routes=site_routes)
             _r["work_type"] = wt
             # Resolve generic handler id to per-site one if the site
             # provides a per-site agent for this handler (so the analyzer
-            # in specpicks routes to specpicks-article-author-agent rather
+            # in specpicks routes to specpicks-article-proposal-agent rather
             # than the generic article-author-agent).
             if handler and handler != "implementer":
                 site_handler = (cfg.get("site_handler_overrides") or {}).get(handler)

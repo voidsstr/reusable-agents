@@ -419,6 +419,86 @@ reporter:
 relay; others fail silently. Copy this block verbatim; don't ask for an
 inbox. (Set 2026-05-07 after a recipient-list expansion was reverted.)
 
+## Implementer queue — UNIFIED on Azure Blob (no local FS)
+
+Single source of truth for every queued rec, host-wide:
+
+```
+Azure container `agents` (nscagentstorage.blob.core.windows.net)
+  agents/responder-agent/auto-queue/              ← pending recs
+  agents/responder-agent/auto-queue-processed/    ← history (post-ship)
+  agents/implementer/runs/<run-ts>/               ← per-dispatch artifacts
+```
+
+Every host-worker service runs with `STORAGE_BACKEND=azure`. The local
+filesystem dirs `~/.reusable-agents/data/agents/responder-agent/auto-queue/`
+and `.../storage/agents/responder-agent/auto-queue/` are **DEPRECATED**
+legacy from before the 2026-05-11 cutover. They each carry a `README.md`
+explaining the deprecation. Stranded items from the cutover are at
+`~/.reusable-agents/.local-stranded-archive/` (cleaned 2026-06-09 after the
+queue unification audit).
+
+**Decision rule — anything queue-touching:**
+1. Read/write via `framework.core.storage.get_storage()`. NEVER os.path
+   into `~/.reusable-agents/data/` directly. The storage backend factory
+   honors `STORAGE_BACKEND=azure|local` so the same code works in dev +
+   prod + tests.
+2. The DRAIN side is the `auto-queue-drainer.service` daemon — a single
+   long-running process (`python3 -m framework.cli.auto_queue_drainer
+   --interval 15 --idle-backoff 60`). It reads exclusively from the Azure
+   path above. Don't spawn parallel drainers; the responder_drain_lock
+   primitive handles concurrent attempts but it's wasted process churn.
+3. The PRODUCE side is `framework.core.dispatch.dispatch_now()` OR
+   writing a JSON file via `framework.core.storage.write_json` to
+   `agents/responder-agent/auto-queue/<request-id>.json`. Reporter scripts,
+   `requeue-deferred.py`, and the per-agent reporter modules already do
+   this correctly.
+4. Refuse on sight: new code that touches `~/.reusable-agents/data/agents/`
+   directly; a second drainer script ("just for this one rec type"); any
+   queue file written outside Azure when `STORAGE_BACKEND=azure`.
+
+### Implementer cadence — event-driven, not cron
+
+| Component | Role | Cadence |
+|---|---|---|
+| `agent-<site>-article-proposal-agent.timer` | producer (writes recs) | **8h** (00:20 / 08:20 / 16:20 EDT for aisleprompt; :45 offsets for specpicks) |
+| `agent-backlog-dispatcher-agent.timer` | producer-side queue feeder | every 1 min |
+| `auto-queue-drainer.service` | drain daemon → fires implementer | **15s when busy, 60s when idle (>5min)** |
+| `agent-implementer.service` | edits code per rec | spawned on demand by drainer |
+| `agent-responder-agent.timer` | email-reply path → manual dispatches | every 15 min |
+
+The implementer does NOT run on a cron. It only runs when the drainer
+finds work. With drainer + producers all stopped, the implementer is
+silent. With them running and the queue empty, the drainer ticks every
+60s but does zero LLM work — checking queue size is `O(1)` blob list.
+
+Inspect queue size (operator-grade one-liner):
+```bash
+STORAGE_BACKEND=azure AZURE_STORAGE_CONNECTION_STRING="$(systemctl --user show \
+  reusable-agents-host-worker.service --property=Environment -o cat | \
+  tr ' ' '\n' | grep -oP 'AZURE_STORAGE_CONNECTION_STRING="?\K[^"]+')" \
+  python3 -c "
+import sys; sys.path.insert(0,'/home/voidsstr/development/reusable-agents')
+from framework.core.storage import get_storage
+s = get_storage()
+print('pending  :', len(s.list_prefix('agents/responder-agent/auto-queue/')))
+print('processed:', len(s.list_prefix('agents/responder-agent/auto-queue-processed/')))
+"
+```
+
+Stop the pipeline (lets the Claude pool cool):
+```bash
+systemctl --user stop auto-queue-drainer.service \
+                       agent-backlog-dispatcher-agent.timer \
+                       agent-responder-agent.timer
+```
+Resume:
+```bash
+systemctl --user enable --now auto-queue-drainer.service \
+                                agent-backlog-dispatcher-agent.timer \
+                                agent-responder-agent.timer
+```
+
 ## Implementer path-scope — keep agents in their lane
 
 The implementer runs aider/claude-cli/copilot against the whole site repo.
@@ -711,7 +791,7 @@ cross-sell, article heroes, and future flows use the same endpoint.
 >     "h2h": "opus", "h2h-commentary": "opus", "comparison_page_generation": "opus"
 >   },
 >   "by_agent_id": {
->     "specpicks-article-author-agent": "opus", "aisleprompt-article-author-agent": "opus",
+>     "specpicks-article-proposal-agent": "opus", "aisleprompt-article-proposal-agent": "opus",
 >     "specpicks-news-writer": "opus", "specpicks-head-to-head-agent": "opus"
 >   }
 > }

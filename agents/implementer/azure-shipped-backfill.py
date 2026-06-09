@@ -43,7 +43,7 @@ for site, slug_idx in {"aisleprompt": shipped_slugs("aisleprompt"),
                        "specpicks":   shipped_slugs("specpicks")}.items():
     print(f"=== {site}: {len(slug_idx)} live articles ===")
     if not slug_idx: continue
-    agent_id = f"{site}-article-author-agent"
+    agent_id = f"{site}-article-proposal-agent"
     keys = s.list_prefix(f"agents/{agent_id}/runs/")
     recs_keys = [k for k in keys if k.endswith("/recommendations.json")]
     print(f"  scanning {len(recs_keys)} recommendations.json files")

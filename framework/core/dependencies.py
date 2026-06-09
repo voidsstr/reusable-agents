@@ -91,7 +91,7 @@ _DEFAULT_EDGES: list[dict] = [
     {"from": "*-seo-opportunity-agent", "to": "implementer",
      "kind": "dispatches-to", "_template": True,
      "description": "SEO opportunity recs dispatch to the implementer."},
-    {"from": "*-article-author-agent", "to": "implementer",
+    {"from": "*-article-proposal-agent", "to": "implementer",
      "kind": "dispatches-to", "_template": True,
      "description": "Article-author proposals dispatch to the implementer for body write + DB insert."},
 

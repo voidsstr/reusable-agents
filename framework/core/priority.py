@@ -47,12 +47,12 @@ Example config:
         },
         "2": {
           "label": "AislePrompt content",
-          "agents": ["aisleprompt-article-author-agent",
+          "agents": ["aisleprompt-article-proposal-agent",
                      "aisleprompt-head-to-head-agent"]
         },
         "3": {
           "label": "SpecPicks content",
-          "agents": ["specpicks-article-author-agent",
+          "agents": ["specpicks-article-proposal-agent",
                      "specpicks-head-to-head-agent"]
         },
         ...
@@ -97,14 +97,14 @@ DEFAULT_CONFIG: dict = {
         "2": {
             "label": "AislePrompt content production",
             "agents": [
-                "aisleprompt-article-author-agent",
+                "aisleprompt-article-proposal-agent",
                 "aisleprompt-head-to-head-agent",
             ],
         },
         "3": {
             "label": "SpecPicks content production",
             "agents": [
-                "specpicks-article-author-agent",
+                "specpicks-article-proposal-agent",
                 "specpicks-head-to-head-agent",
             ],
         },
