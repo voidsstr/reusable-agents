@@ -353,6 +353,16 @@ _AUTH_DEAD_PATTERNS = [
     re.compile(r"Failed to authenticate", re.I),
     re.compile(r"Invalid API key", re.I),
     re.compile(r"authentication failed", re.I),
+    # Anthropic can disable Claude Code subscription access for an
+    # entire org without revoking the auth token. Treating this as
+    # auth-dead lets us rotate to other profiles (different orgs)
+    # instead of looping on the same dead one. Hit 2026-05-24.
+    re.compile(r"disabled Claude subscription access", re.I),
+    re.compile(r"organization has disabled", re.I),
+    # User can run /login but it's not done yet — same outcome (skip,
+    # try next profile) but we don't mark auth_dead permanently in
+    # case it's just a transient session expiry.
+    re.compile(r"Not logged in", re.I),
 ]
 # Capture the human reset hint so we can store an approximate resets_at.
 # Two real-world forms from claude CLI:
@@ -491,6 +501,40 @@ def _mark_rate_limited(profile_id: str, captured_text: str,
         f"family={family or 'unknown'} until {resets_at} "
         f"(parsed={'yes' if parsed else 'fallback-+5h'})\n"
     )
+
+
+def _record_pool_usage(*, agent_id: str, profile_id: str, model: str,
+                       input_text: str, output_text: str,
+                       duration_s: float, is_error: bool) -> None:
+    """Append a row to framework/llm-usage/<month>.jsonl so the dashboard
+    can attribute pool dispatches to the calling agent. Without this,
+    every `claude --print` invocation is invisible to /llms — the LLMs
+    page only sees calls that went through ai_providers.AIClient.chat().
+
+    Best-effort; never raises into the dispatch path.
+    """
+    try:
+        # Import locally so cmd_init doesn't pay framework-import cost.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from framework.core import llm_usage  # type: ignore
+        llm_usage.record_call(
+            agent_id=agent_id or "",
+            run_ts=os.environ.get("AGENT_RUN_TS", ""),
+            provider=f"claude-pool:{profile_id}",
+            kind_provider="claude-cli",
+            model=model or "claude-opus-4-7",
+            input_text=input_text,
+            output_text=output_text,
+            duration_s=duration_s,
+            is_error=is_error,
+        )
+    except Exception as e:  # pragma: no cover
+        # Don't poison the dispatch loop on logging failure. Log to
+        # stderr so we can see the issue without affecting the user.
+        try:
+            sys.stderr.write(f"[claude-pool] _record_pool_usage failed: {e}\n")
+        except Exception:
+            pass
 
 
 def _run_one_dispatch(picked_id: str, picked_home: str,
@@ -858,11 +902,27 @@ def cmd_exec(args) -> None:
                 f"[claude-pool] → {picked_id} (home={picked['home']})"
                 f"{' [failover ' + str(attempt + 1) + ']' if attempt else ''}\n"
             )
+            _dispatch_t0 = time.time()
             try:
                 rc, captured = _run_one_dispatch(picked_id, picked["home"], claude_args)
             finally:
                 _release_profile(picked_id)
             last_rc = rc
+
+            # Record this dispatch to framework/llm-usage so the /llms
+            # dashboard attributes pool burn to the calling agent. The
+            # agent runner sets AGENT_ID via systemd Environment=. We
+            # log on EVERY dispatch (success or rate-limited failover)
+            # — failovers still consumed wall-time on the picked profile.
+            _record_pool_usage(
+                agent_id=os.environ.get("AGENT_ID", ""),
+                profile_id=picked_id,
+                model=requested_model or "claude-opus-4-7",
+                input_text=" ".join(str(a) for a in (claude_args or [])),
+                output_text=captured or "",
+                duration_s=time.time() - _dispatch_t0,
+                is_error=(rc != 0),
+            )
 
             if rc == 0:
                 # Success — clear any outage email gate so next outage re-notifies

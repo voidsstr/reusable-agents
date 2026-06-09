@@ -62,6 +62,12 @@
           "default": 0.95,
           "description": "Recs at confidence >= this and severity in {medium, high, critical} are tier=auto."
         },
+        "max_open_proposals": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10,
+          "description": "Cap on the producer accumulator's open-rec backlog. When the accumulator already has this many open proposals, the producer stops emitting NEW recs this tick (it still refreshes existing ones). Used by competitor-research-agent to prevent backlog growth when the operator hasn't reviewed pending recs."
+        },
         "issue_categories": {
           "type": "array",
           "items": { "type": "string" },

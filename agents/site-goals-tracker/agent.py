@@ -412,11 +412,22 @@ def _short_site(profile: dict) -> str:
 
 
 def _db_fallback(profile: dict) -> str:
-    """No fallback DSN — credentials must be supplied via env var.
-    Returns empty string so the caller raises with a clear 'set
-    <SITE>_DATABASE_URL in .env' error. Profiles in sites.json
-    declare `db_dsn_env` to point at the env var per site.
+    """Resolve the site DB DSN tolerantly across naming conventions.
+
+    Primary is profile['db_env'] (e.g. SPECPICKS_DATABASE_URL), checked by
+    the caller. This fallback also accepts the reversed convention
+    DATABASE_URL_<SITE> (as set in ~/.reusable-agents/secrets.env) and a
+    generic DATABASE_URL, so a rename of one form doesn't silently drop the
+    DB-derived active-pages-count metric (regression seen 2026-05-07: env was
+    DATABASE_URL_SPECPICKS but the tracker only looked for SPECPICKS_DATABASE_URL).
     """
+    primary = profile.get("db_env", "")
+    site = primary.replace("_DATABASE_URL", "").replace("DATABASE_URL_", "").strip("_")
+    candidates = ([f"DATABASE_URL_{site}"] if site else []) + ["DATABASE_URL"]
+    for name in candidates:
+        v = os.environ.get(name)
+        if v:
+            return v
     return ""
 
 

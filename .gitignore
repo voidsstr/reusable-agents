@@ -268,3 +268,8 @@ framework/.pytest_cache/
 framework/ui/test-results/
 framework/ui/playwright-report/
 .aider*
+
+# stray redirect-dump + agent worktrees
+/-
+.claude/worktrees/
+*.bak.*

@@ -153,17 +153,28 @@ def record_call(
 ) -> None:
     """Record one LLM call. Called from AiClient.chat() after the
     stream.response() / stream.error() hook so we capture every call
-    regardless of provider. Best-effort — never raises into caller."""
+    regardless of provider. Best-effort — never raises into caller.
+
+    Attribution fallback (2026-06-09): if no agent_id is passed (e.g.
+    AIClient.chat() called without a stream, or the stream was created
+    without agent_id wired through), fall back to $AGENT_ID env which
+    systemd sets for every agent service. This closes the ~1k/day
+    unattributed-row leak that was making the /llms dashboard show
+    blank agent columns. run_ts gets the same treatment via
+    $AGENT_RUN_TS.
+    """
     try:
         s = storage or get_storage()
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         in_t = estimate_tokens(input_text)
         out_t = estimate_tokens(output_text)
         cost = estimate_cost(in_t, out_t, provider, kind_provider, model)
+        effective_agent_id = agent_id or os.environ.get("AGENT_ID", "") or ""
+        effective_run_ts   = run_ts   or os.environ.get("AGENT_RUN_TS", "") or ""
         row = {
             "ts": ts,
-            "agent_id": agent_id,
-            "run_ts": run_ts,
+            "agent_id": effective_agent_id,
+            "run_ts": effective_run_ts,
             "provider": provider,
             "kind_provider": kind_provider or provider,
             "model": model,

@@ -64,6 +64,27 @@ def finalize(agent, *, cfg, run_ts: str, run_dir: Path) -> dict:
     short_circuited = bool((recs_doc.get("metadata") or {}).get("short_circuited"))
 
     site_id = getattr(cfg, "site_id", "") or ""
+
+    # ── Persist recs to Azure storage (2026-05-22) ─────────────────
+    # The SEO opp agent runs in a local /tmp run-dir that gets cleaned up
+    # on exit. With auto_implement=false (route via backlog-dispatcher
+    # classifier), no dispatch fires — so the backlog-dispatcher never
+    # sees these recs because they were never synced to Azure storage.
+    # Writing here puts them at the canonical path the dispatcher walks.
+    if recs:
+        try:
+            azure_key = f"agents/{agent.agent_id}/runs/{run_ts}/recommendations.json"
+            agent.storage.write_json(azure_key, recs_doc)
+            agent.decide(
+                "action",
+                f"persisted recommendations.json to {azure_key} ({len(recs)} recs)",
+            )
+        except Exception as e:
+            agent.decide(
+                "error",
+                f"failed to persist recommendations.json to Azure: {e}",
+            )
+
     email_cfg = (cfg.get("reporter") or {}).get("email") or {}
     to_list = list(email_cfg.get("to", []) or [])
     sender = email_cfg.get("from", "") or ""

@@ -990,6 +990,28 @@ repo at `agents/article-author-agent/prompts/article_author_system.md`
 first, then propagate to the per-site CLAUDE.md "How articles are
 written" section.
 
+**Timely > evergreen — four framework primitives**
+
+The article-author MUST consume these (don't roll your own):
+
+| Primitive | What it does | When the proposer calls it |
+|---|---|---|
+| `framework.core.seasonal_calendar` | Returns active NOW / IMMINENT / UPCOMING US holidays (Memorial Day, July 4th, Thanksgiving, …) + season-relevant `recipe_keywords` / `link_categories`. Drives the `SEASONAL + HOLIDAY SIGNAL` prompt block. | Every run, in the prompt builder. |
+| `framework.core.trends_signal` | Pulls Google Trends RSS + audience-appropriate subreddits, cached 6h per agent. Drives the `TRENDING TODAY` prompt block. | Every run, gathered into `signals["trends"]`. |
+| `framework.core.featured_rotation` | Reads `editorial_articles.tags` for `holiday:<id>` markers; promotes articles whose holiday is active, demotes stale holiday picks; leaves operator-pinned features alone. Cycles by hour for visual variety. | At the end of every successful article-author run. |
+| `framework.core.article_link_guard` | Counts inline `/recipes/<slug>` + `/k/<slug>` links in the body before INSERT; rejects articles below the per-site min and re-queues with a failure addendum so the LLM knows exactly which gap to fix. | In the implementer's `run.sh` post-write step. |
+
+Tag every seasonal proposal with `holiday:<id>` (e.g. `holiday:memorial-day`)
+or the rotation has nothing to cycle. The article-author prompt enforces this
+already — don't strip it.
+
+The dedup that protects against re-proposing evergreen articles MUST
+exempt holiday-bearing titles, otherwise "Memorial Day Cookout Menu"
+gets killed as "near-dup of How to Meal Prep for the Week" because
+they share the structural `Recipes + Shopping List` suffix every meal-
+plan article uses. See `_dedup_proposals_by_title` in aisleprompt's
+agent.py for the reference implementation.
+
 ## Inter-agent messaging
 
 ```python

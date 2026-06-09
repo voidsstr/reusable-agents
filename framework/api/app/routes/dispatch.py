@@ -8,6 +8,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -572,6 +573,8 @@ def _compute_lifetime_stats():
                     "-progressive-improvement-agent",
                     "-article-author-agent",
                     "-catalog-audit-agent",
+                    "-competitor-research-agent",
+                    "-user-growth-strategist",
                 )):
                     rec_emitting_agents.add(aid)
     except Exception:
@@ -583,10 +586,14 @@ def _compute_lifetime_stats():
         "aisleprompt-article-author-agent",
         "aisleprompt-progressive-improvement-agent",
         "aisleprompt-catalog-audit-agent",
+        "aisleprompt-competitor-research-agent",
+        "aisleprompt-user-growth-strategist",
         "specpicks-seo-opportunity-agent",
         "specpicks-article-author-agent",
         "specpicks-progressive-improvement-agent",
         "specpicks-catalog-audit-agent",
+        "specpicks-competitor-research-agent",
+        "specpicks-user-growth-strategist",
     ):
         rec_emitting_agents.add(aid)
     # Filter: only valid rec-emitter ids. A historical implementer bug
@@ -601,6 +608,8 @@ def _compute_lifetime_stats():
         "-progressive-improvement-agent",
         "-article-author-agent",
         "-catalog-audit-agent",
+        "-competitor-research-agent",
+        "-user-growth-strategist",
     )
     rec_emitting_agents = {
         aid for aid in rec_emitting_agents
@@ -635,10 +644,12 @@ def _compute_lifetime_stats():
         for rk in recs_keys:
             read_tasks.append((agent_id, rk))
 
-    # Phase 2: parallel-fetch every recommendations.json via a thread pool.
-    # Each Azure blob read is ~150-300ms; with 240+ tasks this was the
-    # 60-80s bottleneck for lifetime-stats compute. Parallelism=16 drops
-    # the IO phase to ~3-6 seconds.
+    # Phase 2: parallel-fetch every recommendations.json AND its sibling
+    # deferred-by-allowlist.json via a thread pool. Each Azure blob read
+    # is ~150-300ms; with 240+ pairs (~480 reads), this was the 60-80s
+    # bottleneck for lifetime-stats compute. Parallelism=32 drops the IO
+    # phase to ~3-6 seconds (allowlist reads happen in the same pass so
+    # there's no sequential second IO round-trip per rk).
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _read_one(task: tuple[str, str]):
@@ -646,20 +657,35 @@ def _compute_lifetime_stats():
         try:
             rd = s.read_json(rk) or {}
         except Exception:
-            return (agent_id, rk, None)
-        return (agent_id, rk, rd if isinstance(rd, dict) else None)
+            rd = None
+        # Sibling allowlist read in parallel with the recs.json — same rk
+        # prefix, fetched alongside in a single executor (caller code reads
+        # the result from the tuple, not via another s.read_json call).
+        allowlist_key = rk.rsplit("/", 1)[0] + "/deferred-by-allowlist.json"
+        try:
+            ad = s.read_json(allowlist_key)
+        except Exception:
+            ad = None
+        rd_ok = rd if isinstance(rd, dict) else None
+        ad_ok = ad if isinstance(ad, dict) else None
+        return (agent_id, rk, rd_ok, ad_ok)
 
-    fetched: list[tuple[str, str, dict]] = []
-    with ThreadPoolExecutor(max_workers=16) as ex:
+    fetched: list[tuple[str, str, dict, Optional[dict]]] = []
+    # Pre-fetched allowlist data keyed by rk so the existing loop can
+    # find it without doing another s.read_json call.
+    _allowlist_by_rk: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=32) as ex:
         for fut in as_completed([ex.submit(_read_one, t) for t in read_tasks]):
-            agent_id, rk, rd = fut.result()
+            agent_id, rk, rd, ad = fut.result()
             if rd is None:
                 continue
-            fetched.append((agent_id, rk, rd))
+            fetched.append((agent_id, rk, rd, ad))
+            if ad is not None:
+                _allowlist_by_rk[rk] = ad
 
     # Phase 3: sequential dedup/state-coalesce pass over the in-memory
     # docs (this part must stay serial because it builds shared dicts).
-    for agent_id, rk, rd in fetched:
+    for agent_id, rk, rd, _ad in fetched:
             recs = rd.get("recommendations") or []
             if not isinstance(recs, list):
                 continue
@@ -739,8 +765,9 @@ def _compute_lifetime_stats():
             # different recs). The synthetic id `<rec_id>@<run_ts>` keeps
             # the deferred entry distinct in the lifetime view.
             try:
-                allowlist_key = rk.rsplit("/", 1)[0] + "/deferred-by-allowlist.json"
-                allowlist_data = s.read_json(allowlist_key)
+                # Use the pre-fetched allowlist data from the parallel
+                # read pass instead of doing another sequential blob read.
+                allowlist_data = _allowlist_by_rk.get(rk)
                 if isinstance(allowlist_data, dict):
                     # Skip the entire file if it's been requeued — the
                     # consolidator/requeue script stamps `requeued_at` so

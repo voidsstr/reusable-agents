@@ -955,6 +955,30 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
             outline_text = "\n".join(f"  {i+1}. {h}"
                                      for i, h in enumerate(outline_list))
             secondary = proposal.get("secondary_keywords") or []
+            # Hard inline-link contract — the wrapper enforces this
+            # after the LLM exits. Render the directive into the prompt
+            # so the model knows up-front the link minima it must hit
+            # and which slug pool to draw from.
+            try:
+                from framework.core.article_link_guard import (
+                    render_link_directive as _link_directive,
+                )
+                _site_root = (
+                    "https://specpicks.com" if "specpicks" in (r.get("agent_id") or
+                                                                proposal.get("site") or "")
+                    else "https://aisleprompt.com"
+                )
+                _is_aisleprompt = "specpicks" not in (
+                    r.get("agent_id") or proposal.get("site") or ""
+                )
+                link_directive_text = _link_directive(
+                    proposal,
+                    min_recipes=5 if _is_aisleprompt else 0,
+                    min_kits=2 if _is_aisleprompt else 0,
+                    site_root=_site_root,
+                )
+            except Exception:
+                link_directive_text = ""
             block.append(
                 "ARTICLE PROPOSAL — write the article body to a Markdown "
                 "FILE. Do NOT run psql. The wrapper handles the DB "
@@ -971,6 +995,7 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                 "     • Body = ~200-400 words per section, plain prose\n"
                 "     • Reference recipe slugs from "
                 "`expected_recipe_slugs` as inline links\n"
+                + (("\n" + link_directive_text + "\n") if link_directive_text else "") +
                 f"     • Hit the primary keyword "
                 f"('{proposal.get('primary_keyword','')}') in H1 + "
                 "first paragraph + at least one H2\n"

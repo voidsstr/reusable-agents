@@ -1,0 +1,14 @@
+# local-image-gen daemon dependencies. Pin torch to 2.8.x: torch 2.11+
+# turns the kernel-driver-version-mismatch warning into a fatal NVML
+# assert at allocation time, and the dev box can't safely reload the
+# nvidia driver while gdm is up.
+torch==2.8.0
+torchvision
+diffusers>=0.30
+transformers>=4.43
+accelerate>=0.33
+safetensors
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.7
+sentencepiece

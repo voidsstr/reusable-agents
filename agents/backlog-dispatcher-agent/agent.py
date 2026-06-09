@@ -705,12 +705,42 @@ class BacklogDispatcher(AgentBase):
                     seg = k.split("/runs/")[1].split("/")[0]
                     m = ts_re.search(seg)
                     return m.group(1) if m else seg
-                run_keys = sorted(
-                    [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
-                     if k.endswith("/recommendations.json")],
-                    key=_extract_ts,
-                    reverse=True,
-                )
+                # AUTHORITATIVE walker: run-index.json (always lists the
+                # most-recent runs, never truncated). Falls back to
+                # list_prefix when an agent has no run-index. The naive
+                # `list_prefix("agents/<aid>/runs/")` path returns up to
+                # 10K keys cap-truncated by Azure Blob — for busy
+                # agents (SEO opp emits ~50 files per run × 130+ runs =
+                # 6500+ keys per agent) the cap returns the OLDEST
+                # 10K, so the newest run-dirs are never seen and
+                # "no producer had unshipped recs" fires every minute
+                # even though there are dozens of fresh recs. Fixed
+                # 2026-05-24 after SEO opp recs (ctr-fix, schema-
+                # incomplete, etc.) sat undispatched for hours.
+                run_keys: list[str] = []
+                try:
+                    aid_idx = s.read_json(f"agents/{aid}/run-index.json") or {}
+                    recent = aid_idx.get("recent") if isinstance(aid_idx, dict) else None
+                    if recent:
+                        for entry in recent:
+                            if entry.get("status") != "success":
+                                continue
+                            rts = entry.get("run_ts")
+                            if not rts:
+                                continue
+                            rk = f"agents/{aid}/runs/{rts}/recommendations.json"
+                            if s.exists(rk):
+                                run_keys.append(rk)
+                except Exception:
+                    pass
+                if not run_keys:
+                    # Legacy fallback (older agents without a run-index).
+                    run_keys = sorted(
+                        [k for k in (s.list_prefix(f"agents/{aid}/runs/") or [])
+                         if k.endswith("/recommendations.json")],
+                        key=_extract_ts,
+                        reverse=True,
+                    )
             except Exception as e:
                 self.decide("error", f"list runs failed for {aid}: {e}")
                 continue
@@ -772,6 +802,37 @@ class BacklogDispatcher(AgentBase):
                             rt = r.get("type") or r.get("rec_type") or ""
                             _, handler = handler_for(rt)
                             if handler not in allow_list and "*" not in allow_list:
+                                continue
+                    except Exception:
+                        pass
+
+                    # ── Dispatch-kind allowlist (2026-05-24) ──────────
+                    # Operator-pause for non-authoring work. When the
+                    # config restricts dispatch_kinds (e.g. to just
+                    # `article-author`, `news-author`, `news-rewrite`),
+                    # SEO / PI / catalog-audit recs are held in the
+                    # queue — not dispatched — until the operator
+                    # removes the restriction. Used when the operator
+                    # is manually editing the site repo and doesn't
+                    # want the implementer to interleave changes. See
+                    # CLAUDE.md "Dispatch-kind pause" section.
+                    try:
+                        dk_cfg = s.read_json("config/implementer-allowed-dispatch-kinds.json") or {}
+                        dk_allow = dk_cfg.get("allow")
+                        if isinstance(dk_allow, list) and "*" not in dk_allow:
+                            # Derive dispatch_kind from the rec type the
+                            # same way agent_kind() does.
+                            agent_kind = "general"
+                            if "seo-opportunity" in aid: agent_kind = "seo"
+                            elif "progressive-improvement" in aid: agent_kind = "pi"
+                            elif "article-author" in aid: agent_kind = "article-author"
+                            elif "catalog-audit" in aid: agent_kind = "catalog-audit"
+                            elif "comp-research" in aid or "competitor-research" in aid: agent_kind = "comp-research"
+                            elif "news-author" in aid or "news-writer" in aid: agent_kind = "news-author"
+                            elif "h2h" in aid or "head-to-head" in aid: agent_kind = "h2h"
+                            # Also check rec.dispatch_kind override
+                            rec_dk = r.get("dispatch_kind") or agent_kind
+                            if rec_dk not in dk_allow:
                                 continue
                     except Exception:
                         pass
