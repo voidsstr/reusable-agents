@@ -294,20 +294,54 @@ class PoolProfile(BaseModel):
     last_used_at: str = ""
     label: str = ""
     state: str
-    limit_resets_at: str = ""
+    # Per-model rate-limit reset times — dict keyed by model family
+    # (opus / sonnet / haiku). Empty when no model is currently limited.
+    # 2026-06-10: was typed as str (lossy) — actual shape from state.json
+    # is dict[str, iso_timestamp]; fixed so the UI can render per-model
+    # status.
+    limit_resets_at: dict = {}
+    # Computed at response time: per-model seconds until reset (negative
+    # = already passed). Lets the UI render "opus reopens in 12m" without
+    # parsing ISO strings on the client.
+    limit_seconds_until_reset: dict = {}
+    # Set to True iff EVERY model the profile cares about is OPEN now.
+    has_capacity_now: bool = False
     limit_last_message: str = ""
 
 
 @router.get("/claude-pool/profiles", response_model=list[PoolProfile])
 def list_pool_profiles():
-    """List all Claude Max pool profiles with live auth + rate-limit status."""
+    """List all Claude Max pool profiles with live auth + rate-limit
+    status. State is read fresh on every call (no cache) so the operator
+    sees the current truth, not a snapshot. Used by the /llms dashboard
+    page to render a live capacity table on mount + every 30s thereafter.
+    """
+    from datetime import datetime, timezone
     state = _read_pool_state()
+    now = datetime.now(timezone.utc)
     profiles = []
-    for k in sorted(k for k in state.keys() if not k.startswith("__")):
+    keys = [k for k in state.keys() if not k.startswith("__")]
+    keys.sort(key=lambda x: (int(x.split('-')[1]) if x.startswith('profile-') and x.split('-')[1].isdigit() else 999, x))
+    for k in keys:
         p = state[k]
         if not isinstance(p, dict):
             continue
         authenticated = _profile_is_authenticated(p.get("home", ""))
+        raw_resets = p.get("limit_resets_at") or {}
+        if not isinstance(raw_resets, dict):
+            raw_resets = {}
+        # Compute seconds-until-reset per model, plus has_capacity_now.
+        seconds_until: dict = {}
+        any_blocked = False
+        for model_family, iso_ts in raw_resets.items():
+            try:
+                t = datetime.fromisoformat(str(iso_ts))
+                delta = int((t - now).total_seconds())
+                seconds_until[model_family] = delta
+                if delta > 0:
+                    any_blocked = True
+            except Exception:
+                seconds_until[model_family] = -1  # unparseable → assume passed
         profiles.append(PoolProfile(
             id=p.get("id", k),
             home=p.get("home", ""),
@@ -317,7 +351,9 @@ def list_pool_profiles():
             last_used_at=p.get("last_used_at", ""),
             label=p.get("label", ""),
             state=_profile_state_str(p, authenticated),
-            limit_resets_at=p.get("limit_resets_at") or "",
+            limit_resets_at=raw_resets,
+            limit_seconds_until_reset=seconds_until,
+            has_capacity_now=authenticated and not any_blocked,
             limit_last_message=(p.get("limit_last_message") or "")[:200],
         ))
     return profiles

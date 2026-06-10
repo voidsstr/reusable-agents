@@ -239,6 +239,24 @@ export const api = {
 
   llmUsageRefresh: () => http<unknown>('/api/llm/usage/refresh', { method: 'POST' }),
 
+  // Live Claude Max pool profile status — read from
+  // ~/.reusable-agents/claude-pool/state.json on each request. Used by
+  // the /llms page to show capacity per profile + per-model reset times.
+  claudePoolProfiles: () => http<{
+    id: string
+    home: string
+    authenticated: boolean
+    in_use: number
+    total_uses: number
+    last_used_at: string
+    label: string
+    state: string
+    limit_resets_at: Record<string, string>            // {opus: iso_ts, sonnet: iso_ts, ...}
+    limit_seconds_until_reset: Record<string, number>  // negative = passed
+    has_capacity_now: boolean
+    limit_last_message: string
+  }[]>('/api/providers/claude-pool/profiles'),
+
   // implementer dispatch queue
   implementerQueue: (limit = 20) => http<{
     pending: { agent_id: string; request_id?: string; site?: string; from_run?: string; rec_ids?: string[]; action?: string; ts?: string; _key?: string }[];

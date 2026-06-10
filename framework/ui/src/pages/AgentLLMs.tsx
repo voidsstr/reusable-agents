@@ -498,6 +498,7 @@ export default function AgentLLMs() {
         </div>
       )}
 
+      <PoolStatusSection />
       <UsageSection />
     </div>
   )
@@ -583,6 +584,152 @@ function Sparkline({ values, width = 280, height = 50, color = '#4f46e5' }: {
         return <circle key={i} cx={x} cy={y} r={1.6} fill={color} opacity={i === values.length - 1 ? 1 : 0.5} />
       })}
     </svg>
+  )
+}
+
+// ── Live Claude Max pool status ──────────────────────────────────────────
+// Reads /api/providers/claude-pool/profiles on mount + every 30s. Reads
+// straight off state.json so the operator sees current truth, not
+// cached state. Color-codes per-profile capacity per model so a glance
+// answers "do we have opus to ship articles right now?".
+
+type PoolProfileLive = {
+  id: string
+  home: string
+  authenticated: boolean
+  in_use: number
+  total_uses: number
+  last_used_at: string
+  label: string
+  state: string
+  limit_resets_at: Record<string, string>
+  limit_seconds_until_reset: Record<string, number>
+  has_capacity_now: boolean
+  limit_last_message: string
+}
+
+function PoolStatusSection() {
+  const [profiles, setProfiles] = useState<PoolProfileLive[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState('')
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null)
+
+  const load = async () => {
+    try {
+      const d = await api.claudePoolProfiles()
+      setProfiles(d)
+      setFetchedAt(new Date())
+      setErr('')
+    } catch (e: any) {
+      setErr(e?.message || String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 30_000)   // refresh every 30s
+    return () => clearInterval(t)
+  }, [])
+
+  if (loading) return <div className="mt-6 text-ink-500">Loading pool status…</div>
+  if (err) return <div className="mt-6 text-status-failure-fg">Pool status unavailable: {err}</div>
+
+  const authedWithCapacity = profiles.filter(p => p.authenticated && p.has_capacity_now).length
+  const authedTotal = profiles.filter(p => p.authenticated).length
+
+  // Distinct model families across all profiles, ordered: opus, sonnet, haiku
+  const allModels = new Set<string>()
+  profiles.forEach(p => Object.keys(p.limit_resets_at || {}).forEach(m => allModels.add(m)))
+  const modelOrder = ['opus', 'sonnet', 'haiku']
+  const models = [
+    ...modelOrder.filter(m => allModels.has(m)),
+    ...[...allModels].filter(m => !modelOrder.includes(m)).sort(),
+  ]
+  if (models.length === 0) models.push('opus', 'sonnet', 'haiku')
+
+  const fmtRemain = (secs: number): { text: string; tone: 'open' | 'soon' | 'blocked' } => {
+    if (secs <= 0) return { text: 'OPEN', tone: 'open' }
+    if (secs < 900) return { text: `~${Math.ceil(secs / 60)}m`, tone: 'soon' }       // <15 min
+    if (secs < 3600) return { text: `${Math.ceil(secs / 60)}m`, tone: 'blocked' }     // <1h
+    if (secs < 86400) return { text: `${Math.floor(secs / 3600)}h`, tone: 'blocked' } // <1d
+    return { text: `${Math.floor(secs / 86400)}d`, tone: 'blocked' }
+  }
+  const cellTone: Record<'open' | 'soon' | 'blocked', string> = {
+    open:    'bg-green-50 text-green-800 border-green-200',
+    soon:    'bg-amber-50 text-amber-800 border-amber-200',
+    blocked: 'bg-red-50  text-red-800   border-red-200',
+  }
+
+  return (
+    <div className="mt-12">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h2 className="text-lg font-semibold text-ink-900">Claude Max Pool — Live</h2>
+          <p className="text-xs text-ink-500 mt-0.5">
+            {authedWithCapacity} of {authedTotal} authenticated profile{authedTotal === 1 ? '' : 's'} with capacity now
+            {fetchedAt ? ` · refreshed ${fetchedAt.toLocaleTimeString()} (auto every 30s)` : ''}
+          </p>
+        </div>
+        <button onClick={load}
+                className="px-3 py-1 bg-surface-subtle hover:bg-ink-200 rounded text-xs"
+                title="Refresh now">Refresh</button>
+      </div>
+      <div className="bg-surface rounded-lg border border-surface-divider overflow-hidden mb-8">
+        <table className="w-full text-sm">
+          <thead className="bg-surface-subtle text-[11px] uppercase tracking-wide text-ink-500">
+            <tr>
+              <th className="px-3 py-2 text-left">Profile</th>
+              <th className="px-3 py-2 text-left">Account</th>
+              <th className="px-3 py-2 text-center">Auth</th>
+              {models.map(m => (
+                <th key={m} className="px-3 py-2 text-center">{m}</th>
+              ))}
+              <th className="px-3 py-2 text-right">In use</th>
+              <th className="px-3 py-2 text-right">Total uses</th>
+              <th className="px-3 py-2 text-left">Last used</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profiles.map(p => (
+              <tr key={p.id} className="border-t border-surface-divider hover:bg-surface-subtle/40">
+                <td className="px-3 py-2 font-mono text-xs text-ink-900">{p.id}</td>
+                <td className="px-3 py-2 text-xs text-ink-700">{p.label || <span className="text-ink-400 italic">(no label)</span>}</td>
+                <td className="px-3 py-2 text-center">
+                  {p.authenticated
+                    ? <span className="px-1.5 py-0.5 bg-green-50 text-green-800 rounded text-[10px]">yes</span>
+                    : <span className="px-1.5 py-0.5 bg-ink-100 text-ink-500 rounded text-[10px]">no</span>}
+                </td>
+                {models.map(m => {
+                  const secs = p.limit_seconds_until_reset?.[m]
+                  if (secs === undefined) {
+                    // No record for this model → OPEN if authenticated, else "—"
+                    return p.authenticated
+                      ? <td key={m} className="px-3 py-2 text-center">
+                          <span className={`px-1.5 py-0.5 border rounded text-[10px] ${cellTone.open}`}>OPEN</span>
+                        </td>
+                      : <td key={m} className="px-3 py-2 text-center text-ink-300">—</td>
+                  }
+                  const r = fmtRemain(secs)
+                  return (
+                    <td key={m} className="px-3 py-2 text-center">
+                      <span className={`px-1.5 py-0.5 border rounded text-[10px] ${cellTone[r.tone]}`}
+                            title={p.limit_resets_at?.[m] || ''}>{r.text}</span>
+                    </td>
+                  )
+                })}
+                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{p.in_use}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-ink-500">{p.total_uses.toLocaleString()}</td>
+                <td className="px-3 py-2 text-xs text-ink-500">
+                  {p.last_used_at ? new Date(p.last_used_at).toLocaleString() : <span className="text-ink-300">never</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   )
 }
 
