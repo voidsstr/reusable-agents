@@ -403,6 +403,20 @@ Dashboard URL: https://agents.happysky-24190067.eastus.azurecontainerapps.io
 - **Triggering on a saturated pool** — check `claude-pool/state.json`
   first. If 0 profiles have opus headroom + you trigger article-proposal,
   you've burned a dispatch slot for nothing (it defers).
+- **Assuming rename is complete by checking code only** — operator-side
+  config in storage (`config/ai-defaults.json` agent_overrides,
+  `config/priority-config.json` agent patterns,
+  `config/required-models.json` by_agent_id) is keyed by agent_id strings
+  that DON'T move when you rename a directory. After any agent rename:
+  walk every `config/*.json` in Azure storage, find old agent-id
+  references, rename in-place. (2026-06-10: the article-author →
+  article-proposal rename missed this for 1 day, sonnet kept getting
+  picked because the override didn't match the new id.)
+- **Trusting `ai_client().chat()` defaults** — `_ClaudeCliClient` defaults
+  `max_turns=1` (one-shot). Long-form prompts (article-proposal, h2h
+  generation) MUST pass `max_turns=N` AND `timeout=N` explicitly or
+  Claude returns empty after 1 turn and the agent dies "empty output".
+  Use site.yaml `claude.max_turns` + `claude.per_call_timeout_s` values.
 
 ## Operator-facing summary at the end
 
