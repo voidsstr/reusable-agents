@@ -1663,6 +1663,149 @@ EOF
                         # Record so the dashboard / retro agent can spot it.
                         echo "{\"ts\":\"$(date -Iseconds)\",\"agent\":\"implementer\",\"run\":\"${RESPONDER_RUN_TS}\",\"backend\":\"${CE_WINNER:-?}\",\"lines\":${_shape_lines},\"cap\":${_shape_cap}}" >> "$RESPONDER_RUN_DIR/_big_commits.jsonl" 2>/dev/null || true
                     fi
+                    # ─── Build-syntax gate (2026-06-14) ────────────────────────
+                    # The implementer shipped 4 build-breaking edits in 7 days
+                    # (KitchenComparePage, RecipesPage, HowItWorks, BlogPage
+                    # all broke client hydration with missing-import errors;
+                    # commit e2de6e8 broke server startup with template-
+                    # literal-killing backticks in SQL comments). Every one
+                    # would have been caught by a 30-second build check
+                    # before commit. Gate added: any staged frontend
+                    # .tsx/.ts triggers `npm run build` in frontend/; any
+                    # staged src/*.ts triggers an esbuild parse check. On
+                    # failure, revert the staged files, write
+                    # _build_failed.json, and email the operator. Skip the
+                    # gate when IMPLEMENTER_SKIP_BUILD_GATE=1 (escape hatch).
+                    _build_gate_skip="${IMPLEMENTER_SKIP_BUILD_GATE:-0}"
+                    _build_alert_email="${IMPLEMENTER_BUILD_ALERT_EMAIL:-mperry@northernsoftwareconsulting.com}"
+                    _build_alert_account="${IMPLEMENTER_BUILD_ALERT_MSMTP_ACCOUNT:-automation}"
+                    _build_gate_failed=0
+                    if [ "$_build_gate_skip" = "1" ]; then
+                        echo "[implementer] build-gate: SKIPPED (IMPLEMENTER_SKIP_BUILD_GATE=1)" >&2
+                    elif [ ! -d "$IMPLEMENTER_REPO_PATH" ]; then
+                        echo "[implementer] build-gate: SKIPPED (no IMPLEMENTER_REPO_PATH)" >&2
+                    else
+                        _has_frontend=0
+                        _has_backend_ts=0
+                        while IFS= read -r f; do
+                            [ -z "$f" ] && continue
+                            case "$f" in
+                                frontend/src/*) _has_frontend=1 ;;
+                                src/*.ts)       _has_backend_ts=1 ;;
+                            esac
+                        done < "$CE_NEW_FILES"
+
+                        _build_gate_log="$(mktemp /tmp/implementer-build-gate-XXXXXX.log)"
+
+                        # Frontend gate — `npm run build` is canonical
+                        # because Vite + esbuild + the TypeScript JSX parser
+                        # all run, which catches missing imports, unclosed
+                        # JSX tags, and syntax errors (the full class of
+                        # bugs we've seen).
+                        if [ "$_has_frontend" = "1" ] && [ -f "$IMPLEMENTER_REPO_PATH/frontend/package.json" ]; then
+                            echo "[implementer] build-gate: frontend touched — running 'npm run build' in frontend/" >&2
+                            ( cd "$IMPLEMENTER_REPO_PATH/frontend" && timeout 300 npm run build ) > "$_build_gate_log" 2>&1
+                            _rc=$?
+                            if [ "$_rc" -ne 0 ]; then
+                                _build_gate_failed=1
+                                echo "[implementer] build-gate: FRONTEND BUILD FAILED (rc=$_rc) — see $_build_gate_log" >&2
+                                tail -25 "$_build_gate_log" >&2
+                            fi
+                        fi
+
+                        # Backend gate — esbuild parse check is ~10x faster
+                        # than `tsc --noEmit` for a parse-only pass and
+                        # matches the runtime parser (ts-node
+                        # --transpile-only on prod, which is what crashed
+                        # June 12 on the SQL-backtick bug).
+                        if [ "$_build_gate_failed" = "0" ] && [ "$_has_backend_ts" = "1" ]; then
+                            echo "[implementer] build-gate: backend src/*.ts touched — running esbuild parse check" >&2
+                            while IFS= read -r f; do
+                                [ -z "$f" ] && continue
+                                case "$f" in src/*.ts)
+                                    ( cd "$IMPLEMENTER_REPO_PATH" && timeout 60 npx -y esbuild --bundle=false --outfile=/dev/null --platform=node --target=node18 --log-limit=5 "$f" ) >> "$_build_gate_log" 2>&1
+                                    _rc=$?
+                                    if [ "$_rc" -ne 0 ]; then
+                                        _build_gate_failed=1
+                                        echo "[implementer] build-gate: BACKEND PARSE FAILED on $f (rc=$_rc)" >&2
+                                        tail -25 "$_build_gate_log" >&2
+                                        break
+                                    fi
+                                ;; esac
+                            done < "$CE_NEW_FILES"
+                        fi
+
+                        if [ "$_build_gate_failed" = "1" ]; then
+                            # Revert every staged file so the working tree
+                            # is clean for the next rec; the dispatcher will
+                            # requeue this one with the build error context.
+                            while IFS= read -r f; do
+                                [ -n "$f" ] && [ -e "$f" ] && git checkout -- "$f" 2>/dev/null || true
+                            done < "$CE_NEW_FILES"
+                            _failed_files=$(tr '\n' ' ' < "$CE_NEW_FILES" | sed 's/  */ /g')
+                            cat > "$RESPONDER_RUN_DIR/_build_failed.json" <<BUILDFAIL_EOF
+{"ts": "$(date -Iseconds)",
+ "agent_id": "${RESPONDER_AGENT_ID:-?}",
+ "source_agent": "${SOURCE_AGENT_ID_FROM_RECS:-?}",
+ "run_ts": "${RESPONDER_RUN_TS:-?}",
+ "rec_ids": "${RESPONDER_REC_IDS#,}",
+ "backend": "${CE_WINNER:-?}",
+ "staged_files": "${_failed_files}",
+ "log_path": "${_build_gate_log}"}
+BUILDFAIL_EOF
+                            # Email the operator. Best-effort — never block
+                            # the implementer on a mail failure.
+                            if command -v msmtp >/dev/null 2>&1 && [ -n "$_build_alert_email" ]; then
+                                _from_addr="automation@northernsoftwareconsulting.com"
+                                _subj="[implementer] BUILD FAILED — ${SOURCE_AGENT_ID_FROM_RECS:-?} ${RESPONDER_REC_IDS#,}"
+                                _tail=$(tail -40 "$_build_gate_log" 2>/dev/null | head -c 4000)
+                                _eml=$(mktemp /tmp/implementer-build-alert-XXXXXX.eml)
+                                {
+                                    echo "From: AislePrompt Implementer <${_from_addr}>"
+                                    echo "To: ${_build_alert_email}"
+                                    echo "Subject: ${_subj}"
+                                    echo "MIME-Version: 1.0"
+                                    echo "Content-Type: text/plain; charset=utf-8"
+                                    echo ""
+                                    echo "The implementer build-syntax gate rejected an edit because"
+                                    echo "the resulting code would not build."
+                                    echo ""
+                                    echo "Source agent : ${SOURCE_AGENT_ID_FROM_RECS:-?}"
+                                    echo "Run          : ${RESPONDER_RUN_TS:-?}"
+                                    echo "Recs         : ${RESPONDER_REC_IDS#,}"
+                                    echo "Backend      : ${CE_WINNER:-?}"
+                                    echo "Staged files : ${_failed_files}"
+                                    echo "Action       : Files reverted, NO commit. Rec returns to queue."
+                                    echo ""
+                                    echo "Log tail:"
+                                    echo "---"
+                                    echo "${_tail}"
+                                    echo "---"
+                                    echo ""
+                                    echo "Full log: ${_build_gate_log} (on dev box)"
+                                    echo ""
+                                    echo "If builds keep failing, check the source agent's prompt for"
+                                    echo "a regression. Disable this gate temporarily with"
+                                    echo "IMPLEMENTER_SKIP_BUILD_GATE=1."
+                                } > "$_eml"
+                                msmtp -a "$_build_alert_account" "$_build_alert_email" < "$_eml" \
+                                    && echo "[implementer] build-gate: alert email sent to $_build_alert_email" >&2 \
+                                    || echo "[implementer] build-gate: WARN msmtp returned non-zero (alert NOT sent)" >&2
+                                rm -f "$_eml"
+                            else
+                                echo "[implementer] build-gate: WARN msmtp not available — skipping email alert" >&2
+                            fi
+                            echo "[implementer] build-gate: rec deferred, files reverted, NOT committing" >&2
+                            CE_NEW_COUNT=0
+                            cat > "$RESPONDER_RUN_DIR/_ship_status.json" <<SHIPSTATUS_EOF
+{"shipped": 0, "deferred": $(echo "$RESPONDER_REC_IDS" | tr ',' '\n' | grep -cv '^[[:space:]]*$'), "reason": "build_gate_failed", "rc": 87, "sha": "$(git rev-parse --short HEAD 2>/dev/null || echo '?')", "files": 0, "backend": "${CE_WINNER:-?}", "build_log": "${_build_gate_log}"}
+SHIPSTATUS_EOF
+                        else
+                            echo "[implementer] build-gate: passed (frontend=${_has_frontend} backend_ts=${_has_backend_ts})" >&2
+                            rm -f "$_build_gate_log"
+                        fi
+                    fi
+                    if [ "$_build_gate_failed" = "0" ] && [ "$CE_NEW_COUNT" -gt 0 ]; then
                     git commit -m "implementer (${CE_WINNER:-fallback}): apply ${RESPONDER_REC_IDS#,} for ${RESPONDER_AGENT_ID:-?}/${RESPONDER_RUN_TS:-?}
 
 Recs: $RESPONDER_REC_IDS
@@ -1671,7 +1814,8 @@ Run: $RESPONDER_RUN_TS
 Backend: ${CE_WINNER:-fallback}
 Mode: framework-code-editor (claude-pool rate-limited)
 Files staged: $CE_NEW_COUNT (set-diff of post-edit vs pre-edit)" 2>&1 | head -5
-                    fi  # close: if CE_NEW_COUNT > 0 after scope-revert
+                    fi  # close: if build_gate_failed=0 && CE_NEW_COUNT > 0 (commit guard added 2026-06-14)
+                    fi  # close: outer if CE_NEW_COUNT > 0 after scope-revert
                     set -e
                     SHA=$(git rev-parse --short HEAD 2>/dev/null || echo '?')
                     echo "[implementer] code-editor commit: SHA=$SHA, files=$CE_NEW_COUNT, backend=${CE_WINNER:-?}" >&2
