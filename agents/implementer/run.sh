@@ -1678,7 +1678,14 @@ EOF
                     # gate when IMPLEMENTER_SKIP_BUILD_GATE=1 (escape hatch).
                     _build_gate_skip="${IMPLEMENTER_SKIP_BUILD_GATE:-0}"
                     _build_alert_email="${IMPLEMENTER_BUILD_ALERT_EMAIL:-mperry@northernsoftwareconsulting.com}"
-                    _build_alert_account="${IMPLEMENTER_BUILD_ALERT_MSMTP_ACCOUNT:-automation}"
+                    # Default to the `augusto` msmtp account — it uses a static
+                    # Gmail app password (~/.mail/.app-password-augusto) and is
+                    # the same account the catalog-quality-audit cron uses.
+                    # The `automation` account's OAuth refresh token state was
+                    # found empty on 2026-06-14 (mint-token.py throws on empty
+                    # JSON); fall back to `augusto` until that's repaired.
+                    _build_alert_account="${IMPLEMENTER_BUILD_ALERT_MSMTP_ACCOUNT:-augusto}"
+                    _build_alert_from="${IMPLEMENTER_BUILD_ALERT_FROM:-mperry@augustodigital.com}"
                     _build_gate_failed=0
                     if [ "$_build_gate_skip" = "1" ]; then
                         echo "[implementer] build-gate: SKIPPED (IMPLEMENTER_SKIP_BUILD_GATE=1)" >&2
@@ -1756,7 +1763,7 @@ BUILDFAIL_EOF
                             # Email the operator. Best-effort — never block
                             # the implementer on a mail failure.
                             if command -v msmtp >/dev/null 2>&1 && [ -n "$_build_alert_email" ]; then
-                                _from_addr="automation@northernsoftwareconsulting.com"
+                                _from_addr="${_build_alert_from}"
                                 _subj="[implementer] BUILD FAILED — ${SOURCE_AGENT_ID_FROM_RECS:-?} ${RESPONDER_REC_IDS#,}"
                                 _tail=$(tail -40 "$_build_gate_log" 2>/dev/null | head -c 4000)
                                 _eml=$(mktemp /tmp/implementer-build-alert-XXXXXX.eml)
