@@ -1,0 +1,109 @@
+"""Editorial-metadata leak guard for the article-author pipeline.
+
+The article-author LLM is given the proposal as context (bucket id,
+why_now rationale, trending-signal scores, internal anchor notes). When
+the model is sloppy it copies that internal prompt metadata verbatim
+into the published `subtitle` (and occasionally the lede of `body_md`),
+exposing terms like "Bucket-12", "trending rows (score 70, …)",
+"canonical buying-guide slot the site lacks", or mid-word truncations
+that prove the brief was pasted in.
+
+A 2026-06-15 progressive-improvement-agent audit flagged 4 such leaks
+(rec-001..rec-004 of that run). All four had clean body_md prose; the
+leak lived entirely in `subtitle`, which the SSR renders into the page
+lede and uses as a meta-description fallback.
+
+This module provides:
+
+  - `LEAK_PATTERNS` — the regex catalog of known internal-prompt phrases
+    that must never appear in editor-facing fields.
+  - `scrub(text) -> (clean, was_leak)` — returns "" + True when `text`
+    matches any leak pattern OR looks like a mid-word truncation; else
+    returns the input unchanged.
+  - `body_lede_is_leaky(body_md) -> bool` — defense-in-depth check on
+    the first 600 chars of body_md.
+
+The implementer's article-insert wrapper calls `scrub()` on
+`user_meta["subtitle"]` + `user_meta["excerpt"]` and refuses to ship
+the row's metadata if a leak is detected. Bodies that fail
+`body_lede_is_leaky` are deferred entirely (no INSERT, re-queued).
+"""
+from __future__ import annotations
+
+import re
+
+LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        # Internal taxonomy ids
+        r"\bBucket-\d+\b",
+        # Editorial scheduling / signal vocabulary
+        r"vertical rotates",
+        r"news beat this week\b",
+        r"makers? news brief",
+        r"buyer angle\s*[—–-]",
+        r"trending rows?\s*\(score\b",
+        r"\(score \d+,\s*['\"]",
+        r"Google-?autocomplete trending",
+        r"autocomplete (?:seed |trending )",
+        # Strategy/gap language that belongs in the proposal, not the article
+        r"fresh angle no recent article covers",
+        r"canonical buying-guide slot",
+        r"slot the site lacks",
+        r"anchors? to the featured",
+        r"holiday-evergreen .* demand",
+        # Cross-domain leak: internal infra hostname that must not be cited
+        r"\bretropcfleet\.com\b",
+    )
+)
+
+
+def _looks_truncated_midword(text: str) -> bool:
+    """True when `text` ends mid-word without sentence punctuation.
+
+    The article-author finalizer chops subtitle/excerpt to a length
+    cap; if the LLM put a long rationale block in, the cap lands inside
+    a word, leaving a fragment like "Holiday-evergreen nostalgia
+    demand is high-inten". That truncation is a definitive sign the
+    field carries prompt metadata rather than editorial prose.
+
+    Conservative — only flags strings ≥120 chars that end in a letter
+    sequence with no terminal `.`, `!`, `?`, or `)` in the last 30
+    chars. Editorial subtitles always end punctuated.
+    """
+    s = (text or "").strip()
+    if len(s) < 120:
+        return False
+    tail = s[-30:]
+    if any(c in tail for c in ".!?)"):
+        return False
+    last_token = s.split()[-1] if s.split() else ""
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z-]+", last_token))
+
+
+def is_leaky(text: str) -> bool:
+    """True if `text` contains any known leak pattern or looks truncated."""
+    if not text:
+        return False
+    if _looks_truncated_midword(text):
+        return True
+    return any(p.search(text) for p in LEAK_PATTERNS)
+
+
+def scrub(text: str) -> tuple[str, bool]:
+    """Return ("", True) when leak detected; else (text, False)."""
+    if is_leaky(text or ""):
+        return "", True
+    return (text or ""), False
+
+
+def body_lede_is_leaky(body_md: str, *, window: int = 600) -> bool:
+    """Run the same leak check against the first `window` chars of body_md.
+
+    The article body is the primary editorial surface — a leaked phrase
+    there is worse than in subtitle (SSR renders it in the article's
+    main column, indexed verbatim by Googlebot). Defense in depth:
+    the wrapper SHOULD reject the INSERT entirely when this returns
+    True, even if subtitle/excerpt look fine.
+    """
+    head = (body_md or "")[:window]
+    return is_leaky(head)

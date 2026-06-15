@@ -2161,6 +2161,37 @@ for rid, body_p, meta_p in pairs:
             print(f"[article-insert] {rid}: link-guard error: {_le} (continuing)",
                   file=sys.stderr)
 
+        # ── EDITORIAL-METADATA LEAK GUARD ───────────────────────────
+        # The article-author LLM is fed the proposal as context
+        # (Bucket-N, why_now, trending-signal scores, anchor notes).
+        # When it's sloppy it pastes that internal metadata into the
+        # subtitle / excerpt — or worse, into the body lede — and the
+        # leaked phrases ship to readers and Googlebot. See
+        # `framework/core/article_metadata_guard.py` for the regex
+        # catalog (Bucket-\d+, trending rows (score, fresh angle no
+        # recent article covers, canonical buying-guide slot, etc.).
+        # A leaky body is fatal (refuse INSERT); a leaky subtitle /
+        # excerpt is scrubbed to "" (SSR falls back to title +
+        # body-derived meta) and the row still ships.
+        try:
+            from framework.core.article_metadata_guard import (
+                body_lede_is_leaky,
+            )
+            if body_lede_is_leaky(body_md):
+                errors.append((rid,
+                    "METADATA-LEAK GUARD: body_md lede matches an "
+                    "internal prompt-metadata pattern (Bucket-N, "
+                    "trending rows, brief fragment) — refusing INSERT; "
+                    "re-queue for re-write"))
+                print(f"[article-insert] {rid}: ✗ METADATA-LEAK in body — SKIP",
+                      file=sys.stderr)
+                continue
+        except ImportError:
+            pass  # primitive not available in this checkout
+        except Exception as _me:
+            print(f"[article-insert] {rid}: metadata-guard error: {_me} (continuing)",
+                  file=sys.stderr)
+
         # ── INTEGRITY CHECK: body H1 must match proposal title ──────
         # Defends against the cross-run rec_id collision class that
         # shipped 4 mismatched specpicks articles (wrong body content
@@ -2215,11 +2246,32 @@ for rid, body_p, meta_p in pairs:
         if not proposal.get("slug"):
             errors.append((rid, "no proposal.slug — wrong dispatch type?"))
             continue
+        # Scrub leaked internal prompt metadata out of LLM-written
+        # subtitle/excerpt before they reach the DB. See
+        # `framework/core/article_metadata_guard.py`. A leaked field
+        # is replaced with "" so SSR falls back to title + body-derived
+        # meta — losing the field is preferable to publishing the
+        # internal Bucket-N / trending-rows / "slot the site lacks"
+        # fragments visible to every reader and crawler.
+        _raw_subtitle = user_meta.get("subtitle") or ""
+        _raw_excerpt  = user_meta.get("excerpt")  or ""
+        try:
+            from framework.core.article_metadata_guard import scrub as _scrub_meta
+            _clean_sub, _sub_leaked = _scrub_meta(_raw_subtitle)
+            _clean_exc, _exc_leaked = _scrub_meta(_raw_excerpt)
+            if _sub_leaked:
+                print(f"[article-insert] {rid}: METADATA-LEAK subtitle scrubbed "
+                      f"(was {_raw_subtitle[:80]!r})", file=sys.stderr)
+            if _exc_leaked:
+                print(f"[article-insert] {rid}: METADATA-LEAK excerpt scrubbed "
+                      f"(was {_raw_excerpt[:80]!r})", file=sys.stderr)
+        except ImportError:
+            _clean_sub, _clean_exc = _raw_subtitle, _raw_excerpt
         meta = {
             "slug":  proposal["slug"],
             "title": proposal.get("title") or proposal["slug"],
-            "subtitle": user_meta.get("subtitle") or "",
-            "excerpt":  user_meta.get("excerpt") or "",
+            "subtitle": _clean_sub,
+            "excerpt":  _clean_exc,
             "category": proposal.get("bucket") or proposal.get("category") or "",
             "tags":     proposal.get("tags") or [],
             "primary_keyword": proposal.get("primary_keyword") or "",

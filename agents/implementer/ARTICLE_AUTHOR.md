@@ -342,6 +342,17 @@ is built) in the same rec.
 | `published_at` / `written_at` | `now()` | dateModified ≥30% |
 
 **Hard constraints, repeated for emphasis:**
+- `subtitle` and `excerpt` are EDITORIAL prose — a 1-sentence reader hook
+  (subtitle) and a 145-160-char SERP summary (excerpt). They are NOT
+  scratchpads for the proposal's `why_now`, `rationale`, `bucket`, or
+  trending-signal notes. Phrases like `Bucket-12`, `trending rows
+  (score 70, ...)`, `vertical rotates`, `news beat this week`,
+  `canonical buying-guide slot the site lacks`, `Anchors to the
+  featured`, and `Holiday-evergreen ... demand` are internal prompt
+  metadata — leaking them ships your scaffolding to every reader and
+  crawler. The finalizer (`article_metadata_guard.scrub`) will silently
+  blank any subtitle/excerpt that matches these patterns; a leaked
+  body lede causes the entire INSERT to be REFUSED.
 - `excerpt` MUST be a hand-written 145-160-char summary, **NOT** the
   title verbatim. The 4-30 mediterranean-meal-plan article had
   `excerpt = title` and lost every SERP comparison vs longer competitors.
