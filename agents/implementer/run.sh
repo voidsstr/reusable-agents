@@ -2176,6 +2176,7 @@ for rid, body_p, meta_p in pairs:
         try:
             from framework.core.article_metadata_guard import (
                 body_lede_is_leaky,
+                has_leaky_heading,
             )
             if body_lede_is_leaky(body_md):
                 errors.append((rid,
@@ -2184,6 +2185,17 @@ for rid, body_p, meta_p in pairs:
                     "trending rows, brief fragment) — refusing INSERT; "
                     "re-queue for re-write"))
                 print(f"[article-insert] {rid}: ✗ METADATA-LEAK in body — SKIP",
+                      file=sys.stderr)
+                continue
+            _leaky_heading = has_leaky_heading(body_md)
+            if _leaky_heading:
+                errors.append((rid,
+                    f"OUTLINE-LEAK GUARD: body_md has a heading that "
+                    f"begins with an outline-label prefix "
+                    f"({_leaky_heading!r}) — refusing INSERT; "
+                    f"re-queue for re-write with prose headings"))
+                print(f"[article-insert] {rid}: ✗ OUTLINE-LEAK "
+                      f"heading={_leaky_heading!r} — SKIP",
                       file=sys.stderr)
                 continue
         except ImportError:

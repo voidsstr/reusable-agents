@@ -32,6 +32,21 @@ from __future__ import annotations
 
 import re
 
+HEADING_LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        # Outline / brief-label prefixes that must never survive as an
+        # H2/H3 heading in a shipped article. Flagged by
+        # progressive-improvement-agent 2026-06-30 rec-001 after
+        # "## Editorial intro: split the front-end from the GPU box…"
+        # leaked to production on
+        # /reviews/open-webui-raspberry-pi-4-rtx-3060-self-hosted-2026.
+        r"^Editorial intro\b",
+        r"^\d+w editorial\b",
+        r"^\d-column\b",
+        r"^Pick \| Best For\b",
+    )
+)
+
 LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
     re.compile(p, re.IGNORECASE) for p in (
         # Internal taxonomy ids
@@ -107,3 +122,25 @@ def body_lede_is_leaky(body_md: str, *, window: int = 600) -> bool:
     """
     head = (body_md or "")[:window]
     return is_leaky(head)
+
+
+_HEADING_RE = re.compile(r"^#{2,4}\s+(.+?)\s*$", re.MULTILINE)
+
+
+def has_leaky_heading(body_md: str) -> str | None:
+    """Return the offending heading text when body_md ships an H2/H3/H4
+    that begins with a known outline-label prefix ("Editorial intro:",
+    "500w editorial …", "2-column …", "Pick | Best For …"). These read
+    as prompt scaffolding to users and Googlebot and MUST be rewritten
+    as plain-prose headings before publish.
+
+    Returns None when no leaky heading is found.
+    """
+    if not body_md:
+        return None
+    for m in _HEADING_RE.finditer(body_md):
+        head_text = m.group(1).strip()
+        for pat in HEADING_LEAK_PATTERNS:
+            if pat.search(head_text):
+                return head_text
+    return None
