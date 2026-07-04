@@ -2180,6 +2180,7 @@ for rid, body_p, meta_p in pairs:
         try:
             from framework.core.article_metadata_guard import (
                 body_lede_is_leaky,
+                body_has_fabricated_citation,
                 has_leaky_heading,
             )
             if body_lede_is_leaky(body_md):
@@ -2189,6 +2190,17 @@ for rid, body_p, meta_p in pairs:
                     "trending rows, brief fragment) — refusing INSERT; "
                     "re-queue for re-write"))
                 print(f"[article-insert] {rid}: ✗ METADATA-LEAK in body — SKIP",
+                      file=sys.stderr)
+                continue
+            _fab_citation = body_has_fabricated_citation(body_md)
+            if _fab_citation:
+                errors.append((rid,
+                    f"FABRICATED-CITATION GUARD: body_md attributes a "
+                    f"numeric claim to a source the site does not own "
+                    f"({_fab_citation!r}) — refusing INSERT; re-queue "
+                    f"with sourced or qualitative language"))
+                print(f"[article-insert] {rid}: ✗ FABRICATED-CITATION "
+                      f"snippet={_fab_citation!r} — SKIP",
                       file=sys.stderr)
                 continue
             _leaky_heading = has_leaky_heading(body_md)

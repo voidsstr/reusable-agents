@@ -32,6 +32,28 @@ from __future__ import annotations
 
 import re
 
+FABRICATED_CITATION_PATTERNS: tuple[re.Pattern, ...] = tuple(
+    re.compile(p, re.IGNORECASE) for p in (
+        # Attributing measurements to "SpecPicks" — the site has no
+        # benchmarking lab, so any "(SpecPicks YYYY data)" /
+        # "according to SpecPicks 2026 Q1 data" / "according to
+        # SpecPicks benchmarks" phrasing is fabricated. Flagged by
+        # progressive-improvement-agent 2026-06-08 rec-002 on
+        # /reviews/ah-yes-gaming-laptops-overhyped-or-underpowered
+        # after a follow-up sweep found the pattern surviving beyond
+        # the first 600 chars of the body (past body_lede_is_leaky).
+        r"\(SpecPicks\s+\d{4}(?:\s+Q\d)?\s+data\)",
+        r"according to SpecPicks\s+\d{4}(?:\s+Q\d)?\s+data\b",
+        r"according to SpecPicks (?:benchmarks?|methodology|measurements?|testing|lab(?:oratory)? data)\b",
+        r"per SpecPicks (?:benchmarks?|methodology|measurements?|testing|lab(?:oratory)? data)\b",
+        # Unattributed "YYYY repair data" / "YYYY failure data" style
+        # citations that imply an internal or proprietary dataset the
+        # site does not own.
+        r"according to \d{4} (?:repair|failure|reliability|warranty|RMA) data\b",
+    )
+)
+
+
 HEADING_LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
     re.compile(p, re.IGNORECASE) for p in (
         # Outline / brief-label prefixes that must never survive as an
@@ -122,6 +144,23 @@ def body_lede_is_leaky(body_md: str, *, window: int = 600) -> bool:
     """
     head = (body_md or "")[:window]
     return is_leaky(head)
+
+
+def body_has_fabricated_citation(body_md: str) -> str | None:
+    """Return the offending snippet when body_md attributes numeric
+    claims to a source the site does not own — "(SpecPicks 2026 data)",
+    "according to SpecPicks benchmarks", "according to 2026 repair
+    data". Scans the FULL body (not just the lede) because these
+    citations tend to appear deep in the article next to the numbers
+    they anchor. Returns None when the body is clean.
+    """
+    if not body_md:
+        return None
+    for pat in FABRICATED_CITATION_PATTERNS:
+        m = pat.search(body_md)
+        if m:
+            return m.group(0)
+    return None
 
 
 _HEADING_RE = re.compile(r"^#{2,4}\s+(.+?)\s*$", re.MULTILINE)
