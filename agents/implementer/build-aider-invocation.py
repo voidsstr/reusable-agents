@@ -975,6 +975,7 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                     proposal,
                     min_recipes=5 if _is_aisleprompt else 0,
                     min_kits=2 if _is_aisleprompt else 0,
+                    min_products=0 if _is_aisleprompt else 3,
                     site_root=_site_root,
                 )
             except Exception:

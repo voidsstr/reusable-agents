@@ -42,12 +42,17 @@ from typing import Iterable
 
 
 # Match markdown link `[text](url)` where url is `/recipes/...` or full
-# host. Captures the slug (with optional trailing -<digits>).
+# host. Captures the slug (with optional trailing -<digits>). Slug is
+# case-insensitive so uppercase ASINs (`/product/B08W8BFG9B`) match, and
+# an optional query string / fragment is tolerated after the slug so
+# `?tag=specpicks-articles-20` variants still count.
 _LINK_RE = re.compile(
     r"\[[^\]]+\]"
     r"\((?:https?://[^/)]*)?"
     r"(?P<root>/(?:recipes|k|product|reviews|blog)/)"
-    r"(?P<slug>[a-z0-9][a-z0-9-]*)"
+    r"(?P<slug>[A-Za-z0-9][A-Za-z0-9-]*)"
+    r"(?:\?[^)]*)?"
+    r"(?:#[^)]*)?"
     r"\)"
 )
 
@@ -64,6 +69,7 @@ class LinkAuditResult:
     expected_kitchen_total: int
     min_recipes: int
     min_kits: int
+    min_products: int = 0
 
     @property
     def total_internal_links(self) -> int:
@@ -73,7 +79,8 @@ class LinkAuditResult:
     @property
     def passes(self) -> bool:
         return (self.recipe_links >= self.min_recipes
-                and self.kitchen_links >= self.min_kits)
+                and self.kitchen_links >= self.min_kits
+                and self.product_links >= self.min_products)
 
     def failure_reason(self) -> str:
         if self.recipe_links < self.min_recipes:
@@ -82,6 +89,9 @@ class LinkAuditResult:
         if self.kitchen_links < self.min_kits:
             return (f"only {self.kitchen_links} /k/ links "
                     f"(min {self.min_kits})")
+        if self.product_links < self.min_products:
+            return (f"only {self.product_links} /product/ links "
+                    f"(min {self.min_products})")
         return ""
 
 
@@ -101,7 +111,8 @@ def verify_body(body_md: str,
                 proposal: dict,
                 *,
                 min_recipes: int = 5,
-                min_kits: int = 2) -> LinkAuditResult:
+                min_kits: int = 2,
+                min_products: int = 0) -> LinkAuditResult:
     """Audit `body_md` against the proposal's expected slug lists."""
     found = _count_by_root(body_md or "")
     recipes = found.get("/recipes/", set())
@@ -128,6 +139,7 @@ def verify_body(body_md: str,
         expected_kitchen_total=len(expected_kit),
         min_recipes=min_recipes,
         min_kits=min_kits,
+        min_products=min_products,
     )
 
 
@@ -151,6 +163,7 @@ def render_link_directive(proposal: dict,
                           *,
                           min_recipes: int = 5,
                           min_kits: int = 2,
+                          min_products: int = 0,
                           site_root: str = "https://aisleprompt.com") -> str:
     """Returns a directive block the implementer can paste into its
     aider/claude prompt. The directive lists every expected slug and
@@ -158,17 +171,24 @@ def render_link_directive(proposal: dict,
 
     Sites that don't have one of the two link types (e.g. specpicks has
     no /recipes/) pass min_recipes=0 and the directive adapts.
+    Specpicks passes min_products>=3 so the LLM knows to wrap named
+    hardware SKUs (ZOTAC RTX 3060 12GB, Ryzen 7 5800X, etc.) in
+    /product/<ASIN> markdown links at first mention.
     """
     recipes: list[str] = proposal.get("expected_recipe_slugs") or []
     kits: list[str] = proposal.get("expected_kitchen_slugs") or []
+    products: list[str] = (proposal.get("expected_product_asins")
+                             or proposal.get("expected_asins") or [])
     lines: list[str] = [
         "INLINE-LINK CONTRACT (HARD REQUIREMENT — verified after exit):",
-        f"  The wrapper counts /recipes/ + /k/ markdown links in your "
-        f"output. It rejects the article (EDIT INCOMPLETE) if the body "
-        f"contains fewer than {min_recipes} distinct /recipes/ links "
-        f"and {min_kits} distinct /k/ links — the article will NOT be "
-        f"inserted, the proposal will be re-queued, and you'll be asked "
-        f"to do this work again. Better to put the links in once.",
+        f"  The wrapper counts /recipes/ + /k/ + /product/ markdown "
+        f"links in your output. It rejects the article (EDIT INCOMPLETE) "
+        f"if the body contains fewer than {min_recipes} distinct "
+        f"/recipes/ links, {min_kits} distinct /k/ links, and "
+        f"{min_products} distinct /product/ links — the article will "
+        f"NOT be inserted, the proposal will be re-queued, and you'll "
+        f"be asked to do this work again. Better to put the links in "
+        f"once.",
         "",
     ]
     if recipes:
@@ -190,9 +210,32 @@ def render_link_directive(proposal: dict,
         for s in kits[:10]:
             lines.append(f"    [Category Name]({site_root}/k/{s})")
         lines.append("")
+    if min_products > 0:
+        lines.append(f"  PRODUCTS TO LINK — wrap named hardware SKUs "
+                     f"(GPUs, CPUs, monitors, controllers, kits) in "
+                     f"/product/<ASIN> markdown links at first mention. "
+                     f"Minimum {min_products} distinct /product/ links "
+                     f"required. Example anchor shape:")
+        lines.append(f"    [ZOTAC RTX 3060 12GB]({site_root}/product/"
+                     f"B08W8BFG9B?tag=specpicks-articles-20)")
+        if products:
+            lines.append("")
+            lines.append(f"  Suggested ASINs ({len(products)} provided by "
+                         f"the proposal — use these when their SKU is "
+                         f"referenced in the body):")
+            for a in products[:12]:
+                lines.append(f"    /product/{a}?tag=specpicks-articles-20")
+        lines.append("")
+        lines.append(
+            "  CRITICAL: only link ACTIVE catalog ASINs. Don't invent "
+            "an ASIN. If a named product isn't in the suggested list "
+            "and you're not sure of its ASIN, either (a) link to the "
+            "matching /buying-guide/<slug> instead, or (b) omit that "
+            "link — but hit the minimum with other named SKUs.")
+        lines.append("")
     lines.append(
-        "  Use absolute paths (`/recipes/...`, `/k/...`) — relative paths "
-        "resolve under /blog and break.")
+        "  Use absolute paths (`/recipes/...`, `/k/...`, `/product/...`) "
+        "— relative paths resolve under /blog and break.")
     lines.append("")
     return "\n".join(lines)
 
@@ -203,9 +246,11 @@ def render_failure_addendum(audit: LinkAuditResult) -> str:
     return (
         "INLINE-LINK CONTRACT — VIOLATED. You wrote "
         f"{audit.recipe_links}/{audit.min_recipes} required /recipes/ "
-        f"links and {audit.kitchen_links}/{audit.min_kits} required "
-        f"/k/ links. The article is NOT shippable in this state. "
-        "Add additional inline links to the body using the expected "
-        "slugs already provided; do not delete any existing prose. "
-        "After adding the links, save the file again and exit cleanly."
+        f"links, {audit.kitchen_links}/{audit.min_kits} required "
+        f"/k/ links, and {audit.product_links}/{audit.min_products} "
+        f"required /product/ links. The article is NOT shippable in "
+        f"this state. Add additional inline links to the body using "
+        f"the expected slugs / ASINs already provided; do not delete "
+        f"any existing prose. After adding the links, save the file "
+        f"again and exit cleanly."
     )

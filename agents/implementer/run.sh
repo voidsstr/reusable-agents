@@ -2142,17 +2142,21 @@ for rid, body_p, meta_p in pairs:
             _is_aisleprompt = "specpicks" not in _site_hint
             _audit = verify_body(body_md, _proposal_for_guard,
                                   min_recipes=5 if _is_aisleprompt else 0,
-                                  min_kits=2 if _is_aisleprompt else 0)
+                                  min_kits=2 if _is_aisleprompt else 0,
+                                  min_products=0 if _is_aisleprompt else 3)
             if not _audit.passes:
                 errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
                                     f"(recipes={_audit.recipe_links}, "
                                     f"kitchen={_audit.kitchen_links}, "
+                                    f"products={_audit.product_links}, "
                                     f"matched={_audit.matched_expected_recipes}"
                                     f"/{_audit.expected_recipe_total} expected) "
                                     f"— refusing INSERT; re-queue with addendum"))
                 print(f"[article-insert] {rid}: ✗ LINK-GUARD "
                       f"recipes={_audit.recipe_links}/{_audit.min_recipes} "
-                      f"kits={_audit.kitchen_links}/{_audit.min_kits} — SKIP",
+                      f"kits={_audit.kitchen_links}/{_audit.min_kits} "
+                      f"products={_audit.product_links}/{_audit.min_products} "
+                      f"— SKIP",
                       file=sys.stderr)
                 continue
         except ImportError:
