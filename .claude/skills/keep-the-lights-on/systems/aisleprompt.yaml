@@ -1,0 +1,108 @@
+# keep-the-lights-on — system config for aisleprompt.com
+# Copy this file to systems/<name>.yaml and edit to onboard a new system.
+# The runbook (SKILL.md) is generic; ALL site-specific values live here.
+
+system: aisleprompt
+display_name: AislePrompt (aisleprompt.com)
+
+# ── Overarching growth North Star (what "better over time" means here) ──
+# Success = more people using aisleprompt REGULARLY. Not code shipped, not
+# articles published — user behavior. Bias every improvement toward these.
+growth:
+  north_star: "Grow regular usage of aisleprompt.com (returning users, DAU, organic clicks, indexed pages, Instacart/affiliate conversions)."
+  # Cheap proxy pulses to watch each tick (the real DAU/GA metrics live in
+  # analytics; these DB-side proxies are the frugal stand-in):
+  proxies:
+    - name: articles_24h
+      sql: "select count(*) from editorial_articles where created_at > now() - interval '24 hours'"
+      db: aisleprompt
+      note: "publish pulse — leading indicator of indexable surface area"
+    - name: indexed_recent
+      note: "articles 'Submitted and indexed' in GSC — pull from the SEO agent's coverage data; the true North-Star proxy (organic reach)"
+  # Baseline captured 2026-07-06: 24h article volume ~4 -> lifted to ~11
+  # after the seasonal/two-DSN/cluster-gap fixes (commits 47dc5f5, c6cfd88,
+  # 0a3468e). Watch that it holds/climbs.
+
+# ── Critical agents to keep alive (the aisleprompt pipeline) ──
+agents:
+  critical:
+    - aisleprompt-article-proposal-agent      # Opus proposer (volume engine)
+    - aisleprompt-seo-opportunity-agent        # SEO recs (GSC-driven)
+    - aisleprompt-progressive-improvement-agent
+    - backlog-dispatcher-agent                 # shared: feeds implementer
+  # shared drainer (not per-site): auto-queue-drainer.service
+  supporting:
+    - aisleprompt-article-hero-image-curator
+    - aisleprompt-recipe-image-refiller
+    - aisleprompt-recipe-image-verifier
+    - aisleprompt-catalog-audit-agent
+    - aisleprompt-competitor-research-agent
+    - aisleprompt-gsc-coverage-auditor
+    - aisleprompt-indexnow-submitter
+    - aisleprompt-conversion-optimizer
+
+# ── Databases (env-var names in ~/.reusable-agents/secrets.env) ──
+# NOTE: source with `set -a; . secrets.env; set +a` (plain KEY=val, not
+# exported). psql is not installed — query via python3 + psycopg2.
+db:
+  aisleprompt: DATABASE_URL_AISLEPROMPT       # live app DB (editorial_articles publish here)
+  # The proposer also reads the recipe catalog from the local scraper
+  # container DB (localhost:5436) — full 41,969-recipe catalog. Editorial
+  # reads MUST use the app DB (fixed 2026-07-06, commit c6cfd88).
+
+# ── Live URLs to HTTP-probe ──
+urls:
+  homepage: https://aisleprompt.com/
+  sample_article: https://aisleprompt.com/weeknight-dinner-meal-plan-30-minutes
+
+# ── Escalation recipient (fleet operator; NEVER a personal inbox) ──
+owner_email: mperry@northernsoftwareconsulting.com
+
+# ── Known-excluded failure patterns (documented non-issues — do NOT re-flag) ──
+known_excluded:
+  - agent: digest-rollup-agent
+    reason: "O365 'automation' SMTP relay is tenant-disabled; digest send fails. Operator-gated (restore SMTP AUTH in M365 admin). Flagged 2026-07-06. Also means escalation EMAIL may fail via SMTP — send_via_msmtp tries Graph first, so verify each send's ok flag and fall back to in-session."
+  - pattern: "recipe-image-{verifier,refiller} TimeoutExpired"
+    reason: "large model warm-up; safety net catches it"
+  - pattern: "article-hero-image-curator TimeoutExpired"
+    reason: "vision call occasionally slow; curator retries"
+  - pattern: "indexed 0/NN"
+    reason: "gsc-coverage-auditor local JSONL stale since May 4 (auditor writes elsewhere now); vanity metric, does not gate volume"
+
+# ── Cadence (seconds) ──
+cadence:
+  healthy: 1800        # quiet + stable: 30 min
+  degraded: 240        # watching a recovery
+  down: 180            # site down / volume zero
+  blocked_backoff: 3600 # escalated, waiting on operator
+
+# ── Improvement cadence ──
+improvement_every_hours: 8   # ~ once per aisleprompt cron window; one focused lever per cycle
+
+# ── Standing incidents (operator-gated — do NOT action without go-ahead) ──
+standing_incidents:
+  - id: aisleprompt-articles-not-indexable
+    severity: high
+    summary: >
+      Articles are not indexable/discoverable: (A) crawlers get an empty
+      SPA shell with a generic homepage <title> for every article URL
+      (systemic — a 5-day-old article behaves the same); (B) sitemap.xml
+      has only ~8 <loc> entries and sitemap-articles.xml is empty, so the
+      ~145 published articles are absent. This is the highest-leverage
+      North-Star lever (volume is invisible to Google until fixed) but it
+      is APP-INFRA (frontend SSR + sitemap generation), not agent tuning.
+    flagged: 2026-07-06
+    next_step: >
+      On operator go-ahead, START with the low-risk high-certainty sitemap
+      fix (get the ~145 articles into sitemap-articles.xml — investigate
+      the aisleprompt frontend/sitemap-generation code first). The SSR
+      angle needs a real-Googlebot check (spoofed UA may not equal
+      reverse-DNS-verified Googlebot) before any live-app change.
+    caveat: >
+      Editorial content quality/link-guard is intact; the blocker is
+      purely discoverability/rendering.
+
+# ── Growth arc already shipped (context for the improvement trail) ──
+history:
+  - 2026-07-06: "responder crash-loop fixed + load_state hardened; removed dead drainer + crash-watcher units; re-authed claude-pool 1->4 profiles."
+  - 2026-07-06: "47dc5f5 seasonal/trends injection; c6cfd88 editorial reads from live app DB; 0a3468e recipe-cluster long-tail mining. aisleprompt 24h volume 4 -> 11."
