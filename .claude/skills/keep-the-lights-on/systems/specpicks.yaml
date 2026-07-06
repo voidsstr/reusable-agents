@@ -29,8 +29,12 @@ agents:
     - specpicks-head-to-head-agent               # h2h verdicts (Opus content)
     - backlog-dispatcher-agent                   # shared: feeds implementer
   # shared drainer (not per-site): auto-queue-drainer.service
+  # supporting = the COMPLETE remaining specpicks-prefixed roster (all 22
+  # specpicks agents are in scope: 4 critical + 18 supporting). Keep this
+  # list complete when new specpicks agents are added.
   supporting:
     - specpicks-catalog-audit-agent
+    - specpicks-amazon-catalog-freshness
     - specpicks-benchmark-research-agent
     - specpicks-ebay-product-sync-agent          # retro -> eBay ingest (:30 hourly)
     - specpicks-product-hydration-agent

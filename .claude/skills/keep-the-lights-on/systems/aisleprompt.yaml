@@ -31,15 +31,26 @@ agents:
     - aisleprompt-progressive-improvement-agent
     - backlog-dispatcher-agent                 # shared: feeds implementer
   # shared drainer (not per-site): auto-queue-drainer.service
+  # supporting = the COMPLETE remaining aisleprompt-prefixed roster (all 19
+  # aisleprompt agents are in scope: 3 critical + 16 supporting). Keep this
+  # list complete when new aisleprompt agents are added.
   supporting:
     - aisleprompt-article-hero-image-curator
-    - aisleprompt-recipe-image-refiller
-    - aisleprompt-recipe-image-verifier
     - aisleprompt-catalog-audit-agent
     - aisleprompt-competitor-research-agent
-    - aisleprompt-gsc-coverage-auditor
-    - aisleprompt-indexnow-submitter
     - aisleprompt-conversion-optimizer
+    - aisleprompt-gsc-coverage-auditor
+    - aisleprompt-indexnow-bulk
+    - aisleprompt-indexnow-submitter
+    - aisleprompt-kitchen-instacart-backfill
+    - aisleprompt-kitchen-scraper
+    - aisleprompt-promo-curator-agent           # weekly (Mon 09:00) — long gaps are normal
+    - aisleprompt-recipe-generator-agent
+    - aisleprompt-recipe-image-archiver
+    - aisleprompt-recipe-image-refiller
+    - aisleprompt-recipe-image-verifier
+    - aisleprompt-site-goals-tracker
+    - aisleprompt-user-growth-strategist
 
 # ── Databases (env-var names in ~/.reusable-agents/secrets.env) ──
 # NOTE: source with `set -a; . secrets.env; set +a` (plain KEY=val, not

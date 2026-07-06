@@ -101,8 +101,17 @@ lengthen the cadence.
 
 1. **Load config** (§0) for the target system.
 2. **Layer A cheap sweep** — collect in ONE bash call:
-   - `systemctl --user is-active` for each critical agent's service +
-     the drainer/dispatcher; `list-units --state=failed | grep agent-`.
+   - **Whole-roster failure scan (ALL agents in scope, not just the
+     critical few):** `systemctl --user list-units --state=failed` filtered
+     to this site's prefix (`agent-<system>-`) PLUS the shared infra
+     (`backlog-dispatcher`, `auto-queue-drainer`, `responder-agent`). Every
+     agent carrying the site prefix is in scope — a failed `supporting`
+     agent still gets caught and triaged (auto-fix or note), it just isn't
+     deep-probed for liveness.
+   - **Liveness probe (critical agents only):** `systemctl --user is-active`
+     + `-p Result --value` for each `agents.critical` service + the
+     drainer/dispatcher. `inactive` for a oneshot between cron fires is
+     HEALTHY.
    - Per DB: articles/rows created in `+1h` and `+24h` (volume pulse).
    - `curl` homepage + sample URL → HTTP code.
    - Pool: count authenticated profiles in `claude-pool/state.json`.
@@ -139,7 +148,13 @@ lengthen the cadence.
 - Agent alive: `systemctl --user is-active agent-<id>.service`
   (`inactive` for a oneshot between cron fires is HEALTHY, not failed;
   `failed` is the red flag). Last result: `-p Result --value`.
-- Failed units: `systemctl --user list-units --state=failed | grep agent-`.
+- Failed units (SITE-SCOPED — the whole roster is in scope): `systemctl
+  --user list-units --state=failed | grep -E 'agent-<system>-|backlog-
+  dispatcher|auto-queue-drainer|responder-agent'`. The `agents:` block in
+  config lists the FULL roster (critical + supporting) so it doubles as
+  the inventory of what "all agents in scope" means; keep it complete when
+  new agents are added to the site. A per-site loop must NOT alert on the
+  OTHER site's agents (each site runs its own loop).
 - Volume (the pulse): one `SELECT count(*) FILTER (WHERE created_at > now()
   - interval '24 hours')` per DB. **`set -a; . ~/.reusable-agents/secrets.env;
   set +a`** first — the DSNs are plain `KEY=val` (not exported), so a bare
