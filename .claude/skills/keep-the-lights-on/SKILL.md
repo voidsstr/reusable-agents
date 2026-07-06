@@ -113,17 +113,30 @@ lengthen the cadence.
 
 1. **Load config** (§0) for the target system.
 2. **Layer A cheap sweep** — collect in ONE bash call:
-   - **Whole-roster failure scan (ALL agents in scope, not just the
-     critical few):** `systemctl --user list-units --state=failed` filtered
-     to this site's prefix (`agent-<system>-`) PLUS the shared infra
-     (`backlog-dispatcher`, `auto-queue-drainer`, `responder-agent`). Every
-     agent carrying the site prefix is in scope — a failed `supporting`
-     agent still gets caught and triaged (auto-fix or note), it just isn't
-     deep-probed for liveness.
-   - **Liveness probe (critical agents only):** `systemctl --user is-active`
-     + `-p Result --value` for each `agents.critical` service + the
-     drainer/dispatcher. `inactive` for a oneshot between cron fires is
-     HEALTHY.
+   - **Per-agent roster snapshot (EVERY agent in scope — ALL of
+     `agents.critical` + `agents.supporting`, plus shared
+     `backlog-dispatcher`/`auto-queue-drainer`/`responder-agent`):** loop
+     over the config's FULL agent list and collect three fields per agent —
+     this is the per-agent health table the operator sees every tick (§7):
+       - **HEALTH** — `systemctl --user is-active agent-<id>.service` +
+         `-p Result --value`. Map: `active`/`activating` → `run`;
+         `inactive` + `result=success` → `idle` (a oneshot between cron
+         fires is HEALTHY, not a failure); anything else / `failed` →
+         `FAILED` (the red flag).
+       - **LAST RUN** — `systemctl --user show -p ExecMainExitTimestamp
+         --value agent-<id>.service` (when it last finished); fall back to
+         the newest timestamp in its log if the unit was reset.
+       - **LAST MAJOR WORK** — the final status line of
+         `/tmp/reusable-agents-logs/agent-<id>.log`. The framework logs
+         `[ts] [id] <status> (<pct>) <summary>`; the LAST such line is the
+         run outcome (e.g. "shipped rec-008", "proposed 3 topics",
+         "Refreshed 42 products; dead-link scan deactivated 5"). One
+         `tail`+`grep` per agent — still O(1), no reasoning.
+     This single snapshot **doubles as the failure scan**: any agent whose
+     HEALTH is `FAILED` (and not in `known_excluded`) is triaged per §4.
+     Critical agents are additionally deep-probed for liveness; a failed
+     supporting agent is caught + triaged but not deep-probed. Keep the loop
+     pure shell so the whole roster stays nearly free.
    - Per DB: articles/rows created in `+1h` and `+24h` (volume pulse).
    - `curl` homepage + sample URL → HTTP code.
    - Pool: count authenticated profiles in `claude-pool/state.json`.
@@ -288,23 +301,35 @@ failure mode.
 
 ---
 
-## 7. Output format (every tick — compact, ≤ ~18 lines)
+## 7. Output format (every tick)
 
-Bordered ASCII (the operator prefers bordered tables over markdown
-pipes). No prose padding.
+Bordered ASCII (the operator prefers bordered tables over markdown pipes).
+No prose padding. The **per-agent table is REQUIRED every tick** — the
+operator wants to see, for EACH agent in scope, its health + what it last
+did + when. List every agent from the config `agents` block (critical
+first, then supporting, then shared infra), one row each. Health glyphs:
+`idle` = healthy oneshot between crons, `run` = active/activating,
+`FAILED` = failed (flag it), append `*` if the failure is in
+`known_excluded`. Keep LAST MAJOR WORK to the log's final-status summary,
+truncated to fit.
 
 ```
-+----------------------------------------------------------------------------+
-| KTLO <system> — TICK <n> · <HH:MM>Z (<YYYY-MM-DD>) · <GREEN|DEGRADED|DOWN|BLOCKED> |
-+----------------------------------------------------------------------------+
-| AGENTS   <critical agents ok / any failed> (excl. known)                   |
-| SITE     homepage <code> · sample <code>                                   |
-| VOLUME   <site>: +1h=<n> +24h=<N>  (growth-metric note if known)           |
-| POOL     <k>/<total> profiles alive                                        |
-| ACTION   <auto-fix taken | improvement shipped | none>                     |
-| ESCALATE <email sent to <owner> / none> <in-session note>                  |
-| STANDING <open operator-gated items, 1 line>                               |
-+----------------------------------------------------------------------------+
++--------------------------------------------------------------------------------------------+
+| KTLO <system> — TICK <n> · <HH:MM>Z (<YYYY-MM-DD>) · <GREEN|DEGRADED|DOWN|BLOCKED>          |
++--------------------------------------------------------------------------------------------+
+| AGENT                                  HEALTH   LAST RUN (UTC)    LAST MAJOR WORK            |
+| <id-1>                                 idle     MM-DD HH:MM       <final status summary>     |
+| <id-2>                                 run      MM-DD HH:MM       <final status summary>     |
+| <id-3>                                 FAILED*  MM-DD HH:MM       <error summary> (excluded) |
+| … one row PER agent in scope (critical → supporting → shared) …                             |
++--------------------------------------------------------------------------------------------+
+| SITE     homepage <code> · sample <code>                                                   |
+| VOLUME   <site>: +1h=<n> +24h=<N>  (growth-metric note if known)                            |
+| POOL     <k>/<total> profiles alive                                                        |
+| ACTION   <auto-fix taken | improvement shipped | none>                                     |
+| ESCALATE <email sent to <owner> / none> <in-session note>                                  |
+| STANDING <open operator-gated items, 1 line>                                               |
++--------------------------------------------------------------------------------------------+
 ```
 
 Then ScheduleWakeup (§8). Don't narrate the wakeup.
