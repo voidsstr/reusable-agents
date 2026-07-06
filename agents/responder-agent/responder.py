@@ -73,10 +73,22 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
+def _default_state() -> dict:
+    return {"last_uid": 0, "processed_message_ids": []}
+
+
 def load_state() -> dict:
     if not STATE_PATH.is_file():
-        return {"last_uid": 0, "processed_message_ids": []}
-    return json.loads(STATE_PATH.read_text())
+        return _default_state()
+    txt = STATE_PATH.read_text().strip()
+    if not txt:
+        return _default_state()
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        # Corrupt/truncated state (e.g. a zero-byte file from an interrupted
+        # write) must not crash-loop the poller — fall back to a clean slate.
+        return _default_state()
 
 
 def save_state(state: dict) -> None:
