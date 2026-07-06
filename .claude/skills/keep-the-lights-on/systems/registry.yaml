@@ -1,0 +1,22 @@
+# keep-the-lights-on — system registry
+#
+# Maps each managed system to WHERE its config lives. Per the framework-first
+# contract, each SITE owns its own keep-the-lights-on config in its OWN repo;
+# the reusable-agents repo owns only the shared runbook (../SKILL.md) + the
+# _example.yaml template + this registry.
+#
+# The skill resolves a system's config by:
+#   1. this registry (path in the site repo)  ← authoritative
+#   2. fallback convention: /home/voidsstr/development/<name>/keep-the-lights-on.yaml
+#   3. fallback: systems/<name>.yaml in the skill dir (dev/example only)
+#
+# Onboard a new system: copy _example.yaml into the site's repo as
+# keep-the-lights-on.yaml, edit it, add a line here, commit it to that repo.
+
+systems:
+  aisleprompt:
+    config: /home/voidsstr/development/aisleprompt/keep-the-lights-on.yaml
+    repo: /home/voidsstr/development/aisleprompt      # commit config changes here (master, main-first)
+  specpicks:
+    config: /home/voidsstr/development/specpicks/keep-the-lights-on.yaml
+    repo: /home/voidsstr/development/specpicks

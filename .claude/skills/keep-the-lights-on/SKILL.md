@@ -40,9 +40,17 @@ moments that actually need judgment.
 
 ## 0. Load the system config FIRST
 
-Everything is parameterized. Read `systems/<name>.yaml` (relative to this
-skill dir) for the target system named in the invocation (default:
-`aisleprompt`). It defines:
+Everything is parameterized. Each SITE owns its config in its OWN repo
+(framework-first: the reusable-agents repo holds only the shared runbook +
+template + registry). Resolve the config for the target system named in the
+invocation (default: `aisleprompt`) in this order:
+
+1. **`systems/registry.yaml`** in this skill dir → `systems.<name>.config`
+   (the path inside the site's repo — authoritative).
+2. Convention fallback: `/home/voidsstr/development/<name>/keep-the-lights-on.yaml`.
+3. Dev/example fallback: `systems/<name>.yaml` in this skill dir.
+
+The config (wherever it resolves) defines:
 
 - `agents:` — the agent ids to keep alive (+ which are "critical").
 - `db:` — env-var names of the Postgres DSNs (read-only for monitoring).
@@ -55,10 +63,14 @@ skill dir) for the target system named in the invocation (default:
 - `improvement_every_hours:` — how often to spend an LLM improvement cycle.
 - `standing_incidents:` — open items that need operator go-ahead.
 
-To onboard a NEW system, copy `systems/aisleprompt.yaml` → `systems/<name>.yaml`
-and edit the values. No skill-code change — the runbook is generic; the
+To onboard a NEW system: copy `systems/_example.yaml` into the site's OWN
+repo as `keep-the-lights-on.yaml`, edit the values, add a line to
+`systems/registry.yaml`, and commit the config to THAT site's repo (the
+site owns its config). No skill-code change — the runbook is generic; the
 config carries all site-specific values. If a needed knob doesn't exist,
-add it to the config schema, not to a branch in this runbook.
+add it to the config schema (`_example.yaml`), not to a branch in this
+runbook. When you change a live config, commit it in the SITE repo
+(main-first), not here.
 
 ---
 
