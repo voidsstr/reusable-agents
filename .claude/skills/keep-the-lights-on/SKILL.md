@@ -260,6 +260,61 @@ file so successive sessions see the trail and don't repeat work.
 
 ---
 
+## 5b. Functional verification — Playwright suite (daily + after prod changes)
+
+If the config has a `functional_tests` block, running the site's full
+end-to-end suite against PRODUCTION is part of keeping the lights on.
+Running the tests is PURE SHELL (no LLM tokens); the LLM engages only to
+triage/PATCH a failure or to deepen coverage.
+
+**When to run (checked cheaply each tick, don't run every tick):**
+- **After a prod change since the last run — the highest-value trigger,**
+  because agents (implementer/deployer) commit + deploy code and publish
+  content to prod. Detect via the site repo HEAD sha
+  (`git -C <cwd/repo> rev-parse HEAD`) vs `last_tested_sha` in state, and/or
+  new `editorial_articles` since the last run. On a change → run `smoke_cmd`
+  now (fast) and mark a full run due.
+- **At least daily:** if `now - last_full_test_run > run_every_hours`, run
+  `full_cmd`.
+- Otherwise skip.
+
+**How:** run the cmd in `functional_tests.cwd` against `base_url` (prod).
+Use `run_in_background: true` for the full suite (minutes) and read the
+result when it completes. Parse the `--reporter=line` tail for
+`N passed / M failed / K flaky`.
+
+**On PASS (all green, or only flaky):** record `{ts, sha, passed, flaky}`
+in state; add `TESTS <n> passed` to the tick box. Cheap, done.
+
+**On real FAILURE (non-flaky) — a functionality regression, Layer B engages:**
+1. Read the failing test name(s) + error (≤2 samples). Classify:
+   - **Real prod bug** (SSR/hydration broke, a route 500s, a CTA/price/
+     structured-data wrong): PATCH it. Find the cause (often a recent AGENT
+     commit or a data issue), make the smallest fix in the correct repo,
+     commit main-first, and RE-RUN the failing test to confirm green. If an
+     agent's prod change caused it, fix the agent too so it can't recur.
+   - **Stale / environment-specific test** (asserts local-only data or an
+     intended prod difference): fix or `@fixme` the test with a why-note.
+   - **Can't safely fix** (needs a deploy/decision/credential): ESCALATE
+     (§6) with the failing test + error, de-duped.
+2. Record the failure + resolution in state.
+
+**Coverage-depth mandate (improvement-cycle lever):** the suite must cover
+ALL functionality in depth. On an improvement cycle — or whenever a new
+feature/route ships without a test, or you just patched a bug — audit
+`coverage_areas` vs the live site and ADD tests for the gaps (new routes,
+components, structured data, affiliate flows, and a regression test for any
+bug patched). Commit new tests main-first in the site repo and bump
+`total_tests`. **A patched bug without a new regression test is not done.**
+
+**Token note:** a daily green run costs a shell invocation + a few tokens to
+parse/report. Tokens are spent only when a test actually fails or during a
+coverage audit — consistent with the token-discipline model. State keys:
+`last_full_test_run`, `last_smoke_run`, `last_tested_sha`, and a
+`functional_tests` pass/fail history in the incident file.
+
+---
+
 ## 6. Escalation — email + in-session (when BLOCKED or DOWN-unrecovered)
 
 Escalate when: you can't safely auto-fix; a fix needs a credential or an

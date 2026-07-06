@@ -88,7 +88,29 @@ cadence:
   blocked_backoff: 3600 # escalated, waiting on operator
 
 # ── Improvement cadence ──
-improvement_every_hours: 8   # ~ once per aisleprompt cron window; one focused lever per cycle
+improvement_every_hours: 8   # one focused lever per cycle
+
+# ── Functional verification (Playwright/e2e against PROD) ── (see SKILL §5b)
+# Full suite against the LIVE site >= once/day AND after any prod change.
+# Running tests is pure shell (no LLM tokens); LLM only triages/patches a
+# FAILURE or deepens coverage. Omit this block if the system has no e2e suite.
+functional_tests:
+  runner: playwright                                   # or whatever the site uses
+  cwd: /home/voidsstr/development/<site>               # dir to run from (where the config resolves)
+  target: production
+  base_url: https://<site>.com
+  full_cmd:  "TEST_URL=https://<site>.com npx playwright test --config=playwright.config.ts --reporter=line --workers=6"
+  smoke_cmd: "TEST_URL=https://<site>.com npx playwright test --config=playwright.config.ts --grep @smoke --reporter=line --workers=6"
+  total_tests: 0              # keep updated as the suite grows
+  run_every_hours: 24         # full suite at least daily
+  run_smoke_after_prod_change: true   # + smoke after any prod change since last run
+  coverage_areas:             # what "all functionality in depth" must cover (audit + expand each improvement cycle)
+    - homepage / SEO / structured data
+    - primary content pages — SSR body + hydration + internal links
+    - catalog / listing pages
+    - navigation (desktop + mobile)
+    - affiliate / conversion CTAs
+    - sitemap + robots
 
 # ── Standing incidents (operator-gated — do NOT action without go-ahead) ──
 standing_incidents:
