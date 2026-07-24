@@ -1,0 +1,20 @@
+{
+  "id": "authority-agent",
+  "name": "Authority Agent",
+  "description": "Finds and prioritizes off-page authority opportunities (near-miss rankings, citable assets, unlinked mentions) to break the Discovered-not-indexed wall",
+  "category": "seo",
+  "task_type": "desktop-task",
+  "cron_expr": "0 13 * * *",
+  "timezone": "America/Detroit",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "bash /home/voidsstr/development/reusable-agents/agents/authority-agent/run.sh",
+  "metadata": {
+    "framework": "reusable-agents",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/authority-agent",
+    "created_at": "2026-07-24T04:35:37Z"
+  }
+}
