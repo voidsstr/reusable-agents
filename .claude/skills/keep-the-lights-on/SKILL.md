@@ -72,6 +72,31 @@ add it to the config schema (`_example.yaml`), not to a branch in this
 runbook. When you change a live config, commit it in the SITE repo
 (main-first), not here.
 
+**System types (`type:` in the registry + config).** A system is either a
+**`site`** (the default — agents + DB + homepage + publish volume + optional
+Playwright suite) or a **`daemon`** (a long-running service with none of
+those; health = "the process is active AND actively doing its work"). The
+tick, health classes, and box adapt to the type:
+
+- **site** — the full §2 tick (agent roster, DB volume pulse, homepage
+  probe, pool, functional tests). GREEN needs volume > 0 + sites 200.
+- **daemon** — a much smaller tick: `systemctl --user is-active <unit>` AND a
+  liveness check that the daemon has done recent work (grep its journal for
+  `daemon.liveness_log_grep` within `daemon.liveness_window_min`). A daemon
+  can be **alive-but-hung ("zombie")** — the process stays `active` while its
+  work loop is dead — so liveness-alone is not enough; the recent-work grep
+  is what catches a zombie. GREEN = active + a fresh liveness line. DEGRADED =
+  active but no liveness in the window → **restart** the unit (auto-fix). DOWN
+  = inactive/failed and won't stay up. There is no DB/volume/Playwright for a
+  daemon. `retro-chat` is the reference daemon (config: `systems/retro-chat.yaml`).
+
+**Managing multiple systems in ONE loop.** A single combined session can keep
+several systems lit at once (e.g. `aisleprompt + specpicks + retro-chat`).
+Run each system's tick, emit ONE box per system, then a single ScheduleWakeup
+at the shortest cadence any system needs. Keep per-system state separate
+(each has its own `incidents.json`). A site loop must never alert on another
+site's agents. See `docs/keep-the-lights-on.md` for the current live roster.
+
 ---
 
 ## 1. Token discipline — the core of this skill (READ EVERY TICK)
@@ -429,3 +454,85 @@ class / improvement-window time). A resumed session reads these first so
 it never double-alerts or repeats an improvement. This is what lets the
 skill genuinely "keep the lights on" across restarts, not just within one
 session.
+
+---
+
+## 11. Incident playbook library (known failure modes + the exact fix)
+
+These are recurring, hard-won incidents. When you see the signature, apply
+the linked fix instead of re-diagnosing from scratch. Full narrative + the
+current live status of each is in `docs/keep-the-lights-on.md` and the
+per-incident memories; this is the fast-path index.
+
+**A. Disk-full / ENOSPC fleet crash (host 2026-5090).** Signature: **many
+agents (>5) failed at once**, logs show `[Errno 28] No space left on device`.
+Root cause has been a **deleted-but-open leak** — `df` shows far more used
+than `du -x /` can see (a root process holding unlinked files open), which
+fills `/` and ENOSPC-kills the whole fleet + can zombie the retro-chat
+daemon. Playbook:
+1. **`df -h /` FIRST** on any mass-failure. If >90%, this is the cause.
+2. Find the grower: `du -xhd1 / | sort -h | tail`. If `df used` ≫ `du /`
+   total, it's the deleted-open leak → needs sudo `lsof +L1 | sort -k7 -h |
+   tail` to find the holder, then restart that process (or reboot) — an
+   OPERATOR action (agent has no sudo) → escalate with the exact commands.
+3. The **standing preventive fix** is deleting the 265G *stale* ollama
+   duplicate at `/usr/share/ollama/.ollama/models` (the active ollama runs
+   from `/data/ollama` via `OLLAMA_MODELS` override — verify, then it's safe:
+   `sudo rm -rf /usr/share/ollama/.ollama/models`). With that gone the base
+   footprint is low enough that even a full leak can't refill `/`.
+4. Once the disk is freed (operator acted / `df` dropped): **bulk-reset the
+   stale failed units** — `systemctl --user list-units --state=failed
+   --no-legend | grep -oE 'agent-[a-z0-9-]+\.service' | xargs -r systemctl
+   --user reset-failed` — they were ENOSPC-stale and succeed again on their
+   timers. Restart any zombied daemon (retro-chat). Mark the incident
+   resolved.
+
+**B. claude-pool all profiles dead (authoring blocked).** Signature: pool
+`state.json` shows `0/6 authenticated`, profiles say `"OAuth session
+expired"`; **publish volume goes to 0 and won't recover** (all Opus authors
+defer). This is operator-interactive re-auth (like a credential). Per
+profile: `HOME=/home/voidsstr/.reusable-agents/claude-pool/profile-<N>
+/home/voidsstr/.local/bin/claude /login` (regenerate the exact list with
+`python3 -m framework.cli.claude_pool login-help`). Verify with the authed
+count in `state.json`. The pool auto-picks up newly-authed profiles on the
+next drain tick — no restart needed. **One dead profile with others alive is
+NOT this incident** (the pool rotates; §4.5). Escalate once if 0/6 persists.
+
+**C. GSC OAuth token expired (SEO agents fail ~weekly).** Signature:
+`*-seo-opportunity-agent` (+ `gsc-coverage-auditor`) fail; log shows
+`refresh-token.py … HTTP Error 400`. It's the shared Google test-tier
+`refresh_token` expiring ~every 7 days. EXPECTED + recurring: **reset the
+failed unit each tick, do NOT re-email** past the first escalation. Fix is
+operator-interactive: `bash install/fix-gsc-now.sh` (browser consent). Durable
+fix: publish the OAuth consent screen to "In production" so it stops expiring.
+Renewal check: `python3 agents/seo-opportunity-agent/lib/collector/refresh-token.py
+--oauth-file ~/.reusable-agents/seo/.oauth.json` → a `ya29…` token (not
+HTTP 400) = renewed → mark resolved.
+
+**D. aisleprompt deploy-gate stuck (rc=1 on every app deploy).** Signature:
+newest `dispatch-implementer-aisleprompt-*.log` shows `[deployer:test:smoke]
+rc=1` on app-code batches while prod `@smoke` passes. The gate runs `@smoke`
+against a STANDING `localhost:4001` dev container that is NOT rebuilt — if it
+drifts stale, its Playwright browser is missing, or its local DB lacks a
+column, every app deploy blocks while prod is fine. **Diagnose first, never
+blind-revert:** reproduce `cd tests && TEST_URL=http://localhost:4001 npx
+playwright test --config=pw.config.ts --grep @smoke --reporter=line`, read the
+real failing test, then rebuild `:4001` from HEAD / reinstall the browser /
+add the missing local-DB column. See memory `aisleprompt-deploy-gate-tests-4001-fixture`.
+
+**E. kitchen-scraper 2400s timeout (flaky).** Signature:
+`agent-aisleprompt-kitchen-scraper` fails with `scraper timed out after
+2400s`, parent at ~0.2% CPU (I/O-blocked on an external product fetch, not
+ollama). FIXED by commit 9fb1a07 (a run-level wall-clock deadline
+`KITCHEN_RUN_DEADLINE_S=1500` that stops new work before the wrapper SIGKILL →
+clean partial-success). If it recurs at 2400s, the deadline regressed — check
+the env + that `main.py` on disk still has the fix; otherwise note-only.
+
+**F. Transient single-run failures.** A single failed run of an otherwise-
+healthy agent that is I/O-shaped — one Azure-PG connection timeout
+(`ebay-product-sync`), one homepage `000`, one `"claude returned 0
+proposals"` — is a transient: `reset-failed` (or re-probe 2-3×) and note.
+Escalate/investigate only on the **2nd consecutive** occurrence.
+
+When a NEW recurring incident is diagnosed and fixed, ADD it here so the
+next session gets the fast path.

@@ -1,17 +1,38 @@
 # Claude Instructions — reusable-agents framework
 
-> ## 🛰️ 24/7 monitor skill — `/agent-pipeline-monitor`
+> ## 🛰️ 24/7 on-call skill — `/keep-the-lights-on` (KTLO)
 >
-> Live at `.claude/skills/agent-pipeline-monitor/SKILL.md`. Invoke when
-> the operator asks to monitor the agents, fix the pipeline, "keep them
-> running 24/7", or asks why publish volume is zero. The skill carries
-> the full quality contract (Opus-only authoring; claude-pool only — no
-> Copilot bridge for editorial prose; pause if all profiles dead), the
-> auto-unblock playbook (kill stale impl scopes >2h, remove stuck
-> `IMPLEMENTER_FORCE_FALLBACK`, etc.), the known-pattern exclusion list
-> (don't waste tokens re-flagging cosmetic failures), and the cadence
-> guidance (300s default, 180s during unblock, 600s when healthy).
-> Re-invokes itself via `ScheduleWakeup` to maintain the loop.
+> **The one skill for "keep the agents/sites running, fix things while I'm
+> away, improve them toward their goals."** Runbook:
+> `.claude/skills/keep-the-lights-on/SKILL.md`; overview + re-auth runbooks
+> + optimization workflow: `docs/keep-the-lights-on.md`. Invoke when the
+> operator says "keep the lights on", "monitor <system>", "keep them running
+> 24/7", "you're on call for <system>", "why is publish volume zero", or when
+> a prior loop wakes itself via `ScheduleWakeup` (re-invoke the SAME args every
+> tick to sustain the loop).
+>
+> **Three live systems** (registry: `.claude/skills/keep-the-lights-on/systems/registry.yaml`):
+> `aisleprompt` (site) · `specpicks` (site) · `retro-chat` (daemon —
+> `retro-chat-daemon.service`, health = active AND actively discovering, not a
+> hung zombie). One combined session can keep all three lit: one status box
+> per system, one `ScheduleWakeup` at the shortest cadence needed. A new
+> session starts KTLO by invoking the skill and naming the systems.
+>
+> The skill carries: the token-frugal two-layer tick (cheap shell/SQL every
+> tick, LLM only on a break or the improvement window); the Opus-only authoring
+> + framework-first quality contract; the auto-fix playbook; the **incident
+> playbook library** (§11 — disk-full/ENOSPC fleet recovery, claude-pool
+> re-auth, GSC weekly-token expiry, deploy-gate `:4001` fixture, kitchen-scraper
+> timeout, transients); daily Playwright `@smoke` verification; email+in-session
+> escalation with de-dupe; and the improvement cycle ("a change that doesn't
+> move a goal's metric didn't happen"). State persists in
+> `agents/keep-the-lights-on/<system>/` so a fresh session resumes without
+> double-alerting.
+>
+> **Standing operator-action items** (agent can't do — sudo/interactive auth;
+> current list lives in each system's `incidents.json`): re-auth the claude-pool
+> (`python3 -m framework.cli.claude_pool login-help`), GSC token
+> (`install/fix-gsc-now.sh`), 265G ollama-dup disk reclaim.
 
 > ## 🎯 NORTH STAR — READ EVERY SESSION 🎯
 >
@@ -322,6 +343,10 @@ Docs:
   customer repo?"
 - `docs/agents-catalog.md` — every agent, categorized, with code/manifest
   path + schedule
+- `docs/keep-the-lights-on.md` — the 24/7 on-call (KTLO) runbook: starting a
+  session, the 3 live systems (aisleprompt/specpicks/retro-chat), incident
+  playbook library, GSC + claude-pool re-auth runbooks, and the
+  agent-optimization-toward-goals workflow with worked examples
 - `docs/seo-onboard-new-site.md` — add a site to SEO automation in 5 steps
 - `blueprints/README.md` — pick a blueprint when scaffolding
 - `install/glitchtip/README.md` — optional self-hosted error tracker +

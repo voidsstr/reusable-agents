@@ -17,6 +17,15 @@ systems:
   aisleprompt:
     config: /home/voidsstr/development/aisleprompt/keep-the-lights-on.yaml
     repo: /home/voidsstr/development/aisleprompt      # commit config changes here (master, main-first)
+    type: site
   specpicks:
     config: /home/voidsstr/development/specpicks/keep-the-lights-on.yaml
     repo: /home/voidsstr/development/specpicks
+    type: site
+  # DAEMON-type system (no DB / publish volume / homepage). Its config lives
+  # in the skill dir because the daemon is a thin bridge in nsc-assistant with
+  # no rich site config. Health = active AND actively working (see the config).
+  retro-chat:
+    config: systems/retro-chat.yaml                   # relative to the skill dir
+    repo: /home/voidsstr/development/reusable-agents   # config is versioned here
+    type: daemon

@@ -1,0 +1,56 @@
+# keep-the-lights-on config — retro-chat-daemon
+#
+# A DAEMON-type system (type: daemon), NOT a site. It has no DB / publish
+# volume / homepage / Playwright suite. Health = "the process is active AND
+# actively doing its work" (a long-running loop can be alive-but-hung — a
+# "zombie" — so liveness alone is not enough; check for recent work in the
+# log). Lives in the reusable-agents repo (skill dir) because the daemon
+# itself is a thin bridge in nsc-assistant with no rich site config.
+
+system: retro-chat
+display_name: Retro Chat Daemon (LAN bridge for retro agents)
+type: daemon        # site | daemon — drives which health model the tick uses
+
+# What the daemon is + where it runs (for context / restart).
+daemon:
+  unit: retro-chat-daemon.service          # systemctl --user unit
+  exec: /home/voidsstr/development/nsc-assistant/agent/tools/retro_chat_daemon.py
+  repo: /home/voidsstr/development/nsc-assistant
+  restart_policy: always                   # RestartSec=3; systemd auto-restarts on crash
+  # What "doing its work" looks like in the journal. The daemon scans the LAN
+  # every ~5 min and logs a discovery line; absence of these for >2 intervals
+  # while the unit is 'active' = a hung/zombie loop → restart.
+  liveness_log_grep: "discovery|scanning|claimed"
+  liveness_window_min: 16                   # expect ≥1 liveness line within this window
+  scan_interval_min: 5
+
+growth:
+  # Daemons have no growth metric of their own; their job is availability.
+  north_star: "The LAN bridge stays available so retro agents remain discoverable/reachable."
+
+owner_email: mperry@northernsoftwareconsulting.com
+
+# Daemon HEALTH classes:
+#   GREEN    — unit active AND ≥1 liveness log line within liveness_window_min.
+#   DEGRADED — unit active but NO liveness line in the window (zombie loop) →
+#              auto-fix: `systemctl --user restart retro-chat-daemon.service`,
+#              then confirm a fresh discovery line appears (§ auto-fix).
+#   DOWN     — unit inactive/failed and does not come back on its own → restart;
+#              if it won't stay up (crash-loops many times/min), escalate.
+# NRestarts is cumulative over the unit's life; a high lifetime count with a
+# stable current main-PID uptime is NOT an incident — only a live crash-loop is.
+
+known_excluded:
+  - pattern: "discovery: claimed 0 agents"
+    why: "No retro agents currently on the LAN is normal (they power on/off); not a daemon fault."
+
+cadence:
+  healthy: 1800
+  degraded: 300      # watch a post-restart recovery
+  down: 180
+  blocked_backoff: 3600
+
+standing_incidents: []
+
+history:
+  - "2026-08-03: added as the 3rd keep-the-lights-on system. Recovered from an ENOSPC zombie (disk-full 07-31/08-01 wedged the discovery loop while the process stayed 'active'); restart resumed discovery (claimed 7 LAN agents). This is the canonical daemon failure mode: alive-but-hung → restart."
