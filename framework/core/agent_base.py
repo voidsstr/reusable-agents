@@ -325,6 +325,23 @@ class AgentBase:
         """Framework calls this from run_once() before run(). Returns a
         short-circuited RunResult if the agent's signals() hash matches
         the prior run, else None."""
+        # Operator/CI escape hatch. The auto short-circuit compares INPUTS,
+        # so it cannot notice that the agent's own CODE changed — after a fix
+        # the agent keeps reporting "signals unchanged" and never exercises
+        # the new path. Without this the only way to force a run was to
+        # hand-edit `_auto_signals_hash` out of the agent's state blob, which
+        # is easy to get wrong and leaves no trace of why.
+        #
+        #   AGENT_FORCE_RUN=1 systemctl --user start agent-<id>.service
+        #   AGENT_FORCE_RUN=1 python3 agents/<id>/agent.py
+        #
+        # Deliberately env-only and never persisted: it applies to exactly
+        # one run, so a forced run can't silently become permanent.
+        if os.environ.get("AGENT_FORCE_RUN", "").strip().lower() in ("1", "true", "yes"):
+            self.decisions.observe(
+                "AGENT_FORCE_RUN set — bypassing auto short-circuit for this run",
+            )
+            return None
         try:
             sig = self.signals()
         except Exception as e:

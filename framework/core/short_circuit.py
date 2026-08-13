@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any, Iterable, Optional
 
 
@@ -287,6 +288,9 @@ def too_soon_to_rerun(
     else:
         now = datetime.now(timezone.utc)
     delta_h = (now - prior).total_seconds() / 3600.0
+    if force_run_requested():
+        # Report the true age, but never gate the run — see force_run_requested().
+        return False, delta_h
     return (delta_h < min_interval_hours), delta_h
 
 
@@ -307,6 +311,28 @@ def lossy_snapshot_hash(snap: Any, **kwargs) -> str:
     return stable_hash(_quantize_node(snap), **kwargs)
 
 
+def force_run_requested() -> bool:
+    """True when the operator set AGENT_FORCE_RUN for this process.
+
+    Every short-circuit in the fleet funnels through `should_skip` /
+    `too_soon_to_rerun`, so honoring the flag HERE gives one bypass that
+    works for the framework-level `AgentBase.signals()` hook and for the
+    in-run checks agents make themselves. Before this, forcing a run meant
+    either hand-editing a hash out of the agent's state blob or knowing
+    that agent's private env knob (ARTICLE_AUTHOR_DISABLE_SHORTCIRCUIT,
+    and friends) — per-agent knobs that no operator could be expected to
+    remember.
+
+    Needed because short-circuits compare INPUTS, so they cannot notice
+    that the agent's own code changed: after a fix the agent keeps
+    answering "signals unchanged" and never exercises the new path.
+
+    Env-only and never persisted — it applies to exactly one process, so a
+    forced run cannot silently become permanent.
+    """
+    return os.environ.get("AGENT_FORCE_RUN", "").strip().lower() in ("1", "true", "yes")
+
+
 def should_skip(
     state: Optional[dict],
     state_key: str,
@@ -323,6 +349,8 @@ def should_skip(
     if not current_hash:
         return False
     if not isinstance(state, dict):
+        return False
+    if force_run_requested():
         return False
     return state.get(state_key) == current_hash
 
