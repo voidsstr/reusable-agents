@@ -46,9 +46,9 @@ curl -fsS -X PUT "$API/api/providers/anthropic" \
       "description": "Anthropic API — set ANTHROPIC_API_KEY env var on the framework container.",
       "api_key_env": "ANTHROPIC_API_KEY",
       "available_models": [
-        "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"
+        "claude-opus-5", "claude-sonnet-4-6", "claude-haiku-4-5"
       ],
-      "default_model": "claude-opus-4-7",
+      "default_model": "claude-opus-5",
       "metadata": {"seeded": true}
     }' > /dev/null
 echo "  ✓ anthropic"

@@ -156,7 +156,7 @@ class Defaults:
         "default_provider": "azure-openai-prod",
         "default_model": "gpt-4o-mini",
         "agent_overrides": {
-          "implementer":   {"provider": "anthropic-claude", "model": "claude-opus-4-7"},
+          "implementer":   {"provider": "anthropic-claude", "model": "claude-opus-5"},
           "market-research":   {"provider": "ollama-local",     "model": "qwen3:8b"}
         }
       }
@@ -506,7 +506,7 @@ class _AnthropicClient(AIClient):
             else:
                 clean.append({"role": m["role"], "content": m["content"]})
         kw = {
-            "model": model or self.model or "claude-opus-4-7",
+            "model": model or self.model or "claude-opus-5",
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": clean,
@@ -691,7 +691,7 @@ class _ClaudeCliClient(AIClient):
                 parts.append(content)
         prompt = "\n\n".join(parts)
 
-        chosen = model or self.model or "claude-opus-4-7"
+        chosen = model or self.model or "claude-opus-5"
         # The CLI accepts both aliases ("opus", "sonnet") + full ids.
         # We pass the configured value through verbatim.
         # Default --max-turns 1 is fine for one-shot text generation. Bump

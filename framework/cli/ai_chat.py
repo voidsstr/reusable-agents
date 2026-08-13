@@ -12,7 +12,7 @@ Usage:
 
     # Override provider for a one-off call
     python3 -m framework.cli.ai_chat --agent implementer \\
-       --provider anthropic --model claude-opus-4-7 --prompt "..."
+       --provider anthropic --model claude-opus-5 --prompt "..."
 
     # Multi-message chat with a system prompt
     python3 -m framework.cli.ai_chat --agent implementer \\

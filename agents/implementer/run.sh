@@ -884,9 +884,9 @@ PY
             # Soft fallback chain — ONLY when no hard requirement is set.
             if [ -z "$REQUIRED_MODEL" ]; then
                 case "$START_MODEL" in
-                    *sonnet*) TIER_ORDER+=("claude-opus-4-7" "claude-haiku-4-5") ;;
+                    *sonnet*) TIER_ORDER+=("claude-opus-5" "claude-haiku-4-5") ;;
                     *opus*)   TIER_ORDER+=("claude-sonnet-4-6" "claude-haiku-4-5") ;;
-                    *haiku*)  TIER_ORDER+=("claude-sonnet-4-6" "claude-opus-4-7") ;;
+                    *haiku*)  TIER_ORDER+=("claude-sonnet-4-6" "claude-opus-5") ;;
                 esac
             fi
             set +e

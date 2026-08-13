@@ -14,9 +14,15 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
-parts/
+# Anchored to the repo root ON PURPOSE. Unanchored `lib/` matches at ANY
+# depth, which silently excluded agent source packages such as
+# agents/app-store-opportunity-agent/lib/ and
+# agents/seo-opportunity-agent/lib/{collector,analyzer}/ from version
+# control — they were lost when the host was rebuilt from a fresh clone
+# (2026-08-13). These rules only ever meant setuptools build output.
+/lib/
+/lib64/
+/parts/
 sdist/
 var/
 wheels/

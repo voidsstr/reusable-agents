@@ -893,7 +893,7 @@ cross-sell, article heroes, and future flows use the same endpoint.
 >
 > Every code path that GENERATES an editorial body — article, news,
 > head-to-head verdict/prose, long-form review, buying-guide per-pick
-> rationale — MUST use Claude Opus (`claude-opus-4-7`) and MUST defer
+> rationale — MUST use Claude Opus (`claude-opus-5`) and MUST defer
 > rather than fall back to a smaller model when Opus is unavailable. Prose
 > quality outweighs throughput for anything a human reader judges; sonnet
 > drafts read flatter and lose each site's voice. Applies to
@@ -921,7 +921,7 @@ cross-sell, article heroes, and future flows use the same endpoint.
 > ```
 >
 > **Implementer behavior:** `required_model_for_batch()` returns
-> `("opus","claude-opus-4-7")`; if Opus is unreachable the implementer
+> `("opus","claude-opus-5")`; if Opus is unreachable the implementer
 > writes `deferred.json` (reason `required-model-unavailable`) and the rec
 > stays queued. The defer happens BEFORE any fallback chain — `run.sh`
 > lifts `REQUIRED_MODEL` to the top, ahead of `IMPLEMENTER_FORCE_FALLBACK`
@@ -931,7 +931,7 @@ cross-sell, article heroes, and future flows use the same endpoint.
 > run Opus.
 >
 > **One-off scripts honor this too:** any new `<site>/scripts/*.{ts,py}`
-> writing article-shaped output hard-codes `claude-opus-4-7` in `--model`
+> writing article-shaped output hard-codes `claude-opus-5` in `--model`
 > (not sonnet/downgrade chains). Reference:
 > `specpicks/scripts/rewrite-news-as-commentary.ts`.
 >

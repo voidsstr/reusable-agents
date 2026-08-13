@@ -4,7 +4,7 @@ The dashboard UI uses this to:
   - List providers + which one is the default
   - Add / edit / delete providers (Azure OpenAI, Anthropic, Ollama, etc.)
   - Set the global default provider + model
-  - Set per-agent overrides ("for SEO Implementer, use claude-opus-4-7")
+  - Set per-agent overrides ("for SEO Implementer, use claude-opus-5")
 """
 from __future__ import annotations
 

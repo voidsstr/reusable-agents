@@ -59,7 +59,7 @@ database_url: "${DATABASE_URL}"  # already resolved in env
 implementer:
   prompts:
     system: prompts/h2h_commentary_system.md
-  model: claude-opus-4-7
+  model: claude-opus-5
 ```
 
 The system prompt path is relative to the agent dir; resolve as:
@@ -189,7 +189,7 @@ the system prompt's cross-link rule has something to reference.
 
 ```bash
 claude --print --output-format text \
-       --model claude-opus-4-7 \
+       --model claude-opus-5 \
        --max-turns 8 \
        --dangerously-skip-permissions \
        < <(printf '%s\n\n%s' "$SYSTEM_PROMPT" "$USER_PROMPT")

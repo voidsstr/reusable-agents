@@ -137,7 +137,7 @@ After registration:
 1. **Smoke-test the profile** by running `claude` once with its HOME:
    ```bash
    HOME=/home/voidsstr/.reusable-agents/claude-pool/profile-N \
-     claude --print --model claude-opus-4-7 "ping" 2>&1 | head -5
+     claude --print --model claude-opus-5 "ping" 2>&1 | head -5
    ```
    Expect a one-line response, not a 401 or "weekly limit" message.
 2. **Watch the next authoring run** pick up the new profile — the pool

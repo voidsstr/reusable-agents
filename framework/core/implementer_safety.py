@@ -160,7 +160,7 @@ MODEL_TIER_HAIKU = "haiku"
 # Concrete Claude model IDs per tier. Keep these in sync with the
 # implementer's claude-pool fallback chain in run.sh.
 MODEL_FOR_TIER = {
-    MODEL_TIER_OPUS:   "claude-opus-4-7",
+    MODEL_TIER_OPUS:   "claude-opus-5",
     MODEL_TIER_SONNET: "claude-sonnet-4-6",
     MODEL_TIER_HAIKU:  "claude-haiku-4-5",
 }

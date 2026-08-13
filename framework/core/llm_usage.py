@@ -60,7 +60,8 @@ from .storage import StorageBackend, get_storage
 # the user pays a flat subscription instead.
 PRICING: dict[str, tuple[float, float]] = {
     # Anthropic API (per-token billing)
-    "claude-opus-4-7":    (5.00, 25.00),
+    "claude-opus-5":      (5.00, 25.00),
+    "claude-opus-4-7":    (5.00, 25.00),   # retained: historical usage rows
     "claude-opus-4-6":    (5.00, 25.00),
     "claude-sonnet-4-6":  (3.00, 15.00),
     "claude-sonnet-4-5":  (3.00, 15.00),

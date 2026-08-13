@@ -307,8 +307,20 @@ cmd_backup() {
 
 cmd_status() {
     section "credential status"
-    [ -f "$SECRETS_FILE" ] && green "$SECRETS_FILE present ($(grep -c '^[A-Z]' "$SECRETS_FILE") keys, mode $(stat -c %a "$SECRETS_FILE"))" \
-        || red "$SECRETS_FILE ABSENT"
+    if [ -f "$SECRETS_FILE" ]; then
+        green "$SECRETS_FILE present ($(grep -c '^[A-Z]' "$SECRETS_FILE") keys, mode $(stat -c %a "$SECRETS_FILE"))"
+        # Load what is already stored, else every check below reports ABSENT
+        # regardless of reality (status ran the harvest-time branches against an
+        # empty SECRETS map and wrongly told the operator to re-fetch the GSC
+        # client pair that had already been recovered).
+        while IFS='=' read -r k v; do
+            [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+            v="${v%\'}"; v="${v#\'}"; v="${v%\"}"; v="${v#\"}"
+            SECRETS["$k"]="$v"
+        done < "$SECRETS_FILE"
+    else
+        red "$SECRETS_FILE ABSENT"
+    fi
     check_interactive
     print_checklist
 }

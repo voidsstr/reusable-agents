@@ -1288,7 +1288,7 @@ class AgentBase:
           2. agent's manifest metadata.ai_calls[call] (NAMED CALL OVERRIDE)
              — lets a single agent route different operations to different
              providers, e.g. metadata.ai_calls = {
-               "audit":   {"provider": "claude-cli", "model": "claude-opus-4-7"},
+               "audit":   {"provider": "claude-cli", "model": "claude-opus-5"},
                "summary": {"provider": "ollama-local", "model": "qwen3:8b"}
              }
              then `self.ai_client(call="audit")` uses Claude Opus while

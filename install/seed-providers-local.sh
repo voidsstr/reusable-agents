@@ -55,16 +55,16 @@ put_provider "anthropic" '{
     "kind": "anthropic",
     "description": "Anthropic API (set ANTHROPIC_API_KEY env on the framework container)",
     "api_key_env": "ANTHROPIC_API_KEY",
-    "available_models": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
-    "default_model": "claude-opus-4-7"
+    "available_models": ["claude-opus-5", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    "default_model": "claude-opus-5"
 }'
 
 put_provider "claude-cli" '{
     "name": "claude-cli",
     "kind": "claude-cli",
     "description": "Claude CLI (uses Max session token, no API key). Shells out to `claude --print --model <model>`. Best for one-shot text generation when you want billing on the Max plan.",
-    "available_models": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "opus", "sonnet", "haiku"],
-    "default_model": "claude-opus-4-7"
+    "available_models": ["claude-opus-5", "claude-sonnet-4-6", "claude-haiku-4-5", "opus", "sonnet", "haiku"],
+    "default_model": "claude-opus-5"
 }'
 
 put_provider "ollama-local" '{
@@ -98,14 +98,14 @@ put_provider "azure-openai" '{
 }'
 
 echo ""
-echo "Setting global default → anthropic/claude-opus-4-7"
-set_default "anthropic" "claude-opus-4-7"
+echo "Setting global default → anthropic/claude-opus-5"
+set_default "anthropic" "claude-opus-5"
 
 echo ""
 echo "Per-agent overrides:"
 # SEO sub-agents — use Claude via the CLI (Max session, not API key)
-set_override "seo-implementer"          "claude-cli"    "claude-opus-4-7"
-set_override "seo-analyzer"             "claude-cli"    "claude-opus-4-7"
+set_override "seo-implementer"          "claude-cli"    "claude-opus-5"
+set_override "seo-analyzer"             "claude-cli"    "claude-opus-5"
 set_override "seo-reporter"             "claude-cli"    "claude-haiku-4-5"
 # Existing pipelines that already use specific backends
 set_override "market-research-pipeline" "copilot"       "claude-opus-4.6"

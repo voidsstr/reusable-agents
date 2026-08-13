@@ -197,7 +197,7 @@ config under `agent_id = seo-analyzer`. Override per site:
 ```yaml
 analyzer:
   ai_provider: anthropic       # optional
-  ai_model: claude-opus-4-7    # optional
+  ai_model: claude-opus-5    # optional
 ```
 
 Set globally via the dashboard at

@@ -609,7 +609,7 @@ authors, audits, recommenders) routes through this.
 | Provider kind | Backed by | Auth | When to pick |
 |---|---|---|---|
 | `copilot` | GitHub Copilot proxy (e.g. `copilot-api` on `:4141`) | Copilot Pro/Business subscription, no API key | **Default**. Includes claude-sonnet-4.6, gpt-4o. Subscription billing — no per-call cost. |
-| `anthropic` | Anthropic API (`claude-opus-4-7`, `claude-sonnet-4-6`, …) | `ANTHROPIC_API_KEY` | Highest-quality per-token. Pay-per-call. |
+| `anthropic` | Anthropic API (`claude-opus-5`, `claude-sonnet-4-6`, …) | `ANTHROPIC_API_KEY` | Highest-quality per-token. Pay-per-call. |
 | `claude-cli` | Local `claude` CLI in `--print` mode | Claude Max session token (`claude setup-token`) | Subscription billing under Claude Max. **Per-account 5h rate-limit** — share via `claude-pool` for multi-account round-robin. |
 | `azure_openai` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` + endpoint | Enterprise-billed OpenAI access, Responses-API for codex. |
 | `openai` | api.openai.com | `OPENAI_API_KEY` | Direct OpenAI billing. |

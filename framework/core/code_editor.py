@@ -1451,7 +1451,7 @@ class ClaudeCliBackend(CodeEditorBackend):
             f"---\n\n{prompt_text}\n"
         )
 
-        # Pick model per backend params. Default to claude-opus-4-7 because
+        # Pick model per backend params. Default to claude-opus-5 because
         # Anthropic's seven-day rate limit is PER-MODEL (rateLimitType in
         # the API response is "seven_day_sonnet" / "seven_day_opus" /
         # "seven_day_haiku" — independent quota pools). Sonnet bears most
@@ -1460,7 +1460,7 @@ class ClaudeCliBackend(CodeEditorBackend):
         claude_model = (
             self.params.get("model")
             or os.environ.get("CLAUDE_CLI_MODEL")
-            or "claude-opus-4-7"
+            or "claude-opus-5"
         )
         cmd = [
             *self._claude_invocation(),

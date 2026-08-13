@@ -37,8 +37,12 @@ from _accumulator import (  # noqa: E402
     load_active, save_active, merge_run, open_opportunities,
     stats as accum_stats, transition_state, opportunity_id,
 )
-from lib import app_stores  # noqa: E402
-from lib.scoring import opportunity_score  # noqa: E402
+# Store clients + scoring live in framework/core/, NOT in a local lib/ —
+# the repo-root .gitignore carries the stock Python `lib/` rule, so the
+# original `lib/app_stores.py` + `lib/scoring.py` were never tracked and
+# vanished when the host was rebuilt from a fresh clone.
+from framework.core import app_store_clients as app_stores  # noqa: E402
+from framework.core.app_store_scoring import opportunity_score  # noqa: E402
 
 from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.email_codes import new_request_id  # noqa: E402

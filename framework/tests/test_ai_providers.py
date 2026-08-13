@@ -33,12 +33,12 @@ def test_unsupported_kind_rejected(storage):
 def test_defaults_set_get(storage):
     p = ai_providers.Provider(name="anthropic", kind="anthropic",
                                 api_key_env="TEST_ANTHROPIC_KEY",
-                                default_model="claude-opus-4-7")
+                                default_model="claude-opus-5")
     ai_providers.upsert_provider(p, storage=storage)
-    ai_providers.set_default_provider("anthropic", "claude-opus-4-7", storage=storage)
+    ai_providers.set_default_provider("anthropic", "claude-opus-5", storage=storage)
     d = ai_providers.read_defaults(storage=storage)
     assert d.default_provider == "anthropic"
-    assert d.default_model == "claude-opus-4-7"
+    assert d.default_model == "claude-opus-5"
 
 
 def test_per_agent_override(storage):
@@ -47,7 +47,7 @@ def test_per_agent_override(storage):
         ai_providers.Provider(name="p-a", kind="ollama", default_model="qwen3:8b"),
         storage=storage)
     ai_providers.upsert_provider(
-        ai_providers.Provider(name="p-b", kind="anthropic", default_model="claude-opus-4-7"),
+        ai_providers.Provider(name="p-b", kind="anthropic", default_model="claude-opus-5"),
         storage=storage)
     ai_providers.set_default_provider("p-a", "qwen3:8b", storage=storage)
     ai_providers.set_agent_override("special-agent", provider="p-b",
@@ -78,7 +78,7 @@ def test_manifest_metadata_takes_precedence(storage):
     # Register an agent with a manifest-level provider override
     register_agent(AgentManifest(
         id="custom-agent", name="Custom", category="ops",
-        metadata={"ai": {"provider": "manifest-p", "model": "claude-opus-4-7"}},
+        metadata={"ai": {"provider": "manifest-p", "model": "claude-opus-5"}},
     ), storage=storage)
 
     # ai_client_for should prefer the manifest's provider
@@ -92,7 +92,7 @@ def test_manifest_metadata_takes_precedence(storage):
     assert m is not None
     ai_cfg = m.metadata.get("ai", {})
     assert ai_cfg.get("provider") == "manifest-p"
-    assert ai_cfg.get("model") == "claude-opus-4-7"
+    assert ai_cfg.get("model") == "claude-opus-5"
 
 
 def test_clear_agent_override(storage):

@@ -41,7 +41,7 @@ try:
     from .implementer_safety import MODEL_FOR_TIER, MODEL_TIER_OPUS, MODEL_TIER_SONNET, MODEL_TIER_HAIKU
     VALID_TIERS = (MODEL_TIER_OPUS, MODEL_TIER_SONNET, MODEL_TIER_HAIKU)
 except Exception:  # pragma: no cover
-    MODEL_FOR_TIER = {"opus": "claude-opus-4-7",
+    MODEL_FOR_TIER = {"opus": "claude-opus-5",
                       "sonnet": "claude-sonnet-4-6",
                       "haiku": "claude-haiku-4-5"}
     VALID_TIERS = ("opus", "sonnet", "haiku")
@@ -50,13 +50,17 @@ CONFIG_KEY = "config/required-models.json"
 
 
 def _normalize_tier(t: Optional[str]) -> Optional[str]:
-    """Accept 'opus' / 'claude-opus-4-7' / variants. Returns canonical
+    """Accept 'opus' / 'claude-opus-5' / variants. Returns canonical
     tier string or None if unrecognized."""
     if not t:
         return None
     t = str(t).strip().lower()
     if t in VALID_TIERS:
         return t
+    # Retired ids stay resolvable: recs and stored configs written before the
+    # 2026-08 Opus 5 switch still carry claude-opus-4-7 and must not hard-fail.
+    if t in ("claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-8"):
+        return MODEL_TIER_OPUS if "MODEL_TIER_OPUS" in globals() else "opus"
     # Allow specifying the model id directly
     for tier, model in MODEL_FOR_TIER.items():
         if t == model.lower():
@@ -153,20 +157,20 @@ def _load_config(storage: Any) -> Optional[dict]:
 
 def enforce_writer_model(*, agent_id: str = "", dispatch_kind: str = "",
                           storage: Any = None,
-                          fallback_model: str = "claude-opus-4-7") -> str:
+                          fallback_model: str = "claude-opus-5") -> str:
     """Return the model id required for a writer (article/news) agent.
 
     One-call helper for ad-hoc scripts that produce article-shaped
     output and want the same opus-only policy the implementer obeys.
 
-    Returns the canonical model id (e.g. 'claude-opus-4-7'). If neither
+    Returns the canonical model id (e.g. 'claude-opus-5'). If neither
     `agent_id` nor `dispatch_kind` resolves to a required tier, returns
     `fallback_model` so callers always have a model to invoke.
 
     Usage:
         from framework.core.required_model import enforce_writer_model
         model = enforce_writer_model(dispatch_kind="news-rewrite")
-        # → "claude-opus-4-7"
+        # → "claude-opus-5"
 
     Raises ValueError ONLY when a config entry resolves to an invalid
     tier — never silently downgrades.

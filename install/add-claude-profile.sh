@@ -104,17 +104,39 @@ if [[ -n "$PROXY_URL" ]]; then
   echo ""
 fi
 
-# ── Run claude /login interactively ─────────────────────────────────────────
+# ── Run the login interactively ─────────────────────────────────────────────
+# MUST be a real terminal. `/login` is the IN-SESSION slash command and only
+# works inside an interactive Claude session — invoked without a TTY (e.g. from
+# an agent shell, CI, or Claude Code's `!` prefix) it prints
+#   "/login isn't available in this environment."
+# and exits 0, leaving the profile silently unauthenticated. Fail loudly
+# instead so the operator knows to open a normal terminal.
+if [[ ! -t 0 || ! -t 1 ]]; then
+  echo "  ERROR: no TTY. This login is interactive + browser-based." >&2
+  echo "         Open a REAL terminal (Windows Terminal -> Ubuntu, or \`wsl\`) and run:" >&2
+  echo "           cd $(cd "$(dirname "$0")/.." && pwd) && bash install/add-claude-profile.sh" >&2
+  echo "         Running it through an agent/`!` shell cannot work." >&2
+  exit 3
+fi
+
 echo "  ┌─────────────────────────────────────────────────────────────────┐"
 echo "  │  Log in with your Claude Max account in the browser that opens.  │"
 echo "  │  After authentication completes, return here.                    │"
 echo "  └─────────────────────────────────────────────────────────────────┘"
 echo ""
 
-if [[ -n "$PROXY_URL" ]]; then
-  HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HOME="$PROFILE_DIR" claude /login
+# Prefer the `auth login` SUBCOMMAND (CLI-level, works from a shell); fall back
+# to the legacy `/login` slash form for older CLI builds that lack it.
+if claude auth --help >/dev/null 2>&1; then
+  LOGIN_ARGS=(auth login)
 else
-  HOME="$PROFILE_DIR" claude /login
+  LOGIN_ARGS=(/login)
+fi
+
+if [[ -n "$PROXY_URL" ]]; then
+  HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HOME="$PROFILE_DIR" claude "${LOGIN_ARGS[@]}"
+else
+  HOME="$PROFILE_DIR" claude "${LOGIN_ARGS[@]}"
 fi
 
 # ── Wait for credentials.json to land (pool's auth check looks for it) ─────
