@@ -564,6 +564,142 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
     return summary
 
 
+def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
+                          site_id_filter: str | None,
+                          status_cb, decide_cb) -> dict:
+    """Refresh price + offer data via the Amazon Creators API.
+
+    This is the provider to use: it is the only Amazon path whose
+    credentials are actually provisioned fleet-wide. PA-API needs
+    AMAZON_PAAPI_ACCESS_KEY/SECRET_KEY/ASSOCIATE_TAG (absent) and
+    BrightData needs BRIGHTDATA_API_KEY (absent), so before this existed
+    every hydration run on both sites reported a skipped_reason and
+    refreshed nothing.
+
+    Shares _select_stale_amazon_prices + _persist_provider_refresh with the
+    other providers, so the candidate ordering, freshness window, per-row
+    commit, and compliance accounting are identical -- only the fetch
+    differs.
+    """
+    from framework.core.amazon_creators import CreatorsUnavailable, parse_item
+
+    freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
+    # The API caps getItems at 10 ASINs; the client chunks internally, but
+    # keeping our loop aligned makes the per-batch status readable.
+    batch_size = int(raw_cfg.get("creators_batch_size", 10))
+    max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
+    candidates = _select_stale_amazon_prices(
+        conn, site_id_filter=site_id_filter,
+        freshness_hours=freshness_hours, limit=max_per_run,
+        prioritize_featured_and_linked=bool(
+            raw_cfg.get("prioritize_featured_and_linked", False)),
+    )
+    decide_cb("observation",
+              f"Creators: {len(candidates)} stale-price products to refresh "
+              f"(freshness={freshness_hours}h, cap={max_per_run})")
+    summary = {
+        "provider": "creators",
+        "refreshed": 0, "failed": 0, "processed": 0,
+        "batches": 0, "asins_seen": 0, "inaccessible": 0,
+        "compliance_pass": 0, "compliance_fail": 0,
+    }
+    if not candidates:
+        return summary
+
+    by_asin = {p["asin"]: p for p in candidates}
+    asins = list(by_asin.keys())
+    for i in range(0, len(asins), batch_size):
+        chunk = asins[i:i + batch_size]
+        summary["batches"] += 1
+        status_cb(
+            f"Creators batch {summary['batches']}: {len(chunk)} ASINs",
+            progress=0.05 + 0.05 * (i / max(1, len(asins))),
+            current_action=f"prices {i+1}-{i+len(chunk)}/{len(asins)}",
+        )
+        try:
+            items, errors = creators_client.get_items(chunk)
+        except CreatorsUnavailable as e:
+            # Auth/credential failure is not per-batch bad luck -- every
+            # remaining batch would fail the same way. Stop and report.
+            decide_cb("error", f"Creators API unavailable: {str(e)[:200]}")
+            summary["failed"] += len(asins) - i
+            break
+        except Exception as e:
+            summary["failed"] += len(chunk)
+            decide_cb("error", f"Creators getItems failed for batch "
+                               f"{summary['batches']}: {str(e)[:200]}")
+            continue
+
+        summary["asins_seen"] += len(items)
+        for asin, raw in items.items():
+            row = by_asin.get(asin)
+            if not row:
+                continue
+            p = parse_item(raw)
+            # Map to the shared persist contract's key names.
+            payload = {
+                "price": p.get("price"),
+                "original_price": p.get("original_price"),
+                "currency": p.get("currency"),
+                "availability": p.get("availability"),
+                "rating": p.get("rating"),
+                "review_count": p.get("review_count"),
+                "main_image_url": p.get("image_url"),
+                "amazon_url": p.get("url"),
+                "brand": p.get("brand"),
+                "title": p.get("title"),
+            }
+            try:
+                _persist_provider_refresh(conn, row["id"], payload,
+                                          provider="creators")
+                summary["refreshed"] += 1
+                compliance = _compliance_flags(payload)
+                if all(compliance.values()):
+                    summary["compliance_pass"] += 1
+                else:
+                    summary["compliance_fail"] += 1
+            except Exception as e:
+                summary["failed"] += 1
+                # Same rationale as the PA-API path: without a rollback one
+                # bad row poisons the connection for the rest of the run.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                decide_cb("error",
+                          f"Creators persist failed for {asin}: {str(e)[:200]}")
+
+        # An ItemNotAccessible ASIN is delisted/regional/not-offered. Stamp
+        # the miss so it ages out of the stale queue instead of being
+        # retried every single run forever.
+        for asin, msg in errors.items():
+            row = by_asin.get(asin)
+            if not row:
+                continue
+            summary["inaccessible"] += 1
+            try:
+                _stamp_miss(conn, row["id"], f"creators: {msg[:120]}")
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        for a in chunk:
+            if a in items or a in errors:
+                continue
+            row = by_asin.get(a)
+            if row:
+                try:
+                    _stamp_miss(conn, row["id"], "creators: not in response")
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+    summary["processed"] = summary["refreshed"] + summary["failed"]
+    return summary
+
+
 def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
                              site_id_filter: str | None,
                              status_cb, decide_cb) -> dict:
@@ -687,7 +823,42 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
                             provider: str,
                             site_id_filter: str | None,
                             status_cb, decide_cb) -> dict:
-    """Top-level dispatcher — selects the provider and delegates."""
+    """Top-level dispatcher — selects the provider and delegates.
+
+    `creators` is the Amazon path whose credentials are provisioned, so it
+    is also the automatic fallback: a site still configured for `paapi` or
+    `brightdata` (neither of which has credentials on this host) would
+    otherwise silently refresh nothing forever. Falling back beats
+    reporting a skip, and the swap is recorded via decide_cb so it shows up
+    in the run's decision log rather than happening invisibly.
+    """
+    from framework.core.amazon_creators import client_from_env
+
+    creators_client = client_from_env(
+        partner_tag=raw_cfg.get("associate_tag", "") or "",
+        marketplace=raw_cfg.get("marketplace", "") or "",
+    )
+    if provider in ("paapi", "brightdata") and creators_client:
+        have_configured_creds = (paapi_cfg if provider == "paapi" else bd_cfg)
+        if not have_configured_creds:
+            decide_cb("observation",
+                      f"provider={provider} has no credentials in env; "
+                      f"falling back to the Amazon Creators API")
+            provider = "creators"
+
+    if provider == "creators":
+        if not creators_client:
+            return {"provider": "creators", "skipped_reason":
+                    "Creators credentials not in env "
+                    "(AMAZON_CREATORS_CLIENT_ID / CLIENT_SECRET / PARTNER_TAG)",
+                    "refreshed": 0, "failed": 0, "processed": 0,
+                    "batches": 0, "asins_seen": 0,
+                    "compliance_pass": 0, "compliance_fail": 0}
+        return _refresh_via_creators(
+            conn=conn, creators_client=creators_client, raw_cfg=raw_cfg,
+            site_id_filter=site_id_filter,
+            status_cb=status_cb, decide_cb=decide_cb,
+        )
     if provider == "paapi":
         if not paapi_cfg:
             return {"provider": "paapi", "skipped_reason":
