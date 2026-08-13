@@ -89,11 +89,29 @@ class IndexnowSubmitter(AgentBase):
             return RunResult(status="failure",
                               summary=f"submit.ts not found at {submit_ts}")
 
-        # The TS runner needs ts-node + pg from a specpicks node_modules.
+        # The TS runner needs ts-node + pg. Normally it borrows the specpicks
+        # app's node_modules, but on a FRESH fleet host the repo is cloned and
+        # `npm install` has not run — then bare `npx ts-node` downloads ts-node
+        # into ~/.npm/_npx WITHOUT its typescript peer and dies with
+        # "TypeError: Cannot read properties of undefined (reading 'fileExists')".
+        # Fall back to the globally-installed modules in that case.
         app_dir = os.environ.get("INDEXNOW_TS_APP_DIR",
                                   "/home/voidsstr/development/specpicks")
+        node_path = f"{app_dir}/node_modules"
+        run_cwd, npx_flags = app_dir, []
+        if not Path(node_path).is_dir():
+            global_root = os.environ.get("NODE_PATH", "")
+            if not global_root:
+                try:
+                    global_root = subprocess.run(["npm", "root", "-g"], capture_output=True,
+                                                 text=True, timeout=30).stdout.strip()
+                except Exception:
+                    global_root = ""
+            if global_root:
+                node_path, run_cwd, npx_flags = global_root, str(_HERE.parent), ["--no-install"]
+
         cmd = [
-            "npx", "ts-node", "--transpile-only",
+            "npx", *npx_flags, "ts-node", "--transpile-only",
             "--compiler-options",
             '{"module":"node16","moduleResolution":"node16","esModuleInterop":true,"skipLibCheck":true,"resolveJsonModule":true}',
             str(submit_ts),
@@ -103,12 +121,12 @@ class IndexnowSubmitter(AgentBase):
         if bulk:
             cmd.append("--bulk")
 
-        env = {**os.environ, "NODE_PATH": f"{app_dir}/node_modules"}
+        env = {**os.environ, "NODE_PATH": node_path}
         with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=False) as out:
             out_path = out.name
         try:
             proc = subprocess.run(
-                cmd, cwd=app_dir, env=env,
+                cmd, cwd=run_cwd, env=env,
                 capture_output=True, text=True,
                 timeout=int(os.environ.get("INDEXNOW_TIMEOUT_S", "900")),
             )

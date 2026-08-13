@@ -24,6 +24,14 @@ Wants=docker.service
 
 [Service]
 Type=simple
+# Without this the worker starts with an EMPTY AZURE_STORAGE_CONNECTION_STRING
+# and hands that down to every agent it spawns — every run then fails on a
+# storage error that looks like a per-agent bug. The generated agent units
+# (framework/core/scheduler.py) already carry the same line; the worker was
+# missing it. Leading '-' = tolerate absence (fresh host, pre-secrets).
+EnvironmentFile=-$HOME/.reusable-agents/secrets.env
+Environment=STORAGE_BACKEND=azure
+Environment=PYTHONPATH=$REPO_DIR
 ExecStart=/bin/bash $WORKER_SCRIPT
 Restart=always
 RestartSec=5

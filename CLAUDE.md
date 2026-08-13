@@ -1,5 +1,36 @@
 # Claude Instructions — reusable-agents framework
 
+> ## 🏗️ HOST STANDUP — `/setup-fleet-host` (read before "why is nothing running?")
+>
+> **The fleet host is the machine that EXECUTES agents.** Azure holds state +
+> the read-only dashboard; the host holds the timers, the framework API that
+> writes them, the host-worker, the drainer, and `~/.reusable-agents/`. When
+> the host is gone the sites still serve 200 — the only symptoms are absences
+> (publish volume 0, no IndexNow, decaying organic traffic). **Diagnose "is
+> there a host at all?" before diagnosing individual agents.**
+>
+> Runbook: `.claude/skills/setup-fleet-host/SKILL.md` · narrative + operator
+> checklist: `docs/fleet-host-standup.md` · scripts:
+> `install/standup-fleet-host.sh` (phases: preflight repos deps secrets api
+> register spine verify | all) and `install/recover-credentials.sh`
+> (harvest | status | backup).
+>
+> **Current host (2026-08-13 →):** `whitebeast`, WSL2 Ubuntu 24.04, repos at
+> `/home/voidsstr/development` on **ext4**. Not `/mnt/c` (9p, ~95× slower on
+> small writes), not a NAS (no POSIX locking; one blip fails every agent).
+> The path is a CONTRACT — every manifest `entry_command`, every registry
+> `repo_dir`, and `scheduler.py`'s `EnvironmentFile=` hardcode it.
+>
+> **Non-obvious invariants** (full list in the skill §4): `secrets.env` values
+> MUST be single-quoted (an Azure conn-string's `;` truncates on shell source);
+> node from nvm is invisible to systemd — PATH + NODE_PATH come from the global
+> drop-in `~/.config/systemd/user/service.d/10-fleet-path.conf`; register agents
+> from the REPOS (the blob registry drifts), with the framework repo LAST
+> because duplicate ids are last-write-wins; a clean `systemctl start` is NOT
+> proof a run worked (`EnvironmentFile=-` tolerates a missing file).
+>
+> Standup ends where KTLO begins — hand off as soon as `verify` is green.
+
 > ## 🛰️ 24/7 on-call skill — `/keep-the-lights-on` (KTLO)
 >
 > **The one skill for "keep the agents/sites running, fix things while I'm

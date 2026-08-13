@@ -4,7 +4,7 @@
   "description": "Polls an IMAP inbox every 60s, parses replies to agent-sent emails, and dispatches actions (e.g., implement rec-001, rec-005) to the configured downstream agent.",
   "category": "ops",
   "task_type": "desktop-task",
-  "cron_expr": "*/15 * * * *",
+  "cron_expr": "*/2 * * * *",
   "timezone": "UTC",
   "enabled": true,
   "runbook": "",

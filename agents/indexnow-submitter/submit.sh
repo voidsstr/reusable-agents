@@ -10,13 +10,25 @@ LOG="${INDEXNOW_LOG:-/tmp/reusable-agents-indexnow.log}"
 # Use the SpecPicks app's node_modules — it has ts-node + pg installed.
 # (Was AislePrompt's previously, but that dir's node_modules was reorganized
 # and no longer has pg locally; specpicks has both reliably.)
-APP_DIR="/home/voidsstr/development/specpicks"
+APP_DIR="${INDEXNOW_APP_DIR:-/home/voidsstr/development/specpicks}"
+# On a FRESH fleet host the site repo is cloned but `npm install` has not run,
+# so APP_DIR/node_modules is absent. Bare `npx ts-node` then downloads ts-node
+# into ~/.npm/_npx WITHOUT its typescript peer and dies with a confusing
+# "TypeError: Cannot read properties of undefined (reading 'fileExists')".
+# Fall back to the globally-installed ts-node + modules (npm i -g ts-node
+# typescript@5 pg — see install/standup-fleet-host.sh 'deps').
+if [ -d "$APP_DIR/node_modules" ]; then
+    RUN_CWD="$APP_DIR"; RUN_NODE_PATH="$APP_DIR/node_modules"; NPX_FLAGS=""
+else
+    RUN_CWD="$HERE"; RUN_NODE_PATH="${NODE_PATH:-$(npm root -g 2>/dev/null)}"; NPX_FLAGS="--no-install"
+fi
 RUN_OUTPUT=$(mktemp)
 {
   echo "── $(date -u +%Y-%m-%dT%H:%M:%SZ) — indexnow submit ──"
-  ( cd "$APP_DIR" && \
-    NODE_PATH="$APP_DIR/node_modules" \
-    timeout 600 npx ts-node --transpile-only --compiler-options '{"module":"node16","moduleResolution":"node16","esModuleInterop":true,"skipLibCheck":true,"resolveJsonModule":true}' "$HERE/submit.ts" "$@" ) 2>&1 | tee "$RUN_OUTPUT" \
+  echo "   node_modules: $RUN_NODE_PATH (cwd=$RUN_CWD)"
+  ( cd "$RUN_CWD" && \
+    NODE_PATH="$RUN_NODE_PATH" \
+    timeout 600 npx $NPX_FLAGS ts-node --transpile-only --compiler-options '{"module":"node16","moduleResolution":"node16","esModuleInterop":true,"skipLibCheck":true,"resolveJsonModule":true}' "$HERE/submit.ts" "$@" ) 2>&1 | tee "$RUN_OUTPUT" \
     || echo "(indexnow submit failed or timed out)"
   echo ""
 } >> "$LOG" 2>&1
