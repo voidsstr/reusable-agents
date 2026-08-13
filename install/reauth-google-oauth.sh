@@ -94,11 +94,22 @@ else
     exit 3
 fi
 
-# ── 2. Back up the old oauth file ──
-TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP="${OAUTH_FILE}.expired.${TIMESTAMP}.bak"
-cp -p "$OAUTH_FILE" "$BACKUP"
-echo "Backed up old oauth file → $BACKUP"
+# ── 2. Back up the old oauth file (if there is one) ──
+# First-time bootstrap on a fresh host has no prior token to back up. The
+# unconditional cp used to abort the whole re-auth with
+#   cp: cannot stat '.../seo/.oauth.json': No such file or directory
+# before the consent flow ever ran (set -e). Skip the backup instead, and
+# make sure the directory exists so the bootstrap can write into it.
+mkdir -p "$(dirname "$OAUTH_FILE")"
+chmod 700 "$(dirname "$OAUTH_FILE")" 2>/dev/null || true
+if [ -f "$OAUTH_FILE" ]; then
+    TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+    BACKUP="${OAUTH_FILE}.expired.${TIMESTAMP}.bak"
+    cp -p "$OAUTH_FILE" "$BACKUP"
+    echo "Backed up old oauth file → $BACKUP"
+else
+    echo "No existing oauth file at $OAUTH_FILE — first-time bootstrap, nothing to back up."
+fi
 
 # ── 3. Run the bootstrap consent flow ──
 # This opens a browser tab, you sign in to Google, grant the requested
