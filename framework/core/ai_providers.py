@@ -698,6 +698,24 @@ class _ClaudeCliClient(AIClient):
         # it for callers that need tool use (web_search etc.) — the CLI
         # counts each tool invocation as a turn.
         max_turns = int(kwargs.get("max_turns", 1))
+        # `--output-format text` prints ONLY the final assistant turn. That is
+        # correct for a one-shot (max_turns=1) but silently TRUNCATES any run
+        # where the model emits text, calls a tool, then emits more text: you
+        # get just the tail. Measured 2026-08-13 with a forced text→tool→text
+        # prompt: text mode returned 14 bytes (`"b":"second"}`) while the full
+        # answer was `{"a":"first","b":"second"}`.
+        #
+        # That is what zeroed publish volume on both sites — the article
+        # proposers run --max-turns 30 (web search), so their JSON arrived
+        # headless: starting mid-object, with more `}` than `{`, ending on a
+        # clean `]}`. The salvage parser in the aisleprompt proposer was
+        # recovering a few proposals from the tail; the rest were never seen.
+        #
+        # For multi-turn runs use stream-json (NDJSON of events) and
+        # concatenate the text blocks of EVERY assistant event. Left the
+        # single-turn path on `text` deliberately: it is the overwhelmingly
+        # common case, cannot hit this bug, and needs no parsing.
+        use_stream_json = max_turns > 1
         # CLAUDE_CLI_CMD explicit override (highest priority).
         # Otherwise auto-discover the claude-pool shim — when present, it
         # round-robins across authenticated/non-rate-limited Max profiles
@@ -714,10 +732,13 @@ class _ClaudeCliClient(AIClient):
                 claude_bin = pool_shim
             else:
                 claude_bin = "claude"
-        cmd = [
-            claude_bin,
-            "--print",
-            "--output-format", "text",
+        cmd = [claude_bin, "--print"]
+        if use_stream_json:
+            # --verbose is REQUIRED by the CLI to emit stream-json under --print.
+            cmd += ["--output-format", "stream-json", "--verbose"]
+        else:
+            cmd += ["--output-format", "text"]
+        cmd += [
             "--no-session-persistence",
             "--model", chosen,
             "--max-turns", str(max_turns),
@@ -766,11 +787,59 @@ class _ClaudeCliClient(AIClient):
         _CHUNK_FLUSH_S = 2.0
         _CHUNK_FLUSH_BYTES = 4096
 
+        # Populated from the terminal `result` event when streaming JSON, so a
+        # CLI-side failure (max-turns exhausted, refusal, error subtype) is
+        # reported as itself instead of surfacing as unparseable output.
+        sj_meta: dict = {}
+
+        def _sj_text(line: str) -> str | None:
+            """Extract displayable assistant text from one stream-json event.
+
+            Returns None for events that carry no assistant prose (system
+            banners, tool_use/tool_result turns, rate-limit notices). Malformed
+            lines are ignored rather than raised: a single bad line must not
+            lose an otherwise good answer.
+            """
+            line = line.strip()
+            if not line:
+                return None
+            try:
+                ev = json.loads(line)
+            except Exception:
+                return None
+            etype = ev.get("type")
+            if etype == "assistant":
+                out = [
+                    b.get("text") or ""
+                    for b in (ev.get("message", {}).get("content") or [])
+                    if b.get("type") == "text"
+                ]
+                return "".join(out) or None
+            if etype == "result":
+                sj_meta["subtype"] = ev.get("subtype")
+                sj_meta["is_error"] = bool(ev.get("is_error"))
+                # Keep the CLI's own final string as a fallback for the rare
+                # case where no assistant event carried text.
+                if isinstance(ev.get("result"), str):
+                    sj_meta["result"] = ev["result"]
+            return None
+
         def _pump(stream, buf, sink, kind):
             chunk_buf: list[str] = []
             chunk_bytes = 0
             last_flush = _time.time()
-            for line in iter(stream.readline, ""):
+            for raw in iter(stream.readline, ""):
+                # In stream-json mode the raw line is an event envelope, not
+                # prose. Accumulate only the assistant text so the returned
+                # buffer is the complete answer and the dashboard's Live LLM
+                # panel shows readable output rather than JSON noise.
+                if kind == "stdout" and use_stream_json:
+                    text = _sj_text(raw)
+                    if text is None:
+                        continue
+                    line = text
+                else:
+                    line = raw
                 buf.append(line)
                 # Echo to parent stdout/stderr so host-worker's redirect
                 # captures it (legacy log path; still useful for grep).
@@ -825,7 +894,23 @@ class _ClaudeCliClient(AIClient):
             raise RuntimeError(
                 f"claude CLI exited rc={proc.returncode}: {err}"
             )
-        return (proc.stdout or "").strip()
+        text = (proc.stdout or "").strip()
+        if use_stream_json:
+            # rc=0 with an error result means the CLI stopped early (commonly
+            # max-turns exhausted). Whatever text exists is a partial answer;
+            # say so rather than handing the caller a truncated body to parse.
+            if sj_meta.get("is_error") or (
+                sj_meta.get("subtype") and sj_meta["subtype"] != "success"
+            ):
+                raise RuntimeError(
+                    f"claude CLI returned result subtype="
+                    f"{sj_meta.get('subtype')!r} (is_error="
+                    f"{sj_meta.get('is_error')}) after {max_turns} max turns; "
+                    f"got {len(text)} chars of partial text"
+                )
+            if not text and isinstance(sj_meta.get("result"), str):
+                text = sj_meta["result"].strip()
+        return text
 
 
 _CLIENT_CLASSES = {
