@@ -221,6 +221,70 @@ phase_secrets() {
     section "[secrets] recover what's recoverable -> $SECRETS_FILE"
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
     bash "$(dirname "$0")/recover-credentials.sh" harvest
+    phase_claude_pool
+}
+
+# ── phase: claude-pool shim ─────────────────────────────────────────────────
+# The implementer decides whether Opus authoring is possible by EXECUTING
+# $POOL_DIR/bin/claude. A missing shim fails that probe in a way that is
+# indistinguishable from a dead pool: it sets IMPLEMENTER_FORCE_FALLBACK=1,
+# caches that verdict for 15 minutes, and defers every article/news/h2h batch
+# with "required model claude-opus-5 unavailable" -- while `claude --model
+# claude-opus-5` works perfectly from the shell, which makes it look like an
+# Anthropic-side outage rather than a missing file.
+#
+# This host had exactly that: profiles created by add-claude-profile.sh, no
+# shim, and a full day of zero publish volume on 2026-08-13. Creating the
+# shim is idempotent and costs nothing, so it runs on every standup.
+phase_claude_pool() {
+    section "[claude-pool] shim (implementer's Opus availability probe)"
+    local pool_dir="$STATE_DIR/claude-pool"
+    mkdir -p "$pool_dir/bin"
+    cat > "$pool_dir/bin/claude" <<EOF
+#!/usr/bin/env bash
+# Auto-generated claude-pool shim -- do not edit; standup rewrites it.
+exec python3 $REPO_DIR/framework/cli/claude_pool.py exec -- "\$@"
+EOF
+    chmod +x "$pool_dir/bin/claude"
+    green "shim at $pool_dir/bin/claude"
+
+    local authed
+    authed=$(python3 - "$pool_dir/state.json" <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print(0); raise SystemExit
+print(sum(1 for k, v in d.items()
+          if not k.startswith("__") and v.get("authenticated")))
+PY
+)
+    if [ "${authed:-0}" -gt 0 ]; then
+        green "$authed authenticated profile(s)"
+        # Prove the shim actually rotates to a live profile. The implementer
+        # greps for this exact "-> profile-N (home=" line, so if it is absent
+        # the probe fails no matter how healthy the accounts are.
+        #
+        # Capture to a variable rather than piping into `grep -q`: this script
+        # runs under `set -o pipefail`, and grep -q exits at the first match,
+        # closing the pipe so claude dies of SIGPIPE. pipefail then propagates
+        # that non-zero status and a SUCCESSFUL probe reports as failed.
+        local probe_out
+        probe_out=$(timeout 60 "$pool_dir/bin/claude" \
+            --dangerously-skip-permissions --print --output-format text \
+            --model claude-haiku-4-5 --max-turns 1 'ping' </dev/null 2>&1) || true
+        if printf '%s' "$probe_out" \
+                | grep -qE '^\[claude-pool\] → profile-[0-9]+ \(home='; then
+            green "shim probe OK — Opus authoring can dispatch"
+        else
+            gap "shim probe FAILED — implementer will defer all Opus batches"
+            printf '      probe said: %s\n' "$(printf '%s' "$probe_out" | head -1)"
+        fi
+    else
+        gap "no authenticated profiles — run install/add-claude-profile.sh in a REAL terminal"
+    fi
+    # A stale "pool is dead" verdict outlives the fix by up to 15 min.
+    rm -f /tmp/claude-pool-disabled-probe 2>/dev/null || true
 }
 
 # ── phase: api ──────────────────────────────────────────────────────────────
@@ -429,6 +493,7 @@ main() {
         repos)     phase_repos ;;
         deps)      phase_deps ;;
         secrets)   phase_secrets ;;
+        claude-pool) phase_claude_pool ;;
         api)       phase_api ;;
         register)  phase_register ;;
         spine)     phase_spine ;;

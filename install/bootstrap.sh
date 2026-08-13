@@ -201,18 +201,37 @@ echo
 
 if have claude; then
     POOL_DIR="$HOME/.reusable-agents/claude-pool"
-    if [[ -d "$POOL_DIR/profile-1/.claude" ]]; then
-        green "  ✓ claude-pool already initialized at $POOL_DIR"
-    else
-        if [[ "$(ask 'Initialize claude-pool now? (y/N)' 'N')" =~ ^[yY] ]]; then
-            mkdir -p "$POOL_DIR/profile-1" "$POOL_DIR/bin"
-            cat > "$POOL_DIR/bin/claude" <<EOF
+
+    # The shim is created UNCONDITIONALLY and separately from profile
+    # creation. It used to live inside the "profile-1 doesn't exist yet"
+    # branch, so any host whose profiles were created another way --
+    # install/add-claude-profile.sh, or a restore -- took the "already
+    # initialized" path and never got a shim. The guard checked for the
+    # PROFILE while the body created the SHIM.
+    #
+    # That silently disables all Opus authoring: the implementer probes the
+    # pool by executing $POOL_DIR/bin/claude, a missing shim makes the probe
+    # fail exactly like a dead pool, and it sets IMPLEMENTER_FORCE_FALLBACK=1
+    # -- so every article/news/h2h batch defers 'required model unavailable'
+    # while `claude --model claude-opus-5` works fine from the shell. Cost a
+    # full day of zero publish volume on 2026-08-13 to track down.
+    #
+    # Rewriting it every run is safe (it is generated, not edited) and keeps
+    # the embedded repo path correct if the checkout ever moves.
+    mkdir -p "$POOL_DIR/bin"
+    cat > "$POOL_DIR/bin/claude" <<EOF
 #!/usr/bin/env bash
-# Auto-generated claude-pool shim
+# Auto-generated claude-pool shim -- do not edit; bootstrap.sh rewrites it.
 exec python3 $REPO/framework/cli/claude_pool.py exec -- "\$@"
 EOF
-            chmod +x "$POOL_DIR/bin/claude"
-            green "  ✓ Created pool shim at $POOL_DIR/bin/claude"
+    chmod +x "$POOL_DIR/bin/claude"
+    green "  ✓ claude-pool shim at $POOL_DIR/bin/claude"
+
+    if [[ -d "$POOL_DIR/profile-1/.claude" ]]; then
+        green "  ✓ claude-pool profiles already initialized at $POOL_DIR"
+    else
+        if [[ "$(ask 'Initialize a claude-pool profile now? (y/N)' 'N')" =~ ^[yY] ]]; then
+            mkdir -p "$POOL_DIR/profile-1"
             echo "  Sign in once per profile: HOME=$POOL_DIR/profile-1 claude /login"
         fi
     fi
