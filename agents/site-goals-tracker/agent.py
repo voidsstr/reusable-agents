@@ -75,6 +75,16 @@ SITE_PROFILES: dict[str, dict] = {
         # The instacart-clicks and amazon-clicks events show outbound
         # interest even when GA4 doesn't yet record a confirmed cart.
         "conversion_events": ["instacart-cart", "instacart-clicks", "amazon-clicks"],
+        # First-party fallback, authoritative for outbound clicks. See
+        # CONVERSION_SQL_NOTE below.
+        "conversion_sql": {
+            "amazon-clicks": ("SELECT COUNT(*) FROM kitchen_click_events "
+                              "WHERE source = 'amazon' "
+                              "AND created_at > now() - interval '30 days'"),
+            "instacart-clicks": ("SELECT COUNT(*) FROM kitchen_click_events "
+                                 "WHERE source = 'instacart' "
+                                 "AND created_at > now() - interval '30 days'"),
+        },
         "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
         "agent_id": "aisleprompt-site-goals-tracker",
     },
@@ -84,6 +94,14 @@ SITE_PROFILES: dict[str, dict] = {
         "ga4_property_id": "531274480",
         "db_env": "SPECPICKS_DATABASE_URL",
         "conversion_events": ["amazon-clicks", "ebay-clicks"],
+        "conversion_sql": {
+            "amazon-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
+                              "WHERE target = 'amazon' "
+                              "AND clicked_at > now() - interval '30 days'"),
+            "ebay-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
+                            "WHERE target = 'ebay' "
+                            "AND clicked_at > now() - interval '30 days'"),
+        },
         "page_count_sql": (
             "SELECT (SELECT COUNT(*) FROM products WHERE is_active = true) + "
             "(SELECT COUNT(*) FROM editorial_articles WHERE status = 'published') + "
@@ -168,7 +186,26 @@ def collect_metrics(profile: dict) -> dict[str, float]:
         except Exception as e:
             err(f"  GSC totals failed: {e}")
 
-    # --- GA4: conversion events (30d) ---
+    # --- Conversions (30d): GA4, corrected by first-party click tables ---
+    #
+    # CONVERSION_SQL_NOTE. GA4 alone reports these as ZERO, and that zero is
+    # wrong. Outbound buy-links are server-side 302 redirects (/k/:slug and
+    # friends), so no browser JS ever runs on that hop and no GA4 event
+    # fires. Measured 2026-08-14: GA4 said 0 amazon-clicks on both sites
+    # while the first-party tables held 1,260 aisleprompt clicks in 30d and
+    # 98,132 specpicks outbound clicks all-time (81,837 amazon / 16,295
+    # ebay).
+    #
+    # That false zero is worse than a missing metric: every monetisation
+    # goal read 0/target, so the whole affiliate side of the North Star
+    # looked dead and any optimisation keyed off it was reasoning from
+    # fiction.
+    #
+    # The redirect handler writes the click row itself, so the DB is the
+    # AUTHORITATIVE source here; GA4 can only undercount. Take the larger of
+    # the two per event, and keep both under distinct metric keys so the gap
+    # stays visible rather than silently papered over.
+    events: dict[str, int] = {}
     if token:
         try:
             ga_resp = ga4_run_report(token, profile["ga4_property_id"], {
@@ -178,14 +215,40 @@ def collect_metrics(profile: dict) -> dict[str, float]:
             })
             events = {row["dimensionValues"][0]["value"]: int(row["metricValues"][0]["value"])
                       for row in (ga_resp.get("rows") or [])}
-            total_conv = 0
-            for ev in profile.get("conversion_events", []):
-                n = events.get(ev, 0)
-                metrics[f"goal-{_slug(ev)}-30d"] = float(n)
-                total_conv += n
-            metrics["goal-total-conversions-30d"] = float(total_conv)
         except Exception as e:
             err(f"  GA4 conversions failed: {e}")
+
+    first_party: dict[str, int] = {}
+    conv_sql = profile.get("conversion_sql") or {}
+    if conv_sql:
+        _db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
+        if _db_url:
+            try:
+                _conn = psycopg2.connect(_db_url)
+                try:
+                    for ev, sql in conv_sql.items():
+                        with _conn.cursor() as _cur:
+                            _cur.execute(sql)
+                            first_party[ev] = int(_cur.fetchone()[0])
+                finally:
+                    _conn.close()
+            except Exception as e:
+                err(f"  first-party conversion query failed: {e}")
+
+    total_conv = 0
+    for ev in profile.get("conversion_events", []):
+        ga_n = int(events.get(ev, 0))
+        fp_n = int(first_party.get(ev, 0))
+        n = max(ga_n, fp_n)
+        metrics[f"goal-{_slug(ev)}-30d"] = float(n)
+        if ev in first_party:
+            metrics[f"ga4-{_slug(ev)}-30d"] = float(ga_n)
+            metrics[f"firstparty-{_slug(ev)}-30d"] = float(fp_n)
+            if fp_n > ga_n:
+                err(f"  {ev}: first-party DB {fp_n} > GA4 {ga_n} "
+                    f"(server-side redirect not seen by GA4) — using DB")
+        total_conv += n
+    metrics["goal-total-conversions-30d"] = float(total_conv)
 
     # --- DB: total active pages ---
     db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
