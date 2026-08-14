@@ -133,7 +133,18 @@ STATE_DIR = Path(os.path.expanduser(
 ))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_LIMIT = int(os.environ.get("GSC_INSPECT_LIMIT", "500"))
+# 500 was unreachable. GSC's URL Inspection API is rate-limited to roughly
+# 8 inspections/minute, so 500 URLs needs ~62 minutes while agent.py caps the
+# subprocess at GSC_INSPECT_TIMEOUT_S=1800 (30 min). Every scheduled run
+# therefore died on the timeout AFTER doing real work -- 248 of 250 rows were
+# already appended when the axe fell. The fix that made this script run at all
+# was verified on 3- and 11-URL runs, which never approached the wall.
+#
+# 150 fits ~19 min inside the 30 min cap with headroom for slow responses.
+# Coverage still accumulates across runs (the script appends to a jsonl and
+# tracks a watermark), so a smaller per-run slice costs nothing but calendar
+# time. Raise GSC_INSPECT_TIMEOUT_S alongside this if you raise the limit.
+DEFAULT_LIMIT = int(os.environ.get("GSC_INSPECT_LIMIT", "150"))
 # GSC URL Inspection quota is 2,000/day per property. 2 RPS ≈ 7,200/hour
 # burst capacity, but a single run is capped at DEFAULT_LIMIT (500 by
 # default) so daily volume stays at ~25% of quota with one run, leaving

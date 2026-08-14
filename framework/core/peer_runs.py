@@ -46,6 +46,14 @@ __all__ = [
 ]
 
 
+# A run dir is exactly YYYYmmddTHHMMSSZ. Anything else under runs/ is debris —
+# test fixtures ("test-direct-write-20260522"), persisted dispatch copies
+# ("rundir-<agent>-<ts>-<slug>"), strays. They matter because 't'/'r' sort AFTER
+# '2', so a single stray becomes latest_run_ts() and the caller acts on a
+# non-run. Truncation used to hide this by cutting the list off in May.
+_RUN_TS_RE = __import__("re").compile(r"^\d{8}T\d{6}Z$")
+
+
 def runs_prefix(agent_id: str) -> str:
     """Storage prefix holding an agent's run directories."""
     return f"agents/{agent_id}/runs/"
@@ -59,6 +67,23 @@ def list_run_ts(agent_id: str, *, storage=None) -> list[str]:
     """
     st = storage or get_storage()
     prefix = runs_prefix(agent_id)
+
+    # Enumerate run DIRECTORIES, not every blob beneath them. list_prefix()
+    # caps at 10000 keys and returns them lexicographically, so a busy agent
+    # silently yields its OLDEST slice: on 2026-08-14
+    # specpicks-seo-opportunity-agent had >10000 blobs under runs/ and this
+    # function returned a newest run of 20260511T060000Z -- three months stale --
+    # which latest_run_ts() then handed downstream as "current". A consumer
+    # acting on that would forward May recommendations as today's.
+    try:
+        children = st.list_child_prefixes(prefix)
+    except Exception:
+        children = []
+    if children:
+        return sorted(c for c in children if c and _RUN_TS_RE.match(c))
+
+    # Fallback for backends without delimiter support. Still cap-bound, so
+    # treat a full page as untrustworthy rather than returning a stale answer.
     try:
         keys = st.list_prefix(prefix) or []
     except Exception:
@@ -69,7 +94,7 @@ def list_run_ts(agent_id: str, *, storage=None) -> list[str]:
         head = rest.split("/", 1)[0]
         # Only accept a real run-dir segment (a key directly under the
         # prefix with no child path is a stray file, not a run).
-        if head and "/" not in head and head != rest:
+        if head and "/" not in head and head != rest and _RUN_TS_RE.match(head):
             seen.add(head)
     return sorted(seen)
 

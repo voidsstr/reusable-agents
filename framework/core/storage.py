@@ -71,6 +71,31 @@ class StorageBackend(ABC):
 
     # ---- Convenience helpers (concrete; build on the abstract methods) ----
 
+    def list_child_prefixes(self, prefix: str) -> list[str]:
+        """Immediate child "directory" names under `prefix`, without listing
+        every blob beneath them.
+
+        Why this exists: list_prefix() caps at `limit` keys and returns them
+        LEXICOGRAPHICALLY, so a caller enumerating an agent's run history hits
+        the cap and silently gets the OLDEST slice. Observed 2026-08-14:
+        specpicks-seo-opportunity-agent has >10000 blobs under runs/, so
+        peer_runs.latest_run_ts() returned 20260511T060000Z -- three months
+        stale -- and reported it as current. Truncation that yields wrong-but-
+        plausible data is worse than an error.
+
+        Default implementation derives the children from list_prefix and is
+        therefore still cap-bound; backends that can enumerate delimiters
+        natively override it and are not. Callers that need correctness over
+        a large history should prefer this over list_prefix.
+        """
+        seen: set[str] = set()
+        for key in self.list_prefix(prefix) or []:
+            rest = key[len(prefix):] if key.startswith(prefix) else ""
+            head = rest.split("/", 1)[0]
+            if head and "/" in rest:
+                seen.add(head)
+        return sorted(seen)
+
     def read_text(self, key: str, encoding: str = "utf-8") -> Optional[str]:
         b = self.read_bytes(key)
         return b.decode(encoding) if b is not None else None
@@ -279,6 +304,20 @@ class AzureBlobStorage(StorageBackend):
             if len(out) >= limit:
                 break
         return out
+
+    def list_child_prefixes(self, prefix: str) -> list[str]:
+        """Delimiter walk — returns child dirs only, so it is NOT subject to
+        list_prefix's key cap. See StorageBackend.list_child_prefixes."""
+        if prefix and not prefix.endswith("/"):
+            prefix += "/"
+        out: list[str] = []
+        for item in self._container.walk_blobs(name_starts_with=prefix, delimiter="/"):
+            name = getattr(item, "name", "") or ""
+            if name.endswith("/"):
+                child = name[len(prefix):].rstrip("/")
+                if child:
+                    out.append(child)
+        return sorted(out)
 
     @contextmanager
     def lock(self, key: str, timeout_s: float = 30.0) -> Iterator[bool]:

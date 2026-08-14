@@ -2796,11 +2796,29 @@ try:
 except Exception:
     pass
 
+# DELIBERATELY NOT: `if sha: shipped |= (requested - deferred)`.
+#
+# That treated the mere existence of a git SHA as proof every requested rec
+# shipped — which is failing OPEN, the exact bug this block was written to kill.
+# It is worse than it looks, because SHIP_GIT_SHA is a HEAD *delta*
+# (GIT_SHA_BEFORE vs GIT_SHA_AFTER), so ANY commit landing in the shared repo
+# during the dispatch window gets attributed to this run. Observed 2026-08-14:
+# an h2h dispatch adopted a different agent's concurrent commit and wrote
+# {"shipped": 15, "deferred": 0} when ground truth was 5 rows touched.
+#
+# A SHA is evidence that SOMETHING was committed, never evidence of WHICH recs.
+# Only per-rec artifacts prove a ship: SHIP_APPLIED_IDS / SHIP_ALREADY_IDS above,
+# and applied_rec_ids below. Anything left over is reported as unverified rather
+# than silently counted as success — a run that cannot prove what it shipped must
+# say so, because a false "N/N implemented" makes the whole fleet unauditable.
 sha = os.environ.get("SHIP_GIT_SHA", "")
-# A commit covers the recs in this batch that were not explicitly
-# deferred — the edit landed in the tree under those rec ids.
-if sha:
-    shipped |= (requested - deferred)
+try:
+    doc = json.loads(applied_path.read_text())
+    for rid in doc.get("applied_rec_ids") or []:
+        if rid:
+            shipped.add(str(rid))
+except Exception:
+    pass
 
 deferred -= shipped
 unverified = sorted(requested - shipped - deferred)
