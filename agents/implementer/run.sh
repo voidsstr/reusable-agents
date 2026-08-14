@@ -2752,6 +2752,78 @@ elif [ -n "$ALREADY_IMPLEMENTED_REC_IDS" ]; then
     COMPLETION_REASON="already-implemented: ${ALREADY_IMPLEMENTED_REC_IDS//,/, }"
 fi
 
+# ── Record ship-status for agent.py ─────────────────────────────────────────
+# agent.py turns this into the run's summary line. The paths above (the
+# framework code-editor + graceful-defer branches) already wrote their own
+# verdict, so only write when ABSENT — an earlier explicit decision wins.
+#
+# Before this existed, the claude-pool article-author path wrote no sidecar
+# at all and agent.py defaulted to "everything shipped", producing status
+# lines like `implemented 3/3 rec(s)` on batches whose bodies had DEFERRED
+# every rec. Deferred work that reads as shipped is never re-queued and the
+# fleet stops being auditable, so the count here is evidence-based:
+# shipped = applied-recs.json ∪ already-implemented, deferred = explicit
+# deferred_rec_ids, and anything with no evidence is reported as neither.
+if [ ! -f "$RESPONDER_RUN_DIR/_ship_status.json" ]; then
+    SHIP_STATUS_JSON="$RESPONDER_RUN_DIR/_ship_status.json" \
+    SHIP_APPLIED_IDS="$APPLIED_REC_IDS" \
+    SHIP_ALREADY_IDS="$ALREADY_IMPLEMENTED_REC_IDS" \
+    SHIP_REQUESTED_IDS="${RESPONDER_REC_IDS:-}" \
+    SHIP_RUN_DIR="$RESPONDER_RUN_DIR" \
+    SHIP_GIT_SHA="$GIT_SHA" \
+    SHIP_REASON="$COMPLETION_REASON" \
+    SHIP_COMPLETION="$COMPLETION_STATUS" \
+    python3 - <<'SHIPSTATUS_PY' || true
+import json, os
+from pathlib import Path
+
+
+def _ids(name):
+    return {s.strip() for s in os.environ.get(name, "").split(",") if s.strip()}
+
+
+requested = _ids("SHIP_REQUESTED_IDS")
+shipped = _ids("SHIP_APPLIED_IDS") | _ids("SHIP_ALREADY_IDS")
+deferred = set()
+
+# Explicit deferrals recorded by the DB-write convention.
+applied_path = Path(os.environ["SHIP_RUN_DIR"]) / "applied-recs.json"
+try:
+    doc = json.loads(applied_path.read_text())
+    for rid in doc.get("deferred_rec_ids") or []:
+        if rid:
+            deferred.add(str(rid))
+except Exception:
+    pass
+
+sha = os.environ.get("SHIP_GIT_SHA", "")
+# A commit covers the recs in this batch that were not explicitly
+# deferred — the edit landed in the tree under those rec ids.
+if sha:
+    shipped |= (requested - deferred)
+
+deferred -= shipped
+unverified = sorted(requested - shipped - deferred)
+
+out = {
+    "shipped": len(shipped),
+    "deferred": len(deferred),
+    "reason": os.environ.get("SHIP_REASON") or os.environ.get("SHIP_COMPLETION", ""),
+    "rc": 0,
+    "sha": sha[:8],
+    "shipped_rec_ids": sorted(shipped),
+    "deferred_rec_ids": sorted(deferred),
+    "unverified_rec_ids": unverified,
+    "source": "completion-signals",
+}
+Path(os.environ["SHIP_STATUS_JSON"]).write_text(json.dumps(out, indent=2))
+print(
+    f"[ship-status] shipped={out['shipped']} deferred={out['deferred']} "
+    f"unverified={len(unverified)} reason={out['reason']}"
+)
+SHIPSTATUS_PY
+fi
+
 # 2026-05-13: stamp `shipped=True` + `shipped_at` on the SOURCE producer's
 # recommendations.json when the implementer succeeds via applied-recs.json
 # (article-author DB-write convention) OR when claude marked recs as

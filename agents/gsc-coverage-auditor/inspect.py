@@ -46,6 +46,28 @@ import json
 import os
 import subprocess
 import sys
+
+# ── stdlib-shadowing guard — must run before any third-party import ──
+# This file is named inspect.py, and `python3 inspect.py` (exactly how
+# agent.py invokes it) puts its OWN directory first on sys.path. Any
+# library that then does `import inspect` — the framework metric
+# helpers, importlib machinery, psycopg2 tooling — binds THIS module
+# instead of the stdlib one and dies with
+# "module 'inspect' has no attribute 'signature'".
+#
+# That is why, once the refresh-token path was fixed, the run still
+# ended in "metric recording failed" and recorded no goal progress.
+# Drop our own directory (nothing here imports a sibling by name; the
+# only local references are file paths built with Path) and pre-bind
+# the genuine stdlib module so every later importer gets the real one.
+_SELF_FILE = os.path.abspath(__file__)
+_SELF_DIR = os.path.dirname(_SELF_FILE)
+sys.path[:] = [p for p in sys.path if p and os.path.abspath(p) != _SELF_DIR]
+_shadowed = sys.modules.get("inspect")
+if _shadowed is not None and getattr(_shadowed, "__file__", "") == _SELF_FILE:
+    del sys.modules["inspect"]
+import inspect as _stdlib_inspect  # noqa: E402,F401  — bind the real one
+
 import time
 import urllib.parse
 import urllib.request
@@ -61,7 +83,48 @@ HERE = Path(__file__).resolve().parent
 # SITE_CONFIG_PATHS=<path1>,<path2> to use explicit files. Last-resort
 # fallback: the legacy sites.json in this dir (symlinked to indexnow's).
 SITES_JSON = HERE / "sites.json"
-REFRESH_SCRIPT = (HERE.parent / "seo-data-collector" / "refresh-token.py").resolve()
+
+
+def _resolve_refresh_script() -> Path:
+    """Locate refresh-token.py, the shared GSC access-token minter.
+
+    It used to live at agents/seo-data-collector/refresh-token.py. The
+    2026 pipeline consolidation moved it into the seo-opportunity-agent
+    (agents/seo-opportunity-agent/lib/collector/) and deleted the old
+    standalone dir, but this constant kept pointing at the dead path —
+    so get_access_token() raised CalledProcessError on EVERY run, no
+    coverage JSONL was ever written, and the agent reported the
+    misleading "inspect.py ran but no coverage file yet - first run?"
+    with urls_inspected_7d=0 for ~90 consecutive runs on both sites.
+
+    Search the known locations rather than hardcoding one, so a future
+    move degrades to a clear error instead of silent zero-coverage.
+    Override with GSC_REFRESH_SCRIPT=<path>.
+    """
+    override = os.environ.get("GSC_REFRESH_SCRIPT", "").strip()
+    candidates = [Path(os.path.expanduser(override))] if override else []
+    candidates += [
+        # Current home (post-consolidation).
+        HERE.parent / "seo-opportunity-agent" / "lib" / "collector" / "refresh-token.py",
+        # Legacy standalone collector (pre-consolidation).
+        HERE.parent / "seo-data-collector" / "refresh-token.py",
+        # Retired-but-tracked ancestor, last resort.
+        Path(os.path.expanduser(
+            "~/development/nsc-assistant/agents/_legacy-seo-opportunity-agent/"
+            "refresh-token.py"
+        )),
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            return cand.resolve()
+    raise SystemExit(
+        "refresh-token.py not found. Looked in:\n  "
+        + "\n  ".join(str(c) for c in candidates)
+        + "\nSet GSC_REFRESH_SCRIPT=<path> to point at it explicitly."
+    )
+
+
+REFRESH_SCRIPT = _resolve_refresh_script()
 OAUTH_FILE = Path(os.path.expanduser(
     os.environ.get("GSC_OAUTH_FILE", "~/.reusable-agents/seo/.oauth.json")
 ))

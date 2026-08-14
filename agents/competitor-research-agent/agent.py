@@ -661,59 +661,126 @@ class CompetitorResearchAgent(AgentBase):
                 "rec):\n" + inv_lines
             )
 
-        compare_user = (
-            f"Our site: {cfg.domain}\n"
-            f"What we do: {cfg.what_we_do or '(not specified)'}\n\n"
-            f"OUR FEATURES:\n{json.dumps(ours_features, indent=2)}\n\n"
-            f"COMPETITOR FEATURES:\n{json.dumps(theirs_features, indent=2)}"
-            f"{inventory_block}"
-            f"{prior_block}\n\n"
-            "STEP 1 — Before proposing anything, mentally walk through every "
-            "competitor feature in COMPETITOR FEATURES above and tag each "
-            "one Y/N against OUR FEATURES + CURRENT_STATE_INVENTORY. Pantry "
-            "tracking, recipe import from URLs, meal planning, shopping "
-            "list, Instacart handoff, family sharing, photo input, chat — "
-            "these are the most-common false-positives. If any are tagged "
-            "Y, do not propose adding them.\n"
-            f"STEP 2 — Produce up to {max_recs} thoroughly-blueprinted "
-            "recommendations for the N-tagged gaps. Quality > quantity — "
-            "fewer fully-specified recs beats many shallow ones. NEVER "
-            "propose a feature substantively equivalent to anything in the "
-            "PREVIOUSLY-PROPOSED list above — pick a different gap instead."
-        )
-        try:
-            # Use AgentBase's chat_with_fallback so claude→copilot→ollama
-            # auto-falls through on timeout/rate-limit. Direct client.chat
-            # calls don't get fallback. We also cap max_tokens at 6000 to
-            # keep claude's response time inside its 600s CLI timeout.
-            raw = self.ai_chat([
-                {"role": "system", "content": COMPARE_SYS},
-                {"role": "user", "content": compare_user},
-            ], temperature=0.2, max_tokens=6000)
-        except Exception as e:
-            self.decide("error", f"compare LLM call failed (after fallback): {e}")
-            return RunResult(status="failure", summary=f"LLM compare failed: {e}")
+        def _build_compare_user(subset: list, subset_max_recs: int) -> str:
+            return (
+                f"Our site: {cfg.domain}\n"
+                f"What we do: {cfg.what_we_do or '(not specified)'}\n\n"
+                f"OUR FEATURES:\n{json.dumps(ours_features, indent=2)}\n\n"
+                f"COMPETITOR FEATURES:\n{json.dumps(subset, indent=2)}"
+                f"{inventory_block}"
+                f"{prior_block}\n\n"
+                "STEP 1 — Before proposing anything, mentally walk through every "
+                "competitor feature in COMPETITOR FEATURES above and tag each "
+                "one Y/N against OUR FEATURES + CURRENT_STATE_INVENTORY. Pantry "
+                "tracking, recipe import from URLs, meal planning, shopping "
+                "list, Instacart handoff, family sharing, photo input, chat — "
+                "these are the most-common false-positives. If any are tagged "
+                "Y, do not propose adding them.\n"
+                f"STEP 2 — Produce up to {subset_max_recs} thoroughly-blueprinted "
+                "recommendations for the N-tagged gaps. Quality > quantity — "
+                "fewer fully-specified recs beats many shallow ones. NEVER "
+                "propose a feature substantively equivalent to anything in the "
+                "PREVIOUSLY-PROPOSED list above — pick a different gap instead."
+            )
+
+        def _unwrap_recs(parsed) -> list:
+            """Normalise a parsed compare response into a list of recs."""
+            if isinstance(parsed, dict):
+                for k in ("recommendations", "recs", "items"):
+                    if isinstance(parsed.get(k), list):
+                        return parsed[k]
+                return []
+            return parsed if isinstance(parsed, list) else []
+
+        # ── Batched compare ────────────────────────────────────────────────
+        # One mega-call asking for N fully-blueprinted recs across every
+        # competitor at once routinely blew the claude CLI's 600s ceiling
+        # (3 of 4 runs died with "claude CLI timed out after 600s"), and
+        # the fallback chain then answered with a weaker model — so the
+        # run either failed or silently downgraded.
+        #
+        # Fix is two-part, no model downgrade:
+        #   1. chunk the competitors so each prompt asks for a fraction of
+        #      the blueprints (bounded output = bounded wall-clock), and
+        #   2. give each call an explicit, generous timeout instead of
+        #      inheriting the 600s default.
+        # A chunk that still fails is logged and skipped — partial results
+        # beat losing the whole run.
+        comp_list = theirs_features if isinstance(theirs_features, list) else []
+        chunk_size = max(1, int(analyzer_cfg.get("compare_batch_competitors", 2)))
+        compare_timeout_s = int(analyzer_cfg.get("compare_timeout_s", 1800))
+        chunks = [comp_list[i:i + chunk_size]
+                  for i in range(0, len(comp_list), chunk_size)] or [[]]
+        # Spread the rec budget across chunks (min 2 each so a chunk can
+        # still say something useful), then hard-cap the merged total.
+        per_chunk_recs = max(2, -(-max_recs // len(chunks)))
+
+        raw_recs: list = []
+        seen_titles: set[str] = set()
+        chunk_failures = 0
+        raw_parts: list[str] = []
+
+        for idx, chunk in enumerate(chunks, start=1):
+            self.status(
+                f"comparing competitors ({idx}/{len(chunks)})",
+                progress=0.65 + 0.15 * (idx / max(len(chunks), 1)),
+            )
+            try:
+                # AgentBase's chat_with_fallback keeps the claude→copilot
+                # →ollama safety net for hard outages; the point of the
+                # chunking + timeout is that the PRIMARY model now
+                # actually finishes, so fallback stays a rare event.
+                raw = self.ai_chat([
+                    {"role": "system", "content": COMPARE_SYS},
+                    {"role": "user", "content": _build_compare_user(chunk, per_chunk_recs)},
+                ], temperature=0.2, max_tokens=6000, timeout=compare_timeout_s)
+            except Exception as e:
+                chunk_failures += 1
+                self.decide(
+                    "error",
+                    f"compare chunk {idx}/{len(chunks)} failed (after fallback): {e}",
+                )
+                continue
+            raw_parts.append(f"--- chunk {idx} ---\n{raw or ''}")
+            for r in _unwrap_recs(_parse_llm_json(raw) or []):
+                if not isinstance(r, dict):
+                    continue
+                # De-dupe across chunks: different competitors surface the
+                # same gap, and each chunk gets its own rec budget.
+                key = (r.get("title") or "").strip().lower()
+                if key and key in seen_titles:
+                    continue
+                if key:
+                    seen_titles.add(key)
+                raw_recs.append(r)
+            if len(raw_recs) >= max_recs:
+                break
+
         # Persist the raw compare response for debugging — silent 0-rec
         # runs are nearly always a parse failure or token truncation.
         try:
-            self._save_artifact("compare-raw.txt", raw or "")
+            self._save_artifact("compare-raw.txt", "\n\n".join(raw_parts))
         except Exception:
             pass
-        raw_recs = _parse_llm_json(raw) or []
-        # Some LLMs wrap recs in {"recommendations": [...]} — unwrap.
-        if isinstance(raw_recs, dict):
-            for k in ("recommendations", "recs", "items"):
-                if isinstance(raw_recs.get(k), list):
-                    raw_recs = raw_recs[k]
-                    break
-            else:
-                raw_recs = []
-        if not isinstance(raw_recs, list):
-            raw_recs = []
+
+        self.decide(
+            "observation",
+            f"batched compare: {len(chunks)} chunk(s) x {chunk_size} competitor(s), "
+            f"{per_chunk_recs} recs/chunk, timeout={compare_timeout_s}s "
+            f"→ {len(raw_recs)} rec(s), {chunk_failures} chunk failure(s)",
+        )
+
+        if not raw_recs and chunk_failures == len(chunks):
+            return RunResult(
+                status="failure",
+                summary=f"LLM compare failed: all {len(chunks)} chunk(s) errored",
+            )
         if not raw_recs:
             self.decide(
                 "compare-empty",
-                f"compare LLM returned no parseable recs (raw len={len(raw or '')})",
+                f"compare LLM returned no parseable recs across {len(chunks)} "
+                f"chunk(s) (raw len={sum(len(p) for p in raw_parts)}, "
+                f"{chunk_failures} chunk failure(s))",
             )
 
         # ── 5. Score, tier, validate ────────────────────────────────────────

@@ -122,12 +122,34 @@ class GscCoverageAuditor(AgentBase):
 
         self.status("computing coverage metrics", progress=0.7)
 
+        # A non-zero rc means inspect.py never got to write anything.
+        # This used to be swallowed: the rc was captured but never
+        # checked, so a hard crash (for ~90 consecutive runs, a dead
+        # refresh-token.py path raising CalledProcessError) surfaced as
+        # a *successful* run reporting "no coverage file yet — first
+        # run?" with urls_inspected_7d=0. The one agent that exists to
+        # explain the indexing wall was reporting green while producing
+        # nothing. Fail loudly instead.
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-2000:]
+            return RunResult(
+                status="failure",
+                summary=f"inspect.py exited rc={proc.returncode} for {site}",
+                error_text=tail or f"inspect.py returned {proc.returncode} with no output",
+                metrics={"urls_inspected_7d": 0, "indexed_pct": 0.0, "unknown_pct": 0.0},
+            )
+
         # Parse coverage file → metrics
         cov = self._coverage_path()
         if not cov.is_file():
+            # rc==0 but nothing on disk: a real anomaly, not a benign
+            # first run. Report it as a failure so it can't sit green.
             return RunResult(
-                status="success",
-                summary="inspect.py ran but no coverage file yet — first run?",
+                status="failure",
+                summary=(
+                    f"inspect.py exited 0 but wrote no coverage file at {cov}"
+                ),
+                error_text=(proc.stderr or "").strip()[-2000:],
                 metrics={"urls_inspected_7d": 0, "indexed_pct": 0.0, "unknown_pct": 0.0},
             )
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
