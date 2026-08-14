@@ -23,9 +23,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 # Make framework + shared importable regardless of cwd. After the
 # agents/ consolidation, the repo root is two levels up.
@@ -76,7 +78,96 @@ Return a JSON array of issue objects matching this schema:
 }
 Only flag issues you can prove from the provided page data. If you find
 nothing actionable, return [].
+
+EVIDENCE DISCIPLINE — absence claims (read before flagging anything
+"missing", "absent", "zero", or "without"):
+- BODY TEXT is anchor-stripped and often truncated. It NEVER contains link
+  markup. You cannot conclude a page lacks links of any kind from it.
+  Judge linking ONLY from the LINKS block.
+- Judge structured-data claims ONLY from JSON-LD TYPES, and indexability
+  claims ONLY from ROBOTS. Both are extracted from markup you cannot see
+  in BODY TEXT.
+- When BODY TEXT is marked truncated, the unshown remainder may contain
+  exactly what you are about to call missing. Do not flag it.
+- Never write "almost certainly", "likely", "appears to", or "the truncated
+  body does not show" in a rationale. Those phrases mean you are inferring an
+  absence you cannot see — return nothing for that page instead. A confident
+  wrong finding costs more than a missed one.
 """
+
+
+# How much visible text of each page the LLM sees. body_text is anchor-stripped
+# (BeautifulSoup get_text), so link presence can NEVER be judged from it — that
+# is what LINKS below is for. Kept generous because auditors that see only the
+# opening paragraphs assert absences about the rest of the page.
+BODY_EXCERPT_CHARS = 6000
+
+
+def _link_profile(p: Page, max_prefixes: int = 10, max_samples: int = 15) -> str:
+    """Compact same-origin link inventory for one page.
+
+    body_text is produced by BeautifulSoup's get_text(), which DISCARDS every
+    <a href>. Feeding only body_text to the auditor makes every "this page has
+    no links to X" check structurally unanswerable — the model cannot see a
+    link that was stripped before the prompt was built, so it reports the
+    absence as fact. Crawler.links already holds the real inventory; this
+    renders it as a first-path-segment histogram plus a sample of distinct
+    targets, which is compact enough to inline for every page in the batch.
+
+    Deliberately generic: buckets by whatever the site's own URL shape is, so
+    no site-specific path (/product/, /recipes/, …) is named here.
+    """
+    links = [l for l in (p.links or []) if isinstance(l, str)]
+    if not links:
+        return "LINKS: (none captured)"
+    try:
+        origin = urlparse(p.url).netloc
+    except ValueError:
+        origin = ""
+    internal, external = [], 0
+    for l in links:
+        try:
+            netloc = urlparse(l).netloc
+        except ValueError:
+            continue
+        if origin and netloc == origin:
+            internal.append(l)
+        else:
+            external += 1
+
+    counts: Counter[str] = Counter()
+    by_prefix: dict[str, list[str]] = {}
+    for l in internal:
+        path = urlparse(l).path
+        seg = path.strip("/").split("/")[0]
+        prefix = f"/{seg}" if seg else "/(root)"
+        counts[prefix] += 1
+        by_prefix.setdefault(prefix, [])
+        if l not in by_prefix[prefix]:
+            by_prefix[prefix].append(l)
+
+    hist = ", ".join(
+        f"{prefix} ×{n} ({len(by_prefix[prefix])} distinct)"
+        for prefix, n in counts.most_common(max_prefixes)
+    )
+    # Sample the RAREST prefixes first: high-count buckets are site-wide rails,
+    # while a handful of links under one prefix is the editorial in-body linking
+    # that the "page is missing links to X" rules actually care about.
+    sample: list[str] = []
+    for prefix, _ in sorted(counts.items(), key=lambda kv: kv[1]):
+        for l in by_prefix[prefix]:
+            sample.append(l)
+            if len(sample) >= max_samples:
+                break
+        if len(sample) >= max_samples:
+            break
+    lines = [
+        f"LINKS: {len(internal)} internal ({len(set(internal))} distinct), {external} external",
+        f"  by section: {hist or '(none)'}",
+    ]
+    if sample:
+        lines.append("  distinct internal targets (rarest sections first): " + ", ".join(sample))
+    return "\n".join(lines)
 
 
 def _format_pages_for_prompt(pages: list[Page], what_we_do: str) -> str:
@@ -85,7 +176,16 @@ def _format_pages_for_prompt(pages: list[Page], what_we_do: str) -> str:
         parts.append(f"SITE PURPOSE: {what_we_do}\n")
     parts.append("PAGES TO REVIEW:\n")
     for p in pages:
-        body_excerpt = (p.body_text or "")[:1500]
+        full = p.body_text or ""
+        body_excerpt = full[:BODY_EXCERPT_CHARS]
+        truncated = len(full) > BODY_EXCERPT_CHARS
+        body_label = (
+            f"BODY TEXT (anchor-stripped; first {len(body_excerpt)} of {len(full)}+ chars — "
+            "the rest was NOT shown to you)"
+            if truncated
+            else f"BODY TEXT (anchor-stripped; complete, {len(full)} chars)"
+        )
+        jsonld = ", ".join(dict.fromkeys(p.jsonld_types or [])) or "(none)"
         parts.append(f"""
 URL: {p.url}
 STATUS: {p.status_code}{(' (ERROR: ' + p.error + ')') if p.error else ''}
@@ -93,7 +193,11 @@ TITLE: {p.title}
 DESCRIPTION: {p.description}
 H1: {p.h1}
 CANONICAL: {p.canonical}
-BODY (truncated):
+JSON-LD TYPES ({p.jsonld_count} block(s)): {jsonld}
+ROBOTS: {p.robots_meta or '(none)'}
+OG:TYPE: {p.og_type or '(none)'}
+{_link_profile(p)}
+{body_label}:
 {body_excerpt}
 ---""")
     return "".join(parts)
