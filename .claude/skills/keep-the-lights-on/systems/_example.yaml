@@ -139,3 +139,23 @@ standing_incidents:
 history:
   - 2026-07-06: "responder crash-loop fixed + load_state hardened; removed dead drainer + crash-watcher units; re-authed claude-pool 1->4 profiles."
   - 2026-07-06: "47dc5f5 seasonal/trends injection; c6cfd88 editorial reads from live app DB; 0a3468e recipe-cluster long-tail mining. aisleprompt 24h volume 4 -> 11."
+
+# ── Catalog health (optional) ──────────────────────────────────────────────
+# Cheap SQL probes run every tick by SKILL.md §5c. They guard the half of
+# the North Star the publish pulse cannot see: a site can publish perfectly
+# while every buy-link is stale or broken, with no failed unit to show for
+# it. Give a check `expect_max`/`expect_min` to make it a bound, or omit
+# both to make it a backlog gauge (a FLAT value across ticks is itself a
+# finding -- throughput is not beating catalog growth).
+# catalog_health:
+#   checks:
+#     - name: listings_fresh_24h
+#       db: <db-key from the db: block>
+#       sql: "select count(*) from <listings> where fetched_at > now() - interval '24 hours'"
+#       expect_min: 1
+#       note: "0 = the price refresh path is dead; name the owning agent here"
+#     - name: broken_buy_links
+#       db: <db-key>
+#       sql: "select count(*) from <products> where <cta routing is wrong>"
+#       expect_max: 0
+#       note: "AUTO-FIX: <the idempotent UPDATE that repairs it>"
