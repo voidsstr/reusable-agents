@@ -397,6 +397,21 @@ def maybe_queue_to_digest(
     bypassing the gate). Promoted to shared helper so EVERY sender
     routes through it."""
     import os as _os
+    # Kill switch. DIGEST_DISABLED=1 drops the message instead of queueing it,
+    # and — unlike setting DIGEST_ONLY=0 — does NOT fall through to a real send
+    # attempt. Added 2026-08-14 at the operator's direction after the queue
+    # reached 4,298 undelivered items (growing ~140/hr) with no transport
+    # configured on this host: no msmtp binary, no Graph/SMTP credentials.
+    #
+    # Queueing mail nobody can deliver is worse than not queueing it. The
+    # senders' own summaries said "Emailed N recipient(s)" for months while the
+    # only thing that happens is a blob write, so the growth was invisible.
+    # Existing entries were consolidated to digest-archive/<date>.json first —
+    # nothing was destroyed.
+    #
+    # Re-enable by unsetting DIGEST_DISABLED once a transport exists.
+    if _os.environ.get("DIGEST_DISABLED", "") == "1":
+        return True, "digest disabled (DIGEST_DISABLED=1) — message dropped, not queued"
     if bypass_digest or _os.environ.get("DIGEST_ONLY", "1") != "1":
         return False, ""
     try:
