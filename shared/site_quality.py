@@ -410,10 +410,19 @@ def maybe_queue_to_digest(
     # nothing was destroyed.
     #
     # Re-enable by unsetting DIGEST_DISABLED once a transport exists.
-    if _os.environ.get("DIGEST_DISABLED", "") == "1":
-        return True, "digest disabled (DIGEST_DISABLED=1) — message dropped, not queued"
+    #
+    # ORDER MATTERS. The bypass_digest test comes FIRST. When the kill switch
+    # was checked first it also swallowed ALERTS — every KTLO escalation passes
+    # bypass_digest=True, so the switch returned ok=True "message dropped" and
+    # the operator was never told the fleet was on fire. A switch meant to stop
+    # ROUTINE digest noise must never silence the one channel that reports
+    # emergencies. Alerts now fall through to a real send attempt and fail
+    # HONESTLY when no transport exists, which is what makes KTLO §6 escalate
+    # in-session instead of believing it mailed.
     if bypass_digest or _os.environ.get("DIGEST_ONLY", "1") != "1":
         return False, ""
+    if _os.environ.get("DIGEST_DISABLED", "") == "1":
+        return True, "digest disabled (DIGEST_DISABLED=1) — message dropped, not queued"
     try:
         import json as _json, datetime as _dt, hashlib as _hashlib
         try:

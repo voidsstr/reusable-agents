@@ -1,3 +1,12 @@
+> **2026-08-15 — SUPERSEDED IN PART.** The operational runbook is now
+> `.claude/skills/provision-fleet/SKILL.md`, which covers the FULL fleet:
+> all five repos, the retro-chat daemon + brain, GPU-backed local services,
+> website builds and deployments, and a producing-not-just-green verification
+> gate. `setup-fleet-host` covered only the framework spine. This document
+> remains accurate as the NARRATIVE of the 2026-08 rebuild and its incidents.
+> Note the host described here (WSL2, RTX 4080 SUPER) is the OLD box; the
+> fleet is moving to a native-Linux host with an RTX 5090.
+
 # Fleet host standup — rebuilding the machine that runs the agents
 
 **What a fleet host is.** The one machine that *executes* agents. Azure holds
@@ -12,8 +21,8 @@ publish volume goes to zero, IndexNow stops pinging, GSC feedback stops, and
 organic traffic decays over days. It reads like "the agents are broken" when
 in fact there is no host at all.
 
-The operational runbook is the **`setup-fleet-host` skill**
-(`.claude/skills/setup-fleet-host/SKILL.md`). This page is the narrative: how
+The operational runbook is the **`provision-fleet` skill**
+(`.claude/skills/provision-fleet/SKILL.md`). This page is the narrative: how
 the current host came to be, what a machine loses when it dies, and the
 operator checklist that a script cannot do.
 
@@ -162,7 +171,7 @@ Real issues this rebuild surfaced. None block operation; all are worth fixing.
 
 ## Related
 
-- `.claude/skills/setup-fleet-host/SKILL.md` — the phase-by-phase runbook and
+- `.claude/skills/provision-fleet/SKILL.md` — the phase-by-phase runbook and
   the trap list
 - `.claude/skills/keep-the-lights-on/SKILL.md` + `docs/keep-the-lights-on.md` —
   day-to-day on-call once the host is up

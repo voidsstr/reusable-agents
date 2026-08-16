@@ -340,6 +340,45 @@ coverage audit — consistent with the token-discipline model. State keys:
 
 ---
 
+---
+
+## 5c. Catalog health — monetisation rots silently (every tick, pure SQL)
+
+If the config has a `catalog_health:` block, run its `checks:` every tick.
+They are plain `SELECT count(*)` probes — Layer A cost, no reasoning — and
+they guard the half of the North Star that the publish pulse cannot see:
+**the site can be publishing perfectly while every buy-link is stale or
+broken.**
+
+Why this exists (2026-08-14): all 65,886 aisleprompt Amazon listings were
+**four months stale** — the HTML scrape path had begun getting bot pages
+from Amazon and 403s from eBay, and the agent kept exiting 0 the whole
+time. Separately, 16,228 active specpicks eBay products (`asin` like
+`EBAY_%`) had no `listing_preference`, so render-time routing fell through
+to an Amazon CTA at `amazon.com/dp/EBAY_<id>` — a dead page, $0 commission,
+and Offer structured data Google can flag as deceptive. **Neither showed up
+as a failed unit.** Agents reporting success is not evidence the catalog is
+sellable.
+
+Evaluate each check against its bound:
+- `expect_max: 0` breached → a correctness bug reaching users. Apply the
+  check's `note:` auto-fix if it names one (they are idempotent UPDATEs),
+  re-run the check to confirm 0, and report it.
+- `expect_min: 1` breached → that refresh path is DEAD. Do not just note
+  it: find the owning agent and read why (usually a missing credential, a
+  blocked scrape, or a provider with no configured fallback).
+- No bound (a backlog gauge like `*_stale_30d` / `*_never_priced`) → record
+  the number and compare with the previous tick. **A flat backlog is a
+  finding**: throughput is at or below catalog growth, so the cap
+  (`KITCHEN_CREATORS_REFRESH_PER_RUN`, `max_refresh_per_run`) is too low to
+  ever converge. Raising a cap is a safe tweak; raising it past what the
+  provider will rate-limit is not, so move it and watch one cycle.
+
+Add a `CATALOG` line to the tick box with the breaches, or `ok` when all
+bounds hold. When a NEW class of catalog rot is found, add a check to the
+site's config (and `systems/_example.yaml`) rather than a branch here — the
+runbook stays generic, the config carries the site's specifics.
+
 ## 6. Escalation — email + in-session (when BLOCKED or DOWN-unrecovered)
 
 Escalate when: you can't safely auto-fix; a fix needs a credential or an
@@ -371,6 +410,14 @@ or a standing app-infra blocker needs a go-ahead.
 distinct OPEN incident (keyed by a stable signature). Re-send only if it
 stays unresolved past a long re-alert window (e.g. 24h). Mark resolved
 when the condition clears; note the resolution in-session.
+
+**Mail transport status (2026-08-15).** This host has NO transport: no `msmtp`
+binary, no Graph/SMTP credentials, and `DIGEST_DISABLED=1` is set fleet-wide, so
+routine digests are dropped by design. ALERTS are different — they pass
+`bypass_digest=True`, which skips the kill switch and attempts a real send, so an
+alert fails HONESTLY with `ok=False, "msmtp not found on PATH"`. Treat `ok=True`
+as delivery ONLY if `detail` does not start with `digest disabled` or `suppressed:`.
+Until a transport exists, escalate IN-SESSION and never claim an email was sent.
 
 **If the email send fails** (`ok is False` — e.g. the Graph creds are
 missing or the O365 relay is down): do NOT silently drop it. Notify
@@ -405,6 +452,7 @@ truncated to fit.
 +--------------------------------------------------------------------------------------------+
 | SITE     homepage <code> · sample <code>                                                   |
 | VOLUME   <site>: +1h=<n> +24h=<N>  (growth-metric note if known)                            |
+| CATALOG  <ok | check-name=<value> breached bound, action taken>                             |
 | POOL     <k>/<total> profiles alive                                                        |
 | ACTION   <auto-fix taken | improvement shipped | none>                                     |
 | ESCALATE <email sent to <owner> / none> <in-session note>                                  |

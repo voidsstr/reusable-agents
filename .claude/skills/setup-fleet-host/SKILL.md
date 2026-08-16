@@ -13,6 +13,13 @@ description: >
   ARE the responsibility list.
 ---
 
+> ⚠️ **SUPERSEDED by `/provision-fleet`.** This skill covers only the
+> framework spine (API, host-worker, drainer, agent registration). It does
+> NOT cover the retro-chat daemon + brain, GPU-backed local services,
+> website builds/deployments, or the five-repo layout. Use
+> `.claude/skills/provision-fleet/SKILL.md` to stand up a host.
+
+
 # Set up the fleet host
 
 A **fleet host** is the single machine that actually executes agents. Azure

@@ -1,6 +1,6 @@
 # Claude Instructions — reusable-agents framework
 
-> ## 🏗️ HOST STANDUP — `/setup-fleet-host` (read before "why is nothing running?")
+> ## 🏗️ HOST STANDUP — `/provision-fleet` (read before "why is nothing running?")
 >
 > **The fleet host is the machine that EXECUTES agents.** Azure holds state +
 > the read-only dashboard; the host holds the timers, the framework API that
@@ -9,7 +9,7 @@
 > (publish volume 0, no IndexNow, decaying organic traffic). **Diagnose "is
 > there a host at all?" before diagnosing individual agents.**
 >
-> Runbook: `.claude/skills/setup-fleet-host/SKILL.md` · narrative + operator
+> Runbook: `.claude/skills/provision-fleet/SKILL.md` · narrative + operator
 > checklist: `docs/fleet-host-standup.md` · scripts:
 > `install/standup-fleet-host.sh` (phases: preflight repos deps secrets api
 > register spine verify | all) and `install/recover-credentials.sh`
