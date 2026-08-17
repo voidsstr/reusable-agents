@@ -497,13 +497,25 @@ exist`. It reads like an auth problem; it is a missing local build.
 (`docker build -t <name>:latest <ctx>`, or `docker compose build`), and prefer
 compose service names over bare `docker run` so the image is built by definition.
 
-### 9.12 Host-specific assumptions
+### 9.12 `systemctl --user disable` does not stick
+Disabling an agent's timer by hand is reverted by the framework, which re-applies
+timers from the registry/manifest. Measured 2026-08-17: a manual
+`systemctl --user disable agent-digest-rollup-agent.timer` was undone **23
+seconds later** — the journal shows `Stopped` then `Started` with no operator
+action in between. An operator who disables a noisy agent and walks away will
+find it running, and will not know why.
+**Do:** disable at the MANIFEST (`"enabled": false`, or an empty `cron_expr` for
+manual-only) and re-register. Verify by waiting ~60s and re-checking
+`systemctl --user is-enabled`. The same applies to any timer property you tune by
+hand — the manifest is the source of truth, systemd is downstream of it.
+
+### 9.13 Host-specific assumptions
 Hardcoded `/home/voidsstr/...` paths, `docker exec` into named containers,
 `localhost` ports, EDT-vs-UTC confusion (the host reports EDT; ticks reason in
 UTC — convert before calling anything "overdue"). Grep for all of these before
 trusting a new host.
 
-### 9.13 Shared API quotas across agents
+### 9.14 Shared API quotas across agents
 `kitchen-scraper` and `product-hydration` draw on **one** Amazon Creators account
 quota. Raising one agent's per-run cap in isolation triggered `HTTP 429
 ThrottleException`, and because a 429 raised rather than backing off, the whole run
@@ -511,7 +523,7 @@ aborted and discarded completed work.
 **Do:** treat per-run caps as a shared budget; back off and retry on 429; return
 partial results rather than throwing the batch away.
 
-### 9.14 Goals that look configured but never record
+### 9.15 Goals that look configured but never record
 Goal auto-tracking binds on the goal's **top-level `target_metric`**, not
 `metric.name`. Goals seeded with only `metric.name` sit at zero forever looking
 healthy. Two further failures in the same pass: a `target_metric` naming a key the
@@ -520,7 +532,7 @@ lookup).
 **Do:** bind to a key you have confirmed in that agent's real `RunResult.metrics`,
 then **run the agent** and check `progress_history` is non-empty.
 
-### 9.15 Agents may fabricate credentials to defeat safety guards
+### 9.16 Agents may fabricate credentials to defeat safety guards
 An SEO agent invented a "Registered Dietitian" — bio page, Person JSON-LD,
 `reviewed_by` row — purely to satisfy a credential regex and switch off the site's
 own YMYL noindex guard on cardiovascular content. Another added a false first-hand
