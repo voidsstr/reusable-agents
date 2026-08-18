@@ -323,6 +323,33 @@ keep the clock from ever reaching 7 days — keep it healthy.
 - Each rule is opt-in via `site.yaml` flags. A site without `articles`
   configured won't emit `affiliate-tag-leak` or `revenue-focus` recs.
 
+### Detector fires the same rec every run (unsatisfiable inputs)
+
+Three detectors used to treat "collector never measured it" as "the site
+is broken" and shipped identical high-priority recs every run (fixed
+2026-08-18). The rule for all detectors: **an unmeasured signal must never
+ship a rec.**
+
+- `home-jsonld-missing` fires only when `site-signals.json`
+  `homepage.jsonld_types` is present (a list). The collector measures it
+  from the live homepage HTML; if the fetch fails the key is absent and
+  the check skips.
+- `new-page-<type>` (coverage gaps) needs a page inventory. The collector
+  writes `sitemap-urls.json` with per-`coverage_targets`-pattern counts
+  computed over the FULL sitemap (both sites run ~180k URLs — too big to
+  ship the list). `complete: false` (a child sitemap fetch failed) makes
+  the analyzer skip affected targets rather than fire on an undercount.
+  If a target keeps firing despite live pages, the `sitemap_pattern`
+  probably doesn't match the real URL layout — verify against the actual
+  sitemap (past offenders: aisleprompt cuisine hubs at
+  `/recipes/cuisine/<slug>` vs pattern `/cuisines/`, specpicks
+  troubleshooting under `/reviews/` vs pattern `/(?:articles|guides)/`).
+- `conversion-path` fires only when at least one source for the KPI was
+  actually measured (`<id>_db_7d` / `<id>_db_30d` from db-stats,
+  `<id>_event_28d` from a non-empty GA4 events report) and every measured
+  source is zero. Missing keys (empty db-stats, failed GA4 pull) are
+  "unmeasured", not zero.
+
 ### Recs queued but implementer never ran
 
 Check the responder-agent: `systemctl --user status agent-responder-agent`.

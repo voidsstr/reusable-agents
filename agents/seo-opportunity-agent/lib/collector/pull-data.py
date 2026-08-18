@@ -23,6 +23,7 @@ CONTRACT — analyzer.build_snapshot() loads these from <run_dir>/data/:
     ga4-summary-28d.json        ga4-events-28d.json
     ga4-geo-28d.json            ga4-traffic-sources-28d.json
     db-stats.json               site-signals.json
+    sitemap-urls.json           (coverage-gap inventory: per-pattern counts)
     ads-*.json                  (optional — not produced here)
 Each GSC/GA4 file is the raw API response, because the analyzer reads
 `.get("rows", [])` straight off it. `_load()` returns {} for a missing
@@ -48,7 +49,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -271,6 +272,35 @@ def collect_db(cfg, data: Path) -> None:
 # Site signals (robots + homepage) — cheap, no auth
 # ---------------------------------------------------------------------------
 
+def _extract_jsonld_types(html: str) -> list[str]:
+    """All schema.org @type names present in the page's ld+json blocks.
+
+    Handles a top-level dict, a top-level list, @graph containers, and
+    list-valued @type. Unparseable blocks are skipped (a broken block is
+    effectively absent markup as far as Google is concerned).
+    """
+    types: list[str] = []
+    for block in re.findall(
+            r"(?is)<script[^>]+type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+            html):
+        try:
+            doc = json.loads(block)
+        except Exception:
+            continue
+        if isinstance(doc, dict):
+            items = [doc] + [g for g in (doc.get("@graph") or []) if isinstance(g, dict)]
+        elif isinstance(doc, list):
+            items = [d for d in doc if isinstance(d, dict)]
+        else:
+            continue
+        for it in items:
+            t = it.get("@type")
+            for name in (t if isinstance(t, list) else [t]):
+                if isinstance(name, str) and name and name not in types:
+                    types.append(name)
+    return types
+
+
 def collect_site_signals(cfg, data: Path) -> None:
     domain = cfg.domain
     base = domain if domain.startswith("http") else f"https://{domain}"
@@ -300,12 +330,96 @@ def collect_site_signals(cfg, data: Path) -> None:
             "html_bytes": len(html),
             "h1_count": len(re.findall(r"(?i)<h1[\s>]", html)),
             "has_canonical": bool(re.search(r'(?i)<link[^>]+rel=["\']canonical', html)),
+            # The analyzer's home-jsonld-missing check reads this. It MUST
+            # be measured from the live HTML — before 2026-08-18 the key was
+            # never written, the analyzer treated "unmeasured" as "missing",
+            # and the rec fired every run on sites that DO emit the markup.
+            "jsonld_types": _extract_jsonld_types(html),
         }
     except Exception as e:
         warn(f"  ! homepage fetch failed: {str(e)[:100]}")
         signals["homepage"] = {}
     (data / "site-signals.json").write_text(json.dumps(signals, indent=1))
     warn("  ✓ site-signals.json")
+
+
+# ---------------------------------------------------------------------------
+# Sitemap inventory — feeds the analyzer's coverage-gap pass
+# ---------------------------------------------------------------------------
+
+_SITEMAP_LOC = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.S)
+_SITEMAP_CHILD_CAP = 100  # child sitemaps per index; both sites are < 25 today
+
+
+def _fetch_text(url: str, timeout: int = 25) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "reusable-agents-seo/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def collect_sitemap_inventory(cfg, data: Path) -> None:
+    """Fetch sitemap.xml (following one level of sitemap-index children) and
+    write sitemap-urls.json for the analyzer's coverage-gap pass.
+
+    Without this file `_add_content_gap_recs` counts 0 existing pages for
+    every `coverage_targets` pattern and re-ships the same new-page-* recs
+    every run regardless of what's already published (2026-08-18: specpicks
+    had 101 live /buying-guide/ pages while the rec demanded 30 "missing").
+
+    The sites run to ~180k sitemap URLs, so the artifact stores per-pattern
+    counts (computed against coverage_targets at collect time) plus a small
+    URL sample, not the full list. `complete: false` marks a partial fetch
+    (a child sitemap failed) — the analyzer must not trust undercounts.
+    """
+    targets = (cfg.get("coverage_targets") or {})
+    patterns: dict[str, Any] = {}
+    for tname, tcfg in targets.items():
+        pat = (tcfg or {}).get("sitemap_pattern", "")
+        if not pat:
+            continue
+        try:
+            patterns[pat] = re.compile(pat)
+        except re.error as e:
+            warn(f"  ! coverage_targets.{tname} bad sitemap_pattern: {e}")
+
+    domain = cfg.domain
+    base = domain if domain.startswith("http") else f"https://{domain}"
+    try:
+        root = _fetch_text(f"{base}/sitemap.xml")
+    except Exception as e:
+        warn(f"  ! sitemap.xml fetch failed: {str(e)[:100]} — no sitemap-urls.json")
+        return
+
+    complete = True
+    urls: set[str] = set()
+    if "<sitemapindex" in root:
+        children = _SITEMAP_LOC.findall(root)
+        if len(children) > _SITEMAP_CHILD_CAP:
+            warn(f"  ! sitemap index has {len(children)} children — capping at {_SITEMAP_CHILD_CAP}")
+            children = children[:_SITEMAP_CHILD_CAP]
+            complete = False
+        for child in children:
+            try:
+                urls.update(_SITEMAP_LOC.findall(_fetch_text(child)))
+            except Exception as e:
+                warn(f"  ! child sitemap failed ({child}): {str(e)[:80]}")
+                complete = False
+    else:
+        urls.update(_SITEMAP_LOC.findall(root))
+
+    pattern_counts = {
+        pat: sum(1 for u in urls if rx.search(u))
+        for pat, rx in patterns.items()
+    }
+    (data / "sitemap-urls.json").write_text(json.dumps({
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "complete": complete,
+        "total_urls": len(urls),
+        "pattern_counts": pattern_counts,
+        "sample_urls": sorted(urls)[:100],
+    }, indent=1))
+    warn(f"  ✓ sitemap-urls.json: {len(urls)} urls, "
+         f"{len(pattern_counts)} pattern counts, complete={complete}")
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +435,7 @@ def run_into(data: Path, cfg) -> None:
     collect_ga4(token, cfg, data)
     collect_db(cfg, data)
     collect_site_signals(cfg, data)
+    collect_sitemap_inventory(cfg, data)
 
 
 def main() -> int:

@@ -219,7 +219,12 @@
         "max_llm_audit_pages": { "type": "integer", "minimum": 1, "maximum": 200, "default": 30, "description": "Cap on number of pages fed to the LLM audit pass per run. Caps cost." },
         "pre_traffic_impr_threshold": { "type": "integer", "minimum": 0, "default": 100, "description": "When the site's GSC 90d total_impressions is below this, the analyzer flips into pre-traffic mode and biases toward new-page (content-engine) recs over rank-target recs." },
         "ai_provider": { "type": "string", "description": "Optional override for the LLM provider used by the analyzer's audit pass." },
-        "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." }
+        "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." },
+        "coverage_target_files": {
+          "type": "object",
+          "description": "Repo-relative target files for the gsc-coverage-* recs the analyzer emits from the GSC URL Inspection coverage file. Keys are rec types (gsc-coverage-not-indexed, gsc-coverage-discovered, gsc-coverage-redirect, gsc-coverage-unknown, gsc-coverage-issues, gsc-coverage-noindex, gsc-coverage-canonical-mismatch, gsc-coverage-soft-404) plus an optional 'default' key used when a rec type has no entry. Every path must fall inside implementer.allowed_paths — the analyzer drops out-of-scope paths with a stderr warning so the implementer's pre-LLM scope gate never defers the rec as 'out-of-scope per site policy'. Without this block coverage recs ship with no target_files and stall at the implementer.",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        }
       }
     },
     "local_dev": {

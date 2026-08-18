@@ -168,11 +168,15 @@ def build_snapshot(cfg, run_dir: Path) -> dict:
         users = int(r["metricValues"][1]["value"]) if len(r["metricValues"]) > 1 else 0
         snap["ga4_events_28d"][name] = {"count": count, "users": users}
 
-    # Revenue rollup — read configured KPIs
+    # Revenue rollup — read configured KPIs. Keys are only written when the
+    # underlying source actually returned data: an event absent from a real
+    # GA4 events report IS a measured zero, but an empty/failed report (the
+    # collector writes {} on GA4 errors) is "unmeasured" — and downstream
+    # consumers (the conversion-path rec) must not read unmeasured as zero.
     revenue: dict = {}
     for kpi in cfg.get("revenue_kpis", []):
         ev = kpi.get("ga4_event", "")
-        if ev:
+        if ev and snap["ga4_events_28d"]:
             revenue[f"{kpi['id']}_event_28d"] = snap["ga4_events_28d"].get(ev, {}).get("count", 0)
         tbl = kpi.get("db_table", "")
         if tbl and db_stats:
@@ -1092,11 +1096,18 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
             "implemented": False,
         })
 
-    # Homepage missing WebSite or Organization JSON-LD
+    # Homepage missing WebSite or Organization JSON-LD.
+    # Only judged when the collector actually measured the homepage's
+    # ld+json blocks (site-signals.json homepage.jsonld_types, added
+    # 2026-08-18). Before that gate the key was never populated, the
+    # check treated "unmeasured" as "missing", and this rec fired every
+    # run on both reference sites — which DO emit WebSite+Organization.
+    # An unmeasured signal must never ship a rec.
     if _budget():
         home = (signals.get("homepage") or {}) if isinstance(signals, dict) else {}
+        measured = isinstance(home.get("jsonld_types"), list)
         types = set(home.get("jsonld_types") or [])
-        missing = [t for t in ("WebSite", "Organization") if t not in types]
+        missing = [t for t in ("WebSite", "Organization") if t not in types] if measured else []
         if missing:
             rid = next_id()
             recs.append({
@@ -1159,15 +1170,35 @@ def _add_content_gap_recs(cfg, data: Path, recs: list, next_id, max_recs: int,
                 except Exception:
                     continue
     sitemap_urls: list[str] = []
+    sitemap_counts: dict = {}
+    sitemap_complete = False
     raw_sitemap = data / "sitemap-urls.json"
     if raw_sitemap.exists():
         try:
-            sitemap_urls = json.loads(raw_sitemap.read_text()).get("urls", [])
+            sm = json.loads(raw_sitemap.read_text())
+            # Legacy shape: {"urls": [...]}. Current collector shape
+            # (collect_sitemap_inventory, 2026-08-18): per-pattern counts
+            # computed at collect time — the sites' sitemaps run to ~180k
+            # URLs, too large to ship in the run artifact.
+            sitemap_urls = sm.get("urls", [])
+            sitemap_counts = sm.get("pattern_counts") or {}
+            sitemap_complete = bool(sm.get("complete", bool(sitemap_urls)))
         except Exception:
             pass
     inventory_urls = {p.get("url", "") for p in all_pages if p.get("url")}
     all_urls = sorted(set(sitemap_urls) | inventory_urls)
     db_stats = _load(data / "db-stats.json") or {}
+
+    # Unsatisfiable-detector guard (2026-08-18): with no inventory signal at
+    # all, existing_count would be 0 for every target and the same
+    # new-page-* gap recs would ship every run regardless of what's already
+    # published (specpicks had 101 live /buying-guide/ pages while the rec
+    # demanded 30 "missing"). No data is not zero pages.
+    if not sitemap_counts and not all_urls:
+        print("  [content-gap] no sitemap/page inventory collected — "
+              "skipping coverage-gap recs (existing_count would be a lie)",
+              file=sys.stderr)
+        return
 
     for target_name, target_cfg in targets.items():
         if len(recs) >= max_recs:
@@ -1180,7 +1211,21 @@ def _add_content_gap_recs(cfg, data: Path, recs: list, next_id, max_recs: int,
         except re.error:
             continue
 
-        existing_count = sum(1 for u in all_urls if pattern.search(u))
+        if pattern_str in sitemap_counts and sitemap_complete:
+            # Collector-side count over the FULL sitemap beats any local
+            # URL sample; keep the max in case crawled inventory saw pages
+            # the sitemap omits.
+            existing_count = max(
+                int(sitemap_counts[pattern_str]),
+                sum(1 for u in all_urls if pattern.search(u)),
+            )
+        elif all_urls:
+            existing_count = sum(1 for u in all_urls if pattern.search(u))
+        else:
+            # No trustworthy inventory for this pattern (partial sitemap
+            # fetch and no crawled pages) — the gap can't be measured, so
+            # don't invent one.
+            continue
 
         expected_min = target_cfg.get("expected_min")
         expected_source = ""
@@ -2035,6 +2080,45 @@ def _add_rich_results_api_recs(data: Path, recs: list, next_id, max_recs: int) -
         })
 
 
+
+def _coverage_target_files(cfg, rec_type: str) -> list[str]:
+    """Repo-relative target files for a gsc-coverage-* rec.
+
+    Sourced from site.yaml `analyzer.coverage_target_files` — a mapping
+    of rec_type → list of repo-relative paths, with an optional
+    "default" key used when a rec_type has no entry. Every path is
+    validated against the site's implementer scope policy
+    (implementer.allowed_paths / excluded_paths via
+    framework.core.implementer_scope) so the implementer's pre-LLM
+    scope gate in build-aider-invocation.py never defers the rec as
+    out-of-scope. Out-of-scope paths are dropped with a stderr warning
+    — that is a site.yaml misconfiguration to fix, not a reason to
+    ship a rec the implementer will bounce.
+    """
+    analyzer_cfg = (cfg.get("analyzer") or {}) if hasattr(cfg, "get") else {}
+    mapping = analyzer_cfg.get("coverage_target_files") or {}
+    if not isinstance(mapping, dict):
+        return []
+    files = mapping.get(rec_type) or mapping.get("default") or []
+    files = [str(f).strip() for f in files
+             if isinstance(f, str) and f.strip()]
+    if not files:
+        return []
+    try:
+        from framework.core.implementer_scope import ScopePolicy
+        policy = ScopePolicy.from_site_config(
+            cfg if isinstance(cfg, dict) else None)
+        allowed, denied = policy.filter_files(files)
+        if denied:
+            print(f"  [index-coverage] coverage_target_files outside "
+                  f"implementer scope, dropped: {denied}", file=sys.stderr)
+        return allowed
+    except Exception as e:
+        print(f"  [index-coverage] scope check failed ({e}) — using "
+              f"configured files as-is", file=sys.stderr)
+        return files
+
+
 def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int) -> None:
     """Read GSC URL Inspection results from gsc-coverage-auditor and emit
     recommendations to fix indexing-blocking states.
@@ -2111,48 +2195,58 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
     # post-processor (line ~4380 of analyzer.py) sets handoff_target
     # automatically. All these default to the implementer except
     # gsc-coverage-unknown which routes to indexnow-submitter (re-fire bulk).
-    STATE_RULES: list[tuple[str, str, str, str, str]] = [
-        # match prefix                              priority  rec_type                              summary_template                                                                                            fix
+    STATE_RULES: list[tuple[str, str, str, str, str, str]] = [
+        # match prefix                              priority  rec_type                              summary_template                                                                                            fix, acceptance
         ("Crawled - currently not indexed",
          "high", "gsc-coverage-not-indexed",
          "{n} URL(s) crawled but not indexed by Google — content quality is blocking indexation",
-         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC."),
+         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC.",
+         "Each rewritten page renders 1500+ words with at least 5 inline internal links from indexed pages (verify in the SSR HTML, not just the DB row); GSC URL Inspection of the sample URLs moves from 'Crawled - currently not indexed' toward 'Submitted and indexed' within 2-4 weeks."),
         ("Crawled — currently not indexed",  # em-dash variant
          "high", "gsc-coverage-not-indexed",
          "{n} URL(s) crawled but not indexed by Google — content quality is blocking indexation",
-         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC."),
+         "Expand the article: add 1500+ words, unique perspective, original benchmarks/data, internal links from indexed pages. After publishing the rewrite, re-submit via IndexNow and request indexing in GSC.",
+         "Each rewritten page renders 1500+ words with at least 5 inline internal links from indexed pages (verify in the SSR HTML, not just the DB row); GSC URL Inspection of the sample URLs moves from 'Crawled - currently not indexed' toward 'Submitted and indexed' within 2-4 weeks."),
         ("Discovered - currently not indexed",
          "medium", "gsc-coverage-discovered",
          "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue",
-         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects."),
+         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects.",
+         "Each sample URL gains 3-5 internal links from already-indexed pages (the anchors are visible in the linking pages' rendered HTML) and its <link rel=canonical> is self-referential; next inspection cycle shows the URLs moving to a crawled state."),
         ("Discovered — currently not indexed",
          "medium", "gsc-coverage-discovered",
          "{n} URL(s) discovered but never crawled — crawl-budget pressure or canonical issue",
-         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects."),
+         "Add 3-5 internal links from already-indexed high-authority pages. Verify <link rel=canonical> is self-referential and not pointing to a parent/duplicate. Check that the page isn't behind unnecessary redirects.",
+         "Each sample URL gains 3-5 internal links from already-indexed pages (the anchors are visible in the linking pages' rendered HTML) and its <link rel=canonical> is self-referential; next inspection cycle shows the URLs moving to a crawled state."),
         ("Page with redirect",
          "medium", "gsc-coverage-redirect",
          "{n} URL(s) returning a redirect — unintended canonical chain",
-         "Audit the SSR route handler for these URLs. The page should serve 200 OK at the canonical URL, not 301/302 to a different one. Common causes: trailing-slash mismatch, www→apex redirects, /vs/ → /compare/ aliases. Fix the route to serve content directly, or update the sitemap to use the redirect target as the canonical."),
+         "Audit the SSR route handler for these URLs. The page should serve 200 OK at the canonical URL, not 301/302 to a different one. Common causes: trailing-slash mismatch, www→apex redirects, /vs/ → /compare/ aliases. Fix the route to serve content directly, or update the sitemap to use the redirect target as the canonical.",
+         "curl -sI on every sample URL returns HTTP 200 (no 301/302 hop) and the sitemap lists only the canonical form of each URL."),
         ("URL is unknown to Google",
          "low", "gsc-coverage-unknown",
          "{n} URL(s) unknown to Google — sitemap or IndexNow reachability gap",
-         "Re-fire IndexNow --bulk for the affected site (manually trigger {site}-indexnow-bulk via the framework). Verify sitemap.xml is reachable from public internet (curl -I https://{host}/sitemap.xml — must return 200). Check that the URL pattern is included in sites.json's querySets so the bulk run picks it up. Confirm the URLs return 200 (not 4xx/5xx) when fetched."),
+         "Re-fire IndexNow --bulk for the affected site (manually trigger {site}-indexnow-bulk via the framework). Verify sitemap.xml is reachable from public internet (curl -I https://{host}/sitemap.xml — must return 200). Check that the URL pattern is included in sites.json's querySets so the bulk run picks it up. Confirm the URLs return 200 (not 4xx/5xx) when fetched.",
+         "curl -I https://{host}/sitemap.xml returns 200, every sample URL appears in a sitemap, and the IndexNow bulk run logs HTTP 200/202 for the submitted URLs."),
         ("Submitted and indexed, but issues found",
          "medium", "gsc-coverage-issues",
          "{n} URL(s) indexed but flagged with mobile/schema/duplicate issues",
-         "Open GSC's URL Inspection on a sample URL, read the 'Page indexing' panel for the specific issue (e.g. 'Mobile usability error', 'Structured data invalid'). Fix the issue in the page template/SSR layer (most common: missing required Recipe/Article schema fields, mobile viewport meta tag, or image alt attributes)."),
+         "Open GSC's URL Inspection on a sample URL, read the 'Page indexing' panel for the specific issue (e.g. 'Mobile usability error', 'Structured data invalid'). Fix the issue in the page template/SSR layer (most common: missing required Recipe/Article schema fields, mobile viewport meta tag, or image alt attributes).",
+         "GSC URL Inspection 'Page indexing' panel shows no remaining mobile/schema/duplicate issue for the sample URLs after the fix is deployed."),
         ("Excluded by 'noindex' tag",
          "low", "gsc-coverage-noindex",
          "{n} URL(s) explicitly noindex'd — verify intent",
-         "Inspect the SSR head/meta output for these URLs. If the noindex is intentional (admin/login/search pages), no action needed. If unintentional, remove `<meta name=robots content=noindex>` from the route's head builder and request re-indexing in GSC."),
+         "Inspect the SSR head/meta output for these URLs. If the noindex is intentional (admin/login/search pages), no action needed. If unintentional, remove `<meta name=robots content=noindex>` from the route's head builder and request re-indexing in GSC.",
+         "For unintentional cases the rendered <head> of the sample URLs no longer contains a robots noindex directive; intentional cases (admin/login/search) are listed as no-action in the resolution."),
         ("Duplicate, Google chose different canonical than user",
          "medium", "gsc-coverage-canonical-mismatch",
          "{n} URL(s) where Google chose a different canonical than the user",
-         "Compare userCanonical vs googleCanonical in the inspection result. Either: (a) update <link rel=canonical> on the user-canonical to point at Google's choice (Google found stronger signals there), or (b) strengthen the user-canonical with more internal links + content depth so Google reverses its choice on next crawl."),
+         "Compare userCanonical vs googleCanonical in the inspection result. Either: (a) update <link rel=canonical> on the user-canonical to point at Google's choice (Google found stronger signals there), or (b) strengthen the user-canonical with more internal links + content depth so Google reverses its choice on next crawl.",
+         "On re-inspection googleCanonical equals userCanonical for the sample URLs — either the on-page canonical was updated to Google's choice, or the user canonical gained enough internal links/content for Google to reverse its choice."),
         ("Soft 404",
          "high", "gsc-coverage-soft-404",
          "{n} URL(s) returning soft 404",
-         "Check pageFetchState — likely too-thin content or an SSR error returning a blank/near-blank body with HTTP 200. Either: (a) expand the content to be substantive (>500 words, unique value), or (b) set a real HTTP 404 status when the page legitimately has no content (e.g. legacy slug for a deleted product)."),
+         "Check pageFetchState — likely too-thin content or an SSR error returning a blank/near-blank body with HTTP 200. Either: (a) expand the content to be substantive (>500 words, unique value), or (b) set a real HTTP 404 status when the page legitimately has no content (e.g. legacy slug for a deleted product).",
+         "Every sample URL either renders substantive content (>500 words) with HTTP 200, or returns a real HTTP 404/410 status."),
     ]
 
     seen_state_keys: set[str] = set()
@@ -2163,7 +2257,7 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
         rule = next((r for r in STATE_RULES if state_key.startswith(r[0])), None)
         if not rule:
             continue
-        _, priority, rec_type, summary_tpl, fix_text = rule
+        _, priority, rec_type, summary_tpl, fix_text, acceptance_text = rule
         n = len(urls)
         sample = sorted(urls, key=lambda r: r.get("lastCrawlTime") or "", reverse=True)[:8]
         rid = next_id()
@@ -2174,6 +2268,7 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
             site_host = (site_block or {}).get("domain", "") if isinstance(site_block, dict) else ""
         except Exception:
             site_host = ""
+        target_files = _coverage_target_files(cfg, rec_type)
         recs.append({
             "id": rid,
             "type": rec_type,
@@ -2189,6 +2284,27 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
                 ", ".join(r["url"] for r in sample)
             ),
             "fix": fix_text.replace("{site}", site_id).replace("{host}", site_host or site_id),
+            # Concrete outline + in-scope target files. Without BOTH of
+            # these the implementer's pre-LLM gate in
+            # build-aider-invocation.py defers the rec (no files → no
+            # scope match → 'out-of-scope per site policy') and the
+            # coverage recs never ship. target_files come from site.yaml
+            # analyzer.coverage_target_files, pre-filtered against the
+            # implementer scope policy (see _coverage_target_files).
+            "implementation_outline": {
+                "approach": (
+                    fix_text.replace("{site}", site_id)
+                            .replace("{host}", site_host or site_id)
+                ),
+                "notes": (
+                    f"Coverage state: \"{state_key}\" on {n} URL(s). Fix the "
+                    f"underlying template/route/sitemap layer in the listed "
+                    f"target files — do not hand-edit one page at a time. "
+                    f"Acceptance criteria: "
+                    + acceptance_text.replace("{host}", site_host or site_id)
+                ),
+            },
+            "target_files": target_files,
             "data_refs": [r["url"] for r in sample],
             "sample_urls": [r["url"] for r in sample],
             "metric_before": {"affected_urls": n, "coverage_state": state_key},
@@ -3665,9 +3781,20 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
         # Look for any KPI that dropped meaningfully (will compare in reporter)
         for kpi in cfg.get("revenue_kpis", []):
             if len(recs) >= max_recs: break
-            db_30 = revenue.get(f"{kpi['id']}_db_30d", 0)
-            db_7 = revenue.get(f"{kpi['id']}_db_7d", 0)
-            if db_30 == 0 and db_7 == 0:
+            # A missing key means the collector had no data source for this
+            # KPI (db-stats empty because the db block is unconfigured /
+            # unsupported, GA4 report failed) — that is "unmeasured", not
+            # "zero conversions". Defaulting missing→0 made this rec
+            # unsatisfiable: it fired every run on aisleprompt while the
+            # GA4 event count in the SAME snapshot showed conversions
+            # happening. Fire only when at least one source really
+            # measured the KPI and every measured source is zero.
+            measured = [v for v in (
+                revenue.get(f"{kpi['id']}_db_30d"),
+                revenue.get(f"{kpi['id']}_db_7d"),
+                revenue.get(f"{kpi['id']}_event_28d"),
+            ) if v is not None]
+            if measured and all(not v for v in measured):
                 # No conversions at all — surface it
                 rid = next_id()
                 recs.append({
@@ -3676,8 +3803,10 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
                     "priority": "high",
                     "title": f"Zero {kpi['label']} in last 30d — investigate funnel",
                     "rationale": (
-                        f"`{kpi['id']}` shows 0 conversions in 7d AND 30d. Either the event "
-                        f"isn't firing (instrumentation issue) or there's no traffic to convert."
+                        f"`{kpi['id']}` shows 0 conversions across every measured source "
+                        f"({len(measured)} of GA4-event-28d / db-7d / db-30d). Either the "
+                        f"event isn't firing (instrumentation issue) or there's no traffic "
+                        f"to convert."
                     ),
                     "implementation_outline": {
                         "notes": (

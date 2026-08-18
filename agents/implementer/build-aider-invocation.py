@@ -433,6 +433,19 @@ TRUSTED_REC_TYPES: set[str] = {
     "new-page-troubleshooting",
     "gsc-coverage-discovered",
     "gsc-coverage-unknown",
+    # 2026-08-18: remaining gsc-coverage-* states. The 2026-05-08 sweep
+    # ("every rec_type emitted by an auto-queueing agent is allowlisted")
+    # missed these six — combined with recs shipping without target_files
+    # they were deferred 100% of the time and the indexing-coverage recs
+    # (the sites' binding constraint) never shipped once. The analyzer now
+    # attaches implementation_outline + in-scope target_files (see
+    # _add_index_coverage_recs + site.yaml analyzer.coverage_target_files).
+    "gsc-coverage-not-indexed",
+    "gsc-coverage-redirect",
+    "gsc-coverage-issues",
+    "gsc-coverage-noindex",
+    "gsc-coverage-canonical-mismatch",
+    "gsc-coverage-soft-404",
     "ssr-fix",
     "indexing-fix",
     "schema-markup",
@@ -962,21 +975,17 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
             try:
                 from framework.core.article_link_guard import (
                     render_link_directive as _link_directive,
+                    resolve_minima as _resolve_minima,
                 )
-                _site_root = (
-                    "https://specpicks.com" if "specpicks" in (r.get("agent_id") or
-                                                                proposal.get("site") or "")
-                    else "https://aisleprompt.com"
-                )
-                _is_aisleprompt = "specpicks" not in (
-                    r.get("agent_id") or proposal.get("site") or ""
-                )
+                # Per-site minima from config/article-link-guard-config.json
+                # (framework-first — no site literals here).
+                _m = _resolve_minima(r.get("agent_id") or proposal.get("site") or "")
                 link_directive_text = _link_directive(
                     proposal,
-                    min_recipes=5 if _is_aisleprompt else 0,
-                    min_kits=2 if _is_aisleprompt else 0,
-                    min_products=0 if _is_aisleprompt else 3,
-                    site_root=_site_root,
+                    min_recipes=_m["min_recipes"],
+                    min_kits=_m["min_kits"],
+                    min_products=_m["min_products"],
+                    site_root=_m["site_root"] or "https://aisleprompt.com",
                 )
             except Exception:
                 link_directive_text = ""
