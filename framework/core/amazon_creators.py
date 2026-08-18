@@ -99,6 +99,17 @@ class CreatorsUnavailable(RuntimeError):
     """
 
 
+class CreatorsThrottled(RuntimeError):
+    """Raised when Amazon keeps returning 429 after in-call backoff.
+
+    ``_post`` already sleeps and retries on 429 (honoring Retry-After), so
+    by the time this surfaces the quota is genuinely exhausted for now.
+    ``get_items`` catches it and returns the partial batch — completed work
+    is never discarded over a throttle (the 2026-08-18 kitchen-scraper
+    failure: 49 products repriced, then one 429 aborted the whole run).
+    """
+
+
 @dataclass
 class CreatorsConfig:
     client_id: str
@@ -156,6 +167,9 @@ class AmazonCreatorsClient:
         self._lock = threading.Lock()
         self._min_interval_s = min_interval_s
         self._last_call = 0.0
+        # ASINs get_items() never attempted because the quota ran dry.
+        # NOT errors (an "error" ASIN gets deactivated); retry next run.
+        self.throttled_remainder: list[str] = []
 
     # -- auth ------------------------------------------------------------
     def _access_token(self) -> str:
@@ -203,30 +217,55 @@ class AmazonCreatorsClient:
         self._last_call = time.time()
 
     # -- api -------------------------------------------------------------
-    def _post(self, operation: str, payload: dict) -> dict:
-        self._throttle()
-        req = urllib.request.Request(
-            f"https://{self.cfg.host}/catalog/v1/{operation}",
-            data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {self._access_token()}",
-                "Content-Type": "application/json",
-                # Marketplace is a header, and wants the domain — see module docstring.
-                "x-marketplace": self.cfg.marketplace,
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:400]
-            if e.code in (401, 403):
-                raise CreatorsUnavailable(
-                    f"Creators API rejected credentials HTTP {e.code}: {detail}"
+    def _post(self, operation: str, payload: dict,
+              *, max_throttle_retries: int = 4) -> dict:
+        """POST one operation, absorbing 429s with exponential backoff.
+
+        The Creators quota is shared by every agent on the host (kitchen-
+        scraper and product-hydration fire a minute apart), so a 429 here
+        usually means "wait out the minute", not "broken". Sleep-and-retry
+        honors Retry-After when Amazon sends it, else 4s/8s/16s/32s — ~1min
+        total, which rides out a per-minute quota window. Only after that
+        does CreatorsThrottled surface.
+        """
+        attempt = 0
+        while True:
+            self._throttle()
+            req = urllib.request.Request(
+                f"https://{self.cfg.host}/catalog/v1/{operation}",
+                data=json.dumps(payload).encode(),
+                headers={
+                    "Authorization": f"Bearer {self._access_token()}",
+                    "Content-Type": "application/json",
+                    # Marketplace is a header, and wants the domain — see module docstring.
+                    "x-marketplace": self.cfg.marketplace,
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode()[:400]
+                if e.code in (401, 403):
+                    raise CreatorsUnavailable(
+                        f"Creators API rejected credentials HTTP {e.code}: {detail}"
+                    ) from e
+                if e.code == 429:
+                    attempt += 1
+                    if attempt > max_throttle_retries:
+                        raise CreatorsThrottled(
+                            f"Creators {operation} still throttled after "
+                            f"{max_throttle_retries} retries: {detail}"
+                        ) from e
+                    try:
+                        retry_after = float(e.headers.get("Retry-After") or 0)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    time.sleep(max(retry_after, min(2.0 * (2 ** attempt), 60.0)))
+                    continue
+                raise RuntimeError(
+                    f"Creators {operation} failed HTTP {e.code}: {detail}"
                 ) from e
-            raise RuntimeError(
-                f"Creators {operation} failed HTTP {e.code}: {detail}"
-            ) from e
 
     def get_items(
         self,
@@ -240,19 +279,31 @@ class AmazonCreatorsClient:
         of the tuple matter: an ASIN in `errors` is inaccessible (delisted /
         regional / not offered) and should be deactivated rather than
         retried forever.
+
+        Never raises on throttle: if 429s persist past `_post`'s backoff,
+        the remaining ASINs land in ``self.throttled_remainder`` (neither
+        item nor error) and the partial result is returned.
         """
         res = list(resources or DEFAULT_RESOURCES)
         items: dict[str, dict] = {}
         errors: dict[str, str] = {}
+        self.throttled_remainder = []
         clean = [a.strip() for a in asins if a and a.strip()]
         for i in range(0, len(clean), MAX_ITEMS_PER_CALL):
             batch = clean[i:i + MAX_ITEMS_PER_CALL]
-            resp = self._post("getItems", {
-                "itemIds": batch,
-                "resources": res,
-                "partnerTag": self.cfg.partner_tag,
-                "partnerType": self.cfg.partner_type,
-            })
+            try:
+                resp = self._post("getItems", {
+                    "itemIds": batch,
+                    "resources": res,
+                    "partnerTag": self.cfg.partner_tag,
+                    "partnerType": self.cfg.partner_type,
+                })
+            except CreatorsThrottled:
+                # Quota exhausted even after backoff: keep the completed
+                # work, park the untried tail for the caller to inspect
+                # (``client.throttled_remainder``) and retry next run.
+                self.throttled_remainder = clean[i:]
+                break
             for it in (resp.get("itemsResult") or {}).get("items") or []:
                 if it.get("asin"):
                     items[it["asin"]] = it
