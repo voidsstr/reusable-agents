@@ -2139,11 +2139,14 @@ for rid, body_p, meta_p in pairs:
                                    or {})
             _site_hint = (_rec_for_guard.get("agent_id") or
                           _proposal_for_guard.get("site") or "")
-            _is_aisleprompt = "specpicks" not in _site_hint
+            # Per-site minima come from config (framework-first) — see
+            # config/article-link-guard-config.json; storage copy overrides.
+            from framework.core.article_link_guard import resolve_minima
+            _minima = resolve_minima(_site_hint)
             _audit = verify_body(body_md, _proposal_for_guard,
-                                  min_recipes=5 if _is_aisleprompt else 0,
-                                  min_kits=2 if _is_aisleprompt else 0,
-                                  min_products=0 if _is_aisleprompt else 3)
+                                  min_recipes=_minima["min_recipes"],
+                                  min_kits=_minima["min_kits"],
+                                  min_products=_minima["min_products"])
             if not _audit.passes:
                 errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
                                     f"(recipes={_audit.recipe_links}, "

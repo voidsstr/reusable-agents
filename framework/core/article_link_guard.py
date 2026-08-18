@@ -254,3 +254,45 @@ def render_failure_addendum(audit: LinkAuditResult) -> str:
         f"any existing prose. After adding the links, save the file "
         f"again and exit cleanly."
     )
+
+
+# ── Per-site minima resolution ─────────────────────────────────────────────
+# The minima are per-deployment VALUES, so they live in config, not code
+# (framework-first). Resolution: storage config → repo default file → zeros
+# (with a stderr warning, because silently-disabled enforcement is how the
+# 881 zero-product-link specpicks articles happened).
+import json as _json
+import sys as _sys
+from pathlib import Path as _Path
+
+_REPO_CONFIG = _Path(__file__).resolve().parents[2] / "config" / "article-link-guard-config.json"
+_CONFIG_KEY = "config/article-link-guard-config.json"
+
+
+def resolve_minima(site_hint: str, storage=None) -> dict:
+    """Return {min_recipes, min_kits, min_products, site_root} for a site.
+
+    `site_hint` is whatever the caller has — a per-site agent_id
+    ("specpicks-article-proposal-agent") or a bare site name; matching is
+    by substring against the config's `sites` keys.
+    """
+    cfg = None
+    if storage is not None:
+        try:
+            cfg = storage.read_json(_CONFIG_KEY) or None
+        except Exception:
+            cfg = None
+    if cfg is None:
+        try:
+            cfg = _json.loads(_REPO_CONFIG.read_text())
+        except Exception as e:
+            _sys.stderr.write(f"[link-guard] config unreadable ({e}); minima default to 0 — FIX THIS\n")
+            return {"min_recipes": 0, "min_kits": 0, "min_products": 0,
+                    "site_root": ""}
+    vals = dict(cfg.get("default") or {})
+    hint = (site_hint or "").lower()
+    for key, over in (cfg.get("sites") or {}).items():
+        if key.lower() in hint:
+            vals.update(over or {})
+            break
+    return vals

@@ -1,0 +1,8 @@
+{
+  "schema_version": "1",
+  "_comment": "Per-site inline-link minima for the article link guard (framework/core/article_link_guard.py). Storage copy at config/article-link-guard-config.json overrides this repo default. Site key matches by substring against the rec's agent_id/site hint.",
+  "default": {"min_recipes": 5, "min_kits": 2, "min_products": 0, "site_root": "https://aisleprompt.com"},
+  "sites": {
+    "specpicks": {"min_recipes": 0, "min_kits": 0, "min_products": 3, "site_root": "https://specpicks.com"}
+  }
+}
