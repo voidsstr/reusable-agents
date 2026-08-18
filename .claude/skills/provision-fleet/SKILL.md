@@ -169,6 +169,29 @@ deviate, grep and fix before registering anything.
 
 ## 5. Credentials
 
+**Step zero — restore the whole set from Key Vault.** Every host secret is
+backed up as `fleet-*` secrets in **`nsc-secrets-kv`** (rg `nsc-apps`, sub
+`125b8bc9-…`). After `az login`, ONE command rebuilds the lot:
+
+```bash
+bash install/recover-credentials.sh restore   # secrets.env, GSC/GA4 OAuth,
+                                              # responder, claude-pool auth for
+                                              # every profile, ~/.ssh/id_ed25519,
+                                              # ~/.cloudflared — round-trip
+                                              # verified 2026-08-18
+bash install/recover-credentials.sh status    # what (if anything) is still missing
+```
+
+The matrix below is the FALLBACK — for when the vault snapshot is stale or a
+secret was never captured. Check `fleet-backup-manifest` in the vault for the
+snapshot date before trusting it blindly.
+
+**Keeping the vault fresh (live-host duty):** any time a credential changes —
+a pool profile added via `install/add-claude-profile.sh`, a key rotated, a new
+API key added to secrets.env — re-run
+`bash install/recover-credentials.sh backup` in the same session. A migration
+restores only what the last backup captured.
+
 The credential matrix is the highest-value part of this skill: most "the fleet is
 broken" reports are one missing secret. `install/recover-credentials.sh
 harvest|status` pulls what it can from Azure and the repos; the rest is manual.

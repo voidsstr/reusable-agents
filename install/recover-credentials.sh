@@ -13,6 +13,8 @@
 # Usage:
 #   bash install/recover-credentials.sh harvest   # recover + write secrets.env
 #   bash install/recover-credentials.sh status    # what's present / missing
+#   bash install/recover-credentials.sh backup    # push ALL host secrets to Key Vault (nsc-secrets-kv)
+#   bash install/recover-credentials.sh restore   # NEW HOST: pull everything back from Key Vault
 #   bash install/recover-credentials.sh backup    # snapshot secrets to Azure Key Vault
 #
 # Three tiers of secret:
@@ -283,7 +285,9 @@ write_secrets() {
 # The whole point: never again have a host be the only copy.
 cmd_backup() {
     section "backup secrets.env -> Azure Key Vault"
-    local kv="${AZ_KEYVAULT:-nsc-fleet-secrets}"
+    # nsc-secrets-kv is the vault that actually exists (holds the 2026-07-06
+    # file-* snapshot); nsc-fleet-secrets was aspirational and never created.
+    local kv="${AZ_KEYVAULT:-nsc-secrets-kv}"
     if ! az_ keyvault show -n "$kv" >/dev/null 2>&1; then
         yellow "key vault '$kv' does not exist. Create it once (operator):"
         echo "    az keyvault create -g $AZ_RG -n $kv --subscription $AZ_SUB --enable-rbac-authorization false"
@@ -294,15 +298,152 @@ cmd_backup() {
         --file "$SECRETS_FILE" --only-show-errors >/dev/null \
         && green "uploaded secrets.env to key vault $kv" \
         || red "upload failed"
-    for d in seo responder claude-pool; do
+    _kv_put_file() {  # name, path
+        local name="$1" path="$2"
+        [ -e "$path" ] || { yellow "skip $name ($path absent)"; return 0; }
+        az_ keyvault secret set --vault-name "$kv" --name "$name" \
+            --value "$(base64 -w0 "$path")" --only-show-errors >/dev/null \
+            && green "backed up $path -> $name" || red "FAILED: $name"
+    }
+
+    # seo/ and claude-pool/ carry tens of MB of run caches — the SECRETS are a
+    # handful of small files. Tar exactly those (vault secrets cap ~25KB).
+    local tar=/tmp/fleet-seo.tar.gz
+    if [ -f "$STATE_DIR/seo/.oauth.json" ]; then
+        tar czf "$tar" -C "$STATE_DIR" seo/.oauth.json && \
+        az_ keyvault secret set --vault-name "$kv" --name "fleet-seo-tgz" \
+            --value "$(base64 -w0 "$tar")" --only-show-errors >/dev/null \
+            && green "backed up seo/.oauth.json" || red "FAILED: fleet-seo-tgz"
+        rm -f "$tar"
+    fi
+    # claude-pool: one secret per auth file — the bundled tar overflows the
+    # ~25KB vault value cap once two profiles exist, and per-file scales as
+    # profiles are added.
+    if [ -d "$STATE_DIR/claude-pool" ]; then
+        _kv_put_file "fleet-claude-pool-state-json" "$STATE_DIR/claude-pool/state.json"
+        [ -f "$STATE_DIR/claude-pool/proxies.conf" ] && \
+            _kv_put_file "fleet-claude-pool-proxies-conf" "$STATE_DIR/claude-pool/proxies.conf"
+        local pdir
+        for pdir in "$STATE_DIR"/claude-pool/profile-*/; do
+            [ -d "$pdir" ] || continue
+            local pn; pn=$(basename "$pdir")
+            # .claude.json is ~40KB of CLI cache around ~1KB of identity.
+            # Store the slim identity subset — enough for the pool's labels,
+            # org-disable detection, and skipping onboarding on restore.
+            if [ -f "$pdir/.claude.json" ]; then
+                python3 -c "
+import json, sys
+d = json.load(open('$pdir/.claude.json'))
+keep = ('oauthAccount','hasCompletedOnboarding','userID','installMethod','autoUpdates')
+json.dump({k: d[k] for k in keep if k in d}, open('/tmp/slim-claude.json','w'))
+" && _kv_put_file "fleet-claude-pool-$pn-claude-json" "/tmp/slim-claude.json"
+                rm -f /tmp/slim-claude.json
+            fi
+            _kv_put_file "fleet-claude-pool-$pn-credentials" "$pdir/.claude/.credentials.json"
+        done
+    fi
+    for d in responder market-research-pipeline; do
         [ -d "$STATE_DIR/$d" ] || continue
-        local tar="/tmp/fleet-$d.tar.gz"
+        tar="/tmp/fleet-$d.tar.gz"
         tar czf "$tar" -C "$STATE_DIR" "$d" 2>/dev/null || continue
         az_ keyvault secret set --vault-name "$kv" --name "fleet-$d-tgz" \
             --value "$(base64 -w0 "$tar")" --only-show-errors >/dev/null \
-            && green "backed up $d/ ($(stat -c %s "$tar") bytes)"
+            && green "backed up $d/ ($(stat -c %s "$tar") bytes)" \
+            || red "backup of $d/ FAILED ($(stat -c %s "$tar") bytes; vault secret cap ~25KB)"
         rm -f "$tar"
     done
+
+    # Host-level credentials outside $STATE_DIR that the next host cannot
+    # regenerate: git/SSH identity, cloudflared tunnel, deploy state.
+    for key in "$HOME"/.ssh/id_ed25519 "$HOME"/.ssh/id_rsa; do
+        [ -f "$key" ] || continue
+        _kv_put_file "fleet-ssh-$(basename "$key" | tr '_.' '--')" "$key"
+        _kv_put_file "fleet-ssh-$(basename "$key" | tr '_.' '--')-pub" "$key.pub"
+    done
+    if [ -d "$HOME/.cloudflared" ]; then
+        local tar=/tmp/fleet-cloudflared.tar.gz
+        tar czf "$tar" -C "$HOME" .cloudflared 2>/dev/null && \
+            az_ keyvault secret set --vault-name "$kv" --name "fleet-cloudflared-tgz" \
+                --value "$(base64 -w0 "$tar")" --only-show-errors >/dev/null && \
+            green "backed up ~/.cloudflared ($(stat -c %s "$tar") bytes)"
+        rm -f "$tar"
+    fi
+    _kv_put_file "fleet-aws-deploy-state-env" "$HOME/.aws-deploy/state.env"
+
+    # Manifest LAST: what a restore should expect to find, and when it was cut.
+    az_ keyvault secret set --vault-name "$kv" --name "fleet-backup-manifest" \
+        --value "$(printf 'backed_up_at=%s\nhost=%s\nsecrets_env_keys=%s\nsee=install/recover-credentials.sh restore\n' \
+                   "$(date -u +%FT%TZ)" "$(hostname)" "$(grep -c '^[A-Z]' "$SECRETS_FILE")")" \
+        --only-show-errors >/dev/null && green "wrote fleet-backup-manifest"
+}
+
+# ── restore from Key Vault (run on the NEW host) ────────────────────────────
+cmd_restore() {
+    section "restore secrets from Azure Key Vault"
+    local kv="${AZ_KEYVAULT:-nsc-secrets-kv}"
+    az_ keyvault show -n "$kv" >/dev/null 2>&1 || { red "vault '$kv' unreachable — az login first"; return 1; }
+    mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+
+    if az_ keyvault secret show --vault-name "$kv" -n fleet-secrets-env --query value -o tsv > "$SECRETS_FILE.new" 2>/dev/null; then
+        mv "$SECRETS_FILE.new" "$SECRETS_FILE"; chmod 600 "$SECRETS_FILE"
+        green "restored secrets.env ($(grep -c '^[A-Z]' "$SECRETS_FILE") keys)"
+    else
+        rm -f "$SECRETS_FILE.new"; yellow "fleet-secrets-env not in vault (fall back to 'harvest')"
+    fi
+
+    # claude-pool per-file restore (profiles 1-9)
+    local n
+    for n in 1 2 3 4 5 6 7 8 9; do
+        local pj
+        pj=$(az_ keyvault secret show --vault-name "$kv" -n "fleet-claude-pool-profile-$n-claude-json" --query value -o tsv 2>/dev/null) || continue
+        [ -n "$pj" ] || continue
+        mkdir -p "$STATE_DIR/claude-pool/profile-$n/.claude"
+        printf '%s' "$pj" | base64 -d > "$STATE_DIR/claude-pool/profile-$n/.claude.json"
+        local cr
+        cr=$(az_ keyvault secret show --vault-name "$kv" -n "fleet-claude-pool-profile-$n-credentials" --query value -o tsv 2>/dev/null) && \
+            [ -n "$cr" ] && printf '%s' "$cr" | base64 -d > "$STATE_DIR/claude-pool/profile-$n/.claude/.credentials.json" && \
+            chmod 600 "$STATE_DIR/claude-pool/profile-$n/.claude/.credentials.json"
+        green "restored claude-pool/profile-$n auth"
+    done
+    local sj
+    sj=$(az_ keyvault secret show --vault-name "$kv" -n fleet-claude-pool-state-json --query value -o tsv 2>/dev/null)
+    [ -n "$sj" ] && mkdir -p "$STATE_DIR/claude-pool" && \
+        printf '%s' "$sj" | base64 -d > "$STATE_DIR/claude-pool/state.json" && green "restored claude-pool/state.json"
+
+    for d in seo responder market-research-pipeline; do
+        local b64
+        b64=$(az_ keyvault secret show --vault-name "$kv" -n "fleet-$d-tgz" --query value -o tsv 2>/dev/null) || continue
+        [ -n "$b64" ] || continue
+        printf '%s' "$b64" | base64 -d > "/tmp/fleet-$d.tar.gz" && \
+            tar xzf "/tmp/fleet-$d.tar.gz" -C "$STATE_DIR" && green "restored $d/"
+        rm -f "/tmp/fleet-$d.tar.gz"
+    done
+
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+    for name in fleet-ssh-id-ed25519 fleet-ssh-id-rsa; do
+        local dest="$HOME/.ssh/$(echo "${name#fleet-ssh-}" | sed 's/^id-/id_/')"
+        local v
+        v=$(az_ keyvault secret show --vault-name "$kv" -n "$name" --query value -o tsv 2>/dev/null) || continue
+        [ -n "$v" ] || continue
+        [ -f "$dest" ] && { yellow "$dest exists — not overwriting"; continue; }
+        printf '%s' "$v" | base64 -d > "$dest" && chmod 600 "$dest" && green "restored $dest"
+        v=$(az_ keyvault secret show --vault-name "$kv" -n "$name-pub" --query value -o tsv 2>/dev/null) && \
+            [ -n "$v" ] && printf '%s' "$v" | base64 -d > "$dest.pub" && chmod 644 "$dest.pub"
+    done
+
+    local b64
+    b64=$(az_ keyvault secret show --vault-name "$kv" -n fleet-cloudflared-tgz --query value -o tsv 2>/dev/null)
+    if [ -n "$b64" ] && [ ! -d "$HOME/.cloudflared" ]; then
+        printf '%s' "$b64" | base64 -d > /tmp/fleet-cf.tar.gz && \
+            tar xzf /tmp/fleet-cf.tar.gz -C "$HOME" && green "restored ~/.cloudflared"
+        rm -f /tmp/fleet-cf.tar.gz
+    fi
+    b64=$(az_ keyvault secret show --vault-name "$kv" -n fleet-aws-deploy-state-env --query value -o tsv 2>/dev/null)
+    if [ -n "$b64" ]; then
+        mkdir -p "$HOME/.aws-deploy"
+        printf '%s' "$b64" | base64 -d > "$HOME/.aws-deploy/state.env" && green "restored ~/.aws-deploy/state.env"
+    fi
+    green "restore complete — run 'status' to see what is still missing"
 }
 
 cmd_status() {
@@ -349,6 +490,7 @@ main() {
             print_checklist ;;
         status) cmd_status ;;
         backup) cmd_backup ;;
+        restore) cmd_restore ;;
         *) echo "usage: $0 {harvest|status|backup}" >&2; exit 2 ;;
     esac
 }
