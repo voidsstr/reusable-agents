@@ -39,7 +39,33 @@ def main() -> int:
     p.add_argument("--progress", type=float, default=0.0)
     p.add_argument("--current-action", default="")
     p.add_argument("--iteration-count", type=int, default=0)
+    p.add_argument("--skip-if-terminal", action="store_true",
+                   help="Skip the write when the agent already recorded a "
+                        "terminal state (success/failure/blocked/cancelled) "
+                        "for this run or a newer one (current_run_ts >= "
+                        "--run-ts). Used by agent_run_wrapper.sh so its "
+                        "floor write never clobbers an AgentBase agent's "
+                        "own final status — e.g. a 'blocked' on a dead "
+                        "dependency must not decay into 'completed cleanly'.")
     args = p.parse_args()
+
+    if args.skip_if_terminal:
+        try:
+            from framework.core.status import status_key
+            from framework.core.storage import get_storage
+
+            cur = get_storage().read_json(status_key(args.agent_id)) or {}
+            if (cur.get("state") in ("success", "failure", "blocked", "cancelled")
+                    and str(cur.get("current_run_ts") or "") >= args.run_ts):
+                print(
+                    f"[status] {args.agent_id}: keeping agent-written terminal "
+                    f"'{cur.get('state')}' (run {cur.get('current_run_ts')}); "
+                    f"skipping wrapper '{args.state}'",
+                    file=sys.stderr,
+                )
+                return 0
+        except Exception:
+            pass  # best-effort — fall through to the floor write
 
     reporter = StatusReporter(
         agent_id=args.agent_id,

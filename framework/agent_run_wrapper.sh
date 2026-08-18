@@ -90,6 +90,14 @@ _write_status() {
     local state="$1"
     local message="$2"
     local progress="${3:-0}"
+    # 4th arg "keep-agent-final": the write is a floor, not an override —
+    # skip it when the agent already wrote its own terminal status for
+    # this run (AgentBase subclasses do; e.g. a "blocked" on a dead
+    # dependency must not be clobbered into "completed cleanly").
+    local extra=()
+    if [ "${4:-}" = "keep-agent-final" ]; then
+        extra+=(--skip-if-terminal)
+    fi
     # Best-effort, suppress all output (the agent's stdout owns the journal).
     python3 -m framework.cli.status \
         --agent-id "$AGENT_ID" \
@@ -97,6 +105,7 @@ _write_status() {
         --state "$state" \
         --message "$message" \
         --progress "$progress" \
+        "${extra[@]}" \
         >/dev/null 2>&1 || true
 }
 
@@ -108,9 +117,9 @@ _write_status starting "triggered by $TRIGGERED_BY" 0.0
 RC=$?
 
 if [ $RC -eq 0 ]; then
-    _write_status success "completed cleanly" 1.0
+    _write_status success "completed cleanly" 1.0 keep-agent-final
 else
-    _write_status failure "exited rc=$RC" 1.0
+    _write_status failure "exited rc=$RC" 1.0 keep-agent-final
 fi
 
 exit $RC
