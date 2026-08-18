@@ -404,6 +404,21 @@ def _persist_provider_refresh(conn, product_id: int, parsed: dict, *,
     if parsed.get("original_price") is not None:
         set_clauses.append("original_price = %s")
         params.append(parsed["original_price"])
+    elif parsed.get("price") is not None:
+        # No list price in this refresh, but the row may still hold an OLD
+        # one. If the new price has risen above it we would leave behind
+        # original_price < price -- a "Save -$50" negative discount, which
+        # the pricing-integrity rules forbid on any visible pick.
+        #
+        # This is a real regression seen in the field: a Creators run that
+        # refreshed 430 rows pushed catalog-wide negative discounts from
+        # 277 to 314, purely from stale list prices left in place. Clearing
+        # conditionally (rather than unconditionally) preserves legitimate
+        # discounts where the stored list price is still above the price.
+        set_clauses.append(
+            "original_price = CASE WHEN original_price < %s THEN NULL "
+            "ELSE original_price END")
+        params.append(parsed["price"])
     if parsed.get("currency"):
         set_clauses.append("currency = %s")
         params.append(parsed["currency"])
