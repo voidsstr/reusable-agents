@@ -263,6 +263,62 @@ enable this distro. Diagnose precisely: if
 **ollama models:** check what is actually pulled. A config naming `qwen3:32b` on a
 host that only has `qwen3:14b` fails at first use, not at startup.
 
+### 7a. Standup — SDXL image daemon (:7861)
+
+On the 5090 this is first-class, not optional: every image path in the fleet
+POSTs here and there is NO paid fallback by policy.
+
+```bash
+nvidia-smi | grep -q 5090 || echo "STOP: driver/GPU not ready"
+cd ~/development/reusable-agents/services/local-image-gen
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  # torch is PINNED — do not upgrade
+```
+
+- **Token:** `LOCAL_IMAGE_GEN_TOKEN` must be in `~/.reusable-agents/secrets.env`.
+  Recoverable from Key Vault: `az keyvault secret show --vault-name nsc-secrets-kv
+  -n file-reusable-agents-secrets-env` (the full secrets.env backup).
+- **Unit:** `~/.config/systemd/user/local-image-gen.service` —
+  `ExecStart=%h/development/reusable-agents/services/local-image-gen/.venv/bin/python server.py`,
+  `EnvironmentFile=%h/.reusable-agents/secrets.env`, `Restart=on-failure`. Then
+  `systemctl --user enable --now local-image-gen`.
+- First start downloads ~7 GB of SDXL-Turbo weights into `~/.cache/huggingface`;
+  `/healthz` is not ready until they load. Verify:
+  `curl -s localhost:7861/healthz` → `{"status":"ok", "gpu": "...5090..."}`.
+- **Output-based verification (§8 rule):** trigger `recipe-image-refiller` and
+  watch the recipe `image_url IS NULL` count actually DROP (backlog was 7,745
+  when the old host's daemon died). A green refiller run that fills 0 rows means
+  the daemon or token is still wrong — the agent now reports `blocked` when it
+  cannot reach :7861, so a `blocked` status here is the daemon's problem, not
+  the agent's.
+
+### 7a.2 Standup — SearXNG (:8888)
+
+Product/topic discovery + hero-image search. Agents read `SEARXNG_URL` from
+`secrets.env`; as of 2026-08-18 it points at `https://searxng.aisleprompt.com`,
+which returns **Cloudflare 530** — the tunnel route died with the old host, so
+standing this up is REQUIRED, not inherited.
+
+```bash
+docker run -d --name searxng --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 -v ~/searxng:/etc/searxng searxng/searxng
+# Enable the JSON API or every agent query 403s:
+#   ~/searxng/settings.yml → search: { formats: [html, json] }; then: docker restart searxng
+```
+
+Then pick ONE:
+1. **Local-only (simplest):** set `SEARXNG_URL=http://localhost:8888` in
+   `~/.reusable-agents/secrets.env` — every consumer runs on this host anyway.
+2. **Restore the tunnel hostname:** add an ingress rule
+   `{hostname: searxng.aisleprompt.com, service: http://localhost:8888}` to the
+   cloudflared config (see `~/.cloudflared/config-ollama.yml` for the shape),
+   `cloudflared tunnel route dns <tunnel> searxng.aisleprompt.com`, restart
+   cloudflared. Only needed if the Azure-hosted site code must reach it too.
+
+Verify with a real query, not a homepage 200:
+`curl -s 'http://localhost:8888/search?q=cast+iron+skillet&format=json' | head -c 200`
+must return JSON results. Then confirm a newly-authored article picks up a hero
+image (`hero_image_url IS NOT NULL`) without the curator having to rescue it.
+
 ---
 
 ## 7b. Retro-chat — the retro computers' brain

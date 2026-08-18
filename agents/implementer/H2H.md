@@ -187,6 +187,14 @@ the system prompt's cross-link rule has something to reference.
 
 #### 3c. Call Claude CLI with the H2H system prompt
 
+Run this **synchronously, in the foreground, one pair at a time** — never
+append `&`, never use `nohup`/`systemd-run`, never launch several pairs in
+parallel. Your session's final message ends the whole dispatch: the wrapper
+immediately reads `applied-recs.json` and any still-running child `claude`
+processes are orphaned and their output lost. (2026-08-18: a run spawned
+parallel generations, exited with "I'll wait for the completion
+notification", and shipped 0/15 despite Opus being available.)
+
 ```bash
 claude --print --output-format text \
        --model claude-opus-5 \
@@ -279,6 +287,16 @@ applied.write_text(json.dumps({
 Without `applied-recs.json` the dispatcher marks the run "paused" because
 there's no git commit to detect.
 
+**Do 3f incrementally — re-write both files after EVERY successful upsert,
+not once at the end of the run.** The claude-pool can rate-limit mid-run
+(the single-profile pool has hit its monthly spend cap repeatedly since
+2026-08-14); if `applied-recs.json` only exists after the last pair, a
+mid-run limit loses credit for every pair that DID land in the DB, and the
+producer re-dispatches work that already shipped. Append the pair_id to
+`applied_rec_ids` immediately after its `INSERT ... ON CONFLICT` returns
+successfully — a pair whose upsert you have not confirmed must never
+appear in `applied_rec_ids`.
+
 #### 3g. MANDATORY: write per-pair verification.json
 
 For each pair, write
@@ -337,12 +355,30 @@ deployer chain — you don't need to do anything for that.
 - **No code edits, no git commits.** This dispatch is database-write
   only. The completion email will still go out (it's framework-managed),
   but `commit_sha` will be empty — that's expected for H2H.
+- **Sequential and synchronous — never background.** Process pairs one
+  at a time in `RESPONDER_REC_IDS` order: pull context → generate →
+  parse → upsert → mark implemented (3f) → next pair. Never launch
+  inner `claude` calls with `&` / `nohup` / `systemd-run`, and never
+  end your session while a generation you started is still running —
+  orphaned children are lost and the run reports 0 shipped.
+- **Concrete defer reasons.** `Reason: undefined` in a summary file is
+  a bug. Name the actual failure: "inner claude call exited rc=75
+  (pool rate-limited)", "JSON parse failed after fence strip",
+  "DB upsert error: <first line>". The producer decides whether to
+  re-propose based on this string.
 
 ## When something goes wrong
 
 - LLM call timed out or returned non-JSON: write
   `changes/<pair_id>.summary.md` with `DEFERRED: <reason>` and move on.
   Do NOT retry the same pair more than once in a single run.
+- Inner `claude` call exits rc=75 (claude-pool rate-limited): the pool
+  is out of Opus headroom for the rest of this run. Write
+  `DEFERRED: claude-pool rate-limited (rc=75)` summaries for THIS pair
+  and every remaining unprocessed pair, then finish the run — do not
+  keep probing pair after pair. Pairs already upserted stay in
+  `applied_rec_ids` (that's why 3f is incremental); the producer
+  re-proposes the deferred ones on its next 2-hour tick.
 - DB upsert fails: log the error to the summary file, set
   `implemented: false` for that pair in recommendations.json, continue
   to the next pair.
