@@ -1,0 +1,56 @@
+{
+  "schema_version": "1",
+  "agent_id": "implementer",
+  "goals": [
+    {
+      "id": "goal-recs-shipped-per-run",
+      "title": "Ship queued recs every run",
+      "description": "shipped=0 while rec_count>0 (current state: 15 recs, 0 shipped, 16 deferred) means a blockage - usually required-model-unavailable. Verified emitted key.",
+      "target_metric": "shipped",
+      "metric": {
+        "name": "shipped",
+        "current": 0,
+        "target": 5,
+        "direction": "increase",
+        "unit": "recs/run"
+      },
+      "directives": [
+        "Honor required_model_for_batch(); defer rather than downgrade Opus-bound authoring",
+        "Report the blocking reason in the run summary when shipped=0"
+      ]
+    },
+    {
+      "id": "goal-deferred-backlog-drain",
+      "title": "Drain the deferred-rec backlog",
+      "description": "Deferred recs should clear as soon as their blocker (usually Opus availability) lifts. Verified emitted key.",
+      "target_metric": "deferred",
+      "metric": {
+        "name": "deferred",
+        "current": 16,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "recs"
+      },
+      "directives": [
+        "Respect defer_backoff cooldowns; never hot-loop a deferred rec",
+        "Surface deferral reasons so the operator can fix the root cause (pool auth, proxy)"
+      ]
+    },
+    {
+      "id": "goal-clean-exits",
+      "title": "Every run exits cleanly",
+      "description": "Non-zero exit_code means run.sh crashed rather than completed/deferred. Verified emitted key.",
+      "target_metric": "exit_code",
+      "metric": {
+        "name": "exit_code",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "code"
+      },
+      "directives": [
+        "Fail closed: write deferred.json instead of crashing when a backend is unreachable"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "1",
+  "agent_id": "catalog-audit-agent",
+  "goals": [
+    {
+      "id": "goal-critical-findings-zero",
+      "title": "Zero critical catalog findings outstanding",
+      "description": "Generic audit engine (per-site instances do the running). recs_critical should trend to 0 as fixes ship. Metric binding code-verified in run() but unverified by a recorded run on this generic registration.",
+      "target_metric": "recs_critical",
+      "metric": {
+        "name": "recs_critical",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "recs"
+      },
+      "directives": [
+        "Rank critical findings first in recommendations.json",
+        "Re-emit unresolved criticals each run until shipped"
+      ]
+    },
+    {
+      "id": "goal-findings-auto-dispatched",
+      "title": "Auto-dispatch actionable findings to the implementer",
+      "description": "Findings only matter if they reach the implementer queue. Metric binding code-verified, unverified by a recorded run.",
+      "target_metric": "auto_dispatched",
+      "metric": {
+        "name": "auto_dispatched",
+        "current": 0,
+        "target": 5,
+        "direction": "increase",
+        "unit": "recs/run"
+      },
+      "directives": [
+        "Dispatch via framework.core.dispatch, never a local queue path"
+      ]
+    },
+    {
+      "id": "goal-catalog-issue-count-shrink",
+      "title": "Shrink total audit findings over time",
+      "description": "A healthy catalog produces fewer findings each audit as prior recs ship. Metric binding code-verified, unverified by a recorded run.",
+      "target_metric": "recs_total",
+      "metric": {
+        "name": "recs_total",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "recs"
+      },
+      "directives": [
+        "Dedupe findings already queued or shipped so recs_total reflects genuinely open issues"
+      ]
+    }
+  ]
+}

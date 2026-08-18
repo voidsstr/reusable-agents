@@ -1,0 +1,55 @@
+{
+  "schema_version": "1",
+  "agent_id": "oauth-heartbeat-agent",
+  "goals": [
+    {
+      "id": "goal-token-liveness",
+      "title": "100% of OAuth refresh tokens stay alive",
+      "description": "Daily pings keep Testing-mode Google refresh_tokens from expiring after 7 idle days. Verified emitted key.",
+      "target_metric": "success_pct",
+      "metric": {
+        "name": "success_pct",
+        "current": 100,
+        "target": 100,
+        "direction": "increase",
+        "unit": "%"
+      },
+      "directives": [
+        "Ping every registered OAuth file daily",
+        "Alert on first failure - day 7 is too late"
+      ]
+    },
+    {
+      "id": "goal-failed-pings-zero",
+      "title": "Zero failed OAuth pings",
+      "description": "A failed ping means a token is on the 7-day expiry clock. Verified emitted key.",
+      "target_metric": "oauth_files_failed",
+      "metric": {
+        "name": "oauth_files_failed",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "files"
+      },
+      "directives": [
+        "On failure, name the file and the interactive re-auth command in the alert"
+      ]
+    },
+    {
+      "id": "goal-oauth-file-coverage",
+      "title": "Every Google OAuth file in use is enrolled",
+      "description": "oauth_files_watched should equal the number of OAuth credential files agents actually use. Verified emitted key.",
+      "target_metric": "oauth_files_watched",
+      "metric": {
+        "name": "oauth_files_watched",
+        "current": 1,
+        "target": 1,
+        "direction": "increase",
+        "unit": "files"
+      },
+      "directives": [
+        "When a new agent gains a Google integration, register its OAuth file here in the same change"
+      ]
+    }
+  ]
+}

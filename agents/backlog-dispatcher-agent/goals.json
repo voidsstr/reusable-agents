@@ -1,0 +1,55 @@
+{
+  "schema_version": "1",
+  "agent_id": "backlog-dispatcher-agent",
+  "goals": [
+    {
+      "id": "goal-recs-dispatched-flow",
+      "title": "Keep recs flowing from producers to the auto-queue",
+      "description": "recs_dispatched per tick; sustained 0 while producer accumulators hold open recs = pipeline stall. Verified emitted key.",
+      "target_metric": "recs_dispatched",
+      "metric": {
+        "name": "recs_dispatched",
+        "current": 0,
+        "target": 20,
+        "direction": "increase",
+        "unit": "recs/day"
+      },
+      "directives": [
+        "Check defer_backoff.should_skip() before dispatching",
+        "Honor the dispatch-kind allowlist config"
+      ]
+    },
+    {
+      "id": "goal-producer-coverage",
+      "title": "Walk every producer with open recs",
+      "description": "producers_dispatched should cover all producers holding open recs, not just the loudest. Verified emitted key.",
+      "target_metric": "producers_dispatched",
+      "metric": {
+        "name": "producers_dispatched",
+        "current": 0,
+        "target": 5,
+        "direction": "increase",
+        "unit": "producers/day"
+      },
+      "directives": [
+        "No hardcoded producer lists - walk the registry"
+      ]
+    },
+    {
+      "id": "goal-dispatch-liveness",
+      "title": "At least one dispatch whenever work exists",
+      "description": "Liveness guard: zero dispatches across many ticks with non-empty accumulators means the dispatcher is stuck, not idle. Reuses recs_dispatched (verified emitted key).",
+      "target_metric": "recs_dispatched",
+      "metric": {
+        "name": "recs_dispatched",
+        "current": 0,
+        "target": 1,
+        "direction": "increase",
+        "unit": "recs/day"
+      },
+      "directives": [
+        "Distinguish 'queue empty' from 'all candidates skipped' in the run summary"
+      ]
+    }
+  ]
+}

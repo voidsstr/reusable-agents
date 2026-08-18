@@ -1,0 +1,54 @@
+{
+  "schema_version": "1",
+  "agent_id": "ebay-product-sync-agent",
+  "goals": [
+    {
+      "id": "goal-sync-success-rate",
+      "title": "Keep listing-to-product sync success at 95%+",
+      "description": "products_upserted / items_seen; below 80% means mapping or DB adapter drift. Generic engine (specpicks instance does the running). Metric binding code-verified in run(), unverified by a recorded run on this registration.",
+      "target_metric": "sync_success_rate_pct",
+      "metric": {
+        "name": "sync_success_rate_pct",
+        "current": 0,
+        "target": 95,
+        "direction": "increase",
+        "unit": "%"
+      },
+      "directives": [
+        "Investigate mapping.py when the rate dips below 80% for two runs"
+      ]
+    },
+    {
+      "id": "goal-products-upserted-flow",
+      "title": "Sustain product upsert throughput",
+      "description": "Fresh eBay listings feeding the destination DB each run. Metric binding code-verified, unverified by a recorded run.",
+      "target_metric": "products_upserted_count",
+      "metric": {
+        "name": "products_upserted_count",
+        "current": 0,
+        "target": 50,
+        "direction": "increase",
+        "unit": "products/run"
+      },
+      "directives": [
+        "Cover all configured seed categories before deepening any single one"
+      ]
+    },
+    {
+      "id": "goal-sync-errors-zero",
+      "title": "Zero sync errors per run",
+      "description": "errors_count>0 usually means OAuth token, rate limit, or schema drift. Metric binding code-verified, unverified by a recorded run.",
+      "target_metric": "errors_count",
+      "metric": {
+        "name": "errors_count",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "errors/run"
+      },
+      "directives": [
+        "Classify errors (auth vs rate-limit vs data) in the run summary so the operator can act"
+      ]
+    }
+  ]
+}

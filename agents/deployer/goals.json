@@ -1,0 +1,55 @@
+{
+  "schema_version": "1",
+  "agent_id": "deployer",
+  "goals": [
+    {
+      "id": "goal-deploys-green",
+      "title": "Deploy stage exits 0",
+      "description": "deploy_rc is the per-site deploy pipeline's exit code. Metric binding code-verified in run(); no recorded runs yet on this registration - first run will confirm.",
+      "target_metric": "deploy_rc",
+      "metric": {
+        "name": "deploy_rc",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "code"
+      },
+      "directives": [
+        "Never skip the smoke check after a deploy",
+        "On failure, include the failing stage's tail in the summary"
+      ]
+    },
+    {
+      "id": "goal-tests-gate-green",
+      "title": "Test gate passes before every deploy",
+      "description": "test_rc must be 0 or the pipeline hard-gates. Metric binding code-verified; no recorded runs yet.",
+      "target_metric": "test_rc",
+      "metric": {
+        "name": "test_rc",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "code"
+      },
+      "directives": [
+        "Treat a red test gate as a full stop - no build/push/deploy stages run"
+      ]
+    },
+    {
+      "id": "goal-smoke-checks-pass",
+      "title": "Post-deploy smoke check passes",
+      "description": "smoke_ok is boolean (1=pass); a deploy that fails smoke must roll back or alert. Metric binding code-verified; no recorded runs yet.",
+      "target_metric": "smoke_ok",
+      "metric": {
+        "name": "smoke_ok",
+        "current": 1,
+        "target": 1,
+        "direction": "increase",
+        "unit": "bool"
+      },
+      "directives": [
+        "A failed smoke check after a successful deploy is an incident, not a warning"
+      ]
+    }
+  ]
+}

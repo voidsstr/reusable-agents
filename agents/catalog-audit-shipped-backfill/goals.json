@@ -1,0 +1,54 @@
+{
+  "schema_version": "1",
+  "agent_id": "catalog-audit-shipped-backfill",
+  "goals": [
+    {
+      "id": "goal-recs-reconciled-total",
+      "title": "Reconcile every shipped migration rec",
+      "description": "Cumulative shipped:false-to-true flips after verifying effects landed in prod DB. Verified emitted key.",
+      "target_metric": "total_shipped_flipped",
+      "metric": {
+        "name": "total_shipped_flipped",
+        "current": 0,
+        "target": 50,
+        "direction": "increase",
+        "unit": "recs"
+      },
+      "directives": [
+        "Only flip after the DB effect is verified, never on commit presence alone"
+      ]
+    },
+    {
+      "id": "goal-verification-throughput",
+      "title": "Check outstanding migration recs each run",
+      "description": "this_run_checked=0 for extended periods while unflipped recs exist means the reconciler is idle. Verified emitted key.",
+      "target_metric": "this_run_checked",
+      "metric": {
+        "name": "this_run_checked",
+        "current": 0,
+        "target": 10,
+        "direction": "increase",
+        "unit": "recs/run"
+      },
+      "directives": [
+        "Short-circuit when there is nothing unflipped to check"
+      ]
+    },
+    {
+      "id": "goal-flips-confirmed-per-run",
+      "title": "Confirm landed effects promptly",
+      "description": "this_run_flipped tracks how quickly landed migrations get credited. Verified emitted key.",
+      "target_metric": "this_run_flipped",
+      "metric": {
+        "name": "this_run_flipped",
+        "current": 0,
+        "target": 5,
+        "direction": "increase",
+        "unit": "recs/run"
+      },
+      "directives": [
+        "A rec checked 5+ times without flipping deserves a manual-review flag"
+      ]
+    }
+  ]
+}

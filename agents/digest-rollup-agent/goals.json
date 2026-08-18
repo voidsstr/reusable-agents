@@ -1,0 +1,56 @@
+{
+  "schema_version": "1",
+  "agent_id": "digest-rollup-agent",
+  "goals": [
+    {
+      "id": "goal-fleet-failed-runs-zero",
+      "title": "Zero failed runs per digest window",
+      "description": "The 3-hourly digest reports failed_runs across the fleet; a healthy fleet holds this at 0 and every failure is named with a cause. Verified emitted key.",
+      "target_metric": "failed_runs",
+      "metric": {
+        "name": "failed_runs",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "runs/3h"
+      },
+      "directives": [
+        "Name every failed run with its cause in the digest body",
+        "If the same agent fails two consecutive windows, escalate instead of just listing it"
+      ]
+    },
+    {
+      "id": "goal-fleet-escalations-low",
+      "title": "Keep operator escalations at zero",
+      "description": "Escalations mean the fleet could not self-heal. Drive toward 0 by making auto-fix playbooks absorb recurring causes. Verified emitted key.",
+      "target_metric": "escalations",
+      "metric": {
+        "name": "escalations",
+        "current": 1,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "escalations/3h"
+      },
+      "directives": [
+        "De-dupe repeat escalations (suppressed counter should absorb them)",
+        "When an escalation repeats 3+ windows, propose a permanent fix rec"
+      ]
+    },
+    {
+      "id": "goal-fleet-ship-flow",
+      "title": "Surface continuous shipped-rec flow",
+      "description": "shipped per window is the fleet's heartbeat of user-facing output; sustained 0 across windows means the pipeline is stalled and the digest must say why. Verified emitted key.",
+      "target_metric": "shipped",
+      "metric": {
+        "name": "shipped",
+        "current": 0,
+        "target": 5,
+        "direction": "increase",
+        "unit": "recs/3h"
+      },
+      "directives": [
+        "When shipped=0 while queued_recs>0, call out the blocking stage (drainer, pool, defers) in the digest"
+      ]
+    }
+  ]
+}
