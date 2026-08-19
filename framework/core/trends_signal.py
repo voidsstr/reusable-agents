@@ -307,6 +307,21 @@ def fetch_trends_cached(storage,
             storage.write_json(cache_key, cur)
         except Exception:
             pass
+        return fresh
+    # Empty fetch (feed flake / transient rate-limit): fall back to the
+    # STALE cache rather than returning []. Trends change daily, so a
+    # stale-but-real list keeps them in the author's signal vector; an
+    # empty list made two consecutive runs hash identical and the
+    # article-proposal agent short-circuited past its 12:20Z cron
+    # (2026-08-19). Staleness is still bounded: don't serve anything
+    # older than 4x the TTL — at that age silence is more honest.
+    try:
+        if isinstance(cached, dict) and (now - int(cached.get("fetched_at", 0))) < ttl_seconds * 4:
+            stale = cached.get("by_audience", {}).get(audience) or []
+            if stale:
+                return [TrendTerm(**t) for t in stale]
+    except Exception:
+        pass
     return fresh
 
 
