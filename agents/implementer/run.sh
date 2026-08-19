@@ -2185,6 +2185,7 @@ for rid, body_p, meta_p in pairs:
                 body_lede_is_leaky,
                 body_has_fabricated_citation,
                 has_leaky_heading,
+                repair_leaky_headings,
             )
             if body_lede_is_leaky(body_md):
                 errors.append((rid,
@@ -2206,17 +2207,31 @@ for rid, body_p, meta_p in pairs:
                       f"snippet={_fab_citation!r} — SKIP",
                       file=sys.stderr)
                 continue
+            # Outline-label headings ("## Editorial intro: …",
+            # "## 5-column spec-delta table") are repaired in place —
+            # the scaffolding prefix is stripped and the descriptive
+            # remainder kept — rather than costing the whole article a
+            # re-queue. Only a heading the repair CANNOT salvage is
+            # fatal.
             _leaky_heading = has_leaky_heading(body_md)
             if _leaky_heading:
-                errors.append((rid,
-                    f"OUTLINE-LEAK GUARD: body_md has a heading that "
-                    f"begins with an outline-label prefix "
-                    f"({_leaky_heading!r}) — refusing INSERT; "
-                    f"re-queue for re-write with prose headings"))
-                print(f"[article-insert] {rid}: ✗ OUTLINE-LEAK "
-                      f"heading={_leaky_heading!r} — SKIP",
-                      file=sys.stderr)
-                continue
+                body_md, _head_fixes = repair_leaky_headings(body_md)
+                for _before, _after in _head_fixes:
+                    print(f"[article-insert] {rid}: OUTLINE-LEAK heading "
+                          f"repaired {_before!r} -> "
+                          f"{_after or '<dropped>'!r}", file=sys.stderr)
+                _still_leaky = has_leaky_heading(body_md)
+                if _still_leaky:
+                    errors.append((rid,
+                        f"OUTLINE-LEAK GUARD: body_md has a heading that "
+                        f"begins with an outline-label prefix "
+                        f"({_still_leaky!r}) and could not be repaired — "
+                        f"refusing INSERT; re-queue for re-write with "
+                        f"prose headings"))
+                    print(f"[article-insert] {rid}: ✗ OUTLINE-LEAK "
+                          f"heading={_still_leaky!r} — SKIP",
+                          file=sys.stderr)
+                    continue
         except ImportError:
             pass  # primitive not available in this checkout
         except Exception as _me:
@@ -2429,6 +2444,22 @@ ART_PY
                     DATABASE_URL="$DATABASE_URL" \
                         python3 "$SCRIPT_DIR/resolve-article-links.py" --apply \
                         2>&1 | sed 's/^/[link-resolver] /' >&2 || true
+                fi
+
+                # Outline-leak heading repair: the article-author LLM
+                # writes most rows with its OWN `INSERT INTO
+                # editorial_articles` (written_by='claude-cli', see
+                # ARTICLE_AUTHOR.md), so those bodies never pass the
+                # wrapper's insert-time guard above. Sweep whatever was
+                # just written and strip any "## Editorial intro: …" /
+                # "## 5-column spec-delta table" scaffolding heading.
+                # Idempotent — a clean body is a no-op.
+                if [ -n "${DATABASE_URL:-}" ]; then
+                    DATABASE_URL="$DATABASE_URL" \
+                        PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                        python3 -m framework.cli.article_heading_repair \
+                        --site "${RESPONDER_SITE:-}" --since-hours 6 --commit \
+                        2>&1 | sed 's/^/[heading-repair] /' >&2 || true
                 fi
 
                 # Shipped-flag reconciler: walks every article-author

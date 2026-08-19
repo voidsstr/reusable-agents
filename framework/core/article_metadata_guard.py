@@ -64,7 +64,7 @@ HEADING_LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
         # /reviews/open-webui-raspberry-pi-4-rtx-3060-self-hosted-2026.
         r"^Editorial intro\b",
         r"^\d+w editorial\b",
-        r"^\d-column\b",
+        r"^\d+\s*[-\u2013\u2014]?\s*column\b",
         r"^Pick \| Best For\b",
     )
 )
@@ -183,3 +183,109 @@ def has_leaky_heading(body_md: str) -> str | None:
             if pat.search(head_text):
                 return head_text
     return None
+
+
+# ── Repair (the "strips" half of the outline-leak guard) ─────────────
+#
+# `has_leaky_heading` only DETECTS. Detection alone means an otherwise
+# good article is refused wholesale at INSERT (throughput loss), and it
+# does nothing for the bodies already sitting in `editorial_articles`.
+# The repair functions below turn an outline-label heading back into a
+# plain-prose heading by stripping the scaffolding prefix and keeping
+# the descriptive remainder:
+#
+#     "## Editorial intro: single-tower vs dual-tower air cooling"
+#         -> "## Single-tower vs dual-tower air cooling"
+#     "## 5-column spec-delta table"
+#         -> "## Spec-delta table"
+#     "## Editorial intro (~280w)"     (nothing but scaffolding left)
+#         -> heading line dropped
+#
+# Callers: the implementer's article-insert wrapper (repair before the
+# reject check) and `framework.cli.article_heading_repair` (sweeps rows
+# the article-author LLM INSERTed itself, which never pass through the
+# wrapper — see that module's docstring).
+
+# Prefixes that are pure outline scaffolding. Stripped left-to-right,
+# repeatedly, until the heading text stops shrinking.
+_LABEL_STRIP_RES: tuple[re.Pattern, ...] = (
+    # "Editorial intro", "280w editorial intro", "Editorial intro (~280w)",
+    # each optionally followed by a ':' / '-' / en- or em-dash separator.
+    re.compile(
+        r"^(?:~?\d+\s*w\b\s*)?editorial\s+intro\b"
+        r"(?:\s*\(\s*~?\s*\d+\s*w\s*\))?"
+        r"\s*(?:[:\u2013\u2014-]\s*)?",
+        re.IGNORECASE,
+    ),
+    # "5-column ", "5 column ", "12-column " — a table-shape note that
+    # belongs in the brief, not in a reader-facing heading.
+    re.compile(r"^\d+\s*[-\u2013\u2014]?\s*column\s+", re.IGNORECASE),
+)
+
+# Headings that are nothing but scaffolding — no prose to salvage, so
+# the whole line is dropped.
+_DROP_HEADING_RES: tuple[re.Pattern, ...] = (
+    re.compile(r"^Pick\s*\|\s*Best\s+For\b", re.IGNORECASE),
+)
+
+_MD_HEADING_LINE_RE = re.compile(r"^(#{2,4})[ \t]+(.+?)[ \t]*$")
+
+
+def _repair_heading_text(text: str) -> str:
+    """Return the prose remainder of a leaky heading; "" means drop it."""
+    s = (text or "").strip()
+    for pat in _DROP_HEADING_RES:
+        if pat.search(s):
+            return ""
+    shrinking = True
+    while shrinking:
+        shrinking = False
+        for pat in _LABEL_STRIP_RES:
+            stripped = pat.sub("", s, count=1)
+            if stripped != s:
+                s, shrinking = stripped.strip(), True
+    s = s.strip(" \t:\u2013\u2014-")
+    if not s:
+        return ""
+    return s[0].upper() + s[1:]
+
+
+def repair_leaky_headings(body_md: str) -> tuple[str, list[tuple[str, str]]]:
+    """Rewrite outline-label H2/H3/H4 headings into plain-prose headings.
+
+    Returns `(repaired_body, changes)` where `changes` is a list of
+    `(before, after)` heading-text pairs; `after == ""` means the whole
+    heading line was dropped because nothing but scaffolding remained.
+    A body with no leaky headings is returned unchanged with `[]`.
+
+    The repair is deterministic and text-only — it never touches body
+    prose, tables, links or heading levels, so it is safe to run over
+    already-published rows.
+    """
+    if not body_md:
+        return (body_md or ""), []
+    changes: list[tuple[str, str]] = []
+    out_lines: list[str] = []
+    for line in body_md.split("\n"):
+        m = _MD_HEADING_LINE_RE.match(line)
+        if not m:
+            out_lines.append(line)
+            continue
+        hashes, text = m.group(1), m.group(2).strip()
+        if not any(p.search(text) for p in HEADING_LEAK_PATTERNS):
+            out_lines.append(line)
+            continue
+        new_text = _repair_heading_text(text)
+        # Belt-and-braces: if the salvaged remainder still trips the
+        # detector, there was no prose worth keeping — drop the line.
+        if new_text and any(p.search(new_text) for p in HEADING_LEAK_PATTERNS):
+            new_text = ""
+        changes.append((text, new_text))
+        if new_text:
+            out_lines.append(f"{hashes} {new_text}")
+    if not changes:
+        return body_md, []
+    out = "\n".join(out_lines)
+    # Dropping a heading leaves a blank-line pileup behind it.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out, changes

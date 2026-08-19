@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "_comment": "Per-site table/column mapping for the outline-leak heading repair (framework/core/article_metadata_guard.repair_leaky_headings, driven by framework/cli/article_heading_repair.py). Storage copy at config/article-heading-repair-config.json overrides this repo default. Site key matches by substring against the --site hint (agent id or bare site name). Only VALUES live here — the leak patterns themselves are logic and stay in the primitive.",
+  "default": {
+    "dsn_env": "DATABASE_URL",
+    "table": "editorial_articles",
+    "body_column": "body_md",
+    "slug_column": "slug",
+    "status_column": "status",
+    "status_value": "published",
+    "updated_column": "updated_at"
+  },
+  "sites": {
+    "aisleprompt": {"dsn_env": "DATABASE_URL_AISLEPROMPT"},
+    "specpicks": {"dsn_env": "DATABASE_URL_SPECPICKS"}
+  }
+}
