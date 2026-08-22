@@ -120,6 +120,44 @@ python3 -c "import json;s=json.load(open('/home/voidsstr/.reusable-agents/claude
 The pool auto-picks up newly-authed profiles on the next drain tick — no
 restart. Even 1–2 profiles restores authoring.
 
+## Secrets backup + host migration pull (Key Vault)
+
+Every host secret is backed up to Azure Key Vault **`nsc-secrets-kv`**
+(rg `nsc-apps`, subscription `125b8bc9-e8bb-4827-9d2a-f3492b983dcf`) under the
+`fleet-*` prefix: `secrets.env`, SEO + responder OAuth, **each claude-pool
+profile** (slim `.claude.json` + `.credentials.json`), pool state, the SSH
+keypair, the cloudflared tunnel bundle, and `fleet-backup-manifest` (the
+index). Refresh it any time secrets change (new pool account, rotated key):
+
+```bash
+bash install/recover-credentials.sh backup     # idempotent; prints names/lengths only
+```
+
+**A new host pulls everything with:**
+
+```bash
+az login                                       # any account with vault access
+git clone <reusable-agents> && cd reusable-agents
+bash install/recover-credentials.sh restore    # rebuilds ~/.reusable-agents, ~/.ssh, ~/.cloudflared
+```
+
+The script pins `--subscription` itself, so a drifted `az` default does not
+break it. Round-trip tested byte-identical. Run `backup` on the OLD host
+immediately before cutover; full migration traps live in the
+`fleet-host-migration-handoff` memory + `~/.reusable-agents/handoff/MIGRATION-MANIFEST.md`.
+
+## Whitebeast retro-agent (interactive-session bridge)
+
+The retro-agent also runs ON whitebeast itself (Windows side) — reach it at
+`172.19.176.1:9898` from WSL / `192.168.1.82:9898` from the LAN, protocol
+`shared/retro_protocol.py` in nsc-assistant. It is the ONLY safe launch
+channel for hlds/UCC game servers (interactive session; WSL-interop launches
+zombie-pin UDP ports). If 9898 times out, the game consoles usually died with
+it — operator remedy: run
+`C:\development\retro-agent\scripts\game-servers\start-game-servers.ps1`
+(self-elevating, starts all three servers, skip-if-running) and restart the
+agent.
+
 ---
 
 ## Improving the agents toward their goals (the "make them better" mandate)
