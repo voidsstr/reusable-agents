@@ -381,10 +381,18 @@ units, `enable-linger`, `daemon-reload`, `enable --now`). Then:
 - It round-robins machines across the default Claude login **and every healthy
   claude-pool profile**, failing over between them, so §5's pool applies here too.
 
-⚠️ **Cold-boot crash loop.** The daemon returns from `main_async()` when discovery
-finds zero agents, with `Restart=always` / `RestartSec=3`. Provision the box while
-the retro PCs are powered off and it rescans 254 IPs every 3 seconds forever.
-Either bring one retro machine up first, or leave the unit disabled until they are.
+⚠️ **Cold-boot crash loop — and on this fleet it is the STEADY STATE, not a
+provisioning-window hazard.** The daemon returns from `main_async()` when discovery
+finds zero agents, with `Restart=always` / `RestartSec=3`, so it rescans 254 IPs
+every 3 seconds forever.
+
+The retro machines are **powered on only for configuration changes and for
+gaming** (operator, 2026-08-23) — so "zero agents found" is the normal condition,
+not an outage. Do **not** enable `retro-chat-daemon` as a boot-time
+`Restart=always` unit: either give it a zero-agent backoff, or leave it disabled
+and start it alongside the retro PCs. Judge health by the brain's heartbeat and
+the daemon's *ability* to claim, never by a live agent count. Note the boxes also
+drop ICMP, so probe TCP 9898 — `ping` fails on a perfectly healthy agent.
 
 ⚠️ **The brain's death is invisible to KTLO.** If the brain dies the daemon keeps
 logging discovery lines, so the tick reports GREEN while every prompt goes
