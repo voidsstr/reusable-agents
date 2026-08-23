@@ -126,7 +126,8 @@ Every host secret is backed up to Azure Key Vault **`nsc-secrets-kv`**
 (rg `nsc-apps`, subscription `125b8bc9-e8bb-4827-9d2a-f3492b983dcf`) under the
 `fleet-*` prefix: `secrets.env`, SEO + responder OAuth, **each claude-pool
 profile** (slim `.claude.json` + `.credentials.json`), pool state, the SSH
-keypair, the cloudflared tunnel bundle, and `fleet-backup-manifest` (the
+keypair, the cloudflared tunnel bundle, `fleet-migration-manifest` (the full
+host-takeover inventory — retrieve it FIRST on the new host), and `fleet-backup-manifest` (the
 index). Refresh it any time secrets change (new pool account, rotated key):
 
 ```bash
