@@ -1030,6 +1030,10 @@ def cmd_login_help(args) -> None:
         print(f"HOME={state[target]['home']} {real} /login")
         return
     for k in sorted(state.keys()):
+        # Skip bookkeeping sentinels like __outage__, which carry no `home`
+        # (every other command already filters these).
+        if k.startswith("__") or "home" not in state[k]:
+            continue
         already = " (authed)" if _is_authenticated(state[k]["home"]) else ""
         print(f"# {k}{already}")
         print(f"HOME={state[k]['home']} {real} /login")
