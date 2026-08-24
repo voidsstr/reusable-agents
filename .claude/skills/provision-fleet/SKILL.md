@@ -139,6 +139,17 @@ systemctl --user daemon-reload
 Use a venv or `--break-system-packages` deliberately; do not let half the deps
 land in a user site-dir the systemd units cannot see.
 
+**Ubuntu 26.04 "resolute" / Python 3.14 is fine — do NOT add a second
+interpreter** (verified 2026-08-24 on the 5090 host). 26.04 ships **only**
+Python 3.14 (`python3.12` is not in the archive), which looks like a blocker
+because the previous host ran 3.12. It is not: `claude-agent-sdk`, `pillow`,
+`psycopg2-binary`, `pyyaml`, `azure-storage-blob`, `google-auth-oauthlib`,
+`numpy` and `rich` all install as wheels on 3.14. Installing 3.12 alongside
+(deadsnakes does publish for `resolute`) would leave two interpreters on a box
+where **every agent invokes bare `python3`** — the ambiguity is a bigger risk
+than the version gap. Note `ensurepip` is NOT bundled: `python3 -m venv` fails
+until you `apt install python3.14-venv`, which reads like a broken interpreter.
+
 **nvm is invisible to systemd.** A node installed via nvm lives in a shell-only
 PATH. Agents that shell to `npx` will fail under systemd while working fine when
 you test by hand. Install node system-wide, or add a global drop-in:
