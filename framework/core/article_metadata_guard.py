@@ -66,6 +66,14 @@ HEADING_LEAK_PATTERNS: tuple[re.Pattern, ...] = tuple(
         r"^\d+w editorial\b",
         r"^\d+\s*[-\u2013\u2014]?\s*column\b",
         r"^Pick \| Best For\b",
+        # "Section 1: Iconic mains" -- the outline INDEX label copied
+        # verbatim out of the proposal's `outline` array. Leaked to
+        # production 2026-08-22 on /blog/22-greek-recipes-moussaka-
+        # souvlaki-spanakopita-mediterranean-classics-home, where 5 of
+        # 14 H2s read "Section N: ...". The trailing separator is
+        # REQUIRED so prose headings that legitimately open with the
+        # word ("Section 230 of the CDA") are never touched.
+        r"^Sections?\s+\d+\s*[:.\u2013\u2014-]",
     )
 )
 
@@ -142,8 +150,20 @@ def body_lede_is_leaky(body_md: str, *, window: int = 600) -> bool:
     the wrapper SHOULD reject the INSERT entirely when this returns
     True, even if subtitle/excerpt look fine.
     """
-    head = (body_md or "")[:window]
-    return is_leaky(head)
+    body = body_md or ""
+    # `_looks_truncated_midword` is a signal about a LENGTH CAP landing
+    # inside a word — meaningful for subtitle/excerpt, meaningless for a
+    # `window`-char slice of a body, which ends mid-word by construction.
+    # Applying it to the raw slice flagged 36 of the 60 most recent
+    # published articles (zero real leaks) and refuses the INSERT in
+    # run.sh, so the pattern check runs on the window while the
+    # truncation check runs on the first paragraph — a real editorial
+    # unit that genuinely should not end mid-word.
+    head = body[:window]
+    if any(p.search(head) for p in LEAK_PATTERNS):
+        return True
+    first_para = body.split("\n\n", 1)[0].strip()
+    return _looks_truncated_midword(first_para)
 
 
 def body_has_fabricated_citation(body_md: str) -> str | None:
@@ -220,6 +240,10 @@ _LABEL_STRIP_RES: tuple[re.Pattern, ...] = (
     # "5-column ", "5 column ", "12-column " — a table-shape note that
     # belongs in the brief, not in a reader-facing heading.
     re.compile(r"^\d+\s*[-\u2013\u2014]?\s*column\s+", re.IGNORECASE),
+    # "Section 1: ", "Section 2 - " -- the outline INDEX label. The prose
+    # remainder after the separator is the real heading, so keep it and
+    # strip only the label.
+    re.compile(r"^sections?\s+\d+\s*[:.\u2013\u2014-]\s*", re.IGNORECASE),
 )
 
 # Headings that are nothing but scaffolding — no prose to salvage, so
