@@ -807,7 +807,7 @@ def _emit_outage_event(state: dict, resets: list[str]) -> None:
         "restart needed."
     )
     try:
-        sys.path.insert(0, str(_REPO_ROOT))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
         from framework.core.resilience import notify_operator
         class _ClaudePoolOutage(Exception):
             pass
