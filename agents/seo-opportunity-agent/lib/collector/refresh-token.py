@@ -39,9 +39,20 @@ DEFAULT_OAUTH_PATH = os.path.expanduser("~/.reusable-agents/seo/.oauth.json")
 # Google revokes refresh tokens after 7 days of non-use while the consent
 # screen is in "Testing". Publishing it to "In production" is the durable fix;
 # oauth-heartbeat-agent exists to reset the clock daily until then.
+# GSC scope: `webmasters` is read-WRITE (includes Sitemaps.submit);
+# `webmasters.readonly` can read coverage + search analytics but CANNOT submit
+# sitemaps, which makes IndexNow's sitemap pings 403. reauth-google-oauth.sh has
+# always documented read-write in its header while this list requested readonly
+# — the header was right and the code was wrong. Default to read-write; set
+# GSC_READONLY=1 to request the narrower scope instead.
+_GSC_SCOPE = (
+    "https://www.googleapis.com/auth/webmasters.readonly"
+    if os.environ.get("GSC_READONLY") == "1"
+    else "https://www.googleapis.com/auth/webmasters"
+)
 SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
-    "https://www.googleapis.com/auth/webmasters.readonly",
+    _GSC_SCOPE,
 ]
 
 
