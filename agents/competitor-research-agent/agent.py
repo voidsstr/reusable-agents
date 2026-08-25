@@ -528,6 +528,13 @@ class CompetitorResearchAgent(AgentBase):
             if comp_pages:
                 comp_pages_by_domain[comp] = comp_pages
 
+        # NOTE (2026-08-25): this batches EVERY competitor's pages into one
+        # call (max_pages_per_competitor x max_competitors). Frontier models
+        # tolerate that; local models measurably under-read the TAIL of the
+        # prompt — an A/B found qwen3.6:27b missing two features that it found
+        # reliably when the same page was sent alone. If extraction is routed
+        # to a local provider (metadata.ai_calls.extract), prefer a smaller
+        # max_pages_per_competitor or chunk this per competitor.
         self.status("extracting all competitor features (batched LLM call)",
                     progress=0.55)
         theirs_features = self._extract_features_batched(client, comp_pages_by_domain)
