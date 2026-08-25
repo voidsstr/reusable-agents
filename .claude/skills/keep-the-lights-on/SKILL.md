@@ -584,3 +584,6 @@ Escalate/investigate only on the **2nd consecutive** occurrence.
 
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.
+- `.claude/skills/refresh-gsc-token/SKILL.md` — re-mint the shared GSC/GA4 OAuth
+  token when the collector fails with `token mint failed` / `invalid_grant`, or
+  when sitemap pings report `ok=8/15` (readonly scope).
