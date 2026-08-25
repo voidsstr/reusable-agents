@@ -439,7 +439,7 @@ class CompetitorResearchAgent(AgentBase):
         if not seeds:
             self.status("brainstorming competitors", progress=0.10)
             try:
-                raw = client.chat([
+                raw = self.ai_client(call="brainstorm").chat([
                     {"role": "system", "content": BRAINSTORM_COMPETITORS_SYS},
                     {"role": "user", "content":
                         f"Our site: {cfg.domain}\nWhat we do: {cfg.what_we_do or '(not specified)'}\n"
@@ -1061,7 +1061,7 @@ class CompetitorResearchAgent(AgentBase):
     def _extract_features_from_text(self, client, label: str, text: str) -> dict:
         """LLM-extract feature list from a codebase-scan text blob (no URLs)."""
         try:
-            raw = client.chat([
+            raw = self.ai_client(call="extract").chat([
                 {"role": "system", "content": EXTRACT_FEATURES_SYS},
                 {"role": "user", "content":
                     f"Project: {label}\n\nCODEBASE SCAN (truncated):\n{text[:60_000]}"},
@@ -1083,7 +1083,7 @@ class CompetitorResearchAgent(AgentBase):
         compatibility (tests + the our-site path still call this), but the
         per-competitor loop now uses _extract_features_batched."""
         try:
-            raw = client.chat([
+            raw = self.ai_client(call="extract").chat([
                 {"role": "system", "content": EXTRACT_FEATURES_SYS},
                 {"role": "user", "content":
                     f"Site: {domain}\n\nPAGES:\n{_format_pages(pages)}"},
@@ -1126,7 +1126,7 @@ class CompetitorResearchAgent(AgentBase):
             + "\n\n".join(sections)
         )
         try:
-            raw = client.chat([
+            raw = self.ai_client(call="extract").chat([
                 {"role": "system", "content": EXTRACT_FEATURES_BATCH_SYS},
                 {"role": "user", "content": user_prompt},
             ], temperature=0.1, max_tokens=4500)  # ~750 tok per competitor
