@@ -199,6 +199,7 @@ class ShelfAuditAgent(AgentBase):
                           % (len(findings), len(targets)),
                "recommendations": recs}
         self._save_artifact("recommendations.json", doc)
+        dispatched, dnote = self._maybe_dispatch(recs, cfg)
         self._save_artifact("shelf-findings.json",
                             {"crawled_pages": len(self._pages),
                              "surfaced_asins": len(asins),
@@ -208,8 +209,8 @@ class ShelfAuditAgent(AgentBase):
         return RunResult(
             status="success",
             summary="shelf: %d pages, %d products verified, %d disagree with "
-                    "Amazon (%d recs)" % (len(self._pages), len(truth),
-                                          len(findings), len(recs)),
+                    "Amazon (%d recs; %s)" % (len(self._pages), len(truth),
+                                              len(findings), len(recs), dnote),
             metrics={"pages_crawled": len(self._pages),
                      "products_verified": len(truth),
                      "products_with_issues": len(findings),
@@ -253,6 +254,39 @@ class ShelfAuditAgent(AgentBase):
             })
         return recs
 
+
+    def _maybe_dispatch(self, recs, cfg):
+        """Route findings to the implementer — OFF unless the site opts in.
+
+        The sibling catalog-audit-agent dispatches through the same call, and
+        gated_dispatch_now() already honours `auto_implement` as its approval
+        gate. A second, agent-local switch exists on top of it because the
+        remedy here writes to LIVE CATALOG DATA: the drifts this agent finds
+        span -95% to +279%, so a bug in the comparison could rewrite real
+        prices at scale. `dispatch_findings` therefore defaults to FALSE and
+        the operator turns it on deliberately, per site.
+        """
+        if not str(cfg.get("dispatch_findings", "false")).lower() == "true":
+            return 0, "dispatch off (dispatch_findings=false)"
+        tiers = {t.strip() for t in
+                 str(cfg.get("dispatch_tiers", "lever")).split(",") if t.strip()}
+        cap = int(cfg.get("max_dispatch", 3))
+        eligible = [r for r in recs if r.get("tier") in tiers][:cap]
+        if not eligible:
+            return 0, "no recs in dispatch tiers %s" % sorted(tiers)
+        try:
+            from framework.core import dispatch as _d
+            handle = _d.gated_dispatch_now(
+                agent=self, agent_id=self.agent_id, run_dir=str(self._rundir),
+                rec_ids=[r["id"] for r in eligible], action="implement",
+                site=cfg.get("site_id", ""), subject_tag="shelf-audit")
+            if handle is None:
+                return 0, "awaiting approval (auto_implement=false)"
+            return len(eligible), "dispatched %d of %d eligible (cap %d)" % (
+                len(eligible), len([r for r in recs if r.get("tier") in tiers]), cap)
+        except Exception as e:
+            self.decide("observation", "shelf dispatch failed: %s" % str(e)[:120])
+            return 0, "dispatch failed: %s" % str(e)[:60]
 
     @property
     def _rundir(self) -> Path:

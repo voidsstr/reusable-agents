@@ -99,5 +99,53 @@ class TestAmazonTupleContract(unittest.TestCase):
         self.assertIn("got, aerrs = client.get_items(chunk)", _AGENT_SRC)
 
 
+class TestDispatchGate(unittest.TestCase):
+    """Findings route to the implementer only when the site opts in. The
+    remedy writes to LIVE catalog data and observed drifts span -95% to
+    +279%, so the default must be off."""
+
+    def _agent(self):
+        import sys, types
+        sys.path.insert(0, str(_ROOT / "agents" / "shelf-audit-agent"))
+        sys.argv = ["x"]
+        import agent as A
+
+        class Fake(A.ShelfAuditAgent):
+            def __init__(self):
+                self.agent_id = "test-shelf"; self.run_ts = "T"
+            def decide(self, *a, **k):
+                pass
+        return Fake()
+
+    RECS = [{"id": "r%d" % i, "tier": "lever"} for i in range(1, 5)] + \
+           [{"id": "r5", "tier": "smaller"}]
+
+    def test_default_is_off(self):
+        n, note = self._agent()._maybe_dispatch(self.RECS, {})
+        self.assertEqual(n, 0)
+        self.assertIn("dispatch off", note)
+
+    def test_tier_gate_excludes_smaller(self):
+        n, note = self._agent()._maybe_dispatch(
+            [{"id": "s", "tier": "smaller"}], {"dispatch_findings": "true"})
+        self.assertEqual(n, 0)
+
+    def test_cap_and_tier_respected_when_enabled(self):
+        import types
+        import framework.core.dispatch as D
+        calls = {}
+        orig = D.gated_dispatch_now
+        D.gated_dispatch_now = lambda **kw: (
+            calls.update(kw) or types.SimpleNamespace(fell_back_to_queue=False))
+        try:
+            n, _ = self._agent()._maybe_dispatch(
+                self.RECS, {"dispatch_findings": "true", "max_dispatch": 3})
+        finally:
+            D.gated_dispatch_now = orig
+        self.assertEqual(n, 3)
+        self.assertEqual(calls["rec_ids"], ["r1", "r2", "r3"])
+        self.assertNotIn("r5", calls["rec_ids"])   # smaller tier excluded
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
