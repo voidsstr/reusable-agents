@@ -1,0 +1,17 @@
+{
+ "id": "shelf-audit-agent",
+ "name": "Shelf Audit Agent",
+ "description": "Crawls a site 3 levels deep (plus the JSON endpoints behind client-rendered shelves), collects the products a visitor can actually reach, and verifies each against the Amazon Product API: price drift, whether the stored image is genuinely the same picture, availability, and required fields. Unlike the DB-driven catalog agents it picks targets from the rendered site, so products that are neither featured nor article-linked stop falling through. Per-site instances: specpicks/agents/shelf-audit-agent, aisleprompt/agents/shelf-audit-agent.",
+ "category": "research",
+ "task_type": "scheduled-cron",
+ "enabled": false,
+ "owner": "framework",
+ "runbook": "README.md",
+ "metadata": {
+  "framework": "reusable-agents",
+  "blueprint": "shelf-audit",
+  "code_repo": "reusable-agents",
+  "code_path": "agents/shelf-audit-agent"
+ },
+ "runnable_modes": ["cron", "manual"]
+}
