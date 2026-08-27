@@ -212,6 +212,35 @@ breaks the Live LLM tab + cost reporting.
      the operator can click "Verify in production" on the dashboard
      and prove the change is live.
 
+  **DB-only recs — you still have to leave evidence.** The flow above says
+  "for each rec you actually *code*", and catalog-audit / h2h /
+  article-author work often edits no source file at all: you run a script
+  against the database and write a migration as the record. That is NOT an
+  exemption, and reading it as one has real consequences — on 2026-08-26 the
+  implementer deactivated products in the PRODUCTION database, wrote the
+  migration + script + summary, then exited without committing. The wrapper
+  correctly refused to call it shipped, so the rec was retried and the audit
+  re-found the same defects and re-emitted identical migrations the next
+  cycle, while the only record of a live data change sat untracked in one
+  host's working tree.
+
+  For a DB-only rec do BOTH:
+
+  1. `git add` + `git commit` the migration and script you created. They are
+     new files rather than "paths you edited", but they are the record of a
+     change to production and they belong in the repo.
+  2. Write `<run-dir>/applied-recs.json` — the wrapper's DB-write evidence
+     path, and the only signal available when there is genuinely nothing to
+     commit:
+
+     ```json
+     {"applied_rec_ids": ["rec-001", "rec-002"]}
+     ```
+
+     (`rec_ids` is accepted as an alias.) Without a commit or this file the
+     run is recorded as `paused` no matter how much work actually happened.
+
+
   ## Per-rec verification scripts
 
   Every shipped rec MUST have a verification script at
