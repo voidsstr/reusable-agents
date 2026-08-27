@@ -2929,7 +2929,26 @@ CHANGES_COUNT=0
 if [ -d "$RESPONDER_RUN_DIR/changes" ]; then
     CHANGES_COUNT=$(find "$RESPONDER_RUN_DIR/changes" -type f 2>/dev/null | wc -l)
 fi
-if [ "$COMPLETION_STATUS" = "paused" ] && [ "$CHANGES_COUNT" != "0" ]; then
+# Did claude leave REAL work uncommitted in the site repo? This is a very
+# different failure from "it wrote deferral notes", and calling both of them
+# "likely deferral notes" is how it stayed invisible: on 2026-08-26 the
+# implementer applied catalog-audit deactivations to the PRODUCTION database
+# and wrote the migration + script + summary for each, then exited without
+# committing. 23 runs took this path in a day. The DB had changed and the only
+# record lived in one host's working tree; meanwhile catalog-audit kept
+# re-finding the same defects and re-writing identical migrations every cycle.
+DIRTY_FILES=""
+if [ -n "${IMPL_REPO:-}" ] \
+        && git -C "$IMPL_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    DIRTY_FILES=$(git -C "$IMPL_REPO" status --porcelain -- \
+                    db/migrations scripts changes src 2>/dev/null | head -20)
+fi
+if [ "$COMPLETION_STATUS" = "paused" ] && [ -n "$DIRTY_FILES" ]; then
+    DIRTY_COUNT=$(printf '%s\n' "$DIRTY_FILES" | grep -c . || true)
+    COMPLETION_REASON="UNCOMMITTED WORK: claude left $DIRTY_COUNT changed/untracked file(s) in $IMPL_REPO and did NOT commit — this is real work, not deferral notes; inspect before re-running"
+    echo "[implementer] uncommitted files left behind:" >&2
+    printf '%s\n' "$DIRTY_FILES" | sed 's/^/[implementer]   /' >&2
+elif [ "$COMPLETION_STATUS" = "paused" ] && [ "$CHANGES_COUNT" != "0" ]; then
     COMPLETION_REASON="claude wrote $CHANGES_COUNT artifact(s) to changes/ but did NOT commit (likely deferral notes)"
 elif [ "$COMPLETION_STATUS" = "paused" ]; then
     COMPLETION_REASON="no commit + no applied-recs.json + empty changes/ — claude exited without acting"
