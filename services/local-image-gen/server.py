@@ -82,6 +82,27 @@ logger = logging.getLogger("local-image-gen")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def _reload_pipeline() -> None:
+    """Rebuild the diffusers pipeline from scratch, freeing the broken one.
+
+    Mirrors the load in `lifespan`. Kept as its own function so the startup
+    path and the self-heal path cannot drift apart.
+    """
+    global pipe
+    import gc
+    old = pipe
+    pipe = None
+    del old
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    pipe = AutoPipelineForText2Image.from_pretrained(
+        MODEL_ID,
+        torch_dtype=DTYPE,
+        variant="fp16",
+    ).to("cuda")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the model on startup; cleanup on shutdown."""
@@ -200,6 +221,25 @@ async def generate(req: GenerateReq):
     except Exception as e:
         metrics["errors_total"] += 1
         logger.exception("generate failed")
+        # Self-heal the one fault that does not recover on its own.
+        #
+        # Under GPU pressure the diffusers pipeline can end up with fp16
+        # activations meeting an fp32 bias and every subsequent request dies
+        # with "Input type (c10::Half) and bias type (float) should be the
+        # same" -- permanently. /healthz keeps reporting ok because the model
+        # object is still loaded, so nothing notices; on 2026-08-27 this
+        # silently stopped an 8,000-image backfill twice, and only a manual
+        # `systemctl restart` cleared it. Rebuild the pipeline in place
+        # instead of waiting for a human.
+        if "bias type" in str(e) or "c10::Half" in str(e):
+            logger.error("dtype fault detected — reloading pipeline in place")
+            try:
+                _reload_pipeline()
+                metrics["pipeline_reloads_total"] = \
+                    metrics.get("pipeline_reloads_total", 0) + 1
+                logger.info("pipeline reloaded; next request should succeed")
+            except Exception:
+                logger.exception("pipeline reload FAILED — restart required")
         raise HTTPException(status_code=500, detail=str(e))
 
 
