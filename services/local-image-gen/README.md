@@ -126,3 +126,25 @@ thumbnails. To trade speed for quality:
 For high-end work (article hero, news hero), switch the model env to
 `black-forest-labs/FLUX.1-schnell` (needs HF auth + license acceptance)
 or `black-forest-labs/FLUX.1-dev` (28 steps, ~4 s/image, best quality).
+
+## VRAM budget — this daemon shares the GPU
+
+The 5090 is also where ollama serves the agent fleet's local models, and SDXL
+loses that fight silently. Two failure modes, both observed 2026-08-27:
+
+* Under pressure the diffusers pipeline ends up with fp16 activations meeting
+  an fp32 bias and every request 500s with "Input type (c10::Half) and bias
+  type (float) should be the same" — permanently. The generate handler now
+  self-heals by rebuilding the pipeline (`pipeline_reloads_total` in
+  /metrics), but the reload needs free VRAM to succeed.
+* If the GPU is genuinely full the reload cannot complete and /healthz sits
+  at `"status":"loading"` indefinitely.
+
+So: **before routing an agent to a local model, check the model's resident
+size, not just its quality.** Routing the eBay sync agent to `qwen3:14b`
+looked right on quality (5/5 extractions) but the model sits at **14.5 GB**
+resident, which evicted SDXL and stalled an 8,000-image backfill. `qwen3:8b`
+scores the same 5/5 at **5.3 GB** and coexists with SDXL's ~7 GB.
+
+Check with `curl -s localhost:11434/api/ps` — that reports `size_vram`, which
+is what matters, not the on-disk size in `/api/tags`.
