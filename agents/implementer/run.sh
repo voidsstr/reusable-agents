@@ -2940,8 +2940,14 @@ fi
 DIRTY_FILES=""
 if [ -n "${IMPL_REPO:-}" ] \
         && git -C "$IMPL_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # Deliberately NOT `changes/`: the runbook calls those artifacts
+    # "observability, NOT a substitute for a commit", and the deferral-notes
+    # branch below already reports them. Including them here made the loud
+    # "this is real work" message fire on runs that had only written summary
+    # notes (8 reports on 2026-08-27, most of them just M changes/rec-*.md) —
+    # re-creating, in reverse, the exact conflation this check exists to end.
     DIRTY_FILES=$(git -C "$IMPL_REPO" status --porcelain -- \
-                    db/migrations scripts changes src 2>/dev/null | head -20)
+                    db/migrations scripts src 2>/dev/null | head -20)
 fi
 if [ "$COMPLETION_STATUS" = "paused" ] && [ -n "$DIRTY_FILES" ]; then
     DIRTY_COUNT=$(printf '%s\n' "$DIRTY_FILES" | grep -c . || true)
