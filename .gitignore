@@ -279,3 +279,4 @@ framework/ui/playwright-report/
 /-
 .claude/worktrees/
 *.bak.*
+services/searxng/config/

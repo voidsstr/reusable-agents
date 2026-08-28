@@ -1,0 +1,23 @@
+# Local SearXNG for the reusable-agents image curators.
+#
+# Why this exists: the agents pointed at https://searxng.aisleprompt.com, whose
+# Cloudflare tunnel origin went dead on 2026-08-25 (HTTP 530 / error 1033).
+# Four agents depend on it and two hero-image curators silently did nothing for
+# three days -- they reported success(100%) with no_candidate on every article.
+# The origin is not defined in any repo and is unreachable, so we host it here.
+#
+# The `json` format is NOT enabled by default in SearXNG; the agents call
+# /search?format=json, which 403s without this. That is the one setting most
+# likely to be lost in a future rebuild.
+use_default_settings: true
+
+server:
+  secret_key: "CHANGE_ME_openssl_rand_hex_32"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
