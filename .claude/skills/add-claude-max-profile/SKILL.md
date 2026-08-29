@@ -104,31 +104,43 @@ The proxy is recorded in `~/.reusable-agents/claude-pool/proxies.conf`
 as `profile-N=<url>` and consumed by `framework/cli/claude_pool.py` when
 that profile is dispatched.
 
-## Because YOU cannot run interactive `claude /login`
+## YOU drive the login — open the browser for the operator
 
-You (the assistant) cannot complete the browser auth — only the operator
-can. The correct interaction:
+`claude auth login` (the CLI subcommand, NOT the in-session `/login` slash
+command) prints the OAuth URL and then blocks on stdin waiting for the code the
+operator gets from the browser. That makes the whole flow assistant-drivable
+except the one step only a human can do: authenticating.
 
-1. Tell the operator: "Run this in your terminal:
-   `bash /home/voidsstr/development/reusable-agents/install/add-claude-profile.sh`"
-2. Wait for them to report "done" or "logged in".
-3. Verify the new profile registered correctly:
-   ```bash
-   python3 -c "
-   import json
-   s = json.load(open('/home/voidsstr/.reusable-agents/claude-pool/state.json'))
-   pids = sorted([k for k in s if k.startswith('profile-')], key=lambda x: int(x.split('-')[1]))
-   last = pids[-1]
-   print(json.dumps({last: s[last]}, indent=2))
-   "
-   ```
-4. Confirm the email shown matches what the operator just logged in
-   with, and that `authenticated: true`.
+Use `--assisted`:
 
-If `authenticated` is `false` or `.claude.json` is missing, the login
-didn't complete — ask the operator to re-run. Don't try to fake the
-state.json entry yourself; the pool's first dispatch will discover the
-auth is broken and mark it dead again.
+```bash
+bash /home/voidsstr/development/reusable-agents/install/add-claude-profile.sh --assisted
+```
+
+In this mode the script:
+1. allocates the slot and scaffolds the profile dir as usual,
+2. runs `claude auth login --claudeai` with stdin wired to a FIFO,
+3. scrapes the OAuth URL out of the output and **opens it on the operator's
+   display with `xdg-open`** (suppressing the CLI's own browser launch via
+   `BROWSER=/bin/true` so it opens exactly once),
+4. prints the URL as well, in case the display is headless,
+5. waits for the code at `~/.reusable-agents/claude-pool/.pending-auth-code`.
+
+So: run it in the background, tell the operator their browser is opening, and
+when they hand you the code, complete the login with
+
+```bash
+printf '%s' "<code>" > ~/.reusable-agents/claude-pool/.pending-auth-code
+```
+
+The script feeds it to the waiting process, then verifies and registers the
+profile. Do not ask the operator to run the script themselves unless
+`--assisted` fails — and never hand-write the state.json entry, because the
+pool's first dispatch will discover the auth is broken and mark it dead again.
+
+**Requires a display.** `--assisted` needs `DISPLAY`/`WAYLAND_DISPLAY` and
+`xdg-open` on the host. With neither, it still prints the URL — relay that to
+the operator to open manually.
 
 ## Verifying the pool now picks up the new profile
 

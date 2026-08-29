@@ -7,12 +7,18 @@ POOL_DIR="$HOME/.reusable-agents/claude-pool"
 STATE_JSON="$POOL_DIR/state.json"
 PROXY_URL=""
 REUSE_SLOT=""
+ASSISTED=0
+AUTH_CODE_FILE="$HOME/.reusable-agents/claude-pool/.pending-auth-code"
 
 usage() {
   cat <<EOF
 Usage: $0 [--proxy <url>] [--reuse-slot <N>]
 
   --proxy <url>       Record HTTPS/SOCKS proxy for this profile in proxies.conf.
+  --assisted          Non-TTY mode for an AI assistant driving the login:
+                      prints + opens the OAuth URL in the operator's browser,
+                      then waits for the operator's code to be written to
+                      ~/.reusable-agents/claude-pool/.pending-auth-code.
   --reuse-slot <N>    Wipe the auth state of profile-<N> and log in a new
                       account into that slot (used when a duplicate account
                       is occupying the slot — frees pool capacity without
@@ -26,6 +32,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --proxy) PROXY_URL="$2"; shift 2 ;;
     --reuse-slot) REUSE_SLOT="$2"; shift 2 ;;
+    --assisted) ASSISTED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -111,7 +118,7 @@ fi
 #   "/login isn't available in this environment."
 # and exits 0, leaving the profile silently unauthenticated. Fail loudly
 # instead so the operator knows to open a normal terminal.
-if [[ ! -t 0 || ! -t 1 ]]; then
+if [[ "$ASSISTED" != "1" ]] && [[ ! -t 0 || ! -t 1 ]]; then
   echo "  ERROR: no TTY. This login is interactive + browser-based." >&2
   echo "         Open a REAL terminal (Windows Terminal -> Ubuntu, or \`wsl\`) and run:" >&2
   echo "           cd $(cd "$(dirname "$0")/.." && pwd) && bash install/add-claude-profile.sh" >&2
@@ -133,7 +140,63 @@ else
   LOGIN_ARGS=(/login)
 fi
 
-if [[ -n "$PROXY_URL" ]]; then
+if [[ "$ASSISTED" == "1" ]]; then
+  # Assisted mode. `claude auth login` prints the OAuth URL, then blocks on
+  # stdin waiting for the code the operator gets from the browser. So: drive
+  # stdin from a FIFO, scrape the URL out of the output, open it on the
+  # operator's display, and feed the code back once they hand it over. This is
+  # what lets an assistant do everything except the part only a human can do.
+  LOGIN_LOG="$PROFILE_DIR/.assisted-login.log"
+  FIFO="$(mktemp -u /tmp/claude-auth-fifo.XXXXXX)"
+  mkfifo "$FIFO"
+  rm -f "$AUTH_CODE_FILE"
+
+  ( exec 3> "$FIFO"
+    while [[ ! -s "$AUTH_CODE_FILE" ]]; do sleep 2; done
+    tr -d '\r\n' < "$AUTH_CODE_FILE" >&3
+    printf '\n' >&3
+    exec 3>&- ) &
+  FEEDER=$!
+
+  if [[ -n "$PROXY_URL" ]]; then
+    HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HOME="$PROFILE_DIR" \
+      BROWSER=/bin/true claude "${LOGIN_ARGS[@]}" --claudeai < "$FIFO" > "$LOGIN_LOG" 2>&1 &
+  else
+    HOME="$PROFILE_DIR" BROWSER=/bin/true \
+      claude "${LOGIN_ARGS[@]}" --claudeai < "$FIFO" > "$LOGIN_LOG" 2>&1 &
+  fi
+  LOGIN_PID=$!
+
+  AUTH_URL=""
+  for _ in $(seq 1 30); do
+    AUTH_URL=$(grep -ohE 'https://claude\.com/[^ '"'"'"]+' "$LOGIN_LOG" 2>/dev/null | head -1 || true)
+    [[ -n "$AUTH_URL" ]] && break
+    sleep 1
+  done
+  if [[ -z "$AUTH_URL" ]]; then
+    echo "  ERROR: no OAuth URL appeared within 30s. Log: $LOGIN_LOG" >&2
+    kill $LOGIN_PID $FEEDER 2>/dev/null || true
+    rm -f "$FIFO"
+    exit 4
+  fi
+
+  echo "  Opening this URL in your browser:"
+  echo "    $AUTH_URL"
+  ( setsid xdg-open "$AUTH_URL" >/dev/null 2>&1 & ) || true
+  echo ""
+  echo "  Sign in, then paste the code back to the assistant."
+  echo "  (The code is written to $AUTH_CODE_FILE to complete the login.)"
+
+  # Wait up to 10 minutes for the operator to authenticate.
+  for _ in $(seq 1 300); do
+    kill -0 $LOGIN_PID 2>/dev/null || break
+    sleep 2
+  done
+  wait $LOGIN_PID 2>/dev/null || true
+  kill $FEEDER 2>/dev/null || true
+  rm -f "$FIFO" "$AUTH_CODE_FILE"
+  tail -5 "$LOGIN_LOG" 2>/dev/null | sed 's/^/  /'
+elif [[ -n "$PROXY_URL" ]]; then
   HTTPS_PROXY="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HOME="$PROFILE_DIR" claude "${LOGIN_ARGS[@]}"
 else
   HOME="$PROFILE_DIR" claude "${LOGIN_ARGS[@]}"
