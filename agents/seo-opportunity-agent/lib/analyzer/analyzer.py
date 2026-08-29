@@ -2315,8 +2315,26 @@ def _add_index_coverage_recs(cfg, data: Path, recs: list, next_id, max_recs: int
 
 
 def _add_amazon_tag_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
-    """Flag pages with outbound Amazon links that lack a `?tag=<id>` —
-    direct affiliate revenue leak."""
+    """Flag pages with outbound Amazon links that lack a `?tag=<id>`.
+
+    DEAD AS WRITTEN (verified 2026-08-29). It reads `amazon_outbound_total` and
+    `amazon_outbound_tagged` from `pages-by-type.jsonl`, and NOTHING in this
+    repository writes either the keys or the file — the README describes it as
+    coming from an optional sample crawl that is not implemented. So `total` is
+    always 0, the loop finds nothing, and the rule has never emitted a
+    recommendation.
+
+    Deliberately not resurrected. The leak it was meant to catch is now covered
+    twice, structurally rather than by observation:
+      * every outbound affiliate URL passes through a single render-time choke
+        point (specpicks `ssrHead._buildHtml` -> `stampEbayLinksInHtml` /
+        `enforceAffiliateRel`), so an untagged link cannot be emitted;
+      * `specpicks-site-functional-tests` asserts tag ownership and rel
+        compliance against production every 12h.
+    Building a crawler to feed a rule whose job is already done would add a
+    second, weaker source of truth. If you do revive it, make the PRODUCER emit
+    the counters rather than inferring them here.
+    """
     if len(recs) >= max_recs:
         return
     pages = _load_pages_by_type(data)
