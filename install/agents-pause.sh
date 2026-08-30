@@ -56,11 +56,29 @@ done < "$SERVICES_FILE"
 # A running agent keeps spending after its timer is gone, so kill in-flight
 # work too -- that is the whole point of pausing.
 echo "==> stopping any in-flight agent runs"
-for u in $(systemctl --user list-units --state=running --no-pager 2>/dev/null \
-             | awk '/^ *agent-.*\.service/ { print $1 }'); do
+# NOT --state=running: an agent is a long Type=oneshot, so while it works it
+# sits in ACTIVATING, not running. The first version of this script matched
+# only `running` and left aisleprompt-progressive-improvement-agent happily
+# spending credits with every timer already off -- which is precisely the
+# process the pause exists to stop. Match anything that is not inactive.
+for u in $(systemctl --user list-units --all --no-pager --plain 2>/dev/null \
+             | awk '/^agent-.*\.service/ && $3 != "inactive" { print $1 }'); do
     systemctl --user stop "$u" >/dev/null 2>&1 && echo "    stopped $u"
 done
-pkill -f 'framework.cli.claude_pool' 2>/dev/null && echo "    killed claude_pool workers"
+# Match the interpreter+path, not the bare word: `pgrep -f claude_pool` also
+# matches the grep that looks for it, which made the check read non-zero
+# forever.
+pkill -f 'python3 .*framework/cli/claude_pool\.py' 2>/dev/null && echo "    killed claude_pool workers"
+
+echo "==> verifying (post-condition, not return value)"
+_left=$(systemctl --user list-units --all --no-pager --plain 2>/dev/null \
+          | awk '/^agent-.*\.service/ && $3 == "activating" { print $1 }' | wc -l)
+_pool=$(pgrep -fc 'python3 .*framework/cli/claude_pool\.py' 2>/dev/null || echo 0)
+if [ "$_left" -gt 0 ] || [ "$_pool" -gt 0 ]; then
+    echo "    WARNING: $_left agent(s) still activating, $_pool claude_pool worker(s) alive"
+else
+    echo "    0 agents activating, 0 claude_pool workers"
+fi
 
 echo
 echo "PAUSED. Resume with:  bash install/agents-resume.sh"
