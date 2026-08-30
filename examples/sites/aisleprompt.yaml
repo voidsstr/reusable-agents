@@ -101,12 +101,17 @@ implementer:
 deployer:
   test:
     full_interval_days: 7
+    # 2026-08-30: TEST_URL removed deliberately. It pointed at a local dev
+    # server on :10000 that nothing was starting, so every gate run failed
+    # and the deployer -- which hard-gates on test failure -- shipped
+    # nothing for weeks. pw.config.ts now starts the app itself from the
+    # working tree when TEST_URL is unset.
     smoke:
       cwd: tests
-      cmd: TEST_URL={local_dev_url} npx playwright test --config=pw.config.ts --reporter=line --grep "@smoke"
+      cmd: npx playwright test --config=pw.config.ts --reporter=line --grep "@smoke"
     full:
       cwd: tests
-      cmd: TEST_URL={local_dev_url} npx playwright test --config=pw.config.ts --reporter=line
+      cmd: npx playwright test --config=pw.config.ts --reporter=line
   build:
     cwd: .
     cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
