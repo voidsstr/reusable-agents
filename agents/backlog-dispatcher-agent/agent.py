@@ -95,6 +95,10 @@ PRODUCER_AGENT_IDS = (
     "specpicks-catalog-audit-agent",
     "aisleprompt-article-proposal-agent",
     "specpicks-article-proposal-agent",
+    # User-reported defects. These outrank inferred work: they come from someone
+    # who actually tried to use the site and could not.
+    "aisleprompt-feedback-triage-agent",
+    "specpicks-feedback-triage-agent",
 )
 
 
