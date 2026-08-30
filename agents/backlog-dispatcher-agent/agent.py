@@ -99,6 +99,9 @@ PRODUCER_AGENT_IDS = (
     # who actually tried to use the site and could not.
     "aisleprompt-feedback-triage-agent",
     "specpicks-feedback-triage-agent",
+    # Catalogue integrity: de-categorising is done in-agent, but the pipeline
+    # gap that CAUSES it is a code fix and comes through here.
+    "specpicks-category-integrity-agent",
 )
 
 
