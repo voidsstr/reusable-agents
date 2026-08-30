@@ -375,7 +375,10 @@ is built) in the same rec.
 - `primary_keyword` / `secondary_keywords` — copy from the proposal
 - `author` — **always `"Mike Perry"`**. The agent is a writing assistant, not the byline — every article on the site is published under Mike Perry's name. Do NOT use the agent id, "SpecPicks Editorial", or any other placeholder.
 - `status` — `"published"` (we're going live)
-- `published_at` / `written_at` — `now()`
+- `published_at` — use `implementation_outline.suggested_published_at` (ISO timestamp) if
+  present in the rec; otherwise `now()`. This staggered date prevents same-day publish
+  clusters that trigger Google's freshness classifier.
+- `written_at` — `now()`
 - `written_by` — `"claude-cli"`
 
 ## Routing — which table
@@ -516,7 +519,7 @@ cur.execute("""
         %s, %s,
         %s, %s,
         %s, %s, %s,
-        now(), now(), now(), now()
+        %s, now(), now(), now()
     )
     ON CONFLICT (slug) DO UPDATE SET
         title = EXCLUDED.title,
@@ -530,7 +533,11 @@ cur.execute("""
       category, tags, difficulty, read_time,
       related_hw, related_asins,
       primary_kw, secondary_kw,
-      'Mike Perry', 'published', 'claude-cli'))
+      'Mike Perry', 'published', 'claude-cli',
+      # Use the pre-computed staggered date if the proposal carries one,
+      # else fall back to now() so articles never stack on the same date.
+      rec.get('implementation_outline', {}).get('suggested_published_at')
+      or datetime.datetime.now(datetime.timezone.utc)))
 article_id = cur.fetchone()[0]
 conn.commit()
 ```
