@@ -530,7 +530,13 @@ def register(req: RegisterRequest):
                 timezone=req.timezone,
                 extra_env=_storage_env or None,
             )
-            scheduler.reload_and_enable(req.id)
+            # Same rule as the autowire path: never start the timer for an
+            # agent that is registered disabled.
+            if getattr(req, "enabled", True):
+                scheduler.reload_and_enable(req.id)
+            else:
+                scheduler.systemctl_reload()
+                scheduler.systemctl_stop_and_disable(req.id)
         except Exception as e:
             # Don't fail the register on systemd issues; surface in detail
             return AgentSummary(**{**_summary(manifest).dict(), "owner": f"(autowire: {e})"})

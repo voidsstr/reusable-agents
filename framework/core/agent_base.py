@@ -1395,7 +1395,17 @@ class AgentBase:
                     working_directory=repo_dir or os.path.expanduser("~"),
                     timezone=timezone_str,
                 )
-                scheduler.reload_and_enable(cls.agent_id)
+                # Only start the timer if the agent is actually enabled.
+                # This used to enable unconditionally, so re-registering a
+                # disabled agent resurrected its timer.
+                if getattr(registered, "enabled", True):
+                    scheduler.reload_and_enable(cls.agent_id)
+                else:
+                    scheduler.systemctl_reload()
+                    scheduler.systemctl_stop_and_disable(cls.agent_id)
+                    logger.info(
+                        f"{cls.agent_id} is disabled — units written, timer left stopped"
+                    )
             except Exception as e:
                 logger.warning(f"systemd autowire failed for {cls.agent_id}: {e}")
 

@@ -301,6 +301,28 @@ def systemctl_enable_and_start(agent_id: str) -> bool:
         return False
 
 
+def systemctl_stop_and_disable(agent_id: str) -> bool:
+    """Stop and disable an agent's timer.
+
+    The counterpart to systemctl_enable_and_start, for the case that had no
+    counterpart: writing units for an agent that is registered but DISABLED.
+    Without this the caller either enabled the timer anyway (which is how
+    specpicks-scraper-watchdog kept firing every five minutes while marked
+    disabled everywhere) or left whatever state the unit was already in.
+    """
+    ok = True
+    for verb in ("stop", "disable"):
+        try:
+            subprocess.run(
+                ["systemctl", "--user", verb, f"agent-{agent_id}.timer"],
+                check=False, capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"systemctl {verb} failed for {agent_id}: {e}")
+            ok = False
+    return ok
+
+
 def reload_and_enable(agent_id: str) -> bool:
     return systemctl_reload() and systemctl_enable_and_start(agent_id)
 

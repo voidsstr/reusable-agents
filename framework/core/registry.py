@@ -189,6 +189,20 @@ def register_agent(manifest: AgentManifest, storage: Optional[StorageBackend] = 
     with s.lock(REGISTRY_KEY):
         registry = _read_registry(s)
         is_new = manifest.id not in registry
+        # Never let a re-registration silently RE-ENABLE an agent an
+        # operator disabled. Registration happens on every import/discovery
+        # pass and carries AgentManifest.enabled's default (True), so a
+        # disabled agent came back to life whenever its module was read --
+        # specpicks-scraper-watchdog was `enabled: false` in its manifest,
+        # `enabled=False` in the registry, and still firing its timer every
+        # five minutes and failing every time. Its own disabled_reason
+        # recorded the symptom ("only came back because registration
+        # re-reads the repo") without the cause.
+        #
+        # One-directional on purpose: this can only keep something off, and
+        # enabling stays a deliberate act through update_agent()/the API.
+        if not is_new and registry[manifest.id].get("enabled") is False:
+            manifest.enabled = False
         registry[manifest.id] = manifest.to_dict()
         _write_registry(s, registry)
     s.write_json(f"agents/{manifest.id}/manifest.json", manifest.to_dict(),
