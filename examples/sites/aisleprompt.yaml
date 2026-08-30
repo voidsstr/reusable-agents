@@ -101,17 +101,23 @@ implementer:
 deployer:
   test:
     full_interval_days: 7
-    # 2026-08-30: TEST_URL removed deliberately. It pointed at a local dev
-    # server on :10000 that nothing was starting, so every gate run failed
-    # and the deployer -- which hard-gates on test failure -- shipped
-    # nothing for weeks. pw.config.ts now starts the app itself from the
-    # working tree when TEST_URL is unset.
+    # 2026-08-30: this runs tests/run-local-suite.sh, which BUILDS
+    # Dockerfile.azure -- the image Azure Container Apps runs -- from the
+    # working tree, starts it on :10020 against the local fixture Postgres
+    # (with the production CMD's two scrapers overridden away, so the test
+    # container cannot reach the network or rewrite the fixture underneath
+    # the suite), and runs against it.
+    #
+    # It used to pin TEST_URL to a dev server on :10000 that nothing ever
+    # started -- the dev container is on :4004 -- so every gate run failed
+    # and the deployer, which hard-gates on test failure, shipped nothing
+    # for weeks.
     smoke:
       cwd: tests
-      cmd: npx playwright test --config=pw.config.ts --reporter=line --grep "@smoke"
+      cmd: bash run-local-suite.sh --reporter=line --grep "@smoke"
     full:
       cwd: tests
-      cmd: npx playwright test --config=pw.config.ts --reporter=line
+      cmd: bash run-local-suite.sh --reporter=line
   build:
     cwd: .
     cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
