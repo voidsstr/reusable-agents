@@ -70,6 +70,15 @@ def main():
     check(standup.count("ExecStartPre=-/bin/mkdir -p $LOG_DIR") == 2,
           "standup-fleet-host units (api + drainer) create their log dir")
 
+    drift = ROOT / "install" / "deploy-drift.sh"
+    check(drift.is_file(), "install/deploy-drift.sh exists")
+    if drift.is_file():
+        check(subprocess.run(["bash", "-n", str(drift)]).returncode == 0,
+              "deploy-drift.sh is syntactically valid")
+        d = drift.read_text()
+        check("rev-list --count" in d and "release/" in d,
+              "deploy-drift.sh measures HEAD against the newest release tag")
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED")
