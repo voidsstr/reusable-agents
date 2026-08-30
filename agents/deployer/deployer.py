@@ -669,6 +669,48 @@ def main() -> None:
         _save()
         print(f"[deployer] deployed {image}:{tag}", file=sys.stderr)
 
+        # ── Push the deployed commits, then tag the release ──────────────
+        # The implementer commits locally and nothing pushed, so both site
+        # repos silently accumulated 180-265 unpushed commits: work that was
+        # live in production but existed on exactly one machine. Push at the
+        # moment we know the code is deployed, then stamp an incrementing
+        # release/<site>/NNNN tag so `git tag` alone answers "what went live,
+        # when, and how many releases ago".
+        #
+        # Neither step may fail a deploy that already succeeded: a diverged
+        # branch is a normal state here, and the tag still records the exact
+        # deployed commit even when the branch cannot fast-forward.
+        if repo_root:
+            try:
+                _branch = subprocess.run(
+                    ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=30).stdout.strip()
+                if _branch and _branch != "HEAD":
+                    _pr = subprocess.run(
+                        ["git", "-C", repo_root, "push", "origin", f"HEAD:{_branch}"],
+                        capture_output=True, text=True, timeout=300)
+                    if _pr.returncode == 0:
+                        print(f"[deployer] pushed {_branch}", file=sys.stderr)
+                    else:
+                        print(f"[deployer] WARNING: push of {_branch} failed (deploy stands): "
+                              f"{(_pr.stderr or '').strip()[:200]}", file=sys.stderr)
+            except Exception as e:
+                print(f"[deployer] WARNING: push skipped ({e})", file=sys.stderr)
+
+            try:
+                _tagger = Path(__file__).resolve().parents[2] / "install" / "tag-release.sh"
+                if _tagger.is_file():
+                    _tr = subprocess.run(
+                        ["bash", str(_tagger), cfg.site_id, tag],
+                        cwd=repo_root, capture_output=True, text=True, timeout=180)
+                    for _line in (_tr.stdout or "").splitlines() + (_tr.stderr or "").splitlines():
+                        if _line.strip():
+                            print(f"[deployer] {_line.strip()}", file=sys.stderr)
+                else:
+                    print(f"[deployer] WARNING: tag-release.sh not found at {_tagger}", file=sys.stderr)
+            except Exception as e:
+                print(f"[deployer] WARNING: release tag skipped ({e})", file=sys.stderr)
+
         # ── Mark recs as shipped ────────────────────────────────────────
         # The implementer earlier marked recs `implemented: true` when it
         # committed/applied them. We now know those changes are live in

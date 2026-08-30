@@ -1821,6 +1821,22 @@ Run: $RESPONDER_RUN_TS
 Backend: ${CE_WINNER:-fallback}
 Mode: framework-code-editor (claude-pool rate-limited)
 Files staged: $CE_NEW_COUNT (set-diff of post-edit vs pre-edit)" 2>&1 | head -5
+                    # Push the commit we just made. The implementer committed
+                    # locally and nothing ever pushed, so both site repos drifted
+                    # to 180-265 unpushed commits -- code running in production
+                    # that existed on one machine only. The deployer pushes too,
+                    # but not every rec type deploys (catalog-audit and friends
+                    # skip the docker build), so those commits would still strand.
+                    # A failed push must never fail an apply that succeeded: a
+                    # diverged branch is normal here and is resolved by hand.
+                    _br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+                    if [ -n "$_br" ] && [ "$_br" != "HEAD" ]; then
+                        if git push origin "HEAD:$_br" >/dev/null 2>&1; then
+                            echo "[implementer] pushed $_br" >&2
+                        else
+                            echo "[implementer] WARNING: push of $_br failed (commit stands, still local)" >&2
+                        fi
+                    fi
                     fi  # close: if build_gate_failed=0 && CE_NEW_COUNT > 0 (commit guard added 2026-06-14)
                     fi  # close: outer if CE_NEW_COUNT > 0 after scope-revert
                     set -e
