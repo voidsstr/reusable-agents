@@ -138,6 +138,13 @@ WorkingDirectory={working_directory}
 # (50/50 runs failed with "DATABASE_URL not set") and silently breaks
 # every other agent that reads DATABASE_URL_<SITE> from the host.
 EnvironmentFile=-/home/voidsstr/.reusable-agents/secrets.env
+# The log directory lives under /tmp, which is wiped on every reboot.
+# systemd cannot create the parent of an `append:` target, so after a
+# reboot every unit here failed at `209/STDOUT` -- "Failed to set up
+# standard output: No such file or directory" -- before running a line of
+# agent code. 55 such failures were logged in the 7 minutes after the
+# 2026-08-30 reboot. `-` prefix: never let the mkdir fail the run.
+ExecStartPre=-/bin/mkdir -p {log_dir}
 ExecStart={exec_start}
 Environment=AGENT_ID={agent_id}
 Environment=AGENT_TRIGGERED_BY=cron
@@ -237,6 +244,7 @@ def write_systemd_units(
         exec_start=exec_cmd,
         extra_env=extra_env_block,
         log_path=log_path,
+        log_dir=log_dir,
     )
     timer_content = TIMER_TEMPLATE.format(
         agent_id=agent_id,

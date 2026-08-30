@@ -458,7 +458,22 @@ _stop_llm_flush_sidecar() {
     [ -n "$LLM_FLUSH_SIDECAR_PID" ] && kill -TERM "$LLM_FLUSH_SIDECAR_PID" 2>/dev/null || true
     [ -n "$LLM_FLUSH_SIDECAR_PID" ] && wait "$LLM_FLUSH_SIDECAR_PID" 2>/dev/null || true
 }
-trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure; _stop_llm_flush_sidecar' EXIT
+
+# Push whatever this run committed, on EVERY exit path.
+#
+# The inline push after our own `git commit` is not enough: the claude
+# code-editor agent commits from inside its own bash sandbox, with its own
+# message format ("<agent-id>: rec-NNN: ..."), so it never reaches that
+# branch -- which is why 12 such commits sat unpushed on 2026-08-30 with the
+# inline push already in place. Doing it in the EXIT trap catches every
+# committer and every early exit. push-unpushed.sh is a no-op when in sync
+# and refuses to touch a diverged branch, so this is safe to fire always.
+_push_implementer_repo() {
+    [ -n "${IMPLEMENTER_REPO_PATH:-}" ] || return 0
+    [ -x "$REPO_ROOT/install/push-unpushed.sh" ] || return 0
+    bash "$REPO_ROOT/install/push-unpushed.sh" "$IMPLEMENTER_REPO_PATH" || true
+}
+trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure; _stop_llm_flush_sidecar; _push_implementer_repo' EXIT
 
 # LLM driver:
 #   IMPLEMENTER_LLM=claude     Claude Code CLI (default — uses the user's

@@ -682,18 +682,16 @@ def main() -> None:
         # deployed commit even when the branch cannot fast-forward.
         if repo_root:
             try:
-                _branch = subprocess.run(
-                    ["git", "-C", repo_root, "rev-parse", "--abbrev-ref", "HEAD"],
-                    capture_output=True, text=True, timeout=30).stdout.strip()
-                if _branch and _branch != "HEAD":
+                _pusher = Path(__file__).resolve().parents[2] / "install" / "push-unpushed.sh"
+                if _pusher.is_file():
                     _pr = subprocess.run(
-                        ["git", "-C", repo_root, "push", "origin", f"HEAD:{_branch}"],
+                        ["bash", str(_pusher), repo_root],
                         capture_output=True, text=True, timeout=300)
-                    if _pr.returncode == 0:
-                        print(f"[deployer] pushed {_branch}", file=sys.stderr)
-                    else:
-                        print(f"[deployer] WARNING: push of {_branch} failed (deploy stands): "
-                              f"{(_pr.stderr or '').strip()[:200]}", file=sys.stderr)
+                    for _line in (_pr.stderr or "").splitlines():
+                        if _line.strip():
+                            print(f"[deployer] {_line.strip()}", file=sys.stderr)
+                else:
+                    print(f"[deployer] WARNING: push-unpushed.sh not found at {_pusher}", file=sys.stderr)
             except Exception as e:
                 print(f"[deployer] WARNING: push skipped ({e})", file=sys.stderr)
 

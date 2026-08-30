@@ -308,6 +308,9 @@ WorkingDirectory=$REPO_DIR
 Environment=PYTHONPATH=$REPO_DIR
 Environment=STORAGE_BACKEND=azure
 EnvironmentFile=-$SECRETS_FILE
+# $LOG_DIR is under /tmp, wiped on reboot; systemd will not create the
+# parent of an append: target and fails the unit at 209/STDOUT.
+ExecStartPre=-/bin/mkdir -p $LOG_DIR
 ExecStart=/usr/bin/python3 -m uvicorn framework.api.app.main:app --host 127.0.0.1 --port $API_PORT
 Restart=always
 RestartSec=5
@@ -418,6 +421,9 @@ WorkingDirectory=$REPO_DIR
 Environment=PYTHONPATH=$REPO_DIR
 Environment=STORAGE_BACKEND=azure
 EnvironmentFile=-$SECRETS_FILE
+# $LOG_DIR is under /tmp, wiped on reboot; systemd will not create the
+# parent of an append: target and fails the unit at 209/STDOUT.
+ExecStartPre=-/bin/mkdir -p $LOG_DIR
 ExecStart=/usr/bin/python3 -m framework.cli.auto_queue_drainer --interval 15 --idle-backoff 60
 Restart=always
 RestartSec=10
