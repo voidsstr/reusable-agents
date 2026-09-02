@@ -24,7 +24,31 @@ c(){ printf '\033[36m[reauth-gsc]\033[0m %s\n' "$*"; }
 ok(){ printf '  \033[32m✓\033[0m %s\n' "$*"; }
 bad(){ printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 
-[ -t 0 ] || { bad "no TTY — this is an interactive browser flow. Run it in a real terminal."; exit 1; }
+# Gate on the REAL precondition — "can a browser open here and reach the
+# localhost callback" — not on a TTY, which was only ever a proxy for it.
+#
+# The TTY check made this unrunnable by an agent even at the desktop, where
+# DISPLAY is set and Chrome is installed and the flow works perfectly. The
+# operator then had to be talked through running it by hand, which is exactly
+# the friction that let a dead token sit for days. refresh-token.py already
+# detects a browserless box (WSL, SSH, container) and prints the consent URL
+# instead of failing, so the genuinely headless case is handled downstream.
+_can_browse=0
+if [ -z "${WSL_DISTRO_NAME:-}" ] && ! grep -qi microsoft /proc/version 2>/dev/null; then
+    if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+        _can_browse=1
+    fi
+fi
+if [ "$_can_browse" = "1" ]; then
+    c "browser available on ${DISPLAY:-$WAYLAND_DISPLAY} — the consent tab will open automatically"
+    [ -t 0 ] || c "(no TTY: launched by an agent. The URL is printed below as a fallback.)"
+elif [ -t 0 ]; then
+    c "no browser detected — the consent URL will be printed for you to open elsewhere"
+else
+    bad "no browser AND no TTY: nothing here can complete an OAuth consent."
+    bad "Run this at the machine's own desktop, or set DISPLAY."
+    exit 1
+fi
 
 c "requesting READ-WRITE scope ($RW_SCOPE)"
 # GSC_READONLY unset => refresh-token.py asks for read-write (see its SCOPES).

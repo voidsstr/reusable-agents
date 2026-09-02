@@ -75,9 +75,22 @@ because aisleprompt had no equivalent rule. Narrowed in specpicks commit
 cd ~/development/reusable-agents && bash install/reauth-gsc.sh
 ```
 
-**Must run at the machine's own desktop** — it opens a browser and needs a
-localhost callback. SSH-only sessions fail; the script refuses without a TTY
-rather than half-completing. It cannot be run by an agent.
+**An agent CAN run this at the desktop** (changed 2026-09-02). The script now
+gates on the real precondition — a browser that can open and reach the
+localhost callback — instead of on a TTY, which was only ever a proxy for it.
+Launch it in the background and the consent tab opens on the operator's
+screen; they click through and the flow completes on its own:
+
+```bash
+setsid nohup bash install/reauth-gsc.sh > /tmp/reauth.log 2>&1 < /dev/null &
+```
+
+The old TTY gate made this unrunnable by an agent even on the desktop, where
+DISPLAY is set and Chrome is installed and the flow works perfectly — so the
+operator had to be talked through it by hand, which is the friction that let a
+dead token sit for days. Genuinely headless boxes (WSL, SSH, containers) are
+still handled: refresh-token.py detects them and prints the consent URL to
+open elsewhere, and the callback server keeps listening.
 
 On the consent screen approve **every** box. For Search Console pick the
 permission that says **"View and manage"**, not "View" — "View" is
@@ -121,8 +134,11 @@ systemctl --user start agent-aisleprompt-indexnow-submitter.service
 
 ## 5. Back it up — it exists in exactly one place otherwise
 
-`install/reauth-gsc.sh` does this automatically. If it reported the backup did
-not run:
+`install/reauth-gsc.sh` does this automatically — but **do not trust its
+verdict either way**. On 2026-09-02 it printed "✗ Key Vault backup did not
+run" while the vault in fact held the new token (round-trip SHA matched the
+live file, and differed from the pre-reauth one). Verify, then act on what you
+measured. If the backup genuinely did not run:
 
 ```bash
 bash install/recover-credentials.sh backup    # → fleet-seo-tgz in nsc-secrets-kv
