@@ -157,15 +157,27 @@ def _extract(html: str, url: str) -> dict:
     if tc and tc.get("content"):
         twitter_card = tc["content"].strip()[:60]
 
-    # Strip nav/footer/script/style for cleaner body
-    for tag in soup(["script", "style", "noscript", "nav", "footer", "header"]):
-        tag.decompose()
-    body_text = " ".join(soup.get_text(" ", strip=True).split())
+    # Harvest links from the WHOLE document, before any chrome is stripped.
+    # The strip below decomposes <nav>/<footer>/<header> to keep body_text
+    # clean, and link extraction used to run after it — so every anchor living
+    # in site chrome was deleted before it could be recorded. Pagination is the
+    # expensive case: a numbered <nav aria-label="… pages"> is exactly how a
+    # paginated archive exposes the rest of its corpus to a crawler, and
+    # dropping it made the auditor conclude the pagination was JS-only and
+    # crawler-opaque when the anchors were in the served HTML all along.
+    # `links` is contracted as the page's full inventory (the auditor is told
+    # to judge linking ONLY from the LINKS block, and _link_profile already
+    # buckets site-wide rails separately), so full-document extraction is what
+    # that contract meant.
     links = []
     for a in soup.find_all("a", href=True):
         n = _normalize_url(url, a["href"])
         if n:
             links.append(n)
+    # Strip nav/footer/script/style for cleaner body
+    for tag in soup(["script", "style", "noscript", "nav", "footer", "header"]):
+        tag.decompose()
+    body_text = " ".join(soup.get_text(" ", strip=True).split())
     return {
         "title": title, "description": desc, "canonical": canon, "h1": h1,
         "body_text": body_text, "links": list(dict.fromkeys(links)),
