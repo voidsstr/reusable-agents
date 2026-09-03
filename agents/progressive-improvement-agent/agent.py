@@ -452,6 +452,8 @@ class ProgressiveImprovementAgent(AgentBase):
                 user_agent=crawler_cfg.get("user_agent",
                                            "reusable-agents-quality-crawler/1.0"),
                 throttle_ms=int(crawler_cfg.get("throttle_ms", 500)),
+                retry_on_error=int(crawler_cfg.get("retry_on_error", 1)),
+                retry_backoff_s=float(crawler_cfg.get("retry_backoff_s", 1.5)),
             ):
                 pages.append(page)
                 f.write(json.dumps(page.to_dict()) + "\n")
@@ -500,15 +502,28 @@ class ProgressiveImprovementAgent(AgentBase):
         # Also surface fetch errors as broken-page issues directly (no LLM needed)
         for p in pages:
             if p.error or (p.status_code and not (200 <= p.status_code < 400)):
+                tries = getattr(p, "attempts", 1) or 1
+                # A transport failure the crawler never retried is not evidence
+                # of a broken page — it's evidence of one dropped read. The
+                # crawler retries by default (crawler.retry_on_error), so
+                # status_code=0 after a single try means retries are switched
+                # off; say so rather than dressing a blip up as critical.
+                unretried_transport = p.status_code == 0 and tries < 2
                 raw_issues.append({
                     "url": p.url,
                     "category": "broken-page",
-                    "severity": "critical" if p.status_code in (0, 500, 502, 503) else "high",
-                    "confidence": 0.99,
+                    "severity": ("high" if unretried_transport else
+                                 "critical" if p.status_code in (0, 500, 502, 503) else "high"),
+                    "confidence": 0.6 if unretried_transport else 0.99,
                     "title": f"Broken page: {p.url} returned {p.status_code or 'fetch error'}",
-                    "rationale": p.error or f"HTTP {p.status_code}",
+                    "rationale": (p.error or f"HTTP {p.status_code}")
+                                 + f" [{tries} fetch attempt{'s' if tries != 1 else ''}]",
                     "evidence_snippet": (p.error or f"status={p.status_code}")[:200],
-                    "fix_suggestion": "Investigate the route handler / build error / upstream dependency.",
+                    "fix_suggestion": (
+                        "Investigate the route handler / build error / upstream dependency. "
+                        "Confirm the URL is still failing before editing — transport errors "
+                        "(read timeout, connection reset) can be transient."
+                    ),
                 })
 
         # ── Page-hash short-circuit ────────────────────────────────────────

@@ -47,6 +47,11 @@ class Page:
     og_type: str = ""                                       # og:type meta (article/website/product/etc)
     robots_meta: str = ""                                   # <meta name="robots"> directives
     twitter_card: str = ""                                  # twitter:card meta value
+    # 2026-09-02: how many fetches it took to produce this Page. >1 means an
+    # earlier attempt hit a transport error or a 5xx and we retried. Callers
+    # that turn failures into "broken page" findings must report this — a
+    # single dropped read is not a site defect.
+    attempts: int = 1
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -208,6 +213,40 @@ def _fetch_sitemap_urls(base_url: str, ua: str, timeout: int) -> list[str]:
     return out
 
 
+def _fetch_with_retry(
+    url: str, *, user_agent: str, timeout_s: int, retries: int, backoff_s: float,
+) -> tuple[Optional[requests.Response], str, int, int]:
+    """Fetch `url`, retrying transport errors and 5xx responses.
+
+    Returns `(response | None, error_text, elapsed_ms, attempts)`. A 4xx is a
+    real answer from the origin and is never retried; a read timeout, a reset
+    connection, or a 502 from a replica that was cold when we knocked is not an
+    answer at all, and gets one more chance before we call the page broken.
+    """
+    t0 = time.monotonic()
+    total = max(0, int(retries)) + 1
+    attempts = 0
+    last_err = ""
+    for i in range(total):
+        attempts += 1
+        last = i == total - 1
+        try:
+            r = requests.get(
+                url, headers={"User-Agent": user_agent},
+                timeout=timeout_s, allow_redirects=True,
+            )
+            if r.status_code < 500 or last:
+                return r, "", int((time.monotonic() - t0) * 1000), attempts
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)[:240]
+            if last:
+                break
+        time.sleep(max(0.0, backoff_s))
+    err = last_err if attempts == 1 else f"{last_err} (after {attempts} attempts)"
+    return None, err, int((time.monotonic() - t0) * 1000), attempts
+
+
 def crawl(
     *,
     base_url: str,
@@ -219,9 +258,17 @@ def crawl(
     request_timeout_s: int = 15,
     user_agent: str = "reusable-agents-quality-crawler/1.0",
     throttle_ms: int = 500,
+    retry_on_error: int = 1,
+    retry_backoff_s: float = 1.5,
 ) -> Iterator[Page]:
     """BFS crawl. Yields Page objects in fetch order. Caller is responsible for
-    persisting results."""
+    persisting results.
+
+    `retry_on_error` re-fetches a URL that raised a transport error (read
+    timeout, connection reset, DNS blip) or answered 5xx, waiting
+    `retry_backoff_s` between tries. Only the last attempt's outcome is
+    yielded, with `Page.attempts` recording how many it took. Set to 0 to
+    restore single-shot behaviour."""
     excludes = path_excludes or []
     seen: set[str] = set()
     queue: deque[tuple[str, int]] = deque()
@@ -249,22 +296,29 @@ def crawl(
         if _path_excluded(url, excludes):
             continue
 
-        t0 = time.monotonic()
+        r, fetch_err, ms, attempts = _fetch_with_retry(
+            url, user_agent=user_agent, timeout_s=request_timeout_s,
+            retries=retry_on_error, backoff_s=retry_backoff_s,
+        )
+        if r is None:
+            page = Page(url=url, status_code=0, fetch_ms=ms, depth=depth,
+                        error=fetch_err, attempts=attempts)
+            yield page
+            fetched += 1
+            continue
+
+        page = Page(
+            url=url, status_code=r.status_code, fetch_ms=ms, depth=depth,
+            attempts=attempts,
+            content_type=(r.headers.get("Content-Type") or "").split(";")[0].strip(),
+        )
+        if "html" not in page.content_type.lower() and "xml" not in page.content_type.lower():
+            # Non-HTML: record + don't extract
+            yield page
+            fetched += 1
+            continue
+
         try:
-            r = requests.get(
-                url, headers={"User-Agent": user_agent},
-                timeout=request_timeout_s, allow_redirects=True,
-            )
-            ms = int((time.monotonic() - t0) * 1000)
-            page = Page(
-                url=url, status_code=r.status_code, fetch_ms=ms, depth=depth,
-                content_type=(r.headers.get("Content-Type") or "").split(";")[0].strip(),
-            )
-            if "html" not in page.content_type.lower() and "xml" not in page.content_type.lower():
-                # Non-HTML: record + don't extract
-                yield page
-                fetched += 1
-                continue
             extracted = _extract(r.text, url)
             page.title = extracted["title"]
             page.description = extracted["description"]
@@ -280,9 +334,10 @@ def crawl(
             import hashlib as _h
             page.body_hash = _h.sha1(page.body_text.encode("utf-8")).hexdigest()[:16]
         except Exception as e:
-            ms = int((time.monotonic() - t0) * 1000)
-            page = Page(url=url, status_code=0, fetch_ms=ms, depth=depth,
-                        error=str(e)[:300])
+            # Parse failure, not a fetch failure — keep the status code the
+            # origin actually returned so downstream checks don't report a
+            # 200 page as unreachable.
+            page.error = f"extract failed: {e}"[:300]
             yield page
             fetched += 1
             continue

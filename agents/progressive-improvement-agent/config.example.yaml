@@ -21,6 +21,11 @@ crawler:
   path_excludes: ["/admin/*", "/api/*", "/login*"]
   request_timeout_s: 15
   throttle_ms: 500
+  # Re-fetch a URL that raised a transport error (read timeout, reset
+  # connection) or answered 5xx before calling the page broken. One dropped
+  # read during a 40-page crawl is not a site defect. 0 = single-shot.
+  retry_on_error: 1
+  retry_backoff_s: 1.5
 
 analyzer:
   batch_size: 5
