@@ -23,7 +23,12 @@ git fetch --tags origin --quiet 2>/dev/null || true
 
 # Highest existing number for this site, local or remote.
 LAST=$(git tag -l "release/${SITE}/*" | sed "s#release/${SITE}/##" | grep -E '^[0-9]+$' | sort -n | tail -1)
-NEXT=$(printf "%04d" $(( ${LAST:-0} + 1 )))
+# 10# forces base 10. Without it bash reads a leading-zero number as OCTAL,
+# so release 0008 -- the first zero-padded value that is not valid octal --
+# died with "value too great for base (error token is 0008)" and tagging
+# stopped dead at 8. 0001-0007 worked, which is exactly the kind of bug that
+# ships fine and fails a week later. 0009 would fail too.
+NEXT=$(printf "%04d" $(( 10#${LAST:-0} + 1 )))
 TAG="release/${SITE}/${NEXT}"
 
 SHA=$(git rev-parse --short HEAD)

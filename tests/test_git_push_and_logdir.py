@@ -70,6 +70,19 @@ def main():
     check(standup.count("ExecStartPre=-/bin/mkdir -p $LOG_DIR") == 2,
           "standup-fleet-host units (api + drainer) create their log dir")
 
+    # release/<site>/0008 is not valid octal. tag-release.sh computed the next
+    # number with $(( ${LAST:-0} + 1 )); bash reads a leading-zero literal as
+    # OCTAL, so 0001-0007 incremented fine and 0008 died with "value too great
+    # for base". Tagging stopped at 8, a week after it was introduced.
+    tagsh = (ROOT / "install" / "tag-release.sh").read_text()
+    check("10#${LAST:-0}" in tagsh,
+          "tag-release.sh forces base 10 when incrementing the release number")
+    for last, want in (("0007", "0008"), ("0008", "0009"), ("0009", "0010")):
+        r = subprocess.run(["bash", "-c", f'printf "%04d" $(( 10#{last} + 1 ))'],
+                           capture_output=True, text=True)
+        check(r.returncode == 0 and r.stdout == want,
+              f"release number after {last} is {want}")
+
     drift = ROOT / "install" / "deploy-drift.sh"
     check(drift.is_file(), "install/deploy-drift.sh exists")
     if drift.is_file():
@@ -89,3 +102,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
