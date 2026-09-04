@@ -159,9 +159,24 @@ in *Testing*.** That is what killed the token minted 2026-08-13 by 2026-08-25.
 Re-authing buys another week and nothing more.
 
 **GCP console → APIs & Services → OAuth consent screen → PUBLISH APP
-("In production").** Until that happens, expect this skill to be needed weekly,
-and note `oauth-heartbeat-agent` exists only to reset that clock daily as a
-stopgap — publishing the app is what retires both.
+("In production").**
+
+**DONE 2026-09-04** for project `521976426725` (the console now offers "Back to
+testing", which it only shows once an app is In production). Consequences:
+
+- Refresh tokens should no longer die on a 7-day clock. The token minted
+  2026-09-02 16:33 would have been revoked on 2026-09-09 under Testing; it
+  surviving past that date is the real proof, not the console's status text.
+- `oauth-heartbeat-agent` is retired (`enabled: false`) — it existed solely to
+  reset that clock daily. If refresh tokens start dying weekly again, check
+  the publishing status FIRST; re-enabling the heartbeat only hides it.
+- Unverified-but-published is fine here: the app requests only
+  `analytics.readonly` and `webmasters`, neither of which is a restricted
+  scope, so no verification submission is required. New consenting users see
+  an "unverified app" interstitial; with one operator that is a non-issue.
+
+If it somehow reverts to Testing, this section is the fix and the weekly
+re-auth in §3 is the stopgap.
 
 ---
 
