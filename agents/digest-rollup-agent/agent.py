@@ -26,7 +26,15 @@ from framework.core.guardrails import declare  # noqa: E402
 
 AGENT_ID = "digest-rollup-agent"
 WINDOW_HOURS = 3
-OWNER = os.environ.get("OPERATOR_EMAIL", "")
+# Defaulting to "" meant an unset OPERATOR_EMAIL produced a send to an
+# EMPTY recipient, which fails deep in the mail path and surfaces only as
+# "status=failure" with a summary that lists all the work done correctly.
+# The agent looked broken for weeks while its actual job -- rolling up the
+# individual agent emails, which DIGEST_ONLY=1 suppresses -- had already
+# succeeded; the operator simply heard nothing from any agent. Fall back to
+# the address both keep-the-lights-on.yaml configs name as owner_email.
+OWNER = (os.environ.get("OPERATOR_EMAIL")
+         or "mperry@northernsoftwareconsulting.com")
 
 
 def _now() -> datetime:
