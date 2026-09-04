@@ -280,7 +280,10 @@ def crawl(
     timeout, connection reset, DNS blip) or answered 5xx, waiting
     `retry_backoff_s` between tries. Only the last attempt's outcome is
     yielded, with `Page.attempts` recording how many it took. Set to 0 to
-    restore single-shot behaviour."""
+    restore single-shot behaviour.
+
+    `throttle_ms` is applied before every request after the first, so it
+    holds on the failure paths too."""
     excludes = path_excludes or []
     seen: set[str] = set()
     queue: deque[tuple[str, int]] = deque()
@@ -307,6 +310,14 @@ def crawl(
             continue
         if _path_excluded(url, excludes):
             continue
+
+        # Throttle before the request, not after a successful one. The
+        # error, non-HTML and parse-failure paths below all `continue`, so
+        # a trailing sleep is skipped exactly when politeness matters most:
+        # after a read timeout we would otherwise knock again instantly, on
+        # an origin that just told us it was struggling.
+        if fetched and throttle_ms > 0:
+            time.sleep(throttle_ms / 1000.0)
 
         r, fetch_err, ms, attempts = _fetch_with_retry(
             url, user_agent=user_agent, timeout_s=request_timeout_s,
@@ -364,6 +375,3 @@ def crawl(
                     if _path_excluded(link, excludes):
                         continue
                     queue.append((link, depth + 1))
-
-        if throttle_ms > 0:
-            time.sleep(throttle_ms / 1000.0)
