@@ -411,8 +411,13 @@ distinct OPEN incident (keyed by a stable signature). Re-send only if it
 stays unresolved past a long re-alert window (e.g. 24h). Mark resolved
 when the condition clears; note the resolution in-session.
 
-**Mail transport status (2026-08-15).** This host has NO transport: no `msmtp`
-binary, no Graph/SMTP credentials, and `DIGEST_DISABLED=1` is set fleet-wide, so
+**Mail transport status (re-checked 2026-09-08).** `msmtp` 1.8.32 IS installed at
+`/usr/bin/msmtp` (the earlier "no msmtp binary" note is stale) — what is missing is
+the CREDENTIAL: there is no `~/.msmtprc`, no `/etc/msmtprc`, and no SMTP/Graph
+secret in either Key Vault (`aisleprompt-kv`, `nsc-secrets-kv`) or in `secrets.env`.
+`send_via_msmtp` shells out to `msmtp -a automation`, which fails with "account
+automation not found". So the transport is one `~/.msmtprc` away, not a package
+install. `DIGEST_DISABLED=1` is also set fleet-wide, so
 routine digests are dropped by design. ALERTS are different — they pass
 `bypass_digest=True`, which skips the kill switch and attempts a real send, so an
 alert fails HONESTLY with `ok=False, "msmtp not found on PATH"`. Treat `ok=True`
