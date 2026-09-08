@@ -215,6 +215,14 @@ def notify_operator(
                 "X-Error-Class": error_class,
                 "X-Severity": severity,
             },
+            # This is an ALERT, not digest traffic. Without bypass_digest the
+            # operator only learns an agent is failing whenever the 5-hourly
+            # rollup happens to fire — and while DIGEST_DISABLED=1 was set
+            # (2026-08-14 .. 2026-09-08) these were dropped outright, which is
+            # exactly the failure site_quality's own kill-switch comment warns
+            # about: "A switch meant to stop ROUTINE digest noise must never
+            # silence the one channel that reports emergencies."
+            bypass_digest=True,
         )
         return ok, detail
     except Exception as e:

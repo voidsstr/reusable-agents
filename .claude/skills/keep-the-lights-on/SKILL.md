@@ -411,18 +411,35 @@ distinct OPEN incident (keyed by a stable signature). Re-send only if it
 stays unresolved past a long re-alert window (e.g. 24h). Mark resolved
 when the condition clears; note the resolution in-session.
 
-**Mail transport status (re-checked 2026-09-08).** `msmtp` 1.8.32 IS installed at
-`/usr/bin/msmtp` (the earlier "no msmtp binary" note is stale) — what is missing is
-the CREDENTIAL: there is no `~/.msmtprc`, no `/etc/msmtprc`, and no SMTP/Graph
-secret in either Key Vault (`aisleprompt-kv`, `nsc-secrets-kv`) or in `secrets.env`.
-`send_via_msmtp` shells out to `msmtp -a automation`, which fails with "account
-automation not found". So the transport is one `~/.msmtprc` away, not a package
-install. `DIGEST_DISABLED=1` is also set fleet-wide, so
-routine digests are dropped by design. ALERTS are different — they pass
-`bypass_digest=True`, which skips the kill switch and attempts a real send, so an
-alert fails HONESTLY with `ok=False, "msmtp not found on PATH"`. Treat `ok=True`
-as delivery ONLY if `detail` does not start with `digest disabled` or `suppressed:`.
-Until a transport exists, escalate IN-SESSION and never claim an email was sent.
+**Mail transport status (CORRECTED 2026-09-08 — the previous two notes were both
+wrong).** Mail WORKS. `send_via_msmtp` is a misnomer: it tries **Microsoft Graph
+`/sendMail` first**, minting a token from
+`~/.reusable-agents/responder/.oauth.json` (scope `Mail.Send`); msmtp is only the
+fallback and is sandboxed by AppArmor anyway. Verified 2026-09-08: the token mints,
+and `digest-rollup-agent` delivered with `digest sent (graph:send_as)`.
+
+What was actually broken was **`DIGEST_DISABLED=1`** in `secrets.env` (set
+2026-08-14 on the mistaken belief that no transport existed). It made
+`_maybe_queue_digest` DROP every message whose caller did not pass
+`bypass_digest=True`. That is why some agent mail kept arriving while the rest
+vanished — the senders split cleanly:
+
+- **Passed `bypass_digest=True`, kept working the whole time:**
+  `competitor-research-agent`, `app-store-opportunity-agent`, `authority-agent`,
+  `digest-rollup-agent`.
+- **Did not, so were silently dropped:** `agent_base` (the generic path most
+  agents use), `catalog-audit-agent`, `agent-doctor`, `progressive-improvement-agent`,
+  `product-hydration-agent`, `goals-tracker`, `ebay-product-sync-agent`, and
+  `framework/core/resilience.py` — i.e. the fleet's ERROR ALERTS.
+
+`DIGEST_DISABLED` is now unset (commented in `secrets.env` with the reasoning) and
+`resilience.py` now passes `bypass_digest=True` so alerts can never be swallowed
+again. Routine agent mail queues to `digest-queue/` and ships as ONE consolidated
+email when `agent-digest-rollup-agent.timer` fires (every 5h, `0/5:16:00`).
+
+So you MAY now claim an email was sent — but only when `detail` says `graph:…` or
+`sent to`. Treat `ok=True` as delivery ONLY if `detail` does not start with
+`digest disabled` or `suppressed:`.
 
 **If the email send fails** (`ok is False` — e.g. the Graph creds are
 missing or the O365 relay is down): do NOT silently drop it. Notify
