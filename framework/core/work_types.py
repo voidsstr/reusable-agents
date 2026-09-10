@@ -164,3 +164,90 @@ def all_known_handlers() -> set[str]:
     by the dashboard to render the inter-agent graph + by site configs
     to validate handoff_route overrides."""
     return {h for _, h in DEFAULT_REC_ROUTING.values() if h}
+
+
+# ---------------------------------------------------------------------------
+# Live-state rec types — never suppressed by run-to-run dedupe
+# ---------------------------------------------------------------------------
+#
+# Most recs describe a defect in stored content (a thin body, a missing
+# schema block, a bad category). Once the implementer fixes one, a later
+# run that re-detects it is noise, so producers suppress recs whose
+# canonical key matches a prior run's shipped/implemented/skipped rec.
+#
+# Availability recs are different in kind. "This URL returned 503" is a
+# re-measurement of production RIGHT NOW, not a description of a stored
+# defect — so a past resolution carries no information about whether the
+# condition holds today. Suppressing them trades a duplicate rec for a
+# silent outage: the site 503s, the crawler notices, and the dedupe
+# filter drops the rec because the same URL 503'd during an unrelated
+# incident three weeks ago. That failure is an ABSENCE, which is the
+# hardest kind to spot.
+#
+# The bind this resolves: an availability rec that a run correctly
+# resolves as transient must still be markable `implemented` so the
+# dispatch queue stops re-issuing it, WITHOUT that mark blinding the
+# next crawl. Exempting the type from dedupe decouples the two.
+#
+# Producers call `is_live_state(...)` when building their handled-key
+# set. Match is on the rec's `type` OR its `category` — producers differ
+# in which field carries the taxonomy (the PI agent keys on category,
+# the seo-analyzer on type).
+
+DEFAULT_LIVE_STATE_REC_TYPES: frozenset[str] = frozenset({
+    "broken-page",      # PI category + type: fetch error / 4xx / 5xx
+    "broken-link",      # outbound or internal link that no longer resolves
+    "fetch-error",      # transport-level failure (timeout, reset, DNS)
+    "http-error",       # generic non-2xx status finding
+    "uptime",           # explicit availability probes
+    "cwv-ttfb-slow",    # latency is measured per-crawl, not stored
+})
+
+LIVE_STATE_CONFIG_KEY = "config/live-state-rec-types.json"
+
+
+def live_state_rec_types(storage=None) -> frozenset[str]:
+    """Rec types/categories exempt from run-to-run dedupe suppression.
+
+    Defaults to `DEFAULT_LIVE_STATE_REC_TYPES`. When a storage backend is
+    passed, an operator override at `config/live-state-rec-types.json`
+    is merged in:
+
+        {"schema_version": "1", "rec_types": ["broken-page", "..."],
+         "replace": false}
+
+    `replace: true` swaps the defaults out entirely instead of extending
+    them. A missing or malformed config is ignored — the defaults are
+    the safe behavior (re-propose rather than silently drop a signal).
+    """
+    if storage is None:
+        return DEFAULT_LIVE_STATE_REC_TYPES
+    try:
+        doc = storage.read_json(LIVE_STATE_CONFIG_KEY)
+    except Exception:
+        return DEFAULT_LIVE_STATE_REC_TYPES
+    if not isinstance(doc, dict):
+        return DEFAULT_LIVE_STATE_REC_TYPES
+    extra = doc.get("rec_types")
+    if not isinstance(extra, list):
+        return DEFAULT_LIVE_STATE_REC_TYPES
+    cleaned = {str(t).strip().lower() for t in extra if str(t).strip()}
+    if doc.get("replace") is True:
+        return frozenset(cleaned)
+    return DEFAULT_LIVE_STATE_REC_TYPES | frozenset(cleaned)
+
+
+def is_live_state(rec: dict, *, storage=None) -> bool:
+    """True iff this rec re-measures production state and so must stay
+    re-detectable on every run, regardless of how a prior run resolved it.
+
+    Checks both `type` and `category` — see the note above on why.
+    """
+    if not isinstance(rec, dict):
+        return False
+    live = live_state_rec_types(storage)
+    for field in ("type", "category"):
+        val = (rec.get(field) or "")
+        if isinstance(val, str) and val.strip().lower() in live:
+            return True
+    return False

@@ -38,6 +38,7 @@ if str(_REPO) not in sys.path:
 from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.email_codes import new_request_id  # noqa: E402
 from framework.core.guardrails import declare  # noqa: E402
+from framework.core.work_types import is_live_state  # noqa: E402
 
 from shared.site_quality import (  # noqa: E402
     apply_user_responses,
@@ -321,6 +322,12 @@ def _load_handled_rec_keys(
             continue
         for r in doc.get("recommendations", []) or []:
             if not (r.get("shipped") or r.get("implemented") or r.get("skipped")):
+                continue
+            # Availability findings re-measure production every crawl, so a
+            # prior resolution says nothing about today. Suppressing them
+            # would turn a real outage into silence — see
+            # framework.core.work_types.DEFAULT_LIVE_STATE_REC_TYPES.
+            if is_live_state(r, storage=storage):
                 continue
             key = _canonical_rec_key(r)
             if key:
