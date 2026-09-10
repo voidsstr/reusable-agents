@@ -139,8 +139,28 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _read_registry(storage: StorageBackend) -> dict[str, dict]:
-    raw = storage.read_json(REGISTRY_KEY) or {}
+def _read_registry(storage: StorageBackend, *, strict: bool = False) -> dict[str, dict]:
+    """Read the registry rollup.
+
+    `strict=True` bypasses the storage layer's TTL read cache. Use it for any
+    read that feeds a read-modify-write under `storage.lock()` — serving a
+    cached rollup there would let two concurrent registrations clobber each
+    other, which is exactly the kind of silent data loss the lock exists to
+    prevent. Plain reads (list_agents, get_agent fallback) are fine cached.
+    """
+    raw = None
+    if strict:
+        rb = getattr(storage, "read_bytes_uncached", None)
+        if callable(rb):
+            b = rb(REGISTRY_KEY)
+            if b:
+                import json as _json
+                try:
+                    raw = _json.loads(b.decode("utf-8"))
+                except Exception:
+                    raw = None
+    if raw is None:
+        raw = storage.read_json(REGISTRY_KEY) or {}
     if isinstance(raw, list):
         # Legacy shape — convert
         return {a["id"]: a for a in raw if "id" in a}
@@ -187,7 +207,7 @@ def register_agent(manifest: AgentManifest, storage: Optional[StorageBackend] = 
     manifest.updated_at = now
 
     with s.lock(REGISTRY_KEY):
-        registry = _read_registry(s)
+        registry = _read_registry(s, strict=True)
         is_new = manifest.id not in registry
         # Never let a re-registration silently RE-ENABLE an agent an
         # operator disabled. Registration happens on every import/discovery
@@ -243,7 +263,7 @@ def update_agent(
     d["updated_at"] = _now()
     new = AgentManifest.from_dict(d)
     with s.lock(REGISTRY_KEY):
-        registry = _read_registry(s)
+        registry = _read_registry(s, strict=True)
         registry[agent_id] = new.to_dict()
         _write_registry(s, registry)
     s.write_json(f"agents/{agent_id}/manifest.json", new.to_dict())
@@ -260,7 +280,7 @@ def deregister_agent(
     default — pass delete_storage=True to wipe agents/<id>/* completely."""
     s = storage or get_storage()
     with s.lock(REGISTRY_KEY):
-        registry = _read_registry(s)
+        registry = _read_registry(s, strict=True)
         if agent_id not in registry:
             return False
         del registry[agent_id]

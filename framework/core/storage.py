@@ -194,25 +194,94 @@ class AzureBlobStorage(StorageBackend):
         self._service = BlobServiceClient.from_connection_string(cs)
         self._container_name = container_name or os.getenv("AZURE_STORAGE_CONTAINER", "agents")
         self._container = self._service.get_container_client(self._container_name)
-        # Best-effort container create — idempotent.
-        try:
-            self._container.create_container()
-            logger.info(f"created blob container '{self._container_name}'")
-        except Exception:
-            pass  # Already exists or no permission to create — both are fine.
+        self._read_cache: dict = {}
+        self._cache_bytes = 0
+        # Container create is NOT free. It is billed as a "List and Create
+        # Container" operation, the priciest class on the account, and this
+        # constructor runs in every agent process, every CLI invocation and
+        # every host-worker fork — measured at ~1.5 MILLION calls/month, which
+        # is essentially the whole $14.99 List+Create line on the Azure bill.
+        # The container has existed since 2026-05; creating it again on every
+        # process start buys nothing. Opt in explicitly for a fresh deployment:
+        #     AGENT_STORAGE_ENSURE_CONTAINER=1
+        if os.getenv("AGENT_STORAGE_ENSURE_CONTAINER") == "1":
+            try:
+                self._container.create_container()
+                logger.info(f"created blob container '{self._container_name}'")
+            except Exception:
+                pass  # Already exists or no permission to create — both fine.
 
     def _blob(self, key: str):
         return self._container.get_blob_client(key)
 
-    def read_bytes(self, key: str) -> Optional[bytes]:
+    # ── Process-local read cache ────────────────────────────────────────
+    # Reads were the largest single line on the Azure bill: ~11.9M/month at
+    # $65. The dominant callers are tight sweep loops (snapshot_updater every
+    # 5s over 83 agents, ghost_reaper every 60s, the WebSocket pollers) that
+    # re-read the SAME small blobs, and a large share of those reads are for
+    # blobs that DO NOT EXIST — a miss is billed exactly like a hit.
+    #
+    # A tiny TTL cache collapses both. It is deliberately process-local and
+    # short-lived: agents are separate processes, so this never serves one
+    # agent stale data written by another beyond _READ_TTL_S. Anything that
+    # needs strict read-after-write (lock(), the registry rollup under a lock)
+    # calls read_bytes_uncached().
+    #
+    # Off by default for writes-you-just-made within a process: write_bytes
+    # and delete() both invalidate the key, so self-consistency holds.
+    _READ_TTL_S = float(os.getenv("AGENT_STORAGE_READ_TTL_S", "3.0"))
+    _NEG_TTL_S = float(os.getenv("AGENT_STORAGE_NEG_TTL_S", "10.0"))
+    _MAX_CACHE_BYTES = int(os.getenv("AGENT_STORAGE_CACHE_BYTES", str(32 * 1024 * 1024)))
+    _MAX_CACHE_ENTRY = int(os.getenv("AGENT_STORAGE_CACHE_ENTRY_BYTES", str(1024 * 1024)))
+
+    def _cache_get(self, key: str):
+        ent = self._read_cache.get(key)
+        if ent is None:
+            return None
+        expires, val = ent
+        if time.monotonic() >= expires:
+            self._read_cache.pop(key, None)
+            self._cache_bytes -= len(val) if val else 0
+            return None
+        return (val,)  # tuple-wrap so a cached None is distinguishable
+
+    def _cache_put(self, key: str, val: Optional[bytes]) -> None:
+        if self._READ_TTL_S <= 0:
+            return
+        if val is not None and len(val) > self._MAX_CACHE_ENTRY:
+            return  # don't blow the budget on one big blob
+        if self._cache_bytes > self._MAX_CACHE_BYTES:
+            self._read_cache.clear()
+            self._cache_bytes = 0
+        ttl = self._NEG_TTL_S if val is None else self._READ_TTL_S
+        prev = self._read_cache.get(key)
+        if prev and prev[1]:
+            self._cache_bytes -= len(prev[1])
+        self._read_cache[key] = (time.monotonic() + ttl, val)
+        self._cache_bytes += len(val) if val else 0
+
+    def _cache_invalidate(self, key: str) -> None:
+        prev = self._read_cache.pop(key, None)
+        if prev and prev[1]:
+            self._cache_bytes -= len(prev[1])
+
+    def read_bytes_uncached(self, key: str) -> Optional[bytes]:
+        """Bypass the TTL cache. Use where read-after-write must be strict."""
         try:
             return self._blob(key).download_blob().readall()
         except Exception as e:
-            # ResourceNotFoundError is the common case
             if "ResourceNotFound" in type(e).__name__ or "BlobNotFound" in str(e):
                 return None
             logger.warning(f"azure read_bytes {key}: {e}")
             return None
+
+    def read_bytes(self, key: str) -> Optional[bytes]:
+        hit = self._cache_get(key)
+        if hit is not None:
+            return hit[0]
+        val = self.read_bytes_uncached(key)
+        self._cache_put(key, val)
+        return val
 
     def read_bytes_range(self, key: str, offset: int, length: Optional[int] = None) -> Optional[bytes]:
         """Read a byte range. Negative offset is interpreted as "last N bytes"
@@ -239,6 +308,7 @@ class AzureBlobStorage(StorageBackend):
 
     def write_bytes(self, key: str, data: bytes,
                     cache_control: Optional[str] = None) -> None:
+        self._cache_invalidate(key)
         cs_kwargs = {"content_type": _guess_content_type(key)}
         if cache_control:
             cs_kwargs["cache_control"] = cache_control
@@ -291,6 +361,7 @@ class AzureBlobStorage(StorageBackend):
             return False
 
     def delete(self, key: str) -> bool:
+        self._cache_invalidate(key)
         try:
             self._blob(key).delete_blob()
             return True

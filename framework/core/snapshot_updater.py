@@ -1,3 +1,4 @@
+import os
 """Background task: every 5s, snapshot every agent's status into one blob.
 
 The dashboard's GET /api/agents reads this single blob (registry/agent-snapshot.json)
@@ -62,7 +63,7 @@ def _snapshot_once(s) -> dict:
     return out
 
 
-def _loop(interval_s: float = 5.0) -> None:
+def _loop(interval_s: float = float(os.getenv("SNAPSHOT_INTERVAL_S", "20")) ) -> None:
     log.info("snapshot_updater started, interval=%.1fs", interval_s)
     while not _STOP.is_set():
         try:
@@ -83,7 +84,11 @@ def _loop(interval_s: float = 5.0) -> None:
     log.info("snapshot_updater stopped")
 
 
-def start(interval_s: float = 5.0) -> None:
+# 5s x 83 agents x 2 blobs was the single largest read source on the Azure
+# bill (~$65/mo of GetBlob). The snapshot feeds a dashboard, not a control
+# loop, so 20s is indistinguishable to a human and cuts the read volume 4x.
+# Tune with SNAPSHOT_INTERVAL_S.
+def start(interval_s: float = float(os.getenv("SNAPSHOT_INTERVAL_S", "20"))) -> None:
     """Start the snapshot updater in a daemon thread (idempotent)."""
     global _THREAD
     if _THREAD is not None and _THREAD.is_alive():

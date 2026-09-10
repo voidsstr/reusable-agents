@@ -24,7 +24,10 @@ export RA_REPO_ROOT
 
 QUEUE_DIR="${QUEUE_DIR:-/tmp/agent-trigger-queue}"
 LOG_DIR="${LOG_DIR:-/tmp/reusable-agents-logs}"
-POLL_INTERVAL_S="${POLL_INTERVAL_S:-2}"
+# 2s meant a fresh Python fork doing a blob list ~1,300 times an hour, about
+# 2.6M billed list operations a month. Local queue pickup still feels instant
+# at 15s and the blob-trigger path is not latency-critical.
+POLL_INTERVAL_S="${POLL_INTERVAL_S:-15}"
 ONCE=0
 
 mkdir -p "$QUEUE_DIR" "$LOG_DIR"
