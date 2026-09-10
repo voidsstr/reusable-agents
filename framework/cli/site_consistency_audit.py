@@ -283,6 +283,28 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int,
     if imgs:
         with ThreadPoolExecutor(workers) as ex:
             probes = list(ex.map(lambda i: (i, *_get(i, timeout, method="HEAD")), imgs))
+        # RE-CONFIRM before declaring an image broken.
+        #
+        # The first pass fires `workers` concurrent HEADs at m.media-amazon.com
+        # and Amazon rate-limits that: a spot check of 6 "broken" images found
+        # only 4 genuinely 404 — the other 2 returned 200 the moment they were
+        # requested serially with a browser UA. A checker that is a third false
+        # positives trains people to ignore it, which defeats the entire point.
+        # So every failure is re-probed ONE at a time, with a browser UA and a
+        # GET (some CDNs answer HEAD differently), and only a second failure
+        # counts.
+        suspect = [(iu, st, hd) for iu, st, hd, _b, _e in probes if st == 0 or st >= 400]
+        confirmed = {}
+        for iu, st, hd in suspect:
+            time.sleep(cfg.get("recheck_delay_s", 0.4))
+            st2, hd2, _b2, _e2 = _get(iu, timeout, method="GET")
+            if st2 == 0 or st2 >= 400:
+                confirmed[iu] = (st2, hd2)
+        probes = [(iu, st, hd, b, e) for iu, st, hd, b, e in probes
+                  if iu in confirmed or not (st == 0 or st >= 400)]
+        probes = [(iu, *confirmed[iu], b, e) if iu in confirmed else (iu, st, hd, b, e)
+                  for iu, st, hd, b, e in probes]
+
         for iu, st, hd, _b, _e in probes:
             if st == 0 or st >= 400:
                 results.append(dict(severity="error", kind="broken-image", url=iu,
@@ -314,7 +336,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     cfg = dict(min_words=a.min_words, slow_s=a.slow_s, dupe_title_cap=3,
-               imgs_per_page=6, max_images=500, tiny_img_bytes=12_000)
+               imgs_per_page=6, max_images=500, tiny_img_bytes=12_000,
+               recheck_delay_s=0.4)
 
     rep = crawl(a.base, a.depth, a.max_pages, a.timeout, a.workers, cfg)
     by_kind = collections.Counter(f["kind"] for f in rep["findings"])
