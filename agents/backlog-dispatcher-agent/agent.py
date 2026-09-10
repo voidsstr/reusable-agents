@@ -782,8 +782,16 @@ class BacklogDispatcher(AgentBase):
                     # the deferred flag. The implementer's no-commit
                     # path now writes deferred=true on these to break
                     # the loop, but the dispatcher must also respect it.
+                    # 2026-09-10: `skipped` had the same gap. The
+                    # implementer's runbook offers SKIPPED: *and*
+                    # DEFERRED: as no-commit outcomes and writes
+                    # skipped=true for the first, so a rec correctly
+                    # judged a non-defect (e.g. a broken-page rec whose
+                    # URL re-fetches 200 — a transient crawl timeout)
+                    # was re-dispatched on every tick forever.
                     if r.get("shipped") or r.get("implemented") \
-                            or r.get("deferred") or r.get("duplicate"):
+                            or r.get("deferred") or r.get("duplicate") \
+                            or r.get("skipped"):
                         continue
                     # Skip recs awaiting operator review (comp-research
                     # strategic proposals, multi-feature builds, anything
