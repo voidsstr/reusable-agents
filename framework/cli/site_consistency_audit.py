@@ -215,7 +215,10 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int,
           cfg: dict) -> dict:
     origin = urllib.parse.urlsplit(base)
     seen, queue, results = set(), collections.deque([(base.rstrip("/") + "/", 0)]), []
-    titles, h1s, all_imgs, linked_from = {}, {}, set(), {}
+    # img URL -> the page that renders it. A broken-image finding with no
+    # referring page is nearly unactionable — you cannot tell whether it is a
+    # product card, an article hero or a nav thumbnail without it.
+    titles, h1s, img_pages, linked_from = {}, {}, {}, {}
 
     while queue and len(seen) < max_pages:
         batch = []
@@ -242,7 +245,8 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int,
                 titles.setdefault(title, []).append(url)
             if h1:
                 h1s.setdefault(h1, []).append(url)
-            all_imgs.update(imgs[: cfg["imgs_per_page"]])
+            for iu in imgs[: cfg["imgs_per_page"]]:
+                img_pages.setdefault(iu, url)
 
             if d < depth and status == 200:
                 for href in _attr_all(html, "a", "href"):
@@ -275,19 +279,23 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int,
                                 count=len(urls), sample=urls[:4]))
 
     # ── Image reachability (the defect class that started all this) ─────
-    imgs = list(all_imgs)[: cfg["max_images"]]
+    imgs = list(img_pages)[: cfg["max_images"]]
     if imgs:
         with ThreadPoolExecutor(workers) as ex:
             probes = list(ex.map(lambda i: (i, *_get(i, timeout, method="HEAD")), imgs))
         for iu, st, hd, _b, _e in probes:
             if st == 0 or st >= 400:
                 results.append(dict(severity="error", kind="broken-image", url=iu,
-                                    message=f"image returns {st or hd.get('_err','error')}"))
+                                    on_page=img_pages.get(iu, ""),
+                                    message=f"image returns {st or hd.get('_err','error')} "
+                                            f"(rendered on {img_pages.get(iu,'?')})"))
             else:
                 n = hd.get("Content-Length") or hd.get("content-length")
                 if n and n.isdigit() and int(n) < cfg["tiny_img_bytes"]:
                     results.append(dict(severity="warn", kind="tiny-image", url=iu,
-                                        message=f"image is only {int(n)//1024}KB — renders soft in a lead card"))
+                                        on_page=img_pages.get(iu, ""),
+                                        message=f"image is only {int(n)//1024}KB on "
+                                                f"{img_pages.get(iu,'?')} — renders soft in a lead card"))
 
     return {"base": base, "pages_crawled": len(seen), "images_checked": len(imgs),
             "findings": results}
