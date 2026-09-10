@@ -379,6 +379,64 @@ bounds hold. When a NEW class of catalog rot is found, add a check to the
 site's config (and `systems/_example.yaml`) rather than a branch here — the
 runbook stays generic, the config carries the site's specifics.
 
+## 5d. Site consistency — the outside check (every tick, pure shell)
+
+Agents write to these sites all day and each one validates only its own narrow
+change. Nothing checked the RESULT the way a reader sees it, and that gap was
+expensive: the article "Ah Yes, 'Gaming' Laptops: The Hype vs. Reality" ran a
+gaming MOUSE product photo as its hero for MONTHS. Three guards should have
+caught it. None did — the hero-quality auditor's SUSPECT test is token-overlap
+only ("gaming" overlaps), BRAND passed, and POOL_KIND only covers pool images.
+Underneath both sat a worse bug: every regex in the KINDS taxonomy was
+singular, so "Gaming Laptops" resolved to NO kind at all and the whole kind
+gate silently no-opped on plural titles — i.e. on most listicles.
+
+`site-consistency-audit.timer` (05:40 + 17:40 daily) now crawls BOTH sites
+breadth-first to depth 5 and writes:
+
+    /tmp/reusable-agents-logs/site-audit-specpicks.json
+    /tmp/reusable-agents-logs/site-audit-aisleprompt.json
+
+**Read them every tick — it is a file read, Layer A cost, no reasoning:**
+
+```bash
+for s in specpicks aisleprompt; do
+  python3 -c "
+import json,sys
+d=json.load(open('/tmp/reusable-agents-logs/site-audit-$s.json'))
+sev=d['summary']['by_severity']; print('$s', d['pages_crawled'],'pages', sev)
+for k,n in sorted(d['summary']['by_kind'].items(), key=lambda x:-x[1])[:6]: print('   ',n,k)
+"
+done
+```
+
+Add a `CONSISTENCY` line to the tick box: `<n> error · <n> warn` or `ok`.
+
+What the checks mean, and what to do:
+
+- **`thin-or-shell` / `no-h1`** — a 200 rendering almost nothing. WORSE than a
+  404: Google indexes it, a reader sees an empty page, and no status-code
+  monitor notices. Treat as DEGRADED and trace the route.
+- **`broken-image` / `tiny-image`** — a dead or 7KB hero renders soft in the
+  lead card. Trigger the site's `*-article-hero-image-curator`.
+- **`prompt-leak` / `placeholder-text`** — generator exhaust reached a reader.
+  This is a quality-contract breach; fix the row AND the generator's ban list.
+- **`invalid-jsonld`** — rich results silently stop. Trace the recent commit.
+- **`duplicate-title`** — cannibalisation; hand to the seo-opportunity-agent.
+- **`zero-price`** — a $0 buy box. Monetisation bug, escalate if it persists.
+- **`slow-page`** — over the threshold at crawl time; correlate with DB CPU
+  before blaming code (a 44% catalog growth once pinned Postgres at 95%).
+
+**The auditor never repairs anything** — it is read-only by design so it can
+never itself become a source of damage. Fixes go through the owning agent, or
+through you.
+
+A rising `error` count right after a deploy or a big agent batch is the signal
+this exists for: it means the fleet just shipped a regression. Correlate with
+the newest `dispatch-implementer-*.log` before assuming it is unrelated.
+
+---
+
 ## 6. Escalation — email + in-session (when BLOCKED or DOWN-unrecovered)
 
 Escalate when: you can't safely auto-fix; a fix needs a credential or an
