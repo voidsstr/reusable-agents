@@ -34,6 +34,7 @@ import argparse
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 
 _LINK_RE = re.compile(r"\]\(https?://[^/]*/recipes/([a-z0-9][a-z0-9-]*)\)")
@@ -41,8 +42,15 @@ _BARE_RE = re.compile(r"\bhttps?://[^/\s]*/recipes/([a-z0-9][a-z0-9-]*)\b")
 
 
 def slugify(title: str) -> str:
-    """Lossy title → slug: lowercase, [^a-z0-9-] → '-', collapse '-+'."""
-    s = title.lower()
+    """Title → slug: transliterate accents, lowercase, [^a-z0-9-] → '-'.
+
+    The NFKD pass matters: the site's own slugifier folds accented
+    characters to their ASCII base (Sautéed → sauteed), so skipping it
+    turns every accent into a dash (saut-ed) and the emitted link 301s
+    instead of resolving directly.
+    """
+    s = unicodedata.normalize("NFKD", title.lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
     s = re.sub(r"[^a-z0-9]+", "-", s)
     return s.strip("-")
 
