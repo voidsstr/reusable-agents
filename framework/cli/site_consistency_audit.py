@@ -312,6 +312,13 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
     # a legitimate presentation choice, not a deceptive-markup problem, so the
     # comparison below tolerates it — see _price_matches.
     visible_money = {float(v.replace(",", "")) for v in MONEY.findall(text)}
+    # Does the page corroborate a rating ANYWHERE a reader can see — as words,
+    # as star glyphs, or as explicit rating markup?
+    corroborates_rating = bool(
+        re.search(r"\b(review|rating)s?\b", text, re.I)
+        or re.search(r"[\u2605\u2606\u2b50]", html)
+        or re.search(r'(aria-label|class)="[^"]*\b(star|rating)', html, re.I)
+        or re.search(r"\b\d\.\d\s*(/|out of)\s*5\b", text, re.I))
     for node in nodes:
         # Fabricated ratings. Precedent: aisleprompt shipped
         # "rec-010: null 17 fabricated AggregateRating counts". Structured data
@@ -319,9 +326,22 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
         ar = node.get("aggregateRating")
         if isinstance(ar, dict):
             n = int(re.sub(r"\D", "", str(ar.get("reviewCount") or ar.get("ratingCount") or "0")) or 0)
-            if n > 0 and not re.search(r"\b(review|rating)s?\b", text, re.I):
-                add("error", "fabricated-rating",
-                    f"JSON-LD claims {n} reviews but the page shows no review or rating text")
+            # CALIBRATION: the first version fired on 403 aisleprompt pages,
+            # because it demanded the words "review"/"rating" in the text — but
+            # the site displays ratings as STAR GLYPHS with no accompanying
+            # count, which is a normal design choice, not fraud. Corroboration
+            # now counts stars and rating markup too, so this only fires when
+            # the schema asserts ratings the page corroborates NOWHERE.
+            #
+            # It remains a SIGNAL, not proof. Whether the numbers are real is a
+            # database question (do review rows exist?), which a crawler cannot
+            # answer — that belongs to the catalog-audit / PI agents. Precedent
+            # that it is worth asking: aisleprompt shipped "rec-010: null 17
+            # fabricated AggregateRating counts".
+            if n > 0 and not corroborates_rating:
+                add("error", "uncorroborated-rating",
+                    f"JSON-LD asserts {n} ratings but the page shows no stars, count or "
+                    "review text anywhere — verify the underlying rows exist")
         # Price parity: schema price must match what the reader sees, or the
         # markup is deceptive and the buy box is probably stale.
         offers = node.get("offers")
@@ -604,7 +624,7 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
 
 # ── Run-over-run regression diff ────────────────────────────────────────────
 
-def diff_against_last(rep: dict, state_dir: str) -> dict:
+def diff_against_last(rep: dict, state_dir: str, scope: str = "") -> dict:
     """Compare this run to the previous one for the same base URL.
 
     The absolute finding count is mostly noise — a site always has a tail of
@@ -617,13 +637,27 @@ def diff_against_last(rep: dict, state_dir: str) -> dict:
     path = os.path.join(state_dir, re.sub(r"\W+", "-", rep["base"]).strip("-") + ".last.json")
 
     now = collections.Counter(f["kind"] for f in rep["findings"])
-    prev, prev_at = {}, None
+    prev, prev_at, prev_scope = {}, None, None
     if os.path.exists(path):
         try:
             d = json.load(open(path))
-            prev, prev_at = d.get("by_kind", {}), d.get("at")
+            prev, prev_at, prev_scope = d.get("by_kind", {}), d.get("at"), d.get("scope")
         except Exception:
             pass
+
+    # Only compare like-for-like. A depth-2/25-page smoke run against a
+    # depth-5/240-page run reported "broken-image 1→52, price-mismatch 6→301"
+    # as a regression when nothing had regressed at all — the second run simply
+    # looked at ten times more of the site. Comparing across scopes would make
+    # every parameter change look like an outage and train people to ignore the
+    # one signal this tool exists to give.
+    if prev and prev_scope and scope and prev_scope != scope:
+        json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "scope": scope,
+                   "by_kind": dict(now), "total": len(rep["findings"])}, open(path, "w"), indent=1)
+        return {"compared_to": None, "new_kinds": [], "resolved_kinds": [], "regressed": {},
+                "improved": {}, "is_regression": False,
+                "note": f"previous run had scope {prev_scope!r}, this one {scope!r} — "
+                        "not comparable, baseline reset"}
 
     new_kinds = sorted(k for k in now if k not in prev)
     worse = sorted(k for k in now if prev.get(k, 0) and now[k] > prev[k])
@@ -635,7 +669,7 @@ def diff_against_last(rep: dict, state_dir: str) -> dict:
             "improved": {k: {"was": prev[k], "now": now[k]} for k in better},
             "is_regression": bool(new_kinds or worse)}
 
-    json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    json.dump({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "scope": scope,
                "by_kind": dict(now), "total": len(rep["findings"])},
               open(path, "w"), indent=1)
     return diff
@@ -678,7 +712,7 @@ def main(argv=None) -> int:
     by_kind = collections.Counter(f["kind"] for f in rep["findings"])
     by_sev = collections.Counter(f["severity"] for f in rep["findings"])
     rep["summary"] = {"by_kind": dict(by_kind), "by_severity": dict(by_sev)}
-    rep["diff"] = diff_against_last(rep, a.state_dir)
+    rep["diff"] = diff_against_last(rep, a.state_dir, scope=f"d{a.depth}-p{a.max_pages}")
 
     print(f"\n{a.base}  —  {rep['pages_crawled']} pages, {rep['images_checked']} images, "
           f"{len(rep['findings'])} findings")
@@ -700,7 +734,9 @@ def main(argv=None) -> int:
             "{} {}→{}".format(k, v["was"], v["now"]) for k, v in d["improved"].items()))
     if d["resolved_kinds"]:
         print("  RESOLVED " + ", ".join(d["resolved_kinds"]))
-    if not any((d["new_kinds"], d["regressed"], d["improved"], d["resolved_kinds"])):
+    if d.get("note"):
+        print("  " + d["note"])
+    elif not any((d["new_kinds"], d["regressed"], d["improved"], d["resolved_kinds"])):
         print("  no change" if d["compared_to"] else "  (baseline stored)")
 
     if a.out:
