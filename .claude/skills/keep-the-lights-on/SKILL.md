@@ -384,56 +384,89 @@ runbook stays generic, the config carries the site's specifics.
 Agents write to these sites all day and each one validates only its own narrow
 change. Nothing checked the RESULT the way a reader sees it, and that gap was
 expensive: the article "Ah Yes, 'Gaming' Laptops: The Hype vs. Reality" ran a
-gaming MOUSE product photo as its hero for MONTHS. Three guards should have
-caught it. None did — the hero-quality auditor's SUSPECT test is token-overlap
-only ("gaming" overlaps), BRAND passed, and POOL_KIND only covers pool images.
-Underneath both sat a worse bug: every regex in the KINDS taxonomy was
-singular, so "Gaming Laptops" resolved to NO kind at all and the whole kind
-gate silently no-opped on plural titles — i.e. on most listicles.
+gaming MOUSE product photo as its hero for MONTHS.
 
-`site-consistency-audit.timer` (05:40 + 17:40 daily) now crawls BOTH sites
+`site-consistency-audit.timer` (05:40 + 17:40 daily) crawls BOTH sites
 breadth-first to depth 5 and writes:
 
     /tmp/reusable-agents-logs/site-audit-specpicks.json
     /tmp/reusable-agents-logs/site-audit-aisleprompt.json
 
-**Read them every tick — it is a file read, Layer A cost, no reasoning:**
+**READ THE `diff` BLOCK FIRST — it is the whole point.** The absolute finding
+count is mostly noise (every site has a tail of known warts). What matters is
+what CHANGED since the agents last shipped:
 
 ```bash
 for s in specpicks aisleprompt; do
   python3 -c "
-import json,sys
+import json
 d=json.load(open('/tmp/reusable-agents-logs/site-audit-$s.json'))
-sev=d['summary']['by_severity']; print('$s', d['pages_crawled'],'pages', sev)
-for k,n in sorted(d['summary']['by_kind'].items(), key=lambda x:-x[1])[:6]: print('   ',n,k)
+f=d['diff']; sev=d['summary']['by_severity']
+print('$s', d['pages_crawled'],'pages', sev, 'REGRESSION' if f['is_regression'] else 'stable')
+if f['new_kinds']: print('   NEW:', ', '.join(f['new_kinds']))
+if f['regressed']: print('   WORSE:', f['regressed'])
+if f['improved']:  print('   BETTER:', f['improved'])
 "
 done
 ```
 
-Add a `CONSISTENCY` line to the tick box: `<n> error · <n> warn` or `ok`.
+`is_regression: true` right after a deploy or a big agent batch means the fleet
+just shipped something bad. Correlate with the newest `dispatch-implementer-*.log`
+before assuming it is unrelated. Add a `CONSISTENCY` line to the tick box:
+`<n> error · <n> warn · <REGRESSION|stable>`.
 
-What the checks mean, and what to do:
+### What the checks mean, grouped by what they protect
 
-- **`thin-or-shell` / `no-h1`** — a 200 rendering almost nothing. WORSE than a
-  404: Google indexes it, a reader sees an empty page, and no status-code
-  monitor notices. Treat as DEGRADED and trace the route.
-- **`broken-image` / `tiny-image`** — a dead or 7KB hero renders soft in the
-  lead card. Trigger the site's `*-article-hero-image-curator`.
-- **`prompt-leak` / `placeholder-text`** — generator exhaust reached a reader.
-  This is a quality-contract breach; fix the row AND the generator's ban list.
-- **`invalid-jsonld`** — rich results silently stop. Trace the recent commit.
-- **`duplicate-title`** — cannibalisation; hand to the seo-opportunity-agent.
-- **`zero-price`** — a $0 buy box. Monetisation bug, escalate if it persists.
-- **`slow-page`** — over the threshold at crawl time; correlate with DB CPU
-  before blaming code (a 44% catalog growth once pinned Postgres at 95%).
+**INTEGRITY — is it broken?**
+- `thin-or-shell` / `no-h1` / `no-title` — a 200 rendering almost nothing.
+  WORSE than a 404: Google indexes it, a reader sees an empty page, and no
+  status-code monitor notices. Treat as DEGRADED and trace the route.
+- `broken-image` / `tiny-image` — dead or 7KB hero. Names the page that renders
+  it (`on_page`). Trigger the site's `*-article-hero-image-curator`.
+- `invalid-jsonld` — rich results silently stop. Trace the recent commit.
+- `placeholder-text` / `prompt-leak` — generator exhaust reached a reader. Fix
+  the row AND the generator's ban list.
 
-**The auditor never repairs anything** — it is read-only by design so it can
-never itself become a source of damage. Fixes go through the owning agent, or
-through you.
+**RETENTION — will they read a second page?**
+- `dead-end-page` — fewer than N internal links out; the session ends here.
+  Hand to `internal-link-densifier`.
+- `orphan-page` — nothing links to it; reachable only from the sitemap.
+- `internal-link-to-redirect` — every hop costs crawl budget, leaks link equity
+  and slows the reader. Carries `linked_from` so the source is fixable.
+- `no-cta-on-monetized-page` — a product/buying-guide page with no buy link
+  earns nothing and frustrates purchase intent. ERROR: it is lost revenue.
 
-A rising `error` count right after a deploy or a big agent batch is the signal
-this exists for: it means the fleet just shipped a regression. Correlate with
-the newest `dispatch-implementer-*.log` before assuming it is unrelated.
+**ACQUISITION — will anyone arrive?**
+- `no-meta-description` / `duplicate-meta-description` — the meta description
+  IS the SERP snippet. Missing hands Google a random paragraph; duplicated
+  makes two results look identical. Direct click-through loss.
+- `duplicate-title` / `duplicate-h1` — cannibalisation; the pages compete with
+  each other. Hand to the seo-opportunity-agent.
+- `long-title` — truncated in results, so the differentiator is cut off.
+- `sitemap-url-404` / `sitemap-url-redirects` — the sitemaps are AGENT-GENERATED,
+  so nobody was checking them against the live site. A sitemap full of 404s
+  burns crawl budget on every Googlebot visit.
+- `stale-year-claim` — "Best X of 2026" whose dateModified is years old.
+
+**TRUST — does it look professional and honest?**
+- `fabricated-rating` — JSON-LD claims N reviews the page cannot show. Precedent:
+  aisleprompt shipped "rec-010: null 17 fabricated AggregateRating counts".
+  This is a Google manual-action risk, hence ERROR.
+- `price-mismatch` — schema price nowhere near the displayed price (2% band, so
+  rounding is fine). Usually a stale buy box.
+- `locality-leak-title` / `known-leak-token` — prompt scenery in a title
+  ("Mountain Home, Arkansas"). A BARE city name needs a gazetteer, so once the
+  PI agent strips one, add it via `--leak-token` in the service unit.
+- `no-byline` / `no-visible-date` — editorial without attribution reads as
+  machine output (E-E-A-T).
+- `text-baked-into-hero` — marketing badges burned into hero pixels. OFF by
+  default (`--vision-hero-check`): it costs money per image via the Azure
+  `vision-mini` deployment, whose TPM quota was deliberately cut. There is no
+  OCR on this host and no sudo to install tesseract, so a pixel heuristic would
+  be guesswork — this asks the same vision model the recipe-image-verifier uses.
+
+**The auditor NEVER repairs anything.** Read-only by design so it can never
+itself become a source of damage. Fixes go through the owning agent, or you.
 
 ---
 
