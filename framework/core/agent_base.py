@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,6 +47,26 @@ from .storage import StorageBackend, get_storage
 
 
 logger = logging.getLogger("framework.agent")
+
+
+
+# Summaries that mean "I ran and there was nothing to do". Matched only on a
+# SUCCESSFUL run, so a failure whose text happens to contain one of these
+# phrases is still delivered. Phrase-form on purpose: a bare "no" or "0" would
+# swallow real outcomes like "0 failed, 12 shipped".
+_NO_OP_SUMMARY = re.compile(
+    r"(short-?circuit|no producer had unshipped|nothing to do|no new |"
+    # "throttled: N scope(s) in flight >= cap" is the dispatcher deliberately
+    # standing down because capacity is full — it did no work by design.
+    r"^throttled:|"
+    r"\bno unverified\b|no rows need|no stale |no competitor-research runs|"
+    r"already (up to date|current)|signals unchanged|empty window|"
+    r"^\s*(no|0)\s+\w+\s+(found|needed|pending|to process|remain))", re.I)
+
+
+def _is_no_op_summary(summary: str) -> bool:
+    """True when a successful run's summary says it changed nothing."""
+    return bool(_NO_OP_SUMMARY.search(summary or ""))
 
 
 @dataclass
@@ -664,6 +685,33 @@ class AgentBase:
             return
         if result.status == "blocked":
             return
+
+        # Do not email a run that changed nothing.
+        #
+        # Every run emailed a summary regardless of whether it did any work.
+        # Measured over 24h on 2026-09-11 that was ~2,400 messages/day, of
+        # which ~80% were no-ops: 527 "no producer had unshipped recs", 121
+        # "short-circuited: signals unchanged", 62 "No unverified rows", 41
+        # "No rows need archive". The genuine signal — a failure, a shipped
+        # rec, a recommendation awaiting a reply — was buried underneath it.
+        #
+        # Failures are NEVER suppressed: a run that breaks still emails, which
+        # is the whole point of the channel. Routine per-run status is already
+        # durably recorded (progress.json, decisions.jsonl, the run-index) and
+        # is served by the framework API at /api/agents and /api/runs, so this
+        # removes a duplicate, not a record.
+        #
+        # Override per agent with `always_email_run_summary = True`.
+        if (result.status or "").lower() in ("success", "completed", "ok") \
+                and not getattr(self, "always_email_run_summary", False):
+            if getattr(result, "short_circuited", False):
+                logger.info("[%s] run-summary email skipped: short-circuited",
+                            self.agent_id)
+                return
+            if _is_no_op_summary(result.summary or ""):
+                logger.info("[%s] run-summary email skipped: no-op (%s)",
+                            self.agent_id, (result.summary or "")[:60])
+                return
         manifest = get_agent(self.agent_id)
         owner = (manifest.owner if manifest else "") or os.environ.get(
             "AGENT_DEFAULT_OWNER_EMAIL", "")
