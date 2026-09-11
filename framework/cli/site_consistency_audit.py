@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import html as _html
 import json
 import os
 import re
@@ -217,7 +218,8 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
     its findings plus the facts the cross-page checks need afterwards."""
     findings: list[dict] = []
     rec = {"url": url, "status": status, "findings": findings, "title": "", "h1": "",
-           "meta_desc": "", "links": [], "imgs": [], "redirect_to": "", "is_html": False}
+           "meta_desc": "", "links": [], "imgs": [], "redirect_to": "", "is_html": False,
+           "canonical": ""}
 
     def add(sev, kind, msg, **extra):
         findings.append(dict(severity=sev, kind=kind, url=url, message=msg, **extra))
@@ -265,8 +267,13 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
         add("error", "no-title", "empty <title>")
     elif len(title) < 12:
         add("warn", "short-title", f"title is {len(title)} chars: {title!r}")
-    if not re.search(r'<link[^>]+rel\s*=\s*["\']canonical["\'][^>]*>', html, re.I):
+    cm = re.search(r'<link[^>]+rel\s*=\s*["\']canonical["\'][^>]*>', html, re.I)
+    if not cm:
         add("warn", "no-canonical", "no rel=canonical")
+    else:
+        ch = re.search(r'href\s*=\s*["\']([^"\']+)["\']', cm.group(0), re.I)
+        if ch:
+            rec["canonical"] = urllib.parse.urljoin(url, _html.unescape(ch.group(1))).rstrip("/") or "/"
 
     for rx, kind, sev, label in (
         (PLACEHOLDER, "placeholder-text", "error", "placeholder/debug text"),
@@ -375,7 +382,10 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
     origin = urllib.parse.urlsplit(url)
     internal = []
     for href in _attr_all(html, "a", "href"):
-        nxt = urllib.parse.urljoin(url, href).split("#")[0]
+        # Unescape first: an href written `?a=1&amp;b=2` in HTML is the URL
+        # `?a=1&b=2`. Requesting the literal `&amp;` fetches a DIFFERENT url,
+        # which made 40 tracking variants of one page look like 40 pages.
+        nxt = urllib.parse.urljoin(url, _html.unescape(href)).split("#")[0]
         p = urllib.parse.urlsplit(nxt)
         if p.netloc == origin.netloc and p.scheme in ("http", "https"):
             internal.append(nxt.rstrip("/") or "/")
@@ -556,6 +566,13 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
         groups: dict[str, list] = {}
         for u, rec in pages.items():
             v = (rec.get(field) or "").strip()
+            # A page whose canonical points ELSEWHERE is not competing — it has
+            # already told Google which URL to keep. /shoppinglist?source=… has
+            # 40 tracking variants that all canonicalise to /shoppinglist, and
+            # counting them as duplicates was pure noise.
+            canon = (rec.get("canonical") or "").strip()
+            if canon and canon != u.rstrip("/") and canon != u:
+                continue
             if v:
                 groups.setdefault(v, []).append(u)
         for v, urls in groups.items():
