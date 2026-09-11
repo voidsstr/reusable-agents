@@ -24,7 +24,27 @@ from pathlib import Path
 from typing import Iterable
 
 
-QUEUE_ROOT = Path(os.path.expanduser("~/.reusable-agents/indexnow-submitter"))
+def _queue_root() -> Path:
+    """Resolve the force-submit queue dir the indexnow-submitter agent reads.
+
+    Callers of this script (notably the implementer) frequently run with HOME
+    pointed at a claude-pool profile — ``<fleet-root>/claude-pool/profile-N``.
+    Expanding ``~/.reusable-agents`` there yields a *shadow* queue tree that the
+    agent never reads, so every queued URL is silently stranded and the page
+    waits for the next sitemap diff instead of being pushed within 15 minutes.
+    When HOME is nested inside a ``.reusable-agents`` root, walk back up to it.
+    """
+    override = os.environ.get("INDEXNOW_QUEUE_ROOT")
+    if override:
+        return Path(os.path.expanduser(override))
+    home = Path(os.path.expanduser("~")).resolve()
+    for parent in home.parents:
+        if parent.name == ".reusable-agents":
+            return parent / "indexnow-submitter"
+    return home / ".reusable-agents" / "indexnow-submitter"
+
+
+QUEUE_ROOT = _queue_root()
 
 
 def _normalize(site: str, line: str) -> str | None:
@@ -62,7 +82,10 @@ def queue(site: str, urls: Iterable[str]) -> int:
             existing_set.add(u)
             added += 1
     if added:
-        path.write_text("\n".join(existing[-50000:]))
+        # Trailing newline is load-bearing: operators and other agents append to
+        # this queue with ">>", which would otherwise splice a URL onto the last
+        # line and make both unusable.
+        path.write_text("\n".join(existing[-50000:]) + "\n")
     return added
 
 
