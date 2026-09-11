@@ -470,6 +470,36 @@ itself become a source of damage. Fixes go through the owning agent, or you.
 
 ---
 
+## 5e. Email volume — routine status does NOT go to the inbox
+
+Decided with the operator 2026-09-11 after run-summary mail hit ~2,400/day,
+~80% of it no-ops ("no producer had unshipped recs", "short-circuited",
+"No unverified rows", "throttled: N scope(s) in flight"). Burying a real
+failure under 2,000 non-events is the practical equivalent of not sending it.
+
+The contract now:
+
+- **Email** = failures, shipped recs, and recommendations awaiting a reply.
+- **Dashboard / API** = routine per-run status. It was always recorded there;
+  email was duplicating it.
+    GET /api/agents             — all 83 agents, status, last run
+    GET /api/agents/<id>/status
+    GET /api/runs               — run history
+  (framework API, `Authorization: Bearer $FRAMEWORK_API_TOKEN`;
+   nsc-dashboard is the UI, minReplicas=0 so first hit cold-starts.)
+
+`AgentBase._maybe_send_run_summary_email` enforces it: a SUCCESSFUL run that
+sets `result.short_circuited` or whose summary matches a no-op phrase sends
+nothing. **Failures are never suppressed.** An agent that genuinely must report
+every run sets `always_email_run_summary = True`.
+
+If email volume climbs again, check that first — and do NOT reach for
+`DIGEST_DISABLED=1`. That kill switch drops mail whose caller did not pass
+`bypass_digest=True`, which silently breaks the escalation path (see the mail
+transport note below). Fix what is emitting, not the transport.
+
+---
+
 ## 6. Escalation — email + in-session (when BLOCKED or DOWN-unrecovered)
 
 Escalate when: you can't safely auto-fix; a fix needs a credential or an
