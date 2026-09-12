@@ -389,8 +389,15 @@ gaming MOUSE product photo as its hero for MONTHS.
 `site-consistency-audit.timer` (05:40 + 17:40 daily) crawls BOTH sites
 breadth-first to depth 5 and writes:
 
-    /tmp/reusable-agents-logs/site-audit-specpicks.json
-    /tmp/reusable-agents-logs/site-audit-aisleprompt.json
+    ~/.reusable-agents/site-consistency-audit/site-audit-specpicks.json
+    ~/.reusable-agents/site-consistency-audit/site-audit-aisleprompt.json
+
+**Not /tmp.** /tmp on this host is tmpfs (RAM-backed) and is wiped on every
+boot. Reports AND the regression baseline lived there until 2026-09-12, when a
+reboot silently erased the baseline — the next run would have reported
+"baseline stored" instead of a regression. A monitor that forgets is not a
+monitor. If you ever see "(baseline stored)" on a site that has run before,
+suspect lost state before you believe the site is clean.
 
 **READ THE `diff` BLOCK FIRST — it is the whole point.** The absolute finding
 count is mostly noise (every site has a tail of known warts). What matters is
@@ -399,8 +406,8 @@ what CHANGED since the agents last shipped:
 ```bash
 for s in specpicks aisleprompt; do
   python3 -c "
-import json
-d=json.load(open('/tmp/reusable-agents-logs/site-audit-$s.json'))
+import json,os
+d=json.load(open(os.path.expanduser('~/.reusable-agents/site-consistency-audit/site-audit-$s.json')))
 f=d['diff']; sev=d['summary']['by_severity']
 print('$s', d['pages_crawled'],'pages', sev, 'REGRESSION' if f['is_regression'] else 'stable')
 if f['new_kinds']: print('   NEW:', ', '.join(f['new_kinds']))

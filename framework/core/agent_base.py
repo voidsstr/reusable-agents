@@ -60,6 +60,10 @@ _NO_OP_SUMMARY = re.compile(
     # standing down because capacity is full — it did no work by design.
     r"^throttled:|"
     r"\bno unverified\b|no rows need|no stale |no competitor-research runs|"
+    # Observed in the 2026-09-12 tick, still emailing after the first pass:
+    #   "All news articles already have a verified hero"
+    #   "No specpicks-seo-opportunity recs awaiting schema review"
+    r"^all \w+ .*already |^no [\w-]+ recs?\b|"
     r"already (up to date|current)|signals unchanged|empty window|"
     r"^\s*(no|0)\s+\w+\s+(found|needed|pending|to process|remain))", re.I)
 
