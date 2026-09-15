@@ -741,6 +741,37 @@ class AgentBase:
             "AGENT_SUMMARY_SENDER",
             os.environ.get("OPERATOR_FROM_EMAIL", ""),
         )
+        # Route into the DAILY digest instead of sending immediately.
+        #
+        # This was the last direct-to-inbox path in the framework. completion_email
+        # already honours the DIGEST_ONLY gate (default on), but run summaries went
+        # straight out via msmtp and bypassed it entirely — which is why the
+        # operator still received ~500 separate messages a day after the no-op
+        # suppression landed. Queued entries are rendered into one consolidated
+        # mail by digest-rollup-agent.
+        #
+        # FAILURES ARE NOT QUEUED. A failed run still sends immediately: a digest
+        # that arrives tomorrow morning is useless for something that is broken
+        # now, and the escalation path exists precisely so a breakage reaches a
+        # human while it matters. Set AGENT_SUMMARY_DIGEST=0 to restore the old
+        # per-run behaviour for every status.
+        failed = (result.status or "").lower() not in ("success", "completed", "ok")
+        if not failed and os.environ.get("AGENT_SUMMARY_DIGEST", "1") == "1":
+            try:
+                self.queue_for_digest(
+                    subject=subject, body_html=body_html,
+                    to=[owner], sender=sender,
+                    site=getattr(self, "site", "") or "",
+                )
+                logger.info("[%s] run summary queued for the daily digest",
+                            self.agent_id)
+                return
+            except Exception as e:
+                # Never lose the summary because the queue is unavailable —
+                # fall through to the direct send below.
+                logger.warning("[%s] digest queue unavailable, sending direct: %s",
+                               self.agent_id, e)
+
         try:
             from shared.site_quality import send_via_msmtp  # type: ignore
             ok, detail = send_via_msmtp(
