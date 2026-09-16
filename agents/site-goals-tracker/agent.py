@@ -94,6 +94,14 @@ SITE_PROFILES: dict[str, dict] = {
         "ga4_property_id": "531274480",
         "db_env": "SPECPICKS_DATABASE_URL",
         "conversion_events": ["amazon-clicks", "ebay-clicks"],
+        # The site's delegated listener (frontend/src/utils/affiliateClickTracking.ts)
+        # sends `amazon_click` / `ebay_click`. The goal names use the hyphenated
+        # form, so the GA4 lookup never matched either one and the GA4 side of
+        # these goals has always been 0.
+        "ga4_event_aliases": {
+            "amazon-clicks": ["amazon_click"],
+            "ebay-clicks": ["ebay_click"],
+        },
         "conversion_sql": {
             "amazon-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
                               "WHERE target = 'amazon' "
@@ -272,7 +280,9 @@ def collect_metrics(profile: dict) -> dict[str, float]:
 
     total_conv = 0
     for ev in profile.get("conversion_events", []):
-        ga_n = int(events.get(ev, 0))
+        ga_n = int(events.get(ev, 0)) + sum(
+            int(events.get(alias, 0))
+            for alias in (profile.get("ga4_event_aliases") or {}).get(ev, []))
         fp_n = int(first_party.get(ev, 0))
         n = max(ga_n, fp_n)
         metrics[f"goal-{_slug(ev)}-30d"] = float(n)
