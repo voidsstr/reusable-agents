@@ -46,7 +46,10 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import datetime as _dt
+import json
 import os
+import time as _time
 import random
 import time
 import traceback
@@ -141,6 +144,67 @@ def _should_send_alert(agent_id: str, error_class: str,
     return True
 
 
+# ── alert dedup ────────────────────────────────────────────────────────────
+# Tiny on-disk ledger of when each (agent, error_class) last paged. Deliberately
+# a local file, not blob storage: an alert must not depend on the network being
+# healthy to be delivered.
+ALERT_DEDUP_WINDOW_S = int(os.environ.get("ALERT_DEDUP_WINDOW_S", str(24 * 3600)))
+_ALERT_LEDGER = os.path.expanduser("~/.reusable-agents/alert-dedup.json")
+
+
+def _alert_ledger_read() -> dict:
+    try:
+        with open(_ALERT_LEDGER) as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _alert_seen_recently(agent_id: str, error_class: str) -> bool:
+    key = f"{agent_id}|{error_class}"
+    last = _alert_ledger_read().get(key)
+    if not last:
+        return False
+    return (_time.time() - float(last)) < ALERT_DEDUP_WINDOW_S
+
+
+def _alert_mark_sent(agent_id: str, error_class: str) -> None:
+    d = _alert_ledger_read()
+    d[f"{agent_id}|{error_class}"] = _time.time()
+    os.makedirs(os.path.dirname(_ALERT_LEDGER), exist_ok=True)
+    tmp = _ALERT_LEDGER + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(d, fh)
+    os.replace(tmp, _ALERT_LEDGER)
+
+
+
+# Hard ceiling on immediate alert emails per calendar day, so a bad morning
+# across many agents still cannot flood the inbox. Anything over the cap is
+# folded into the daily digest rather than dropped.
+ALERT_MAX_PER_DAY = int(os.environ.get("ALERT_MAX_PER_DAY", "1"))
+
+
+def _alert_budget_spent() -> bool:
+    d = _alert_ledger_read()
+    today = _dt.date.today().isoformat()
+    return int(d.get("_sent_" + today, 0)) >= ALERT_MAX_PER_DAY
+
+
+def _alert_budget_consume() -> None:
+    d = _alert_ledger_read()
+    today = _dt.date.today().isoformat()
+    d["_sent_" + today] = int(d.get("_sent_" + today, 0)) + 1
+    for k in [k for k in d if k.startswith("_sent_") and k != "_sent_" + today]:
+        d.pop(k, None)          # keep the ledger from growing forever
+    os.makedirs(os.path.dirname(_ALERT_LEDGER), exist_ok=True)
+    tmp = _ALERT_LEDGER + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(d, fh)
+    os.replace(tmp, _ALERT_LEDGER)
+
+
+
 def notify_operator(
     *,
     agent_id: str,
@@ -206,6 +270,54 @@ def notify_operator(
         from shared.site_quality import send_via_msmtp
     except Exception as e:
         return False, f"send_via_msmtp unavailable: {e}"
+
+    # ALERT BATCHING — operator request 2026-09-15, stated twice: "I only want
+    # 1 email per day", explicitly including alerts ("for alerts like that").
+    #
+    # These were the remaining constant stream. They carry bypass_digest=True, so
+    # they skip the digest AND the digest-archive record — which is why the
+    # archive showed ZERO sends in the last hour while mail kept arriving. The
+    # aisleprompt-article-hero-image-curator timer fires every 15 minutes and was
+    # failing ~37% of runs, so one unresolved problem alone generated ~35 alerts
+    # a day, all of them the same error.
+    #
+    # Repeats are now folded into the daily digest. The FIRST occurrence of a
+    # given (agent_id, error_class) in ALERT_DEDUP_WINDOW_S still sends
+    # immediately, so a genuinely new failure reaches a human while it matters —
+    # which is the property site_quality's kill-switch comment above exists to
+    # protect. A problem that is merely still-happening does not re-page.
+    #
+    # ALERT_DIGEST=0 restores immediate delivery for every alert.
+    if os.environ.get("ALERT_DIGEST", "1") == "1":
+        try:
+            # ALERT_DIGEST_ALL=1 is the strictest setting: nothing pages, the
+            # daily digest is the ONLY email. Costs you same-day notice of an
+            # outage, so it is opt-in rather than the default.
+            # Otherwise: a repeat of a known problem, or anything over the daily
+            # cap, is folded into the digest.
+            if (os.environ.get("ALERT_DIGEST_ALL", "0") == "1"
+                    or _alert_seen_recently(agent_id, error_class)
+                    or _alert_budget_spent()):
+                from . import digest_queue as _dq
+                _dq.queue(
+                    agent=agent_id,
+                    subject=f"[repeat] {subject}",
+                    body_html=body,
+                    to=[operator_email],
+                    sender=sender,
+                    extra_headers={
+                        "X-Reusable-Agent": agent_id,
+                        "X-Error-Class": error_class,
+                        "X-Severity": severity,
+                        "X-Alert-Repeat": "1",
+                    },
+                )
+                return True, "queued to daily digest (repeat alert)"
+            _alert_mark_sent(agent_id, error_class)
+            _alert_budget_consume()
+        except Exception as e:
+            # Never lose an alert because the dedup store or queue misbehaved.
+            logger.warning(f"alert dedup unavailable, sending direct: {e}")
 
     try:
         ok, detail = send_via_msmtp(
