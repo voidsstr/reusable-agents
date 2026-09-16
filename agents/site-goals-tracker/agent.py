@@ -186,6 +186,41 @@ def collect_metrics(profile: dict) -> dict[str, float]:
         except Exception as e:
             err(f"  GSC totals failed: {e}")
 
+    # --- GA4: AI Assistant channel sessions (30d) ---
+    #
+    # rec growth-20260916T001200Z-03. AI Assistant is GA4's channel group for
+    # referrals from ChatGPT / Perplexity / Gemini and friends, and on
+    # aisleprompt it is the highest-intent human channel on the site: measured
+    # 2026-09-16, 33 sessions with 32 of them engaged, against Organic Search's
+    # 37/30. It was not tracked here at all, so the one channel worth building
+    # on had no daily series and no goal.
+    #
+    # Read straight off sessionDefaultChannelGroup rather than any raw
+    # activeUsers total. Direct carries 32,562 sessions against ~70 real human
+    # ones — that is the Tencent-Cloud bot fleet, and any goal keyed off an
+    # unfiltered GA4 user count is tracking bots, not traction. Filtering to a
+    # named channel sidesteps that entirely.
+    if token:
+        try:
+            ch_resp = ga4_run_report(token, profile["ga4_property_id"], {
+                "dateRanges": [{"startDate": start_30d, "endDate": end_today}],
+                "dimensions": [{"name": "sessionDefaultChannelGroup"}],
+                "metrics": [{"name": "sessions"}, {"name": "engagedSessions"}],
+                "dimensionFilter": {"filter": {
+                    "fieldName": "sessionDefaultChannelGroup",
+                    "stringFilter": {"matchType": "EXACT", "value": "AI Assistant"},
+                }},
+            })
+            ch_rows = ch_resp.get("rows") or []
+            # No rows means the channel genuinely had no sessions in the
+            # window, which is a real zero and should be recorded as one.
+            metrics["goal-ai-assistant-sessions-30d"] = float(
+                ch_rows[0]["metricValues"][0]["value"]) if ch_rows else 0.0
+            metrics["ga4-ai-assistant-engaged-sessions-30d"] = float(
+                ch_rows[0]["metricValues"][1]["value"]) if ch_rows else 0.0
+        except Exception as e:
+            err(f"  GA4 AI Assistant channel failed: {e}")
+
     # --- Conversions (30d): GA4, corrected by first-party click tables ---
     #
     # CONVERSION_SQL_NOTE. GA4 alone reports these as ZERO, and that zero is
@@ -364,6 +399,18 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
             "metric": {"name": "organic_clicks_30d", "current": 0,
                        "target": 5000 if is_aisleprompt else 3000,
                        "direction": "increase", "unit": "clicks", "horizon_weeks": 16},
+            "status": "active",
+        },
+        {
+            "id": "goal-ai-assistant-sessions-30d",
+            "title": f"30-day AI Assistant sessions ({site_label})",
+            "description": "GA4 sessions whose channel group is 'AI Assistant' — "
+                           "ChatGPT / Perplexity / Gemini referrals. Highest engagement "
+                           "rate of any human channel on the site; the GEO/AI-search "
+                           "thesis in docs/seo-growth-strategy.md is measured here.",
+            "metric": {"name": "ai_assistant_sessions_30d", "current": 0,
+                       "target": 50 if is_aisleprompt else 100,
+                       "direction": "increase", "unit": "sessions", "horizon_weeks": 8},
             "status": "active",
         },
         {
