@@ -52,6 +52,12 @@ class Page:
     # that turn failures into "broken page" findings must report this — a
     # single dropped read is not a site defect.
     attempts: int = 1
+    # 2026-09-18: the URL that was requested, when the fetch followed a
+    # redirect to `url`. requests follows 3xx silently, so without this a
+    # legacy slug that 301s to its canonical was recorded as "200 at the old
+    # URL with a non-self canonical" — a false indexing-fix finding the SEO
+    # audit re-emitted every run for weeks after the redirect shipped.
+    redirected_from: str = ""
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -330,9 +336,20 @@ def crawl(
             fetched += 1
             continue
 
+        # Report the page where it actually lives. A redirect to a page we
+        # already crawled adds nothing, and one that leaves the site (an
+        # affiliate hop) is not a page of this site at all.
+        redirected_from = ""
+        final_url = _normalize_url(url, r.url or url) or url
+        if final_url != url:
+            if final_url in seen or not _same_origin(final_url, base_url):
+                continue
+            seen.add(final_url)
+            redirected_from, url = url, final_url
+
         page = Page(
             url=url, status_code=r.status_code, fetch_ms=ms, depth=depth,
-            attempts=attempts,
+            attempts=attempts, redirected_from=redirected_from,
             content_type=(r.headers.get("Content-Type") or "").split(";")[0].strip(),
         )
         if "html" not in page.content_type.lower() and "xml" not in page.content_type.lower():
