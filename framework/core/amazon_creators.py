@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -229,6 +230,7 @@ class AmazonCreatorsClient:
         does CreatorsThrottled surface.
         """
         attempt = 0
+        net_attempt = 0
         while True:
             self._throttle()
             req = urllib.request.Request(
@@ -265,6 +267,21 @@ class AmazonCreatorsClient:
                     continue
                 raise RuntimeError(
                     f"Creators {operation} failed HTTP {e.code}: {detail}"
+                ) from e
+            except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
+                # 2026-09-18: a TLS handshake timeout to the catalog host
+                # escaped as a raw URLError and failed the whole
+                # kitchen-scraper run (27 min of work lost, unit marked
+                # failed). Network-level trouble is "unavailable this run",
+                # the same class callers already handle: retry once, then
+                # surface CreatorsUnavailable so the caller skips the refresh
+                # and carries on.
+                net_attempt += 1
+                if net_attempt <= 1:
+                    time.sleep(3.0)
+                    continue
+                raise CreatorsUnavailable(
+                    f"Creators {operation} unreachable: {e}"
                 ) from e
 
     def get_items(
