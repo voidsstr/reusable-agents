@@ -450,7 +450,11 @@ class CompetitorResearchAgent(AgentBase):
             except Exception as e:
                 self.decide("error", f"competitor brainstorm failed: {e}")
                 seeds = []
-        seeds = [d.strip().lower().lstrip("https://").lstrip("http://").rstrip("/") for d in seeds][:max_comp]
+        # A prefix strip, not str.lstrip(): lstrip takes a character SET, so
+        # lstrip("https://") also ate the leading letters of the domain —
+        # "pcpartpicker.com" became "cpartpicker.com" and "tomshardware.com"
+        # became "omshardware.com", and the crawl hit hosts that don't exist.
+        seeds = [re.sub(r"^https?://", "", d.strip().lower()).rstrip("/") for d in seeds][:max_comp]
         seeds = [d for d in seeds if d and d != cfg.domain.lower()]
         self.decide("plan",
                     f"comparing against {len(seeds)} competitor(s): {', '.join(seeds[:6])}",
@@ -607,6 +611,21 @@ class CompetitorResearchAgent(AgentBase):
             except Exception as e:
                 self.decide("error", f"app-store scan failed: {e}")
 
+        # No competitor evidence → no comparison. The chunker below falls back
+        # to `[[]]` on an empty list, so without this guard the compare LLM
+        # was asked for parity-gap recs against zero competitors and answered
+        # anyway: 6 recs on 2026-09-19 and 7 on 09-23 were queued with nothing
+        # behind them. 'blocked' keeps the run visibly non-green.
+        if not theirs_features:
+            return RunResult(
+                status="blocked",
+                summary=(f"No competitor pages crawled for any of {len(seeds)} "
+                         f"seed(s) ({', '.join(seeds[:8])}); skipped compare. "
+                         f"Check the seeds in site.yaml and whether the "
+                         f"origins block the crawler's user agent."),
+                metrics={"competitors_analyzed": 0, "recs_total": 0},
+            )
+
         # ── 4. Compare → recommendations ────────────────────────────────────
         self.status("comparing + writing recommendations", progress=0.65)
         # Cap recs to keep the blueprint output budget tractable.
@@ -740,7 +759,34 @@ class CompetitorResearchAgent(AgentBase):
                 raw = self.ai_chat([
                     {"role": "system", "content": COMPARE_SYS},
                     {"role": "user", "content": _build_compare_user(chunk, per_chunk_recs)},
-                ], temperature=0.2, max_tokens=6000, timeout=compare_timeout_s)
+                ], temperature=0.2, max_tokens=6000, timeout=compare_timeout_s,
+                    # max_turns is REQUIRED here even though this reads like a
+                    # one-shot synthesis. claude-cli ships WebFetch/web_search
+                    # enabled (see AgentBase.ai_chat's docstring), and the model
+                    # spends its FIRST turn on a tool call when the compare
+                    # prompt mentions competitor URLs — so with the framework
+                    # default of max_turns=1 it hits the cap before emitting any
+                    # text and the CLI returns "Error: Reached max turns (1)".
+                    #
+                    # Every chunk then fails and the run ends
+                    # "LLM compare failed: all N chunk(s) errored". Observed
+                    # 2026-09-23 failing identically on BOTH sites, because this
+                    # is the shared blueprint: specpicks 06:34, aisleprompt
+                    # 10:13 and 14:13.
+                    #
+                    # Raising it also switches the provider to stream-json
+                    # (ai_providers.py: `use_stream_json = max_turns > 1`),
+                    # which is the correct output mode for any multi-turn run —
+                    # `--output-format text` prints only the FINAL assistant
+                    # turn and silently truncates a text -> tool -> text
+                    # sequence to its tail. That truncation is what zeroed
+                    # publish volume on both sites in 2026-08.
+                    #
+                    # 8, not the proposers' 30: this is synthesis over pages
+                    # already fetched into the prompt, so it needs room for a
+                    # couple of tool round-trips, not an open-ended research
+                    # budget.
+                    max_turns=8)
             except Exception as e:
                 chunk_failures += 1
                 self.decide(

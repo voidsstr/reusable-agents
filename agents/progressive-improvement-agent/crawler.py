@@ -78,10 +78,21 @@ def _normalize_url(base: str, href: str) -> Optional[str]:
     return urllib.parse.urlunparse(parsed._replace(fragment=""))
 
 
+def _site_host(netloc: str) -> str:
+    host = netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 def _same_origin(a: str, b: str) -> bool:
-    pa = urllib.parse.urlparse(a)
-    pb = urllib.parse.urlparse(b)
-    return pa.netloc == pb.netloc
+    # `example.com` and `www.example.com` are one site. Most origins answer
+    # the apex with a 301 to www, and since the crawler started reporting
+    # redirected pages at their final URL (1f460cc, 2026-09-18) an exact
+    # netloc match dropped every such page as "off-site" — the crawl of
+    # https://rtings.com yielded nothing at all. competitor-research went
+    # from 5 competitors analyzed (09-17) to 0 on every run after, and still
+    # emitted recs from an empty comparison.
+    return (_site_host(urllib.parse.urlparse(a).netloc)
+            == _site_host(urllib.parse.urlparse(b).netloc))
 
 
 def _path_excluded(url: str, excludes: list[str]) -> bool:
