@@ -1,5 +1,14 @@
 # Competitor Research — Claude Desktop / Sub-agent Task
 
+> **Out of date (checked 2026-09-23).** The live prompts are the
+> `EXTRACT_FEATURES_SYS`, `EXTRACT_FEATURES_BATCH_SYS` and `COMPARE_SYS`
+> constants in `agent.py`, and they win where this file differs. In
+> particular, `COMPARE_SYS` also requires `user_story`, a `blueprint`
+> object (UI, backend, data model, API, integrations, edge cases, rollout,
+> complexity) and `success_metrics` on every rec, and applies an
+> EXISTING-FEATURE GATE against `current_state_inventory`. The batched
+> extract returns one object keyed by competitor domain.
+
 You are doing competitor research for a website. You have two jobs depending
 on which prompt you receive.
 

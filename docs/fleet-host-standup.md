@@ -4,8 +4,9 @@
 > website builds and deployments, and a producing-not-just-green verification
 > gate. `setup-fleet-host` covered only the framework spine. This document
 > remains accurate as the NARRATIVE of the 2026-08 rebuild and its incidents.
-> Note the host described here (WSL2, RTX 4080 SUPER) is the OLD box; the
-> fleet is moving to a native-Linux host with an RTX 5090.
+> Note the host this rebuild produced (`whitebeast`: WSL2, RTX 4080 SUPER) is
+> the OLD box. The fleet has since moved to a native-Linux host with an RTX
+> 5090 — agent units there were created 2026-08-24. See "Current host" below.
 
 # Fleet host standup — rebuilding the machine that runs the agents
 
@@ -23,7 +24,7 @@ in fact there is no host at all.
 
 The operational runbook is the **`provision-fleet` skill**
 (`.claude/skills/provision-fleet/SKILL.md`). This page is the narrative: how
-the current host came to be, what a machine loses when it dies, and the
+the post-incident host came to be, what a machine loses when it dies, and the
 operator checklist that a script cannot do.
 
 ---
@@ -92,19 +93,39 @@ product), and **`recover-credentials.sh backup`** to Key Vault.
 
 ---
 
-## The current host (2026-08-13 →)
+## Current host (~2026-08-24 →)
+
+Native Linux — no WSL (kernel `7.0.0-31-generic`, no `WSLInterop` binfmt
+entry), Ubuntu 26.04 LTS, NVIDIA RTX 5090 (GB202). Repos at
+`/home/voidsstr/development` on ext4, `/dev/sda2` (3.7T). The first
+`agent-*` unit files were created **2026-08-24**; the framework spine units
+(`reusable-agents-api`, `reusable-agents-host-worker`, `auto-queue-drainer`)
+the same day. Its hostname is not `whitebeast` — that name belongs to the
+previous (Windows/WSL2) box below.
+
+Live units as of 2026-09-23: `reusable-agents-api.service` (:8090, bound to
+127.0.0.1) · 69 `agent-*.timer` (67 enabled; `oauth-heartbeat-agent` and
+`specpicks-scraper-watchdog` disabled) · `reusable-agents-host-worker.service`
+· `auto-queue-drainer.service` — all three spine services active. User linger
+is enabled, and Docker Engine runs natively (`docker.service`), so the two
+WSL-only checklist steps below do not apply here.
+
+---
+
+## Previous host: whitebeast (2026-08-13 → ~2026-08-24)
 
 `whitebeast`, WSL2 Ubuntu 24.04, RTX 4080 SUPER. Repos at
-`/home/voidsstr/development` on ext4 (892G free).
+`/home/voidsstr/development` on ext4 (892G free at standup). The notes below
+are kept because the reasoning — especially the storage choice — still holds.
 
-Why not `/mnt/c`: it is 9p, measured **~95× slower** for small writes (300
+Why not `/mnt/c` (WSL-only): it is 9p, measured **~95× slower** for small writes (300
 files: 0.01s vs 0.95s), and its free space swung 147G in twenty minutes — and a
 fleet-wide ENOSPC is already in the incident library. Why not the NAS: no
 reliable POSIX locking for git, and a share blip fails every agent at once.
 Durability instead comes from **code → GitHub**, **state → Azure blob**, and an
 optional rsync to the NAS.
 
-Live units: `reusable-agents-api.service` (:8090) · 55 `agent-*.timer` ·
+Units on whitebeast at standup: `reusable-agents-api.service` (:8090) · 55 `agent-*.timer` ·
 `reusable-agents-host-worker.service` · `auto-queue-drainer.service`.
 The Azure dashboard needed **no wiring** — it reads the same blob container
 this host writes to, so runs appear there within seconds.
@@ -140,15 +161,18 @@ Run `bash install/recover-credentials.sh status` for the live version.
    `~/.msmtprc` with the `automation` account. Without it every KTLO escalation
    fails **silently**, which is worse than failing loudly.
 4. **eBay keyset / BrightData** — vendor-console copy-paste into `secrets.env`.
-5. **Windows boot task** (admin PowerShell) — linger is enabled, but the distro
-   itself must start:
+5. **Windows boot task** (**WSL-only** — not needed on the current native-Linux
+   host, where user linger alone starts the units at boot). Admin PowerShell;
+   linger is enabled, but the distro itself must start:
    ```
    schtasks /create /tn "WSL-Fleet" /tr "C:\Windows\System32\wsl.exe -d Ubuntu-24.04 -u voidsstr --exec /bin/true" /sc onstart /ru voidsstr /rl highest /delay 0000:30 /f
    ```
-6. **Docker Desktop WSL integration** (optional) — unblocks the deployer, the
-   dashboard image build, and `specpicks-scraper-watchdog`. Review the pending
-   local implementer commits *before* enabling it, since deploys currently fail
-   closed at `rc=127`.
+6. **Docker Desktop WSL integration** (**WSL-only**, optional — on the current
+   host Docker Engine is installed natively and `docker.service` is active).
+   On whitebeast it unblocked the deployer, the dashboard image build, and
+   `specpicks-scraper-watchdog`; the advice there was to review the pending
+   local implementer commits *before* enabling it, since deploys failed
+   closed at `rc=127` without it.
 7. **Key Vault backup** — `bash install/recover-credentials.sh backup`, so the
    next host loss is a file copy.
 
@@ -164,8 +188,13 @@ Real issues this rebuild surfaced. None block operation; all are worth fixing.
 - **`registry/agents.json` drift** — 5 weeks stale at rebuild time. Registering
   from the repos is the correct default; the blob should follow, not lead.
 - **Agents with no declared goals** — CLAUDE.md requires 3–7 each.
-- **`specpicks-scraper-watchdog`** still shells `docker run` from a bash
-  entry_command, violating the AgentBase mandate. Currently disabled here.
+- **`specpicks-scraper-watchdog`** — at rebuild time it shelled `docker run`
+  from a bash entry_command. The entry_command is now a Python AgentBase
+  wrapper (`agents/scraper-watchdog/agent.py`), but that wrapper still
+  subprocesses `watchdog.sh`, which runs `docker run specpicks-scraper:latest`.
+  Disabled in its manifest (`"enabled": false`, specpicks commit `4833d1f`,
+  2026-08-25) because a `systemctl --user disable` alone does not survive
+  re-registration; its timer is disabled on the current host.
 
 ---
 

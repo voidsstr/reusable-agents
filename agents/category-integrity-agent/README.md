@@ -3,6 +3,12 @@
 Keeps products out of categories they do not belong in, so a buying guide stops
 listing slow cookers.
 
+This file is the design rationale. For operations (schedule, inputs/outputs,
+metrics, troubleshooting) see the runbook [AGENT.md](AGENT.md). This dir is a
+shared **engine** with no manifest of its own. The registered instance is
+`specpicks-category-integrity-agent` (`specpicks: agents/category-integrity-agent/`,
+manifest + `site.yaml` vocabulary).
+
 ## Why it exists
 
 2026-08-30, `/buying-guide/games-cartridges` on specpicks listed a Crock-Pot
@@ -52,10 +58,18 @@ with just a model number.
 ## What goes to the implementer
 
 De-categorising is treating the symptom. When the unscored share exceeds
-`CATEGORY_UNSCORED_ALERT` (default 25% — it is currently **54%**), the agent
-writes a recommendation for the implementer to fix the *writer*: every path that
-sets `category_id` without a confidence should run the same exported scoring
-rules, or leave the category NULL rather than guess.
+`CATEGORY_UNSCORED_ALERT` (default 25%; it was **54%** at launch and 53.3% on
+2026-09-23), the agent writes a recommendation for the implementer to fix the
+*writer*. Every path that sets `category_id` without a confidence should run the
+same exported scoring rules, or leave the category NULL rather than guess.
+
+The rec is written to the run's `recommendations.json` in storage; the agent
+does not queue it itself. `backlog-dispatcher-agent`, which lists this instance
+as a producer, picks recs up from there. The first one shipped on 2026-08-29 as specpicks
+commit `2d8345a`: the scraper and BD import no longer write `category_id`
+without a confidence. The share is measured over existing rows, so it stays
+high until the backlog is re-scored, and the agent keeps emitting the same rec
+each run meanwhile.
 
 Data repair is deterministic and safe to automate. Changing the categoriser is
 not, which is why that half goes out as a recommendation instead.
@@ -63,5 +77,6 @@ not, which is why that half goes out as a recommendation instead.
 | env | default | meaning |
 |---|---|---|
 | `CATEGORY_INTEGRITY_CONFIG` | — | required; the site's `site.yaml` |
+| `AGENT_ID` | `category-integrity-agent` | the instance id (storage prefix) |
 | `CATEGORY_MAX_FIX_PER_RUN` | `500` | de-categorisations per tick |
 | `CATEGORY_UNSCORED_ALERT` | `0.25` | unscored share that raises a code-fix rec |

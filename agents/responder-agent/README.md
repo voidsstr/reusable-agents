@@ -1,8 +1,15 @@
 # responder-agent
 
-Polls an IMAP inbox every 60 seconds, parses replies to agent-sent emails,
-and dispatches actions to the right downstream agent (e.g.,
-`implementer --recommendations rec-001,rec-005`).
+Polls an IMAP inbox (framework systemd timer, every 2 minutes), parses
+replies to agent-sent emails, and dispatches actions to the right downstream
+agent (e.g., the implementer with `RESPONDER_REC_IDS=rec-001,rec-005`).
+
+> **Operational runbook:** [AGENT.md](AGENT.md) covers schedule, live
+> status, storage keys, metrics and troubleshooting. This README is the
+> setup reference (OAuth bootstrap, send paths, reply grammar).
+> **2026-09-23:** on whitebeast the live `config.yaml` is still the
+> unedited example (`imap.host: imap.example.com`), so no mail is being
+> read. See AGENT.md → Failure modes.
 
 This is the human-in-the-loop bridge. The flow:
 
@@ -17,28 +24,38 @@ seo-reporter ─sends email─► automation@company.com ─► You read it
                                                 Parse subject + body
                                                            │
                                        ▼
-                           Write to <run>/responses.json
-                           Write to global responses queue
-                           Trigger implementer
+                  Write agents/<target>/responses-queue/<request-id>.json
+                  (+ legacy <run>/responses.json + global queue)
+                           Trigger implementer (systemd-run scope)
 ```
 
 ## What it does each tick
 
-1. Connect to IMAP server (TLS).
-2. Search for `UNSEEN` emails to the configured inbox.
+1. Connect to the IMAP server (TLS, 30 s socket timeout, 3 retries).
+2. Search for `UNSEEN` emails in the configured mailbox.
 3. For each:
-   - Extract the **agent id + run-ts** from the email's `In-Reply-To` /
-     `References` header (matches the `Message-ID` the original report set)
-     OR from the `Re: …` subject pattern.
+   - Identify the reply from the `X-Reusable-Agent` header, a run-ts in
+     the subject, or a `[<agent>:<site>]` subject tag. `In-Reply-To` /
+     `References` are read (`In-Reply-To` is copied into the archive entry)
+     but **not** used for matching: the reporter doesn't persist its
+     Message-IDs.
    - Parse the body for command lines:
      - `implement rec-001 rec-005`
      - `skip rec-002`
      - `merge rec-003 rec-004` (combine into one impl)
      - Or just `rec-001` (defaults to `implement`)
-   - Append to the matching run's `responses.json`.
-   - Append to the global `<runs_root>/_queue/responses.jsonl`.
+   - Write each rec's decision to framework storage at
+     `agents/<target_agent>/responses-queue/r-<run_ts>-<rec_id>.json`
+     (the target defaults to `implementer`).
+   - Also append to the run's legacy `responses.json` and the global
+     `<runs_root>/_queue/responses.jsonl`.
    - Mark the email as read.
-4. (Optional) trigger the downstream agent immediately.
+4. For `implement` / `merge` with a matching route, dispatch batch 1 to the
+   route's script. The implementer auto-chains the remaining batches.
+
+Draining `agents/responder-agent/auto-queue/` is **off** in this agent by
+default (`RESPONDER_DRAIN_AUTO_QUEUE=1` turns it on). The
+`auto-queue-drainer.service` daemon owns that job.
 
 ## Configuration
 
@@ -52,9 +69,15 @@ imap:
   use_tls: true
   mailbox: INBOX
   auth_method: oauth2                        # recommended; or 'password' for legacy
-  oauth_file: ~/.reusable-agents/responder/.oauth.json
+  oauth_file: ~/.reusable-agents/responder/.oauth.json   # IMAP needs the Outlook-scoped token:
+                                                         # install/setup-imap-oauth.sh writes
+                                                         # .imap-oauth.json and repoints this key
 
-# Map subject prefixes / X-Reusable-Agent-Site headers to a downstream agent.
+# Map the X-Reusable-Agent header (or a subject tag / body prefix) to a downstream agent.
+# Also supported (see responder.py _match_route_for_email): agent_prefix,
+# agent_subject_tag, agent_subject_tag_re, fallback: true, and a per-route
+# target_agent. Outlook usually strips X-headers from replies, so an
+# X-header-only route records replies without dispatching them.
 # When a reply matches, the responder routes the parsed action to this agent.
 routes:
   - match:
@@ -68,10 +91,9 @@ routes:
 runs_roots:
   - ~/.reusable-agents/seo/runs
 
-# (Optional) log every parsed action to this dashboard for visibility
-dashboard:
-  base_url: http://localhost:8080
-  agent_id: responder-agent
+# NOTE: a `dashboard:` block was documented here historically; the current
+# responder.py does not read it. Runs show up in the dashboard through the
+# AgentBase wrapper (agent.py) instead.
 ```
 
 ## OAuth setup (recommended — no password in a file)
@@ -156,7 +178,7 @@ short-lived access tokens automatically.
 **responder.py (IMAP)** — already wired. Set `auth_method: oauth2` in the
 responder config (the example shows both forms).
 
-**seo-reporter (sending email)** — three send paths, in priority order:
+**seo-reporter (sending email)** (`agents/seo-opportunity-agent/lib/reporter/send-report.py`; with `DIGEST_ONLY=1`, its default, the mail goes to the digest queue instead) — three send paths, in priority order:
 
 1. **Graph `sendMail`** (recommended for M365). No SMTP needed; uses Mail.Send
    delegated permission. The reporter's site config uses a `graph:` block:
@@ -193,18 +215,20 @@ responder config (the example shows both forms).
 ## Why poll IMAP instead of a webhook?
 
 - Works with any inbox / provider — no need for the email server to push.
-- 60-second cadence matches "respond next minute" UX.
+- A 2-minute cadence is close enough to "respond next minute" UX.
 - Stateless — no inbound HTTP endpoint to expose / secure.
 - One responder can watch many automation inboxes if needed.
 
-## Cron
+## Scheduling
 
-```cron
-* * * * * cd /home/voidsstr/development/reusable-agents/responder-agent && python3 responder.py >> /tmp/responder-agent.log 2>&1
-```
-
-Or wire as a `desktop-task` with `cron_expr: "* * * * *"` so the dashboard
-shows it next to the other agents.
+The agent is registered with the framework (`manifest.json`,
+`cron_expr: "*/2 * * * *"`, UTC). The framework writes the systemd user
+timer `agent-responder-agent.timer` (`OnCalendar=*-*-* *:0/2:00`), which runs
+`agent.py` (the AgentBase wrapper) through `framework/agent_run_wrapper.sh`.
+The log goes to `/tmp/reusable-agents-logs/agent-responder-agent.log`.
+Don't add a separate crontab line. For a one-off tick outside the framework:
+`python3 responder.py --once`. `--daemon --interval 60` also exists, but is
+not used in production.
 
 ## Reply parsing
 
@@ -217,12 +241,18 @@ Email body grammar (case-insensitive, line-based):
 | `skip rec-005` | mark rec as skipped (no action taken, but recorded) |
 | `merge rec-001 rec-002` | combine into a single implementation |
 | `rec-001` | defaults to implement |
-| `[seo:aisleprompt] implement rec-001` | explicit site/agent prefix (overrides routing) |
+| `[seo:aisleprompt] implement rec-001` | explicit prefix: the site part sets the site; the agent part is matched by `agent_prefix` routes |
+| `implement art-001 art-003` | article-proposal ids (`art-NNN`) are accepted like `rec-NNN` |
+| `implement rec-001 - rec-007` / `implement 1-7` / `implement 1, 3, 5` | ranges and bare numbers (bare numbers only after a verb) |
+| `implement r-1a2b3c4d` | globally-unique rec uid, resolved downstream |
+| `implement all` / `implement high and critical` / `skip experimental` | bulk filters (`all auto review experimental critical high medium low`), expanded against the run's `recommendations.json` by `tier` / `severity` / `priority` |
+| `modify rec-004 …` | recorded with action `modify` (not dispatched) |
 
 Lines without a recognized command are ignored. Multiple commands per email
-are fine — they're processed in order.
+are fine — they're processed in order, and sentences on one line are split
+(`Hey — implement art-001. Skip art-005.` yields two actions).
 
 ## Schema
 
-Every parsed action is written as a [Response](../shared/schemas/responses.schema.json)
+Every parsed action is written as a [Response](../../shared/schemas/responses.schema.json)
 entry, with `source: "email-reply"`.

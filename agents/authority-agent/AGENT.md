@@ -1,102 +1,157 @@
-# Authority Agent — Runbook
+# Authority Agent (`authority-agent`)
 
-> Finds and prioritizes off-page authority opportunities (near-miss rankings, citable assets, unlinked mentions) to break the Discovered-not-indexed wall
+> Works the off-page lever the content agents don't: each day it reads the
+> site's indexation snapshot, ranks the most link-worthy published pages, and
+> emails the operator a link-building worklist (off-site targets + on-site
+> link-equity moves). North Star: **indexed pages** → organic clicks.
 
-## What this agent does
+## At a glance
 
-_(One paragraph: the goal of this agent, the systems it operates on,
-the users it affects.)_
+| | |
+|---|---|
+| Agent id | `authority-agent` |
+| Home | `reusable-agents/agents/authority-agent/` (`agent.py`, `run.sh`, `manifest.json`, `SKILL.md`) |
+| Kind | AgentBase python behind a thin bash env wrapper (`run.sh` sources `secrets.env`, sets defaults, `exec python3 agent.py`) |
+| Schedule | manifest `0 13 * * *` (America/Detroit) → systemd `OnCalendar=*-*-* 13:0:00`, `Persistent=true`; timer **enabled** |
+| Entry command | `bash …/agents/authority-agent/run.sh` |
+| Category | seo |
+| Status | live — one deployment, targeting **specpicks** via `run.sh` defaults (added 2026-07-24, commit `23a5ecd`) |
+| Other docs | [`README.md`](README.md) (quick reference), [`SKILL.md`](SKILL.md) (task stub pointing here) |
 
-## Schedule
+## What it does
 
-- Cron: `0 13 * * *` (`America/Detroit`)
-- Triggered by:
-  - The framework's systemd `--user` timer (auto-wired at registration)
-  - Manual: `curl -X POST http://localhost:8090/api/agents/authority-agent/trigger`
-  - UI: http://localhost:8091/agents/authority-agent → "▶ Run now"
+1. **Short-circuit check** — `signals()` (see below).
+2. **Indexation audit** — latest `gsc_crawl_progress` row for
+   `site = AUTHORITY_SITE_ID`: `indexed_pct = 100 × sample_indexed /
+   sample_total`, plus `states`, `clicks_28d`, `impr_28d` logged as a
+   decision.
+3. **Citable assets** — top 40 `status='published'` rows with a `body_md`
+   from `AUTHORITY_ASSET_TABLE`, ranked by
+   `length(body_md) + 400 × #related_product_asins + 3000 if the slug matches
+   vs|comparison|benchmark|best-`. URL is built as
+   `https://<AUTHORITY_SITE_DOMAIN>/reviews/<slug>`.
+4. **Worklist** — plain-text list of the top `AUTHORITY_WORKLIST_SIZE`
+   assets with a suggested outreach angle each, suggested channels
+   (subreddits, HARO/Qwoted, resource pages), and the on-site move
+   (2–3 contextual inline links from already-indexed hubs).
+5. **Email** — `send_via_msmtp(bypass_digest=True)`, subject
+   `[AUTHORITY:<site_id>] link-building worklist`, to
+   `mperry@northernsoftwareconsulting.com` from
+   `automation@northernsoftwareconsulting.com` (msmtp account `automation`).
+6. **Goal progress** — `record_goal_progress` for `surface-authority-targets`
+   every run and for `lift-indexation-rate` only when a snapshot row exists,
+   then `RunResult`.
 
-## Inputs / Outputs
+What it does **not** do (despite older wording in the module docstring and
+manifest description): it does not queue internal-link recs to the
+implementer (the code comment calls that "a v2"), step 3's "near-miss"
+list is just the top of the asset ranking (no per-query GSC data), and there
+is no unlinked-mention search. `send_external_outreach()` exists only as a
+`@requires_confirmation` stub and is never called.
 
-**Reads:**
-- _(External APIs, files, databases, credentials)_
+## Inputs
 
-**Writes:**
-- _(Files / blobs / DB rows / git commits this agent produces)_
-- Always: `agents/authority-agent/runs/<run-ts>/{progress,errors,decisions,context-summary}.{json,jsonl,md}` in the framework storage backend.
+| Source | Detail |
+|---|---|
+| `gsc_crawl_progress` (site DB) | written by the site's `scripts/gsc-crawl-tracker.js` (specpicks) — see *Failure modes* |
+| `editorial_articles` (default `AUTHORITY_ASSET_TABLE`) | `slug`, `title`, `body_md`, `related_product_asins`, `category`, `status` |
+| `~/.reusable-agents/secrets.env` | sourced by `run.sh` (also the unit's `EnvironmentFile`) |
 
-## Per-run flow
+## Outputs
 
-1. _(What pre_run does — load credentials, drain response queue, etc.)_
-2. _(The main `run()` work — step by step)_
-3. _(What post_run does — write summary, update goals)_
+- One operator email per non-short-circuited run. Today that means every
+  run, because the short-circuit never fires (see *Short-circuit &
+  idempotency*).
+- `RunResult.metrics`: `indexed_pct` (0 when no snapshot),
+  `citable_assets_found`, `authority_targets_surfaced`
+  (`min(#assets, worklist_size)`), `worklist_emailed`.
+- `next_state.last_indexed_pct`.
+- No recs, no handoffs, no DB writes.
+- Missing DSN → `RunResult(status="error", summary="DATABASE_URL not set")`.
 
-## Hard gates / guardrails
+## Goals & metrics
 
-_(Any operations that should never happen without confirmation. Methods
-gated with `@requires_confirmation` should be listed here. The framework's
-Confirmations UI will surface pending requests.)_
+No goals file in the dir; goals live in framework storage. Live after the
+2026-09-23 17:00 UTC run:
 
-- Example: `@requires_confirmation(reason="deploys to production Azure")`
-  on `deploy_to_azure()` — the agent emails the owner; nothing ships
-  until the owner replies "yes".
+| Goal id | Metric | Current | Target |
+|---|---|---|---|
+| `lift-indexation-rate` | `indexed_pct` | 8.3 % | 60 % |
+| `surface-authority-targets` | `authority_targets_surfaced` | 10 | 10 |
 
-## State carried between runs
+## Configuration
 
-State written by the agent persists at:
-- `agents/authority-agent/state/latest.json` — the most recent state object
-- `agents/authority-agent/state/history/<run-ts>.json` — historical snapshots
+| Env | Default | Meaning |
+|---|---|---|
+| `AUTHORITY_SITE_ID` | `specpicks` (set in `run.sh` and code) | `gsc_crawl_progress.site` filter; email subject |
+| `AUTHORITY_SITE_DOMAIN` | `specpicks.com` | used to build asset URLs |
+| `DATABASE_URL` | `run.sh` falls back to `DATABASE_URL_SPECPICKS` | site DSN |
+| `AUTHORITY_ASSET_TABLE` | `editorial_articles` | asset source table |
+| `AUTHORITY_WORKLIST_SIZE` | `10` | assets in the worklist |
+| `STORAGE_BACKEND` | `azure` (set in `run.sh`) | so goals/status land where the dashboard reads them |
 
-The framework auto-loads `latest.json` into `self.state` at the start of
-each run via `pre_run()`. Update `RunResult.next_state` in `run()` to
-persist for the next pass.
+A second site = a second manifest/instance overriding the first three env
+vars (per the `run.sh` comment); none exists today.
 
-## Decisions to log
+## Short-circuit & idempotency
 
-`self.decide("plan", "...")` — what the agent intends to do this run
-`self.decide("observation", "...")` — something noteworthy it noticed
-`self.decide("choice", "...", evidence=...)` — why it chose option A over B
-`self.decide("skip", "...")` — what it deliberately didn't do
-`self.decide("defer", "...")` — work pushed to a future run
-`self.decide("warning", "...")` — a caveat for the next run
-`self.decide("result", "...")` — outcome of an action
+`signals()` hashes `{gsc_snapshot_id: max(gsc_crawl_progress.id) for the
+site, newest_asset_id: max(<asset_table>.id)}` (returns `None`, meaning no
+short-circuit, when the DSN is missing or the query fails). **The
+short-circuit never fires, though.**
 
-These render to `runs/<run-ts>/decisions.jsonl` and into the next-run
-context summary the agent uses to learn over time.
+- `AgentBase._check_short_circuit()` keeps the hash in
+  `self.state["_auto_signals_hash"]`, but `run()` returns
+  `next_state={"last_indexed_pct": ...}` without it.
+- `post_run()` writes only `result.next_state` to
+  `agents/authority-agent/state/latest.json`, so the hash is dropped after
+  every run.
+- Evidence: after the 2026-09-23 17:00 UTC run, `state/latest.json` held only
+  `{"last_indexed_pct": 8.3}` (iteration 56). The 50 most recent runs in the
+  API history are all full `success` runs, with no `short-circuited` summary.
+- Result: every 13:00 (America/Detroit) run executes and sends the email,
+  even when both inputs are unchanged.
+- Fix (not yet applied): merge `self.state` into `next_state` in `run()`
+  (for example `next_state={**self.state, "last_indexed_pct": indexed_pct}`).
 
-## Goals + success criteria
+The run itself is read-only against the DB.
 
-_(Optional — define measurable outcomes the agent works toward.
-Goals live in `agents/authority-agent/goals/current.json` and get scored
-against the next run's snapshot.)_
+## Running & inspecting
 
-```json
-{
-  "goals": [
-    {
-      "id": "example-goal",
-      "description": "Move metric X from Y to Z",
-      "target_metric": "...",
-      "baseline": 0,
-      "target": 100,
-      "check_by": "+4-weeks"
-    }
-  ]
-}
+```bash
+systemctl --user start agent-authority-agent.service
+tail -f /tmp/reusable-agents-logs/agent-authority-agent.log
+curl -s -H "Authorization: Bearer $FRAMEWORK_API_TOKEN" \
+  http://localhost:8090/api/agents/authority-agent/runs?limit=10
+AGENT_FORCE_RUN=1 bash /home/voidsstr/development/reusable-agents/agents/authority-agent/run.sh   # bypass short-circuit once (currently unnecessary, see Short-circuit)
 ```
 
-## Operational notes
+`AGENT_FORCE_RUN=1` is a framework-wide escape hatch in
+`AgentBase._check_short_circuit()`. This agent does not need it today,
+because the short-circuit never fires. It becomes relevant once the
+`next_state` fix lands.
 
-- _(Anything an operator (human) needs to know about running, debugging,
-  or recovering this agent.)_
-- _(Logs are at `/tmp/reusable-agents-logs/authority-agent-*.log` if invoked
-  via host-worker; otherwise wherever the entry script writes.)_
+## Failure modes & troubleshooting
 
-## When something breaks
+| Symptom | Evidence / action |
+|---|---|
+| `indexed_pct` flat at 8.3 % | The newest specpicks `gsc_crawl_progress` row is from **2026-07-28** (sample 1/12); aisleprompt has one row (2026-06-08). Nothing on whitebeast schedules `scripts/gsc-crawl-tracker-cron.sh` (no timer or crontab entry found 2026-09-23), so the goal metric is frozen and `gsc_snapshot_id` never changes. With a 12-URL sample the metric moves in ~8.3-point steps. Restore the tracker before reading this goal. |
+| Runs (and emails) daily even with a stale snapshot | Expected until the `next_state` fix: the signals hash is never persisted (see *Short-circuit & idempotency*). Latest runs were 2026-09-23 03:11 UTC and 17:00 UTC, both `success` ("indexed 8.3% · 40 citable assets · 10 authority targets emailed"). Once the hash persists, note that `newest_asset_id` is `max(id)` of the whole asset table. Any inserted row (any status, not only published) will still trigger a re-run. |
+| `citable-asset query fell back` | `AUTHORITY_ASSET_TABLE` lacks the expected columns; worklist will be empty. |
+| `worklist email skipped` / `ok=False` | msmtp/`shared.site_quality` failure; see the run's decisions. |
 
-_(Common failure modes + recovery steps.)_
+## Guardrails
 
-## See also
+- `send_external_outreach` is `@requires_confirmation` (risk high,
+  affects external/reputation). Off-site link building stays a human action;
+  auto-pitching is spam.
 
-- [`SKILL.md`](SKILL.md) — Claude Desktop task definition (if used)
-- [`manifest.json`](manifest.json) — registry metadata
-- Framework: https://github.com/voidsstr/reusable-agents
+## Related agents
+
+- `specpicks-gsc-coverage-auditor` / `aisleprompt-gsc-coverage-auditor` —
+  other indexation signals.
+- `specpicks-internal-link-densifier` — automated article-to-article
+  `related_article_slugs` linking (this agent only recommends on-site links
+  in the email).
+- `specpicks-seo-opportunity-agent` / `aisleprompt-seo-opportunity-agent` —
+  on-page SEO recs.

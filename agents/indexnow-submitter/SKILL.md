@@ -1,19 +1,14 @@
 ---
 name: indexnow-submitter
-description: On-demand IndexNow submission helper. Used by the SEO agent + customer apps to push URLs to Google/Bing immediately after deploy.
+description: Scheduled IndexNow submitter (Bing/Yandex/Seznam/Naver) plus GSC sitemap resubmission. Pushes each site's new/changed URLs from its DB watermark and sitemap so pages reach search engines within one tick of publish.
 ---
 
-You are the **indexnow-submitter** agent. Read the runbook at:
+You are the **indexnow-submitter** agent. Your runbook is `AGENT.md` in
+this directory, `/home/voidsstr/development/reusable-agents/agents/indexnow-submitter/AGENT.md`.
+The per-site `AGENT.md` files are symlinks to it.
 
-  `/home/voidsstr/development/nsc-assistant/agents/indexnow-submitter/AGENT.md`
-
-…and follow it exactly. Every step is documented there.
-
-End-of-run, record completion via:
-
-```bash
-python3 -m agents.lib.agent_recorder complete --run-id "$AGENT_RUN_ID" --summary "..."
-```
-
-(If `$AGENT_RUN_ID` is unset the run was triggered outside the dashboard;
-record a fresh row by calling `start` first instead of `complete`.)
+The per-site wrapper (`<instance>/run.sh`) sets `INDEXNOW_SITE`, `AGENT_ID`,
+and, for the bulk instances, `INDEXNOW_BULK=1`. It then execs `agent.py`.
+`agent.py` is an AgentBase subclass, so run recording, status, and goal
+metrics are handled by the framework. Do not call the legacy
+`agents.lib.agent_recorder`.
