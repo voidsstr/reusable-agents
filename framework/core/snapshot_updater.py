@@ -1,4 +1,3 @@
-import os
 """Background task: every 5s, snapshot every agent's status into one blob.
 
 The dashboard's GET /api/agents reads this single blob (registry/agent-snapshot.json)
@@ -9,6 +8,8 @@ existing parallel-read path, so the dashboard never breaks if the updater
 is down.
 """
 from __future__ import annotations
+
+import os
 
 import logging
 import threading

@@ -890,7 +890,7 @@ PY
                 START_MODEL="$REQUIRED_MODEL"
                 echo "[implementer] REQUIRED model: $REQUIRED_MODEL (no fallback — will defer if unavailable)" >&2
             else
-                START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-${STAKE_AWARE_MODEL:-claude-sonnet-4-6}}"
+                START_MODEL="${IMPLEMENTER_CLAUDE_MODEL:-${STAKE_AWARE_MODEL:-claude-opus-5-5}}"
                 if [ -n "$STAKE_AWARE_MODEL" ] && [ -z "${IMPLEMENTER_CLAUDE_MODEL:-}" ]; then
                     echo "[implementer] stake-aware tier: $STAKE_AWARE_MODEL (batch: $RESPONDER_REC_IDS)" >&2
                 fi
@@ -899,9 +899,12 @@ PY
             # Soft fallback chain — ONLY when no hard requirement is set.
             if [ -z "$REQUIRED_MODEL" ]; then
                 case "$START_MODEL" in
-                    *sonnet*) TIER_ORDER+=("claude-opus-5" "claude-haiku-4-5") ;;
-                    *opus*)   TIER_ORDER+=("claude-sonnet-4-6" "claude-haiku-4-5") ;;
-                    *haiku*)  TIER_ORDER+=("claude-sonnet-4-6" "claude-opus-5") ;;
+                    # Every Claude tier runs on claude-opus-5-5 since 2026-09-23
+                    # (operator: cheaper than the prior opus/sonnet mix), so
+                    # the soft chain is opus-5-5 -> haiku.
+                    *sonnet*) TIER_ORDER+=("claude-opus-5-5" "claude-haiku-4-5") ;;
+                    *opus*)   TIER_ORDER+=("claude-haiku-4-5") ;;
+                    *haiku*)  TIER_ORDER+=("claude-opus-5-5") ;;
                 esac
             fi
             set +e
