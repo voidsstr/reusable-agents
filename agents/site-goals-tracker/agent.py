@@ -120,6 +120,11 @@ SITE_PROFILES: dict[str, dict] = {
 }
 
 
+# GA4 sessionSource substrings for engines that serve Bing's index
+# ("bing", "cn.bing.com", "ca.search.yahoo.com", …) or retrieve from it.
+BING_INDEX_SOURCES = ("bing", "duckduckgo", "ecosia", "yahoo", "chatgpt.com", "copilot")
+
+
 def err(*a) -> None:
     print(*a, file=sys.stderr)
 
@@ -228,6 +233,38 @@ def collect_metrics(profile: dict) -> dict[str, float]:
                 ch_rows[0]["metricValues"][1]["value"]) if ch_rows else 0.0
         except Exception as e:
             err(f"  GA4 AI Assistant channel failed: {e}")
+
+    # --- GA4: search + AI sessions split by index (30d) ---
+    #
+    # rec growth-20260924T141200Z-01. GSC only sees Google, and on aisleprompt
+    # Google sent 2 organic sessions in the 30 days to 2026-09-24 while bing,
+    # duckduckgo, ecosia, yahoo (all Bing-backed) and chatgpt.com (retrieves
+    # from Bing) sent ~137. goal-organic-clicks-30d therefore measures the
+    # channel that isn't delivering. This records the one that is.
+    if token:
+        try:
+            src_resp = ga4_run_report(token, profile["ga4_property_id"], {
+                "dateRanges": [{"startDate": start_30d, "endDate": end_today}],
+                "dimensions": [{"name": "sessionSource"}],
+                "metrics": [{"name": "sessions"}],
+                "dimensionFilter": {"filter": {
+                    "fieldName": "sessionDefaultChannelGroup",
+                    "inListFilter": {"values": ["Organic Search", "AI Assistant"]},
+                }},
+                "limit": 100,
+            })
+            bing_n = google_n = 0
+            for row in src_resp.get("rows") or []:
+                src = row["dimensionValues"][0]["value"].lower()
+                n = int(row["metricValues"][0]["value"])
+                if "google" in src:
+                    google_n += n
+                elif any(k in src for k in BING_INDEX_SOURCES):
+                    bing_n += n
+            metrics["goal-bing-index-sessions-30d"] = float(bing_n)
+            metrics["ga4-google-search-ai-sessions-30d"] = float(google_n)
+        except Exception as e:
+            err(f"  GA4 search-source split failed: {e}")
 
     # --- Conversions (30d): GA4, corrected by first-party click tables ---
     #
@@ -420,6 +457,18 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
                            "thesis in docs/seo-growth-strategy.md is measured here.",
             "metric": {"name": "ai_assistant_sessions_30d", "current": 0,
                        "target": 50 if is_aisleprompt else 100,
+                       "direction": "increase", "unit": "sessions", "horizon_weeks": 8},
+            "status": "active",
+        },
+        {
+            "id": "goal-bing-index-sessions-30d",
+            "title": f"30-day search + AI sessions via Bing's index ({site_label})",
+            "description": "GA4 Organic Search + AI Assistant sessions whose source is "
+                           "bing / duckduckgo / ecosia / yahoo / chatgpt.com / copilot — "
+                           "every engine that serves or retrieves from Bing's index. GSC "
+                           "cannot see any of these.",
+            "metric": {"name": "ga4_sessions_bing_plus_chatgpt", "current": 0,
+                       "target": 400 if is_aisleprompt else 300,
                        "direction": "increase", "unit": "sessions", "horizon_weeks": 8},
             "status": "active",
         },
