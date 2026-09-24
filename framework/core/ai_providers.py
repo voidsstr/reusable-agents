@@ -46,6 +46,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
+from . import local_llm as _local_llm
 from .storage import StorageBackend, get_storage
 
 
@@ -157,7 +158,7 @@ class Defaults:
         "default_model": "gpt-4o-mini",
         "agent_overrides": {
           "implementer":   {"provider": "anthropic-claude", "model": "claude-opus-5-5"},
-          "market-research":   {"provider": "ollama-local",     "model": "qwen3:8b"}
+          "market-research":   {"provider": "ollama-local",     "model": "qwen3.8:27b"}
         }
       }
     """
@@ -519,21 +520,29 @@ class _AnthropicClient(AIClient):
 
 
 class _OllamaClient(AIClient):
+    def __init__(self, provider: Provider, model: str = ""):
+        super().__init__(provider, model)
+        # Resolved here as well as per call so the dashboard stream and the
+        # llm-usage rows record the model that actually ran.
+        self.model = _local_llm.resolve_model(self.model, caller=provider.name)
+
     def _chat(self, messages, *, model="", temperature=0.0, max_tokens=1024, **kwargs):
         import urllib.request, urllib.error
-        base = (self.provider.base_url or "http://localhost:11434").rstrip("/")
-        target_model = model or self.model or "qwen3:8b"
+        # One resident model on the local daemon — see framework/core/local_llm.py.
+        # A stale provider/override (qwen3:8b, minicpm, the dead 192.168.1.82
+        # box) is rewritten instead of forcing Ollama to load a second model.
+        base = _local_llm.resolve_base_url(self.provider.base_url,
+                                           caller=self.provider.name)
+        target_model = _local_llm.resolve_model(model or self.model,
+                                                caller=self.provider.name)
 
         # ── Preflight reachability check (2026-05-12) ───────────────────
-        # The remote ollama box (e.g. ollama-4080 at 192.168.1.82:11434)
-        # is reached cross-LAN. Silent failures were happening when the
-        # remote ollama wasn't running — the agent's chat call would
-        # eventually raise URLError or ConnectionError and the fallback
-        # chain would transparently re-route to a metered provider.
-        # No alert, no signal that the user's "cost-savings split" was
-        # broken. We probe /api/tags with a tight 3s timeout here. If
-        # unreachable, fire an operator alert (24h cooldown) THEN raise
-        # so the fallback chain can pick a backup.
+        # Silent failures used to happen when ollama wasn't running — the
+        # agent's chat call would eventually raise URLError or
+        # ConnectionError with no signal. We probe /api/tags with a tight
+        # 3s timeout here. If unreachable, fire an operator alert (24h
+        # cooldown) THEN raise; chat_with_fallback may retry on a free
+        # provider but never on a metered one for this error.
         if not _ollama_reachable(base, timeout_s=3.0):
             _alert_ollama_unreachable(
                 agent_id=getattr(self.provider, "agent_id", None)
@@ -554,25 +563,51 @@ class _OllamaClient(AIClient):
         # bounded by urlopen's 300s timeout below.
         try:
             from .locks import ollama_dispatch_lock as _ollama_lock
-            from .code_editor import ensure_ollama_model_loaded as _ensure
         except Exception:
             _ollama_lock = None
-            _ensure = None
+
+        # Thinking is OFF unless the caller asks for it. Every model the fleet
+        # has run locally thinks by default (qwen3.8:27b at effort xhigh),
+        # puts the reasoning in message.thinking and can spend the
+        # whole num_predict budget there — content then comes back "" and
+        # the caller parses an empty verdict. That was 385 empty eBay
+        # hydration batches in 2026-09 and a 100% reject rate on the
+        # aisleprompt hero curator. Pass think=True (or "low"/"high" for
+        # models with effort levels) to opt back in; OLLAMA_THINK=default
+        # omits the field entirely (server/model default).
+        think = kwargs.get("think", os.environ.get("OLLAMA_THINK", "off"))
 
         def _do_call() -> str:
             url = base + "/api/chat"
-            body = json.dumps({
+            req_body = {
                 "model": target_model,
                 "messages": messages,
                 "stream": False,
-                "options": {"temperature": temperature, "num_predict": max_tokens},
-            }).encode()
+                # num_ctx is the fleet value, never per call: a different
+                # num_ctx makes Ollama reload the model (local_llm.py).
+                "options": {"temperature": temperature, "num_predict": max_tokens,
+                            "num_ctx": _local_llm.fleet_num_ctx()},
+            }
+            if think not in ("default", None):
+                req_body["think"] = False if think in ("off", False, "false", "0") else think
+            body = json.dumps(req_body).encode()
             req = urllib.request.Request(
                 url, data=body, headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=300) as r:
                 payload = json.loads(r.read().decode())
-            return (payload.get("message") or {}).get("content", "")
+            msg = payload.get("message") or {}
+            content = msg.get("content", "")
+            if not (content or "").strip() and (msg.get("thinking") or "").strip():
+                # Raise instead of returning "": an empty string parses as an
+                # empty/negative verdict downstream and silently loses the
+                # work, while an exception lets the fallback chain retry.
+                raise RuntimeError(
+                    f"ollama {target_model} returned only thinking "
+                    f"({len(msg.get('thinking') or '')} chars) and no content — "
+                    f"done_reason={payload.get('done_reason')}"
+                )
+            return content
 
         if _ollama_lock is None:
             return _do_call()
@@ -580,14 +615,17 @@ class _OllamaClient(AIClient):
         # Tight 5-min lock-acquire timeout — chat wants a fast verdict.
         # If we can't grab the lock that fast, run anyway (proceed) so
         # we don't block higher-level agents.
+        #
+        # No ensure_ollama_model_loaded() here any more. It unloaded EVERY
+        # other resident model before each chat call, so two agents on
+        # different models evicted each other on every request (qwen3:14b
+        # was cold-loaded 103 times in 24h on 2026-09-23). Those 10-20 GB
+        # load/unload swings are the suspected trigger of the RTX 5090
+        # Xid-79 bus drops. Ollama already evicts least-recently-used models
+        # itself when a new one does not fit (OLLAMA_MAX_LOADED_MODELS), so
+        # the chat path lets it. The code-editor path still warms the fleet
+        # model via ensure_ollama_model_loaded, which no longer unloads others.
         with _ollama_lock(timeout_s=300, on_timeout="proceed"):
-            if _ensure is not None:
-                try:
-                    _ensure(target_model, base_url=base)
-                except Exception:
-                    # Preflight is best-effort; ollama will load on
-                    # demand if we skipped here.
-                    pass
             return _do_call()
 
 
@@ -940,15 +978,27 @@ _FALLBACK_TRIGGER_SUBSTRINGS = (
     "exhausted", "quota", "overloaded",
 )
 
+# Local-model failures (raised by _OllamaClient). They trigger fallback, but
+# only onto FREE providers: once one is seen, chat_with_fallback skips
+# metered kinds for the rest of the call, so an Ollama outage never starts
+# billing. Before these were triggers the call simply raised.
+_LOCAL_FAILURE_SUBSTRINGS = ("ollama unreachable", "returned only thinking")
+
 # Kinds we consider for fallback, in preference order. Skipped if no
 # provider of that kind is registered or if the registered one has no
 # usable credentials.
 DEFAULT_FALLBACK_KINDS = ("copilot", "ollama", "azure_openai", "openai", "anthropic")
 
 
+def _is_local_failure(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    return any(sub in s for sub in _LOCAL_FAILURE_SUBSTRINGS)
+
+
 def _is_fallback_trigger(exc: BaseException) -> bool:
     s = str(exc).lower()
-    return any(sub in s for sub in _FALLBACK_TRIGGER_SUBSTRINGS)
+    return (any(sub in s for sub in _FALLBACK_TRIGGER_SUBSTRINGS)
+            or _is_local_failure(exc))
 
 
 def _retry_after_seconds(exc: BaseException) -> Optional[float]:
@@ -994,6 +1044,11 @@ def _build_fallback_chain(primary: "AIClient",
     seen_names = {primary.provider.name}
     s = storage or get_storage()
     all_providers = list_providers(s)
+    # Ollama slot: prefer a provider on the local daemon. Registry order
+    # otherwise picked `ollama-small`, which points at the retired RTX 4080
+    # (192.168.1.82). _OllamaClient also rewrites any remote host to local.
+    all_providers.sort(key=lambda p: p.kind == "ollama"
+                       and not _local_llm.is_local_url(p.base_url))
     for kind in DEFAULT_FALLBACK_KINDS:
         if kind in seen_kinds:
             continue
@@ -1062,12 +1117,10 @@ def _alert_ollama_unreachable(*, agent_id: str, provider_name: str,
                                base_url: str) -> None:
     """Operator-alert when a chat agent's ollama provider is unreachable.
 
-    The cost-savings split (5090 + 4080 ollama boxes) only works if both
-    ollama instances are running. When the remote box (typically
-    ollama-4080 at 192.168.1.82:11434) is down, ten chat agents
-    silently fall through the fallback chain to METERED providers
-    (Azure OpenAI / OpenAI / Anthropic). No signal otherwise — usage
-    logs don't distinguish "intended fallback" from "endpoint dead".
+    The fleet runs one local Ollama daemon (127.0.0.1:11434). When it is
+    down, every agent routed to a local model fails or falls back to a
+    free provider (chat_with_fallback never picks a metered one for this
+    error), so the only signal is this alert.
 
     Cooldown: 24h per (agent, provider) so the operator gets one
     summary alert, not one per chat call.
@@ -1078,26 +1131,23 @@ def _alert_ollama_unreachable(*, agent_id: str, provider_name: str,
             agent_id=agent_id,
             error=RuntimeError(
                 f"Ollama provider '{provider_name}' unreachable at "
-                f"{base_url}. Chat fallback chain will route to a paid "
-                f"provider instead."
+                f"{base_url}. Local-model work is failing or falling back "
+                f"to a free provider."
             ),
             context={
                 "category": "ollama-unreachable",
                 "provider": provider_name,
                 "base_url": base_url,
                 "impact": (
-                    "Cost-savings split is broken: agents configured to "
-                    "use this local ollama box are bouncing to metered "
-                    "providers (Azure / OpenAI / Anthropic) or to "
-                    "another claude-cli session, increasing burn rate "
-                    "and risk of Claude Max throttling."
+                    "Agents routed to the local model are failing or "
+                    "bouncing to copilot / claude-cli, which increases "
+                    "the risk of Claude Max throttling."
                 ),
                 "recovery": (
-                    "Bring ollama back up on the host. Typical fixes: "
-                    "(a) systemctl --user start ollama on the box, "
-                    "(b) ollama serve & if not running under systemd, "
-                    "(c) check the host is reachable on the LAN, "
-                    "(d) verify /api/tags responds: "
+                    "Bring ollama back up on the host: "
+                    "(a) sudo systemctl restart ollama, "
+                    "(b) check the GPU is on the bus (nvidia-smi), "
+                    "(c) verify /api/tags responds: "
                     f"curl {base_url}/api/tags"
                 ),
             },
@@ -1247,8 +1297,11 @@ def chat_with_fallback(agent_id: str,
         chain = chain[: max(1, max_attempts)]
 
     last_err: Optional[BaseException] = None
+    local_failed = False
     import time as _time
     for i, client in enumerate(chain):
+        if local_failed and client.provider.kind in _METERED_KINDS:
+            continue  # see _LOCAL_FAILURE_SUBSTRINGS
         # Up to 2 attempts on the same provider before falling over: the
         # first call, then one retry honouring any server-suggested
         # Retry-After. Azure 429s are typically window-bounded and clear
@@ -1296,7 +1349,8 @@ def chat_with_fallback(agent_id: str,
                     # Hard error — don't burn the chain on a bad prompt.
                     raise
                 last_err = e
-                wait = _retry_after_seconds(e)
+                local = _is_local_failure(e)
+                wait = None if local else _retry_after_seconds(e)
                 if attempt == 0 and wait is not None and 0 < wait <= 30:
                     logger.warning(
                         "ai-fallback: agent=%s provider=%s rate-limited; "
@@ -1310,6 +1364,11 @@ def chat_with_fallback(agent_id: str,
                     agent_id, client.provider.name, client.provider.kind,
                     type(e).__name__, str(e)[:300],
                 )
+                if local:
+                    # Not a quota event (_OllamaClient already alerted when
+                    # unreachable). Metered kinds are skipped from here on.
+                    local_failed = True
+                    break
                 # Operator-alert: a pre-paid provider just rejected us.
                 # Different shape from the metered-fallback alert above —
                 # this fires the FIRST time a quota is detected so the

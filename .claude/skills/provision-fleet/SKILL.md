@@ -281,7 +281,7 @@ not fall back — it silently produces nothing (§9.6 class).
 
 | service | port | required for | absent ⇒ |
 |---|---|---|---|
-| SDXL image gen | 7861 | ALL image generation (paid providers are forbidden) | refiller "succeeds" with 0 rows |
+| image gen (Z-Image-Turbo) | 7861 | ALL image generation (paid providers are forbidden) | refiller "succeeds" with 0 rows |
 | SearXNG | 8888 | product/topic discovery | discovery degrades, refresh unaffected |
 | ollama | 11434 | local LLM (kitchen enrichment) | scraper enrichment fails |
 | docker | socket | **deployer, BOTH sites** | code commits but never ships |
@@ -294,10 +294,12 @@ enable this distro. Diagnose precisely: if
 `/mnt/wsl/docker-desktop/shared-sockets/guest-services/` has bootstrap sockets but
 **no `docker.sock`**, integration is off for this distro.
 
-**ollama models:** check what is actually pulled. A config naming `qwen3:32b` on a
-host that only has `qwen3:14b` fails at first use, not at startup.
+**ollama models:** the fleet runs ONE resident model, `qwen3.8:27b`, at
+`num_ctx` 65536. `bash install/configure-local-models.sh` pulls it and writes the
+ollama drop-in, the `secrets.env` knobs and the image-daemon drop-in. A config
+naming a model that is not pulled fails at first use, not at startup.
 
-### 7a. Standup — SDXL image daemon (:7861)
+### 7a. Standup — image daemon (:7861, Z-Image-Turbo)
 
 On the 5090 this is first-class, not optional: every image path in the fleet
 POSTs here and there is NO paid fallback by policy.
@@ -315,8 +317,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  # torch is P
   `ExecStart=%h/development/reusable-agents/services/local-image-gen/.venv/bin/python server.py`,
   `EnvironmentFile=%h/.reusable-agents/secrets.env`, `Restart=on-failure`. Then
   `systemctl --user enable --now local-image-gen`.
-- First start downloads ~7 GB of SDXL-Turbo weights into `~/.cache/huggingface`;
-  `/healthz` is not ready until they load. Verify:
+- Model knobs live in `~/.config/systemd/user/local-image-gen.service.d/10-model.conf`
+  (written by `install/configure-local-models.sh`). First start downloads ~31 GB
+  of Z-Image-Turbo weights into `~/.cache/huggingface`; `/healthz` is not ready
+  until they load. Verify:
   `curl -s localhost:7861/healthz` → `{"status":"ok", "gpu": "...5090..."}`.
 - **Output-based verification (§8 rule):** trigger `recipe-image-refiller` and
   watch the recipe `image_url IS NULL` count actually DROP (backlog was 7,745

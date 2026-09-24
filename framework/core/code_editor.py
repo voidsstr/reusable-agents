@@ -64,6 +64,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from . import local_llm as _local_llm
 from .storage import StorageBackend, get_storage
 
 
@@ -269,25 +270,14 @@ DEFAULT_CONFIG: dict = {
             # Native ollama provider — no profile needed, just `jcode
             # login --provider ollama` once.
             #
-            # Model selection (validated 2026-05-06 on RTX 5090 / 32 GB VRAM):
-            #   • qwen3.6:35b-a3b — Apr 2026 release, 73.4% SWE-bench
-            #     Verified (best dense+MoE combo for tool-use), MoE
-            #     35B total / 3B active per token = same VRAM as 24B
-            #     dense but faster inference. Native tool-call parser.
-            #     PRIMARY CHOICE.
-            #   • devstral-small-2:24b — 68% SWE-bench Verified.
-            #     Mistral's purpose-built agent-coding model. Reliable
-            #     fallback if qwen3.6 misbehaves on a particular repo.
-            #     SECONDARY (set via DEPLOYER_OLLAMA_MODEL env override).
-            #   • qwen3-coder:30b — strong benchmarks but in jcode's
-            #     `run` harness it explores instead of converging
-            #     (rc=0, files_changed=0). Doesn't reliably engage Edit
-            #     tool. Avoid.
-            # Override per-deployment via storage `config/code-editor-config.json`
-            # or env DEPLOYER_OLLAMA_MODEL when a future model proves
-            # out better.
+            # Model: the fleet's one resident local model (FLEET_LOCAL_MODEL,
+            # default qwen3.8:27b — see framework/core/local_llm.py). A
+            # dedicated coder model (devstral / qwen3.6 / qwen3-coder) would be
+            # a second resident model and reintroduce the reload churn behind
+            # the 2026-09 Xid-79 bus drops. DEPLOYER_OLLAMA_MODEL still pins
+            # another model for an explicit experiment.
             "native_provider": "ollama",
-            "model": "${DEPLOYER_OLLAMA_MODEL:-devstral-small-2:24b}",
+            "model": "${FLEET_LOCAL_MODEL:-qwen3.8:27b}",
         },
         "aider-ollama": {
             "kind": "aider",
@@ -297,18 +287,15 @@ DEFAULT_CONFIG: dict = {
             # it strips the prefix, calls select_ollama_model() with the
             # dispatch kind, then reattaches the prefix. The bare model
             # name here is the FALLBACK if the router can't decide.
-            "model": "ollama_chat/devstral-small-2:24b",
-            # aider speaks SEARCH/REPLACE diff format reliably with
-            # devstral, qwen3.6, qwen3-coder-next.
+            "model": "ollama_chat/${FLEET_LOCAL_MODEL:-qwen3.8:27b}",
             "edit_format": "diff",
-            # aider reads OLLAMA_API_BASE if set, else defaults to
-            # http://localhost:11434. Override via env when running
-            # against a remote ollama box.
+            # aider reads OLLAMA_API_BASE; the fleet runs only the local
+            # daemon (the RTX 4080 box at 192.168.1.82 is retired).
             "extra_env": {
-                "OLLAMA_API_BASE": "${OLLAMA_API_BASE:-http://localhost:11434}",
+                "OLLAMA_API_BASE": "${OLLAMA_API_BASE:-http://127.0.0.1:11434}",
             },
             # Preflight: ollama listens on the OLLAMA_API_BASE URL.
-            "preflight_url": "${OLLAMA_API_BASE:-http://localhost:11434}/api/tags",
+            "preflight_url": "${OLLAMA_API_BASE:-http://127.0.0.1:11434}/api/tags",
         },
         "claude-cli": {
             "kind": "claude-cli",
@@ -424,40 +411,16 @@ def _expand_dict(d: dict) -> dict:
 # Per-dispatch-kind ollama model routing
 # ---------------------------------------------------------------------------
 #
-# Different rec shapes benefit from different local models. Empirically
-# (validated 2026-05-06 on RTX 5090):
-#   - catalog-audit recs are small + structured (tight UPDATE/DELETE
-#     migrations against listed row IDs). devstral-small-2 engages the
-#     Edit tool reliably and converges in <60s.
-#   - article-author recs are long-form prose (1500-2500 word articles).
-#     qwen3-coder-next has 256k native context + Sonnet-4.5-ish quality
-#     and handles multi-paragraph generation cleanly.
-#   - generic code edits (PI, CR, SEO snippet) want a fast, recent
-#     coder MoE. qwen3.6:35b-a3b is the latest open-weight tool-use
-#     leader (73.4% SWE-bench Verified) with 3B active per token.
-#
-# Override via env DEPLOYER_OLLAMA_MODEL (single-pin) or per-kind
-# DEPLOYER_OLLAMA_MODEL_<KIND> (e.g. DEPLOYER_OLLAMA_MODEL_CATALOG_AUDIT).
-# Per-deployment override via storage `config/code-editor-config.json`
-# `ollama_model_by_kind` dict.
-
-# 2026-05-07: Two-GPU split deployment — RTX 5090 (32GB) hosts ONE
-# always-resident large model on port 11434, RTX 4080 (16GB) hosts ONE
-# always-resident small model on port 11435 (used by chat agents, not
-# code-editor). The implementer/code-editor only talks to the 5090
-# instance and uses its single resident model. No more per-dispatch-kind
-# swap — the swap was the source of HTTP 500 preflight failures (model B
-# couldn't load before model A released VRAM under contention).
-#
-# Override single-pin via DEPLOYER_OLLAMA_MODEL env. Per-kind overrides
-# (DEPLOYER_OLLAMA_MODEL_<KIND>) still work for ad-hoc experiments but
-# default config doesn't use them.
+# Since 2026-09-23 every dispatch kind uses the fleet's one resident local
+# model (FLEET_LOCAL_MODEL, default qwen3.8:27b; framework/core/local_llm.py).
+# Per-kind models were dropped: each extra model is a load/unload swing on
+# the RTX 5090, and that churn is the suspected cause of its Xid-79 bus
+# drops. For an explicit experiment, DEPLOYER_OLLAMA_MODEL (single pin) or
+# DEPLOYER_OLLAMA_MODEL_<KIND> (e.g. DEPLOYER_OLLAMA_MODEL_CATALOG_AUDIT)
+# still override.
 
 OLLAMA_MODEL_BY_DISPATCH_KIND: dict[str, str] = {
-    # Single resident model on the 5090 — handles every code-editor
-    # dispatch kind. qwen3-coder-next has 256k context + Sonnet-4.5-ish
-    # quality, large enough for multi-rec batches and small/large prose.
-    "": "devstral-small-2:24b",
+    "": _local_llm.fleet_model(),
 }
 
 
@@ -465,27 +428,29 @@ def ensure_ollama_model_loaded(
     model: str,
     *,
     base_url: str = "",
-    keep_alive: str = "30m",
+    keep_alive: Optional[str] = None,
     load_timeout_s: float = 90.0,
+    unload_others: bool = False,
 ) -> tuple[bool, str]:
-    """Force-unload any model OTHER than `model` from ollama, then
-    pre-warm `model` so the next inference call doesn't pay the
-    cold-load cost. Idempotent.
+    """Pre-warm `model` at the fleet num_ctx so the next inference call
+    doesn't pay the cold-load cost. Idempotent.
 
     Returns (ok, detail). On failure the caller should still attempt
     the actual call — ollama will retry the load itself, but cold +
     contended.
 
     Strategy:
-      1. GET /api/ps — list currently-loaded models.
-      2. For each loaded model whose name != target, POST /api/generate
-         with `{"model": <name>, "keep_alive": 0, "prompt": ""}`. This
-         is ollama's documented way to immediately unload — `keep_alive: 0`
-         tells the runner to drop the model on completion, and an
-         empty prompt makes the call a no-op generation.
-      3. POST /api/generate with `{"model": target, "keep_alive": "30m",
-         "prompt": ""}` — this loads + warms the target. The empty
-         prompt is cheap; we just want the model resident.
+      1. Only when `unload_others=True`: GET /api/ps and POST
+         /api/generate `{"model": <other>, "keep_alive": 0, "prompt": ""}`
+         for every other loaded model (ollama's documented immediate
+         unload). Off by default — unloading on every call made agents on
+         different models evict each other on every request (2026-09-23:
+         103 cold loads/day, suspected cause of the RTX 5090 Xid-79 drops).
+      2. POST /api/generate `{"model": target, "prompt": "", "think": false, "options":
+         {"num_ctx": <fleet>}}`. The warm-up MUST use the fleet num_ctx:
+         any other value makes ollama reload the model for the next real
+         request. `keep_alive` is omitted unless given, so the server's
+         OLLAMA_KEEP_ALIVE applies.
 
     The caller is expected to hold ollama_dispatch_lock so two
     concurrent dispatches don't fight over the runner.
@@ -495,7 +460,7 @@ def ensure_ollama_model_loaded(
     import urllib.error as _ue
 
     url_base = (base_url or os.environ.get("OLLAMA_API_BASE")
-                or "http://localhost:11434").rstrip("/")
+                or _local_llm.DEFAULT_BASE_URL).rstrip("/")
 
     def _post(path: str, body: dict, timeout: float) -> tuple[int, dict]:
         try:
@@ -516,31 +481,29 @@ def ensure_ollama_model_loaded(
         except Exception as e:
             return 0, {"error": str(e)[:200]}
 
-    # 1. Inventory currently-loaded models
-    try:
-        with _ur.urlopen(f"{url_base}/api/ps", timeout=5) as r:
-            ps = _json.loads(r.read())
-    except Exception as e:
-        return False, f"/api/ps failed: {e}"
-    loaded = [m.get("name", "") for m in (ps.get("models") or [])]
-    others = [m for m in loaded if m and m != model]
+    others: list[str] = []
+    if unload_others:
+        try:
+            with _ur.urlopen(f"{url_base}/api/ps", timeout=5) as r:
+                ps = _json.loads(r.read())
+        except Exception as e:
+            return False, f"/api/ps failed: {e}"
+        loaded = [m.get("name", "") for m in (ps.get("models") or [])]
+        others = [m for m in loaded if m and m != model]
+        for other in others:
+            rc, body = _post(
+                "/api/generate",
+                {"model": other, "prompt": "", "keep_alive": 0, "stream": False},
+                timeout=30.0,
+            )
+            logger.info("[ollama] unload %s rc=%s", other, rc)
 
-    # 2. Unload anything else (keep_alive=0 with empty prompt)
-    for other in others:
-        rc, body = _post(
-            "/api/generate",
-            {"model": other, "prompt": "", "keep_alive": 0, "stream": False},
-            timeout=30.0,
-        )
-        logger.info("[ollama] unload %s rc=%s", other, rc)
-
-    # 3. Warm the target (small load timeout — most models warm in <60s
-    #    on 5090, longer for 70B-class)
-    rc, body = _post(
-        "/api/generate",
-        {"model": model, "prompt": "", "keep_alive": keep_alive, "stream": False},
-        timeout=load_timeout_s,
-    )
+    # Warm the target (most models warm in <60s on the 5090).
+    warm = {"model": model, "prompt": "", "stream": False, "think": False,
+            "options": {"num_ctx": _local_llm.fleet_num_ctx()}}
+    if keep_alive is not None:
+        warm["keep_alive"] = keep_alive
+    rc, body = _post("/api/generate", warm, timeout=load_timeout_s)
     if rc != 200:
         return False, f"warm-up rc={rc} body={body}"
     return True, f"loaded {model} (unloaded {len(others)} others)"
@@ -573,7 +536,7 @@ def select_ollama_model(dispatch_kind: str = "",
         return generic
     if backend_default:
         return backend_default
-    return "devstral-small-2:24b"
+    return _local_llm.fleet_model()
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +661,21 @@ class AiderBackend(CodeEditorBackend):
             cmd[3:3] = ["--edit-format", edit_format]
         for f in req.files:
             cmd += ["--file", f]
+        if ollama_target:
+            # aider sizes num_ctx per request for ollama models unless the
+            # model settings pin it, and every new num_ctx is an ollama
+            # reload. Pin it to the fleet value. think:false for the same
+            # reason as _OllamaClient: the fleet model otherwise thinks at
+            # xhigh and can leave message.content empty.
+            import tempfile
+            settings = Path(tempfile.gettempdir()) / f"aider-ollama-settings-{os.getuid()}.yml"
+            # Per-pid tmp: concurrent dispatches must not rename each other's.
+            tmp = settings.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(f"- name: {json.dumps(model)}\n  extra_params:\n"
+                           f"    num_ctx: {_local_llm.fleet_num_ctx()}\n"
+                           f"    think: false\n")
+            tmp.replace(settings)
+            cmd += ["--model-settings-file", str(settings)]
 
         # Wrap the actual aider invocation in the ollama lock when
         # this backend uses ollama, so concurrent dispatches serialize
@@ -1157,7 +1135,7 @@ class JcodeBackend(CodeEditorBackend):
         pointing at an Azure deployment. Cloud fallback after the aider
         chain if copilot+aider both soft-fail.
       - `jcode-ollama` — uses native `--provider ollama` against the local
-        Ollama server (qwen3-coder:30b on the 5090 by default). Free
+        Ollama server (the fleet model, qwen3.8:27b by default). Free
         last-resort fallback.
 
     Provider profiles live in `~/.jcode/config.toml` and are provisioned via
@@ -1236,7 +1214,7 @@ class JcodeBackend(CodeEditorBackend):
 
         # Wrap ollama path in the global ollama_dispatch_lock so two
         # concurrent jcode/aider-ollama dispatches don't fight over the
-        # runner. Pre-warm the target model + force-unload others.
+        # runner. Pre-warm the target model (other models stay loaded).
         if is_ollama:
             from .locks import ollama_dispatch_lock as _ol
             # If ollama is busy with another dispatch, fall through to

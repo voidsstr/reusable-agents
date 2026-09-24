@@ -75,11 +75,12 @@ def _resolve_override(agent_id: str) -> tuple[str, str, str] | None:
         return None
     if provider is None or provider.kind != "ollama":
         return None
-    base = (provider.base_url or "").rstrip("/")
-    if not base:
-        _eprint(f"ollama provider {provider.name!r} has no base_url")
-        return None
-    return provider.name, base, (model or "qwen3:14b")
+    # One resident model on the local daemon (framework/core/local_llm.py):
+    # a stale override model or the retired 192.168.1.82 host is rewritten
+    # rather than making Ollama load a second model.
+    from framework.core import local_llm
+    base = local_llm.resolve_base_url(provider.base_url, caller=agent_id)
+    return provider.name, base, local_llm.resolve_model(model, caller=agent_id)
 
 
 def _parse_claude_argv(argv: list[str]) -> dict:
@@ -164,6 +165,8 @@ def _ollama_chat(base: str, model: str, prompt: str,
     if base_native.endswith("/v1"):
         base_native = base_native[:-3]
 
+    from framework.core import local_llm
+
     url = f"{base_native}/api/chat"
     payload = {
         "model": model,
@@ -171,6 +174,8 @@ def _ollama_chat(base: str, model: str, prompt: str,
         "stream": False,
         # Disable thinking tokens — we want the answer directly.
         "think": False,
+        # Fleet num_ctx only: any other value makes Ollama reload the model.
+        "options": {"num_ctx": local_llm.fleet_num_ctx()},
     }
     data = json.dumps(payload).encode("utf-8")
     req = _u.Request(url, data=data,
@@ -190,6 +195,10 @@ def _ollama_chat(base: str, model: str, prompt: str,
 
     msg = d.get("message", {})
     content = msg.get("content") or ""
+    if not content.strip():
+        # Empty (e.g. the whole budget went to thinking) — let the shim fall
+        # through to claude instead of handing the caller an empty answer.
+        return 12, "", f"empty content (done_reason={d.get('done_reason')})"
     return 0, content, body
 
 

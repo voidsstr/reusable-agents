@@ -357,7 +357,7 @@ reusable-agents/
 │  ├─ seed-default-goals.sh     Idempotent goal seeding (init_goals merges by goal id)
 │  ├─ seed-providers.sh         Seeds AI provider skeletons (Azure / Anthropic / Ollama / Copilot / OpenAI)
 │  └─ seed-providers-local.sh   Host-tailored seeder for the dev box
-├─ services/                    local-image-gen (SDXL-Turbo daemon, :7861) + searxng config
+├─ services/                    local-image-gen (Z-Image-Turbo daemon, :7861) + searxng config
 ├─ docker-compose.yml           API (:8090) + UI (:8091) services
 ├─ .env.example                 Operator config template
 └─ examples/
@@ -879,7 +879,7 @@ authors, audits, recommenders) routes through this.
 | `claude-cli` | Local `claude` CLI in `--print` mode, auto-routed through the claude-pool shim at `~/.reusable-agents/claude-pool/bin/claude` when present (`CLAUDE_CLI_CMD` overrides) | Claude Max login per pool profile | **Live global default (2026-09-23): `claude-cli` / `claude-sonnet-4-6`.** Subscription billing under Claude Max. **Per-account rate limits**, so the pool round-robins across accounts. |
 | `azure_openai` | Azure OpenAI deployments | `AZURE_OPENAI_API_KEY` + endpoint | Enterprise-billed OpenAI access, Responses-API for codex. |
 | `openai` | api.openai.com | `OPENAI_API_KEY` | Direct OpenAI billing. |
-| `ollama` | Ollama server (`:11434`; the fleet registers `ollama-local`/`ollama-5090` on 127.0.0.1 and `ollama-small`/`ollama-4080` on a LAN box) | none | Free local inference (qwen3:8b / qwen3:14b in the 2026-09-23 registry). Privacy + zero cost. |
+| `ollama` | Local Ollama server (`127.0.0.1:11434`) | none | Free local inference. Since 2026-09-23 there is one resident model, `qwen3.8:27b` (text + vision; `FLEET_LOCAL_MODEL`), at one `num_ctx` (`OLLAMA_NUM_CTX`, 65536), called with `think:false` unless a caller opts in. `_OllamaClient` rewrites any other model or a non-local host, such as the registry's stale `ollama-small`/`ollama-4080` entries for the retired 192.168.1.82 box (`framework/core/local_llm.py`). |
 
 **Resolution order** for `ai_client_for(agent_id)` (operator config beats
 the manifest since 2026-05-11):
@@ -947,9 +947,9 @@ claude-cli → jcode-copilot → aider-github-copilot → aider-azure → jcode-
 | `jcode-copilot` | jcode | `claude-opus-4.7` via the Copilot proxy | In the default chain |
 | `aider-github-copilot` | aider | `github_copilot/claude-sonnet-4` (litellm native) | In the default chain. Needs `~/.config/litellm/github_copilot/api-key.json`. |
 | `aider-azure` | aider | `azure/${AZURE_OPENAI_DEPLOYMENT:-chat}` | In the default chain, near the end: its whole-edit format occasionally rewrites entire files (2026-05-11 retro). |
-| `jcode-ollama` | jcode | `${DEPLOYER_OLLAMA_MODEL:-devstral-small-2:24b}` | Last in the default chain (free, local) |
+| `jcode-ollama` | jcode | the fleet model `${FLEET_LOCAL_MODEL:-qwen3.8:27b}` (`DEPLOYER_OLLAMA_MODEL` pins another) | Last in the default chain (free, local) |
 | `aider-copilot-proxy` | aider | `openai/claude-sonnet-4.6` via `:4141` | Defined, not in the default chain |
-| `aider-ollama` | aider | `ollama_chat/devstral-small-2:24b` | Defined, not in the default chain |
+| `aider-ollama` | aider | `ollama_chat/${FLEET_LOCAL_MODEL:-qwen3.8:27b}`, with `num_ctx` pinned via a generated `--model-settings-file` | Defined, not in the default chain |
 | `jcode-azure` | jcode | `${AZURE_OPENAI_DEPLOYMENT:-chat}` | Defined, not in the default chain |
 | `opencode-azure` | sst/opencode | `azure/chat` | Defined, not in the default chain |
 | `crush-azure` | charmbracelet/crush | `azure/<deployment>` | BYO model via `~/.config/crush/crush.json` |

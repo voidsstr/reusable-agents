@@ -193,7 +193,7 @@ so local run dirs are `…/runs/<site_id>/<UTC-ts>/`.
 | Site config | `COMPETITOR_RESEARCH_CONFIG` → instance `site.yaml` |
 | Our site | Public HTTP crawl of `site.base_url` (or a local repo in `codebase` mode) |
 | Competitor sites | Public HTTP crawl, UA `…ReusableAgentsCompetitorResearch/1.0…` |
-| LLM | `ai_client(call="extract")` / `call="brainstorm"` resolve through the instance manifest `metadata.ai_calls`. Both instances route these calls to `ollama-local` / `qwen3:14b` (since 2026-09-16). Compare uses the agent default |
+| LLM | `ai_client(call="extract")` / `call="brainstorm"` resolve through the instance manifest `metadata.ai_calls` to `ollama-local`. Since 2026-09-23 every local call runs the fleet model `qwen3.8:27b` (`FLEET_LOCAL_MODEL`) with `think:false` at `num_ctx` 65536. `_OllamaClient` rewrites any other manifest model (see `framework/core/local_llm.py`). Compare uses the agent default |
 | Backlog | `agents/<agent_id>/proposals/active.json` |
 | Replies | `agents/<agent_id>/responses-queue/` + prior run's `rec-id-to-proposal-id.json` |
 
@@ -374,9 +374,9 @@ yet exercised the committed code.
   `[Errno 7] Argument list too long` and, on 2026-09-23,
   `ollama unreachable at http://127.0.0.1:11434 (provider=ollama-local)`
   (aisleprompt 03:11Z–09:04Z, specpicks 10:30Z). The manifest `_why`
-  explains that `qwen3:14b` under-reads large batched prompts: lower
-  `max_pages_per_competitor` or chunk per competitor. Check
-  `features-ours.json` before trusting any parity rec.
+  explains that `qwen3:14b` (the extract model until 2026-09-23) under-read
+  large batched prompts: lower `max_pages_per_competitor` or chunk per
+  competitor. Check `features-ours.json` before trusting any parity rec.
 - **Truncated or odd compare output → few or 0 recs.**
   - **Evidence.** On 2026-09-23 the aisleprompt `compare-raw.txt` began
     with "Continuing from the cut —…" (03:11Z and 09:04Z runs) and with

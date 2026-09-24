@@ -175,6 +175,7 @@ Run `bash install/recover-credentials.sh status` for the live version.
    closed at `rc=127` without it.
 7. **Key Vault backup** — `bash install/recover-credentials.sh backup`, so the
    next host loss is a file copy.
+8. **Local models** (`sudo`) — `bash install/configure-local-models.sh` (`--dry-run` first): one resident Ollama model (`qwen3.8:27b`, `num_ctx` 65536) plus the Z-Image-Turbo image daemon.
 
 ---
 

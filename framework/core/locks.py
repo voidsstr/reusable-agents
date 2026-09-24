@@ -287,28 +287,32 @@ def ollama_dispatch_lock(
             if lock is None:
                 # on_timeout='skip' path — fall through
                 return SOFT_FAIL
-            ensure_ollama_model_loaded("devstral-small-2:24b")
+            ensure_ollama_model_loaded(local_llm.fleet_model())
             run_aider_or_jcode(...)
     """
     lock = FileLock("ollama-dispatch", timeout_s=timeout_s)
     acquired = False
+    # Only the ACQUIRE may be guarded by `except TimeoutError`. The yield
+    # used to sit inside that try, so a TimeoutError raised by the caller's
+    # body (urllib's socket timeout is a TimeoutError) was caught here and
+    # the generator yielded a second time -> "generator didn't stop after
+    # throw()", masking the real timeout (competitor-research 09-22/09-23).
     try:
-        try:
-            lock.acquire(timeout_s=timeout_s)
-            acquired = True
-            yield lock
-        except TimeoutError:
-            mode = (on_timeout or "raise").lower()
-            if mode == "raise":
-                raise
-            if mode == "skip":
-                # Caller checks `if lock is None` to fall through.
-                yield None
-                return
-            # mode == "proceed" — run unguarded. Caller still gets the
-            # lock object so its preflight calls work, but two callers
-            # may overlap.
-            yield lock
+        lock.acquire(timeout_s=timeout_s)
+        acquired = True
+    except TimeoutError:
+        mode = (on_timeout or "raise").lower()
+        if mode == "raise":
+            raise
+        if mode == "skip":
+            # Caller checks `if lock is None` to fall through.
+            yield None
+            return
+        # mode == "proceed" — run unguarded. Caller still gets the
+        # lock object so its preflight calls work, but two callers
+        # may overlap.
+    try:
+        yield lock
     finally:
         if acquired:
             try:

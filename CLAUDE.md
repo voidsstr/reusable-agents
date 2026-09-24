@@ -855,18 +855,26 @@ news-author/news-writer→news-author); recs can override via
 
 ## Image generation — local only
 
-All text-to-image generation MUST POST the local SDXL-Turbo daemon
+All text-to-image generation MUST POST the local daemon
 `http://127.0.0.1:7861/generate`. Paid providers (Azure OpenAI
 gpt-image-1, DALL-E, fal.ai, Replicate, Stability, Together) are forbidden
-(2026-05-24: Azure gpt-image-1 burned ~$190/day at the 8-RPM cap). Local is
-~140× cheaper (~$0.0003 vs $0.042/img), ~6,000 img/h on the RTX 5090, and
-quality beats the paid path. Daemon: `services/local-image-gen/` under
-`local-image-gen.service`, port 7861, bearer-token auth (see its README).
+(2026-05-24: Azure gpt-image-1 burned ~$190/day at the 8-RPM cap). Daemon:
+`services/local-image-gen/` under `local-image-gen.service`, port 7861,
+bearer-token auth (see its README). Model since 2026-09-23:
+**Tongyi-MAI/Z-Image-Turbo** (Apache-2.0; blind judges preferred it to
+SDXL-Turbo 9/12). It runs in a low-VRAM mode that fits beside the one
+resident Ollama model: fp8 transformer weights, Qwen3-4B text encoder on the
+CPU, 9 steps, guidance 0.0, 1024². That measured 8.96 GB peak and ~8–16 s/img.
+**The daemon owns steps/guidance defaults**, so clients omit them (a
+`steps: 4` sent to Z-Image is raised to 9). SDXL-Turbo remains selectable
+with `LOCAL_IMAGE_GEN_MODEL=stabilityai/sdxl-turbo`. Host setup:
+`install/configure-local-models.sh`.
 
 Hard rules:
 1. New image code MUST POST `localhost:7861/generate`. Need a different
    model? Run a SECOND daemon instance with `LOCAL_IMAGE_GEN_MODEL=...` on
-   another port.
+   another port, after checking the VRAM budget (the 5090 already holds
+   qwen3.8:27b at ~17.5 GB).
 2. No paid fallback — if the daemon is down the op fails/defers (refiller
    retries next tick). Silent failover caused the incident.
 3. The live API (Azure simple-server.ts) can't reach localhost — new
