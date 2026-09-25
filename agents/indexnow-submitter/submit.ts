@@ -28,7 +28,11 @@
  *      noindex (meta robots/bingbot or X-Robots-Tag) and a self-canonical.
  *      A random sample of trusted DB candidates is checked too, as a drift
  *      canary. Rejections are recorded in the ledger so a dead URL is not
- *      re-fetched every tick.
+ *      re-fetched every tick. A TRANSIENT failure (timeout, fetch error, 5xx,
+ *      429) is not a rejection: the URL is re-queued and retried on the next
+ *      incremental ticks, up to policy.transientMaxAttempts times.
+ *   Only incremental runs move the watermark; a failed IndexNow POST puts
+ *   queue and sitemap-diff URLs back on the queue.
  *
  * All per-site VALUES live in the site's config file
  * (<repo>/agents/seo-config/site-indexnow.json); the logic here is generic.
@@ -93,6 +97,10 @@ export type Policy = {
   /** Path prefixes whose sitemap <lastmod> is not a content change (e.g. a
    *  "last seen trending" stamp): only NEW locs under them count. */
   ignoreLastmodPrefixes: string[];
+  /** A verification that fails TRANSIENTLY (timeout, fetch error, 5xx, 429)
+   *  is retried on the next incremental tick (the URL is re-queued) up to
+   *  this many times before it is treated as a normal rejection. */
+  transientMaxAttempts: number;
 };
 
 export type VerifyCfg = {
@@ -147,6 +155,7 @@ export const DEFAULT_POLICY: Policy = {
   ledgerRetentionDays: 120,
   queryTimeoutMs: 120_000,
   ignoreLastmodPrefixes: [],
+  transientMaxAttempts: 6,
 };
 
 export const DEFAULT_VERIFY: VerifyCfg = {
@@ -311,7 +320,15 @@ function interpolateSiteIds(sql: string, siteId?: string, siteIds?: string[]): s
 
 // ── Ledger ─────────────────────────────────────────────────────────────────
 // TSV, one line per URL: url \t status \t atMs \t token
-//   status = "sent" | "rej:<reason>"
+//   status = "sent"          token = change token when sent (day)
+//          | "rej:<reason>"  permanent-looking reject (404, noindex, …)
+//          | "tmp:<reason>"  transient verify failure; token = attempt count
+
+/** Verify failures that say nothing about the page itself (it may be fine
+ *  on the next try): the URL is retried, not rejected for days. */
+export function isTransientReason(reason: string): boolean {
+  return /^(timeout|fetch-error|http-error|http-5\d\d|http-429|http-408)$/.test(reason);
+}
 
 export type LedgerEntry = { status: string; at: number; token: string };
 export type Ledger = Map<string, LedgerEntry>;
@@ -360,6 +377,11 @@ export function decideCandidate(
   if (!entry) return { submit: true, reason: 'new', priority: 0 };
   const ageMs = nowMs - entry.at;
   if (entry.status !== 'sent') {
+    // A transient failure (timeout, 5xx) is retried at the next chance, a
+    // bounded number of times, before it counts as a rejection.
+    if (entry.status.startsWith('tmp:') && (Number(entry.token) || 1) < policy.transientMaxAttempts) {
+      return { submit: true, reason: 'retry-transient', needVerify: true, priority: 1 };
+    }
     if (ageMs < policy.rejectRecheckDays * DAY_MS) return { submit: false, reason: 'recently-rejected' };
     return { submit: true, reason: 'recheck-rejected', needVerify: true, priority: 1 };
   }
@@ -368,6 +390,14 @@ export function decideCandidate(
     // Both sides carry a change token: that is the whole answer, except that
     // --bulk re-confirms long-unchanged URLs on a slow rotation.
     if (cand.token !== entry.token) return { submit: true, reason: 'changed', priority: 0 };
+    if (mode === 'bulk' && ageMs >= policy.bulkResubmitDays * DAY_MS) return { submit: true, reason: 'stale', priority: 2 };
+    return { submit: false, reason: 'unchanged' };
+  }
+  if (cand.token && /^\d{4}-\d{2}-\d{2}$/.test(cand.token)) {
+    // Sent without a token (force queue, static) and now seen with a change
+    // date: changed if that date is after the day we sent it. Without this a
+    // page queued at publish time hid every later edit for the whole window.
+    if (cand.token > new Date(entry.at).toISOString().slice(0, 10)) return { submit: true, reason: 'changed', priority: 0 };
     if (mode === 'bulk' && ageMs >= policy.bulkResubmitDays * DAY_MS) return { submit: true, reason: 'stale', priority: 2 };
     return { submit: false, reason: 'unchanged' };
   }
@@ -654,9 +684,24 @@ async function verifyAll(urls: string[], cfg: VerifyCfg): Promise<{ results: Map
 
 // ── Force-submit queue ─────────────────────────────────────────────────────
 
+/** One URL per line. A writer that appended to a file lacking its trailing
+ *  newline splices two URLs into one line ("…/a-buildhttps://…/b" — seen in
+ *  production); split those back apart rather than submit a 404. */
+export function parseQueue(raw: string): string[] {
+  const out = new Set<string>();
+  for (const line of raw.split('\n')) {
+    for (const tok of line.trim().split(/\s+/)) {
+      for (const u of tok.split(/(?<!^)(?<![=?&%])(?=https?:\/\/)/)) {
+        if (u.trim()) out.add(u.trim());
+      }
+    }
+  }
+  return Array.from(out);
+}
+
 function readQueue(file: string): string[] {
   try {
-    return Array.from(new Set(fs.readFileSync(file, 'utf-8').split('\n').map((s) => s.trim()).filter(Boolean)));
+    return parseQueue(fs.readFileSync(file, 'utf-8'));
   } catch { return []; }
 }
 
@@ -725,7 +770,7 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
 
   const stats: Record<string, any> = {
     mode, candidates: 0, by_source: {} as Record<string, number>, skipped: {} as Record<string, number>,
-    rejected: {} as Record<string, number>, verified_ok: 0, deferred: 0, sample_checked: 0, sample_bad: 0,
+    rejected: {} as Record<string, number>, verified_ok: 0, deferred: 0, retry_later: 0, sample_checked: 0, sample_bad: 0,
     query_failures: 0, sitemap: 'skipped', queue_in: 0, queue_left: 0, submitted: 0, failed: 0,
   };
   const bump = (o: Record<string, number>, k: string, n = 1) => { o[k] = (o[k] || 0) + n; };
@@ -856,11 +901,21 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
     const sampleSet = new Set(sample);
     const examples: string[] = [];
     for (const [u, v] of results) {
-      if (sampleSet.has(u)) { stats.sample_checked += 1; if (!v.ok) stats.sample_bad += 1; }
+      const transient = !v.ok && isTransientReason(v.reason);
+      if (sampleSet.has(u)) { stats.sample_checked += 1; if (!v.ok && !transient) stats.sample_bad += 1; }
       if (v.ok) { if (!sampleSet.has(u)) stats.verified_ok += 1; continue; }
       drop.add(u);
       bump(stats.rejected, v.reason);
       if (examples.length < 12) examples.push(`${v.reason}${sampleSet.has(u) ? '(sample)' : ''} ${u}`);
+      if (transient) {
+        // Says nothing about the page: retry (bounded) instead of parking a
+        // new article for rejectRecheckDays because one fetch timed out.
+        const prev = ledger.get(u);
+        const attempts = (prev && prev.status.startsWith('tmp:') ? (Number(prev.token) || 1) : 0) + 1;
+        ledgerUpdates.set(u, { status: `tmp:${v.reason}`, at: nowMs, token: String(attempts) });
+        if (!BULK && attempts < policy.transientMaxAttempts) { deferredForce.push(u); stats.retry_later += 1; }
+        continue;
+      }
       ledgerUpdates.set(u, { status: `rej:${v.reason}`, at: nowMs, token: '' });
     }
     if (examples.length) console.log(`[indexnow:${site.name}] rejected e.g.:\n  ${examples.join('\n  ')}`);
@@ -873,6 +928,7 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
   // 7. Submit
   const urlList = keep.map((c) => c.url);
   const tokenOf = new Map(keep.map((c) => [c.url, c.token] as const));
+  const sourceOf = new Map(keep.map((c) => [c.url, c.source] as const));
   console.log(`[indexnow:${site.name}] candidates=${stats.candidates} → submit=${urlList.length} ` +
     `skipped=${JSON.stringify(stats.skipped)} rejected=${JSON.stringify(stats.rejected)} deferred=${stats.deferred} sitemap=${stats.sitemap}`);
   let submitted = 0;
@@ -888,7 +944,13 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
       console.log(`[indexnow:${site.name}] batch ${Math.floor(i / BATCH_SIZE) + 1}: submitted ${batch.length} (HTTP ${result.status})`);
     } else {
       failed += batch.length;
-      for (const u of batch) if (queueSet.has(u)) failedForce.push(u);
+      // DB rows come back via the un-advanced watermark; queue URLs and
+      // sitemap diffs would be lost (the snapshot below still advances), so
+      // they go back on the queue.
+      for (const u of batch) {
+        const src = sourceOf.get(u) || '';
+        if (queueSet.has(u) || src === 'sitemap' || src === 'force') failedForce.push(u);
+      }
       console.error(`[indexnow:${site.name}] batch ${Math.floor(i / BATCH_SIZE) + 1}: FAIL HTTP ${result.status} — ${result.body}`);
     }
   }
@@ -904,7 +966,10 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
       rewriteQueue(forceFile, queueInitial, left);
       stats.queue_left = readQueue(forceFile).length;
     }
-    if (failed === 0 && stats.query_failures === 0) writeFileAtomic(site.watermarkFile, startedAt);
+    // The watermark is the INCREMENTAL cursor. --bulk skips incrementalOnly
+    // sets and caps its output, so it must not move it (it used to, and could
+    // jump past rows an earlier failed incremental tick never read).
+    if (!BULK && failed === 0 && stats.query_failures === 0) writeFileAtomic(site.watermarkFile, startedAt);
   }
 
   console.log(`[indexnow:${site.name}] stats ${JSON.stringify(stats)}`);

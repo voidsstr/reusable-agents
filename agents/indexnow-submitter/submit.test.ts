@@ -15,7 +15,8 @@ import path from 'path';
 import { spawn } from 'child_process';
 import {
   buildUrl, classifyPage, decideCandidate, diffSnapshots, headerNoindex, isSyntheticLastmod,
-  mergeSnapshot, normalizeToken, readLedger, writeLedger, DEFAULT_POLICY, Snapshot,
+  isTransientReason, mergeSnapshot, normalizeToken, parseQueue, readLedger, writeLedger,
+  DEFAULT_POLICY, Snapshot,
 } from './submit';
 
 const DAY = 86_400_000;
@@ -63,6 +64,31 @@ async function unit() {
     assert.equal(decideCandidate(rej(1), { token: '' }, now, 'incremental', P).reason, 'recently-rejected');
     const d = decideCandidate(rej(4), { token: '' }, now, 'incremental', P);
     assert.equal(d.reason, 'recheck-rejected'); assert.equal(d.needVerify, true);
+  });
+  await test('ledger gate: a transient verify failure is retried (bounded), not parked for days', () => {
+    const P = DEFAULT_POLICY; const now = Date.parse('2026-09-25T12:00:00Z');
+    assert.equal(isTransientReason('timeout'), true);
+    assert.equal(isTransientReason('http-503'), true);
+    assert.equal(isTransientReason('http-429'), true);
+    assert.equal(isTransientReason('http-404'), false);
+    assert.equal(isTransientReason('noindex-header'), false);
+    const tmp = (attempts: number) => ({ status: 'tmp:timeout', at: now - 60_000, token: String(attempts) });
+    const d = decideCandidate(tmp(1), { token: '' }, now, 'incremental', P);
+    assert.equal(d.reason, 'retry-transient'); assert.equal(d.needVerify, true); assert.equal(d.submit, true);
+    // After transientMaxAttempts it is an ordinary rejection.
+    assert.equal(decideCandidate(tmp(P.transientMaxAttempts), { token: '' }, now, 'incremental', P).reason, 'recently-rejected');
+  });
+  await test('ledger gate: a URL sent token-less (force queue) is re-sent when a later change date shows up', () => {
+    const P = DEFAULT_POLICY; const now = Date.parse('2026-09-28T12:00:00Z');
+    const sentForce = { status: 'sent', at: Date.parse('2026-09-25T10:00:00Z'), token: '' };
+    // Edited on the 27th → changed (it used to be hidden for resubmitDays).
+    assert.equal(decideCandidate(sentForce, { token: '2026-09-27' }, now, 'incremental', P).reason, 'changed');
+    // Change date on/before the day it was sent → already covered.
+    assert.equal(decideCandidate(sentForce, { token: '2026-09-25' }, now, 'incremental', P).reason, 'unchanged');
+  });
+  await test('queue parsing splits spliced URLs (a writer appended to a line with no newline)', () => {
+    const raw = 'https://x.test/a-buildhttps://x.test/b\n\n  https://x.test/c  \nhttps://x.test/r?u=https://y.test/z\nhttps://x.test/a-build\n';
+    assert.deepEqual(parseQueue(raw), ['https://x.test/a-build', 'https://x.test/b', 'https://x.test/c', 'https://x.test/r?u=https://y.test/z']);
   });
   await test('ledger round-trips, merges with a concurrent writer, prunes old rows', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'inx-ledger-'));
@@ -136,11 +162,18 @@ async function unit() {
 
 type Page = { status: number; headers?: Record<string, string>; body?: string };
 
+const mockIndexNow = { fail: false };
+
 function startServer(routes: () => Record<string, Page>, posts: any[]): Promise<{ port: number; close: () => void }> {
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method === 'POST' && req.url === '/indexnow') {
-        let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { posts.push(JSON.parse(b)); res.writeHead(200); res.end('ok'); });
+        let b = '';
+        req.on('data', (c) => (b += c));
+        req.on('end', () => {
+          if (mockIndexNow.fail) { res.writeHead(500); res.end('down'); return; }
+          posts.push(JSON.parse(b)); res.writeHead(200); res.end('ok');
+        });
         return;
       }
       const p = routes()[req.url || ''];
@@ -172,8 +205,11 @@ async function e2e() {
   const html = (loc: string, extraHead = '') =>
     `<html><head><title>t</title><link rel="canonical" href="${origin}${loc}">${extraHead}</head><body>content</body></html>`;
   let sitemapUrls = ['/a', '/b'];
+  let flakyStatus = 503;
   const routes = (): Record<string, Page> => ({
     '/': { status: 200, body: html('/') },
+    '/flaky': { status: flakyStatus, body: flakyStatus === 200 ? html('/flaky') : 'busy' },
+    '/d': { status: 200, body: html('/d') },
     '/ok': { status: 200, body: html('/ok') },
     '/new': { status: 200, body: html('/new') },
     '/a': { status: 200, body: html('/a') }, '/b': { status: 200, body: html('/b') }, '/c': { status: 200, body: html('/c') },
@@ -249,6 +285,54 @@ async function e2e() {
       assert.equal(r.rc, 0, r.out);
       assert.equal(posts.length, 3, r.out);
       assert.match(r.out, /done submitted=0 failed=0/);
+    });
+
+    const ledgerFile = path.join(dir, 'mock.indexnow-ledger.tsv');
+    await test('e2e run 5: a 503 at verification is a retry, not a 3-day reject — the URL stays queued', async () => {
+      fs.writeFileSync(queue, `${origin}/flaky\n`);
+      const r = await runScript(['--site=mock'], env);
+      assert.equal(r.rc, 0, r.out);
+      assert.equal(posts.length, 3, r.out);
+      const e = readLedger(ledgerFile).get(`${origin}/flaky`)!;
+      assert.equal(e.status, 'tmp:http-503'); assert.equal(e.token, '1');
+      assert.equal(fs.readFileSync(queue, 'utf-8').trim(), `${origin}/flaky`);
+    });
+
+    await test('e2e run 6: the page recovers → it is verified and submitted on the next tick', async () => {
+      flakyStatus = 200;
+      const r = await runScript(['--site=mock'], env);
+      assert.equal(r.rc, 0, r.out);
+      assert.equal(posts.length, 4, r.out);
+      assert.deepEqual(paths(3), ['/flaky']);
+      assert.equal(readLedger(ledgerFile).get(`${origin}/flaky`)!.status, 'sent');
+      assert.equal(fs.readFileSync(queue, 'utf-8').trim(), '');
+    });
+
+    await test('e2e run 7 (--bulk): the incremental watermark is not moved by a bulk run', async () => {
+      const wm = path.join(dir, 'mock-watermark.txt');
+      const before = fs.readFileSync(wm, 'utf-8');
+      await new Promise((res) => setTimeout(res, 20));
+      const r = await runScript(['--site=mock', '--bulk'], env);
+      assert.equal(r.rc, 0, r.out);
+      assert.equal(fs.readFileSync(wm, 'utf-8'), before);
+    });
+
+    await test('e2e run 8: a failed IndexNow POST puts the new sitemap URL back on the queue', async () => {
+      const nPosts = posts.length;
+      sitemapUrls = ['/a', '/b', '/c', '/d'];
+      mockIndexNow.fail = true;
+      try {
+        const r = await runScript(['--site=mock'], env);
+        assert.match(r.out, /done submitted=0 failed=1/, r.out);
+      } finally {
+        mockIndexNow.fail = false;
+      }
+      assert.equal(posts.length, nPosts);
+      assert.equal(fs.readFileSync(queue, 'utf-8').trim(), `${origin}/d`);
+      const r2 = await runScript(['--site=mock'], env);
+      assert.equal(r2.rc, 0, r2.out);
+      assert.equal(posts.length, nPosts + 1, r2.out);
+      assert.deepEqual(paths(nPosts), ['/d']);
     });
   } finally {
     srv.close();

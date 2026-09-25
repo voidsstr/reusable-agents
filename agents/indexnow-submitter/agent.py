@@ -264,6 +264,8 @@ class IndexnowSubmitter(AgentBase):
                 "urls_rejected_by_verify": float(sum(rejected.values())),
                 "urls_verified_ok": float(worker_stats.get("verified_ok") or 0),
                 "urls_deferred": float(worker_stats.get("deferred") or 0),
+                # Transient verify failures (timeout/5xx) re-queued for retry.
+                "urls_retry_later": float(worker_stats.get("retry_later") or 0),
                 "force_queue_remaining": float(worker_stats.get("queue_left") or 0),
                 "trusted_sample_bad": float(worker_stats.get("sample_bad") or 0),
                 "query_failures": float(worker_stats.get("query_failures") or 0),
