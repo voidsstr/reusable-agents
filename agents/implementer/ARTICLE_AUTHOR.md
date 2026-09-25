@@ -239,7 +239,9 @@ markdown source is correct in the DB and the analyzer's
 | Reference | Correct markdown |
 |---|---|
 | Recipe by slug | `[Classic Beef Stir Fry](/recipes/classic-beef-stir-fry)` |
-| Kitchen product by slug | `[Chef's Knife](/k/chefs-knife)` |
+| Kitchen category (crawlable) | `[Knives](/kitchen/category/knives)` |
+| Kitchen product page (crawlable) | `[Product Name](/kitchen/<product-slug>)` — only slugs the link directive lists |
+| Explicit buy link (affiliate click-out) | `[Check price](/k/<product-slug>?source=amazon)` — `/k/` is robots-blocked; never use it as the only link to a page |
 | Other blog article | `[Mediterranean Meal Plan](/blog/complete-mediterranean-meal-plan)` |
 | Feature page | `[Meal Plan](/meal-plan)` |
 | External / outbound citation | `[Serious Eats — Knife Skills](https://www.seriouseats.com/...)` |
@@ -260,12 +262,14 @@ paths from the start.
 
 The implementer's wrapper (`run.sh`) calls
 `framework.core.article_link_guard.verify_body()` AFTER the LLM exits
-and counts distinct inline `/recipes/<slug>` + `/k/<slug>` markdown
-links. If the body falls short of the per-site minima, the article is
+and counts distinct inline `/recipes/<slug>` + kitchen markdown links
+(the roots a site lists in `kitchen_roots` in
+`config/article-link-guard-config.json` — aisleprompt counts
+`/kitchen/category/`, `/kitchen/` and `/k/`). If the body falls short of the per-site minima, the article is
 NOT inserted, the rec is re-queued, and the LLM is re-prompted with
 `render_failure_addendum()` listing the exact gap.
 
-| Site         | Min `/recipes/` links | Min `/k/` links |
+| Site         | Min `/recipes/` links | Min kitchen links |
 |--------------|----------------------:|----------------:|
 | aisleprompt  |                     5 |               2 |
 | specpicks    |                     0 |               0 |
