@@ -6,7 +6,8 @@ import os
 import json
 import datetime
 
-DATABASE_URL = "postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require"
+# One-off script: the DSN comes from secrets.env (never a literal in git).
+DATABASE_URL = os.environ["DATABASE_URL_SPECPICKS"]
 
 BODY_007 = """Cloning a Win98 SE install to CompactFlash and booting it bare-metal on a socket-370 or socket-7 motherboard sounds simple in theory. In practice, the adapter between the CF card and the IDE bus is almost always the thing that fails. Three adapters dominate eBay and Amazon searches for this project in 2026: the FIDECO USB 3.0 to SATA/IDE combo, the Unitek Y-1039A, and the Vantec CB-ISATAU2. This article documents five full test runs with each adapter — cloning, first boot, and sustained read/write benchmarks — on a stock ABIT BH6 Intel 440BX board with 256MB PC100 SDRAM and a SanDisk Ultra 4GB CompactFlash card.
 

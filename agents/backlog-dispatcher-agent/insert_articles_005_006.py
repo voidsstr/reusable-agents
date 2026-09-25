@@ -1,9 +1,12 @@
+import os
+
 import psycopg2
 import psycopg2.extras
 import json
 import datetime
 
-DATABASE_URL = 'postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require'
+# One-off script: the DSN comes from secrets.env (never a literal in git).
+DATABASE_URL = os.environ["DATABASE_URL_SPECPICKS"]
 
 ARTICLE_1 = {
     "slug": "local-llm-demo-coach-quake-3-ut99-ryzen-5800x-rtx-3060-2026",
