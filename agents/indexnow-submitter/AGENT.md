@@ -45,7 +45,7 @@ run this engine. `aisleprompt-indexnow-bulk` has its own `AGENT.md`;
 
 1. **Resolve the site and mode.** The site comes from `INDEXNOW_SITE` (or `INDEXNOW_TARGET_SITE`); empty means all configured sites. `INDEXNOW_BULK=1` selects bulk mode.
 2. **Pick node modules.** Uses `$INDEXNOW_TS_APP_DIR/node_modules` (default `/home/voidsstr/development/specpicks`). If that dir is absent, as on a freshly cloned host, it falls back to `NODE_PATH` or `npm root -g` with `npx --no-install`.
-3. **Run the worker.** Executes `npx ts-node --transpile-only … submit.ts [--site=<site>] [--bulk]` with timeout `INDEXNOW_TIMEOUT_S` (900 s). The output is written to a `NamedTemporaryFile` `/tmp/tmp*.log`, which is never deleted and not echoed to the unit log.
+3. **Run the worker.** Executes `npx ts-node --transpile-only … submit.ts [--site=<site>] [--bulk]` with timeout `INDEXNOW_TIMEOUT_S` (1500 s). The output is written to a `NamedTemporaryFile` `/tmp/tmp*.log`, which is never deleted and not echoed to the unit log.
 4. **submit.ts, per site** (rewritten 2026-09-25 after the AI-visibility audit found the full catalog re-sent daily, the same ~277 URLs every 15 minutes, and 404/noindex URLs in the batches). Every candidate passes three gates — SOURCE → LEDGER → VERIFY:
    1. **Config.** `SITE_CONFIG_PATHS` if set, else every `<INDEXNOW_SITE_REPOS_ROOT or ~/development>/*/agents/seo-config/site-indexnow.json` (discovered, no site names in code), else the legacy `sites.json`.
    2. **Sources.**
@@ -249,7 +249,7 @@ currently submits that file).
 
 | Symptom | Cause / evidence | Action |
 |---|---|---|
-| `submit.ts timed out after 900s` | Very large candidate set, or a slow DB | Raise `INDEXNOW_TIMEOUT_S` for bulk, or check the DB |
+| `submit.ts timed out after 1500s` | Very large candidate set, or a slow DB | Raise `INDEXNOW_TIMEOUT_S` for bulk, or check the DB |
 | `npx/ts-node not found`, or `TypeError: Cannot read properties of undefined (reading 'fileExists')` | Fresh host: `npx` fetched ts-node without its typescript peer | `npm install` in the specpicks repo, or install `ts-node typescript@5 tsx pg` globally, as the `setup-fleet-host` skill's `deps` step lists. `install/standup-fleet-host.sh deps` does not install these node globals |
 | `[indexnow:<set>] query failed: …` in the temp log | One query set's SQL failed. It contributes 0 URLs silently, and the run still succeeds | Fix the SQL in `site-indexnow.json` |
 | `batch N: FAIL HTTP …` / `failed=N` | IndexNow rejected the batch (bad key file, foreign-host URL) | The watermark holds, so the next tick retries. Check the key file URL |
