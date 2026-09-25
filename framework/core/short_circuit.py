@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 
@@ -367,6 +368,9 @@ def partition_by_hash(
     hash_fn,
     revisit_counter: Optional[dict[str, int]] = None,
     revisit_after_runs: int = 12,
+    prior_seen_at: Optional[dict[str, str]] = None,
+    cooldown_hours: Optional[float] = None,
+    now: Optional[datetime] = None,
 ) -> tuple[list, list, dict[str, int]]:
     """Split `items` into (fresh, cached) based on hash equality with the
     prior run, and return an updated revisit-counter.
@@ -381,10 +385,25 @@ def partition_by_hash(
         every `revisit_after_runs` ticks even if the hash is unchanged.
       revisit_after_runs: ticks between forced revisits (default 12 ≈ 24h
         at 2h cadence)
+      prior_seen_at: optional {key: ISO-8601 timestamp} of when each key
+        was last processed. Only read when `cooldown_hours` is set.
+      cooldown_hours: optional TIME-based revisit window. When set, an
+        item is cached only if its hash is unchanged AND it was last
+        processed less than `cooldown_hours` ago per `prior_seen_at`; a
+        missing or unparseable timestamp counts as "cooldown expired".
+        The tick-count rule (`revisit_after_runs`) is not consulted in
+        this mode. Use it when the item pool differs between runs, so a
+        per-run counter never accumulates (e.g. "rewrite a page at most
+        once per 30 days unless its inputs changed"). None (the default)
+        keeps the original tick-count behaviour exactly.
+      now: clock override for tests; defaults to datetime.now(UTC).
 
     Returns: (fresh_items, cached_items, new_revisit_counter)
     """
     revisit_counter = revisit_counter or {}
+    prior_seen_at = prior_seen_at or {}
+    if cooldown_hours is not None and now is None:
+        now = datetime.now(timezone.utc)
     fresh: list = []
     cached: list = []
     new_counter: dict[str, int] = {}
@@ -399,6 +418,16 @@ def partition_by_hash(
             fresh.append(it)
             continue
         seen_count = int(revisit_counter.get(k, 0))
+        if cooldown_hours is not None:
+            age_h = _age_hours(prior_seen_at.get(k), now)
+            if (prior_hashes.get(k) == h and age_h is not None
+                    and age_h < float(cooldown_hours)):
+                cached.append(it)
+                new_counter[k] = seen_count + 1
+            else:
+                fresh.append(it)
+                new_counter[k] = 0
+            continue
         if prior_hashes.get(k) == h and seen_count < revisit_after_runs:
             cached.append(it)
             new_counter[k] = seen_count + 1
@@ -406,6 +435,22 @@ def partition_by_hash(
             fresh.append(it)
             new_counter[k] = 0  # reset on fresh analysis
     return fresh, cached, new_counter
+
+
+def _age_hours(seen_at: Any, now: datetime) -> Optional[float]:
+    """Hours between an ISO-8601 timestamp and `now`; None if unparseable.
+    Naive timestamps are read as UTC. A future timestamp yields 0.0."""
+    if not seen_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(seen_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - ts).total_seconds() / 3600.0)
 
 
 def merge_findings_cache(
