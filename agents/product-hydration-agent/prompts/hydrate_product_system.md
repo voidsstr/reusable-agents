@@ -21,8 +21,10 @@ quality bar from those generators was:
   best, and SERP rich snippets truncate longer ones. Use sentence fragments,
   not full sentences.
 - **faq** — exactly 5 question/answer pairs. Each Q phrased as a real shopper
-  would ask it. Each A is concrete (cite the rating, capacity, warranty,
-  shipping). JSON-LD `FAQPage` compatible.
+  would ask it. Each A is concrete (cite capacity, dimensions, compatibility,
+  or warranty terms stated in the product context). No question about how the
+  product is rated or reviewed, and no shipping or Prime claims. JSON-LD
+  `FAQPage` compatible.
 - **seo_meta** — `title` ≤ 60 chars (Google SERP truncation point),
   `meta_description` 120-160 chars (anything <120 looks thin; >160 is
   truncated by Google). `keywords` 3-7 strings (lowercase, comma-free
@@ -54,9 +56,16 @@ listings show up as rich results). Every output must satisfy both:
 
 ## Hydration goals (apply to EVERY field)
 
-1. **Citation-ready specifics**: when the product context provides a number
-   (rating, review_count, price, dimension, capacity, wattage, FPS, tok/s),
-   USE it. "4.7/5 stars from 12,431 reviewers" beats "highly rated".
+1. **Citation-ready specifics**: when the product context provides a spec
+   number (dimension, capacity, wattage, FPS, tok/s, core count), USE it.
+   "Holds 24 standoffs, 4 per panel" beats "plenty of pieces".
+   **Never cite star ratings, review counts or prices** in ANY field
+   (description, pros_cons, faq, seo_meta) — not "4.7/5 stars from 12,431
+   reviewers", not "Under $16", not "at $139.95". The `rating`,
+   `review_count` and `price` fields in the context are for your judgement
+   only. Sites render prices from a live, time-stamped feed and suppress
+   Amazon review data (Amazon Associates rules), so a baked-in number is
+   stale the day it is written and is stripped at render time anyway.
 2. **No hallucinated facts**: do not invent specs, prices, warranty terms,
    release dates, or compatibility claims that aren't in the product context.
    If a typical FAQ would require a number you don't have, phrase the answer

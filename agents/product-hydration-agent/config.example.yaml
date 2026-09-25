@@ -34,6 +34,13 @@ hydration:
   max_runtime_minutes: 30        # wall-clock budget; in-flight finishes
   stale_after_days: 90           # rebuild any product older than this
   selection_priority: review_count   # ORDER BY <col> DESC NULLS LAST
+  # Optional: a read-only SELECT whose first column is an ASIN; those rows are
+  # hydrated first (then selection_priority). Use it to reach pages that get
+  # traffic but have no reviews (review_count order never gets to them).
+  # A failing query only logs a decision; the run falls back to the order above.
+  # priority_asins_sql: |
+  #   SELECT DISTINCT substring(path from '^/product/([A-Za-z0-9_-]+)')
+  #     FROM ai_traffic_log WHERE ts > now() - interval '30 days' AND path LIKE '/product/%'
 
 claude:
   model: opus                    # Claude Max plan model name

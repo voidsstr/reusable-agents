@@ -171,13 +171,19 @@ def _connect(dsn: str):
 def _select_candidates(conn, *, content_types: list[str],
                        batch_size: int, stale_after_days: int,
                        site_id_filter: str | None,
-                       priority_column: str = "review_count") -> list[dict]:
+                       priority_column: str = "review_count",
+                       priority_asins: list[str] | None = None) -> list[dict]:
     """Return rows that need any of `content_types` hydrated.
 
     A row is a candidate if EITHER:
       - hydrated_at IS NULL (never hydrated), OR
       - hydrated_at < NOW() - stale_after_days, OR
       - any of the requested content_types' columns IS NULL.
+
+    `priority_asins` (from `hydration.priority_asins_sql`) are selected
+    before everything else, then `priority_column DESC`. Ordering by
+    review_count alone never reaches rows with no reviews (a site's eBay
+    listings), however much traffic their pages get.
     """
     cols = []
     for ct in content_types:
@@ -191,6 +197,10 @@ def _select_candidates(conn, *, content_types: list[str],
         site_clause = "AND p.site_id = %s"
         params.append(site_id_filter)
     params.append(stale_after_days)
+    prio_order = ""
+    if priority_asins:
+        prio_order = "(p.asin = ANY(%s)) DESC, "
+        params.append(list(priority_asins))
     params.append(batch_size)
 
     # `category_slug` was a denormalized column; the schema now keeps the
@@ -209,12 +219,39 @@ def _select_candidates(conn, *, content_types: list[str],
               OR p.hydrated_at IS NULL
               OR p.hydrated_at < NOW() - (%s || ' days')::interval
           )
-        ORDER BY p.{priority_column} DESC NULLS LAST, p.id ASC
+        ORDER BY {prio_order}p.{priority_column} DESC NULLS LAST, p.id ASC
         LIMIT %s
     """
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return [dict(r) for r in cur.fetchall()]
+
+
+def _priority_asins(conn, sql: str | None, *, timeout_ms: int = 30000,
+                    cap: int = 50000) -> tuple[list[str], str | None]:
+    """Run the site's optional `hydration.priority_asins_sql` (a read-only
+    SELECT whose first column is an ASIN). Returns (asins, error). A failure
+    never blocks hydration -- the run falls back to priority_column order."""
+    if not sql or not str(sql).strip():
+        return [], None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = %s", (int(timeout_ms),))
+            cur.execute(str(sql))
+            rows = cur.fetchmany(cap)
+        conn.commit()
+        out = []
+        for r in rows:
+            v = list(r.values())[0] if isinstance(r, dict) else r[0]
+            if v:
+                out.append(str(v))
+        return out, None
+    except Exception as e:  # noqa: BLE001 -- optional ordering hint
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return [], str(e)[:300]
 
 
 def _coverage_stats(conn, *, content_types: list[str],
@@ -1361,6 +1398,11 @@ class ProductHydrationAgent(AgentBase):
                 conn.rollback()
             except Exception:
                 pass
+            prio_asins, prio_err = _priority_asins(conn, hyd.get("priority_asins_sql"))
+            if prio_err:
+                self.decide("observation", f"priority_asins_sql failed, using {priority_column} order: {prio_err}")
+            elif prio_asins:
+                self.decide("observation", f"{len(prio_asins)} priority ASIN(s) from priority_asins_sql are selected first")
             try:
                 queue = _select_candidates(
                     conn,
@@ -1369,6 +1411,7 @@ class ProductHydrationAgent(AgentBase):
                     stale_after_days=stale_after_days,
                     site_id_filter=self.site_id_filter,
                     priority_column=priority_column,
+                    priority_asins=prio_asins,
                 )
             except Exception as e:
                 self.decide("error", f"candidate selection failed: {e}")

@@ -207,6 +207,7 @@ keys above. See the instance runbook for the current goals and values.
 | `hydration.content_types` | all four of `description, pros_cons, faq, seo_meta` (unknown values cause `SystemExit`) |
 | `hydration.batch_size` / `max_runtime_minutes` / `stale_after_days` | 25 / 30 / 90 |
 | `hydration.selection_priority` | `review_count` (allowed: `review_count, rating, sales_rank, price, id`) |
+| `hydration.priority_asins_sql` | unset. Read-only SELECT (first column = ASIN, 30 s timeout, 50k cap); those ASINs are selected before `selection_priority` order. A failure logs an `observation` decision and is ignored |
 | `claude.model` / `max_turns` / `per_call_timeout_s` | `opus` / 10 / 300 |
 | `price_refresh.provider` | unset (skip). Values: `creators`, `paapi`, `brightdata`, `none` |
 | `price_refresh.price_freshness_hours` / `max_refresh_per_run` | 24 / 200 |
