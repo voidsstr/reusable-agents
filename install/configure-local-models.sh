@@ -18,6 +18,11 @@
 #      their config changed (or with --restart); warm the model at the fleet
 #      num_ctx
 #   6. verification summary: ollama ps, :7861/healthz
+#   +  /etc/systemd/system/nvidia-power-cap.service, enabled at boot: caps the
+#      GPU at GPU_POWER_LIMIT_W (default 450 W). Uncapped at 575 W the host
+#      hard-reset twice on 2026-09-24 under full inference load (no clean
+#      shutdown in the journal) and earlier dropped the card off the bus
+#      (Xid 79). 450 W costs little local-model throughput.
 #
 # Usage:
 #   bash install/configure-local-models.sh             # converge
@@ -50,6 +55,8 @@ STATE_DIR="${STATE_DIR:-$HOME/.reusable-agents}"
 SECRETS_FILE="$STATE_DIR/secrets.env"
 OLLAMA_DROPIN="/etc/systemd/system/ollama.service.d/10-models-dir.conf"
 IMAGE_DROPIN="$HOME/.config/systemd/user/local-image-gen.service.d/10-model.conf"
+GPU_POWER_LIMIT_W="${GPU_POWER_LIMIT_W:-450}"
+POWER_CAP_UNIT="/etc/systemd/system/nvidia-power-cap.service"
 
 bold()   { printf "\033[1m%s\033[0m\n" "$*"; }
 green()  { printf "  \033[32m✓\033[0m %s\n" "$*"; }
@@ -127,6 +134,41 @@ else
     printf '%s' "$OLLAMA_DROPIN_CONTENT" | sudo tee "$OLLAMA_DROPIN" >/dev/null
     green "written"
     OLLAMA_CHANGED=1
+fi
+
+# ── 1b. GPU power cap (applied at every boot) ───────────────────────────────
+section "1b. GPU power cap ${GPU_POWER_LIMIT_W} W ($POWER_CAP_UNIT)"
+POWER_CAP_CONTENT="[Unit]
+Description=Cap NVIDIA GPU power limit (MCE / hard-reset crash mitigation)
+After=nvidia-persistenced.service
+Wants=nvidia-persistenced.service
+ConditionPathExists=/usr/bin/nvidia-smi
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# persistence keeps the limit applied when no CUDA client is attached
+ExecStart=-/usr/bin/nvidia-smi -pm 1
+ExecStart=/usr/bin/nvidia-smi -pl ${GPU_POWER_LIMIT_W}
+# restore stock on stop/disable
+ExecStop=-/usr/bin/nvidia-smi -pl 575
+
+[Install]
+WantedBy=multi-user.target
+"
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    yellow "no nvidia-smi; skipped"
+elif [ -f "$POWER_CAP_UNIT" ] && [ "$(cat "$POWER_CAP_UNIT")" == "$(printf '%s' "$POWER_CAP_CONTENT")" ] \
+        && systemctl is-enabled --quiet nvidia-power-cap.service; then
+    green "already current ($(nvidia-smi --query-gpu=power.limit --format=csv,noheader))"
+elif [ "$DRY_RUN" -eq 1 ]; then
+    yellow "would write $POWER_CAP_UNIT and enable --now (sudo)"
+else
+    printf '%s' "$POWER_CAP_CONTENT" | sudo tee "$POWER_CAP_UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl enable nvidia-power-cap.service >/dev/null 2>&1
+    sudo systemctl restart nvidia-power-cap.service
+    green "enabled; limit now $(nvidia-smi --query-gpu=power.limit --format=csv,noheader)"
 fi
 
 # ── 2. secrets.env knobs ────────────────────────────────────────────────────
