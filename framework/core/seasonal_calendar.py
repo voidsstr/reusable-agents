@@ -52,9 +52,13 @@ Refer to test_seasonal_calendar.py for the calibration cases.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
+import re
 from dataclasses import dataclass, field, asdict
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
+
+CONFIG_KEY = "config/seasonal-calendar.json"
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +86,34 @@ class Occasion:
     bucket_hints: tuple[str, ...] = ()
     link_categories: tuple[str, ...] = ()
     length_days: int = 1
+    # Per-year exact dates for occasions whose date is announced, not
+    # rule-based (Amazon's October event, Prime Day). Pairs of
+    # ("YYYY", "MM-DD"); a matching year wins over `month_day`. Operators
+    # can add years without a commit via `date_overrides` in
+    # config/seasonal-calendar.json (see load_occasions()).
+    year_dates: tuple[tuple[str, str], ...] = ()
+    # One-paragraph authoring hint rendered under the occasion in the
+    # prompt block (e.g. what a deal page must and must not claim).
+    guidance: str = ""
 
 
 # ---------------------------------------------------------------------------
 # Default occasions list — US-centric, food + tech friendly
 # ---------------------------------------------------------------------------
+
+# Shared by every retail deal event. Deal pages are the one place a site
+# earns a purchase on a date the reader already chose, and also the place
+# Google and assistants punish invented discounts hardest.
+_DEAL_GUIDANCE = (
+    "Deal / buying-guide page, not news. Anchor on product families that "
+    "already earn clicks or AI citations on this site. Name specific in-stock "
+    "SKUs from the catalog: USD price >= $1, no negative discounts, no "
+    "foreign-marketplace listings. Say what a good price is (a price-history "
+    "or MSRP anchor) and who should wait. Never invent a discount, a coupon "
+    "or a deal price. Say prices change during the event and link to the "
+    "live listing. Publish before the event starts, then keep the slug "
+    "evergreen and refresh it next year."
+)
 
 DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
     Occasion(
@@ -228,13 +255,37 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
     ),
     Occasion(
         id="black-friday",
-        label="Black Friday / Cyber Monday",
-        month_day="nth-weekday:4:friday:11",  # day after Thanksgiving
+        label="Black Friday / Cyber Monday (tech deals)",
+        # Day after Thanksgiving. NOT nth-weekday:4:friday:11 -- when Nov 1
+        # is a Friday the 4th Friday is Nov 22 and Thanksgiving is Nov 28.
+        month_day="nth-weekday:4:thursday:11+1",
         audience="tech",
-        recipe_keywords=(),
-        bucket_hints=("buying-guide", "kitchen-buying-guide"),
-        link_categories=("deals",),
+        recipe_keywords=("black friday deals", "cyber monday deals",
+                         "black friday gpu deals", "black friday gaming pc deals",
+                         "prebuilt gaming pc black friday",
+                         "mini pc black friday", "monitor deals",
+                         "gaming desk deals", "is it worth waiting for black friday",
+                         "lowest price", "price history"),
+        bucket_hints=("buying-guide", "use-case"),
+        link_categories=("gpus", "prebuilt-gaming-pcs", "workstations",
+                         "monitors", "gaming-desks", "cpus"),
         length_days=4,
+        guidance=_DEAL_GUIDANCE,
+    ),
+    Occasion(
+        id="black-friday-kitchen",
+        label="Black Friday / Cyber Monday (kitchen gear deals)",
+        month_day="nth-weekday:4:thursday:11+1",
+        audience="food",
+        recipe_keywords=("black friday kitchen deals", "cyber monday kitchen deals",
+                         "air fryer deals", "stand mixer deals",
+                         "instant pot deals", "cookware set deals",
+                         "knife set deals", "holiday gift kitchen"),
+        bucket_hints=("kitchen-buying-guide",),
+        link_categories=("small-appliances", "cookware", "knives",
+                         "bakeware", "utensils", "gadgets"),
+        length_days=4,
+        guidance=_DEAL_GUIDANCE,
     ),
     Occasion(
         id="christmas",
@@ -270,8 +321,52 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
         label="Amazon Prime Day",
         month_day="07-16",  # approximation; Amazon announces date
         audience="tech",
-        bucket_hints=("buying-guide", "kitchen-buying-guide"),
+        recipe_keywords=("prime day deals", "prime day gpu deals",
+                         "prime day gaming pc deals", "prime day monitor deals",
+                         "lowest price", "price history"),
+        bucket_hints=("buying-guide", "use-case"),
+        link_categories=("gpus", "prebuilt-gaming-pcs", "monitors",
+                         "gaming-desks"),
         length_days=2,
+        guidance=_DEAL_GUIDANCE,
+    ),
+    # Amazon's October Prime event ("Prime Big Deal Days"). Held the 2nd
+    # Tuesday-Wednesday of October in 2023 and 2024, the 1st in 2025
+    # (Oct 7-8). The 2026 date is the operator's estimate until Amazon
+    # announces it -- correct it via `date_overrides` in
+    # config/seasonal-calendar.json, no commit needed.
+    Occasion(
+        id="prime-big-deal-days",
+        label="Amazon Prime Big Deal Days (October Prime Day, tech deals)",
+        month_day="nth-weekday:2:tuesday:10",
+        year_dates=(("2025", "10-07"), ("2026", "10-07")),
+        audience="tech",
+        recipe_keywords=("prime big deal days", "october prime day",
+                         "prime big deal days gpu deals",
+                         "prime day gaming pc deals", "prebuilt gaming pc deals",
+                         "mini pc deals", "monitor deals", "gaming desk deals",
+                         "standing desk deals", "lowest price", "price history"),
+        bucket_hints=("buying-guide", "use-case"),
+        link_categories=("gpus", "prebuilt-gaming-pcs", "workstations",
+                         "monitors", "gaming-desks", "cpus"),
+        length_days=2,
+        guidance=_DEAL_GUIDANCE,
+    ),
+    Occasion(
+        id="prime-big-deal-days-kitchen",
+        label="Amazon Prime Big Deal Days (October Prime Day, kitchen deals)",
+        month_day="nth-weekday:2:tuesday:10",
+        year_dates=(("2025", "10-07"), ("2026", "10-07")),
+        audience="food",
+        recipe_keywords=("prime big deal days kitchen deals",
+                         "october prime day kitchen", "air fryer deals",
+                         "stand mixer deals", "instant pot deals",
+                         "cookware deals", "knife deals"),
+        bucket_hints=("kitchen-buying-guide",),
+        link_categories=("small-appliances", "cookware", "knives",
+                         "bakeware", "utensils", "gadgets"),
+        length_days=2,
+        guidance=_DEAL_GUIDANCE,
     ),
     Occasion(
         id="back-to-school-tech",
@@ -297,9 +392,27 @@ _WEEKDAYS = {
 def resolve_date(occasion: Occasion, year: int) -> datetime.date | None:
     """Resolve an occasion to a concrete date in the given year.
 
+    Precedence: an exact `year_dates` entry for `year`, then the
+    `month_day` rule. A rule may carry a `+N` / `-N` day offset suffix
+    (`nth-weekday:4:thursday:11+1` = the day after Thanksgiving).
+
     Returns None if the format can't be parsed.
     """
+    for y, md_exact in occasion.year_dates or ():
+        if str(y) == str(year):
+            try:
+                m, d = str(md_exact).split("-")
+                return datetime.date(year, int(m), int(d))
+            except (ValueError, TypeError):
+                break
     md = occasion.month_day
+    offset_m = re.match(r"^(.*?)([+-]\d+)$", md)
+    if offset_m and not re.match(r"^\d{2}-\d{2}$", md):
+        base = resolve_date(Occasion(id=occasion.id, label=occasion.label,
+                                     month_day=offset_m.group(1)), year)
+        if base is None:
+            return None
+        return base + datetime.timedelta(days=int(offset_m.group(2)))
     if md.startswith("season:"):
         return None
     if md.startswith("nth-weekday:"):
@@ -341,6 +454,72 @@ def resolve_date(occasion: Occasion, year: int) -> datetime.date | None:
 
 
 # ---------------------------------------------------------------------------
+# Storage overrides (config/seasonal-calendar.json)
+# ---------------------------------------------------------------------------
+
+_TUPLE_FIELDS = ("recipe_keywords", "bucket_hints", "link_categories")
+
+
+def _occasion_from_dict(d: dict) -> Optional[Occasion]:
+    known = {f.name for f in dataclasses.fields(Occasion)}
+    kw: dict[str, Any] = {k: v for k, v in d.items() if k in known}
+    if not kw.get("id") or not kw.get("month_day"):
+        return None
+    kw.setdefault("label", kw["id"])
+    for f in _TUPLE_FIELDS:
+        if f in kw:
+            kw[f] = tuple(kw[f] or ())
+    if "year_dates" in kw:
+        yd = kw["year_dates"]
+        if isinstance(yd, dict):
+            yd = yd.items()
+        kw["year_dates"] = tuple((str(y), str(md)) for y, md in (yd or ()))
+    try:
+        return Occasion(**kw)
+    except TypeError:
+        return None
+
+
+def load_occasions(storage=None, *,
+                   base: Sequence[Occasion] = DEFAULT_OCCASIONS
+                   ) -> tuple[Occasion, ...]:
+    """DEFAULT_OCCASIONS with the storage config applied.
+
+    config/seasonal-calendar.json (all keys optional):
+      {
+        "date_overrides": {"prime-big-deal-days": {"2026": "10-07"}},
+        "occasions": [{"id": "...", "label": "...", "month_day": "...",
+                       "audience": "tech", ...}],   # add, or replace by id
+        "disabled": ["super-bowl"]
+      }
+    Any read/parse failure returns `base` unchanged. The calendar must never
+    break an authoring run.
+    """
+    if storage is None:
+        return tuple(base)
+    try:
+        cfg = storage.read_json(CONFIG_KEY) or {}
+    except Exception:
+        return tuple(base)
+    if not isinstance(cfg, dict) or not cfg:
+        return tuple(base)
+    by_id: dict[str, Occasion] = {o.id: o for o in base}
+    for d in cfg.get("occasions") or []:
+        occ = _occasion_from_dict(d) if isinstance(d, dict) else None
+        if occ:
+            by_id[occ.id] = occ
+    for oid, years in (cfg.get("date_overrides") or {}).items():
+        occ = by_id.get(oid)
+        if occ is None or not isinstance(years, dict):
+            continue
+        merged = dict(occ.year_dates)
+        merged.update({str(y): str(md) for y, md in years.items()})
+        by_id[oid] = dataclasses.replace(occ, year_dates=tuple(merged.items()))
+    disabled = set(cfg.get("disabled") or [])
+    return tuple(o for o in by_id.values() if o.id not in disabled)
+
+
+# ---------------------------------------------------------------------------
 # Window classification + signal builder
 # ---------------------------------------------------------------------------
 
@@ -376,16 +555,22 @@ class ActiveOccasion:
 
 def active_signal(today: datetime.date | None = None,
                   *,
-                  occasions: Sequence[Occasion] = DEFAULT_OCCASIONS,
-                  audience: str = "general") -> list[ActiveOccasion]:
+                  occasions: Sequence[Occasion] | None = None,
+                  audience: str = "general",
+                  storage=None) -> list[ActiveOccasion]:
     """Return all occasions matching today's NOW / IMMINENT / UPCOMING
     windows, newest-first.
 
     `audience` filters occasions whose `audience` is not "general" and
-    not the requested audience. Pass `"food"` for aisleprompt, `"tech"`
-    for specpicks.
+    not the requested audience. Pass `"food"` for a food/kitchen site,
+    `"tech"` for a hardware-review site.
+
+    `storage` (optional) applies config/seasonal-calendar.json overrides
+    (see load_occasions). An explicit `occasions` list wins over both.
     """
     today = today or datetime.date.today()
+    if occasions is None:
+        occasions = load_occasions(storage)
     out: list[ActiveOccasion] = []
     for occ in occasions:
         if occ.audience != "general" and occ.audience != audience:
@@ -428,18 +613,44 @@ def active_signal(today: datetime.date | None = None,
     return out
 
 
+def _detail_lines(a: ActiveOccasion, category_path_prefix: Optional[str]) -> list[str]:
+    out: list[str] = []
+    cats = a.occasion.link_categories[:6]
+    if cats:
+        if category_path_prefix:
+            out.append(f"      link to {category_path_prefix}<slug> pages: "
+                       f"{', '.join(cats)}")
+        else:
+            out.append(f"      cross-link categories: {', '.join(cats)}")
+    if a.occasion.bucket_hints:
+        out.append(f"      best buckets: {', '.join(a.occasion.bucket_hints)}")
+    out.append(f"      tag the proposal: holiday:{a.occasion.id}")
+    if a.occasion.guidance:
+        out.append(f"      how: {a.occasion.guidance}")
+    return out
+
+
 def build_prompt_block(active: Sequence[ActiveOccasion],
                        *,
-                       today: datetime.date | None = None) -> str:
+                       today: datetime.date | None = None,
+                       category_path_prefix: Optional[str] = None) -> str:
     """Render the active occasions as a block we paste into the LLM
     user-message. Empty when nothing is in window.
+
+    NOW and IMMINENT occasions carry their link categories, bucket hints,
+    the `holiday:<id>` tag to set, and any `guidance`. IMMINENT is where
+    deal pages must be written (publish before the event), so it needs
+    the same detail as NOW. `category_path_prefix` (e.g. "/k/") renders
+    categories as site paths. Omit it for plain slugs.
     """
     if not active:
         return ""
     today = today or datetime.date.today()
     lines: list[str] = [
         f"SEASONAL + HOLIDAY SIGNAL — today is {today.isoformat()} "
-        f"({today.strftime('%A')})."
+        f"({today.strftime('%A')}). Any proposal that targets one of these "
+        "occasions MUST include `holiday:<occasion-id>` in `tags` (the "
+        "homepage feature rotation keys on it)."
     ]
     now_list = [a for a in active if a.window == "now"]
     if now_list:
@@ -453,24 +664,19 @@ def build_prompt_block(active: Sequence[ActiveOccasion],
         )
         for a in now_list:
             lines.append(a.as_prompt_line())
-            if a.occasion.link_categories:
-                lines.append(
-                    f"      link to /k/ categories: "
-                    f"{', '.join(a.occasion.link_categories[:6])}"
-                )
-            if a.occasion.bucket_hints:
-                lines.append(
-                    f"      best buckets: {', '.join(a.occasion.bucket_hints)}"
-                )
+            lines.extend(_detail_lines(a, category_path_prefix))
     imminent = [a for a in active if a.window == "imminent"]
     if imminent:
         lines.append("")
         lines.append(
             "📅 IMMINENT (4–14 days). Strong candidates for this run "
-            "if you have proposal slots after the NOW pick:"
+            "if you have proposal slots after the NOW pick. A retail deal "
+            "event in this window is the top pick: the page has to be live "
+            "and indexed before the event starts."
         )
         for a in imminent:
             lines.append(a.as_prompt_line())
+            lines.extend(_detail_lines(a, category_path_prefix))
     upcoming = [a for a in active if a.window == "upcoming"]
     if upcoming:
         lines.append("")
