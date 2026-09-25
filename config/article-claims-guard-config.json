@@ -1,0 +1,22 @@
+{
+  "schema_version": "1",
+  "_comment": "Honesty guard for article bodies (framework/core/article_claims_guard.py). Storage copy at config/article-claims-guard-config.json overrides this repo default. Site key matches by substring against the rec's agent_id / site hint. Each check is reject | warn | off; 'reject' refuses the implementer INSERT and re-queues the rec with the offending sentences as the addendum. point_prices applies only to the buckets in price_buckets (buying guides; never recipe clusters, where cost per serving is the point). 2026-09-25 AI-visibility audit F119/F075/F100/F108/F120.",
+  "default": {
+    "first_hand_claims": "reject",
+    "star_ratings": "reject",
+    "point_prices": "warn",
+    "price_buckets": ["kitchen-buying-guide", "buying-guide"]
+  },
+  "sites": {
+    "aisleprompt": {
+      "point_prices": "reject",
+      "price_buckets": ["kitchen-buying-guide", "kitchen-equipment"]
+    },
+    "specpicks": {
+      "first_hand_claims": "warn",
+      "star_ratings": "warn",
+      "point_prices": "warn",
+      "price_buckets": ["buying-guide"]
+    }
+  }
+}
