@@ -4142,7 +4142,8 @@ def _page_record(page) -> dict:
 
 
 def _crawl_for_audit(cfg, run_dir, seeds: Optional[list] = None,
-                     max_pages: int = 20):
+                     max_pages: int = 20,
+                     seed_failures: Optional[list] = None):
     """On-demand crawl for the LLM audit when the collector didn't already
     produce a page inventory. Returns page records (url, title, h1,
     description, canonical, body_text, status, fetch_ms, ttfb_ms, ...).
@@ -4154,6 +4155,11 @@ def _crawl_for_audit(cfg, run_dir, seeds: Optional[list] = None,
          matters rather than to /about or /privacy.
       2. Only if slots remain: the legacy BFS from the homepage + top-10
          GSC pages + sitemap roots (depth 1).
+
+    `seed_failures`, when given, receives a record for every seed that got
+    no response (read timeout, reset) or a 5xx. Those pages have nothing to
+    audit, but for an assistant fetching live they are the slowest pages of
+    all, so the AI-landed latency rec must still see them.
     """
     try:
         # Reuse the BFS crawler from progressive-improvement-agent
@@ -4202,6 +4208,14 @@ def _crawl_for_audit(cfg, run_dir, seeds: Optional[list] = None,
         for page in _crawl(base_url=base_url, seed_urls=seed_urls,
                            use_sitemap=False, max_depth=0,
                            max_pages=len(seed_urls), **common):
+            if seed_failures is not None and (
+                    page.status_code == 0 or page.status_code >= 500):
+                seed_failures.append({
+                    "url": page.url, "status": page.status_code,
+                    "fetch_ms": getattr(page, "fetch_ms", 0) or 0,
+                    "ttfb_ms": getattr(page, "ttfb_ms", 0) or 0,
+                    "error": (getattr(page, "error", "") or "")[:200],
+                })
             _keep(page)
             if len(pages) >= max_pages:
                 break
@@ -4614,9 +4628,11 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                             pages.append(json.loads(line))
                         except Exception:
                             pass
+                seed_failures: list[dict] = []
                 if not pages:
                     pages = _crawl_for_audit(cfg, run_dir, seeds=audit_seeds,
-                                             max_pages=min(20, max_audit_pages))
+                                             max_pages=min(20, max_audit_pages),
+                                             seed_failures=seed_failures)
                     if pages:
                         with pages_path.open("w") as f:
                             for p in pages:
@@ -4624,6 +4640,21 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                 # Seed pages first (and annotated with their AI-landing
                 # counts), then the per-URL cooldown, then the cap.
                 pages = _audit_pages.prioritize(pages, audit_seeds)
+                # Latency on AI-landed pages — measured by this crawl, so it
+                # needs no LLM. One live-state rec (cwv-ttfb-slow). Measured
+                # BEFORE the cooldown and the cap: those limit LLM recs, and
+                # a page that already had its share of copy recs is still
+                # slow. Seeds that never answered (timeouts, 5xx) count too.
+                ttfb_budget = int(analyzer_cfg.get(
+                    "ai_landed_ttfb_budget_ms",
+                    _audit_pages.DEFAULT_TTFB_BUDGET_MS if audit_seeds else 0) or 0)
+                latency_pages = pages + _audit_pages.prioritize(seed_failures, audit_seeds)
+                if latency_pages and ttfb_budget > 0 and len(recs) < max_recs:
+                    slow_rec = _audit_pages.slow_ai_landed_rec(
+                        latency_pages, budget_ms=ttfb_budget, rec_id=next_id())
+                    if slow_rec:
+                        recs.append(slow_rec)
+                        print(f"  → {slow_rec['title']}", file=sys.stderr)
                 if analyzer_cfg.get("audit_url_cooldown"):
                     pages, _cooled = _audit_pages.cooldown_filter_pages(
                         pages, prior_url_counts, cooldown_cfg, cooldown_exempt)
@@ -4633,17 +4664,6 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                               + ", ".join(_cooled[:5]), file=sys.stderr)
                 # Cap to bound cost (default 30, configurable per-site)
                 pages = pages[:max_audit_pages]
-                # Latency on AI-landed pages — measured by this crawl, so it
-                # needs no LLM. One live-state rec (cwv-ttfb-slow).
-                ttfb_budget = int(analyzer_cfg.get(
-                    "ai_landed_ttfb_budget_ms",
-                    _audit_pages.DEFAULT_TTFB_BUDGET_MS if audit_seeds else 0) or 0)
-                if pages and ttfb_budget > 0 and len(recs) < max_recs:
-                    slow_rec = _audit_pages.slow_ai_landed_rec(
-                        pages, budget_ms=ttfb_budget, rec_id=next_id())
-                    if slow_rec:
-                        recs.append(slow_rec)
-                        print(f"  → {slow_rec['title']}", file=sys.stderr)
                 if pages:
                     print(f"  → LLM audit: {len(pages)} pages", file=sys.stderr)
                     # Adaptive context: load past goal-changes for this site

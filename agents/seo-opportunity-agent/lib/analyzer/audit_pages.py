@@ -251,11 +251,30 @@ def cooldown_filter_recs(recs: list[dict], counts: Mapping[str, int],
 # Latency on AI-landed pages
 # ---------------------------------------------------------------------------
 
+def _latency_label(ms: int, p: Mapping) -> str:
+    """"14.8s", or what happened when the page never answered in time."""
+    status = _int(p.get("status"))
+    if status == 0 and p.get("error"):
+        return f"no response after {ms / 1000:.1f}s: {str(p.get('error'))[:60]}"
+    if status >= 500:
+        return f"HTTP {status} after {ms / 1000:.1f}s"
+    return f"{ms / 1000:.1f}s"
+
+
 def slow_ai_landed_rec(pages: Iterable[dict], *, budget_ms: int,
                        rec_id: str, data_ref: str = "data/pages.jsonl") -> Optional[dict]:
     """One `cwv-ttfb-slow` rec (a live-state type: re-measured every crawl,
     never deduped) listing AI-landed pages whose time to first byte exceeded
     `budget_ms`, slowest first. None when there are none or budget_ms <= 0.
+
+    `pages` may include seed fetches that never answered (status 0 with an
+    `error`, e.g. a read timeout) or answered 5xx: those are the worst case
+    for a live assistant fetch, and their `fetch_ms` (>= the crawl timeout)
+    stands in for the missing time to first byte.
+
+    The title carries no page count on purpose: the backlog dispatcher
+    de-duplicates recs by title, so a count that drifts run to run (7, 8,
+    6 slow pages...) would re-dispatch the same perf work every run.
 
     Assistants fetch a page while the user waits (ChatGPT-User,
     Perplexity-User) and give up after a few seconds; a slow page is a page
@@ -275,21 +294,21 @@ def slow_ai_landed_rec(pages: Iterable[dict], *, budget_ms: int,
         return None
     slow.sort(key=lambda t: -t[0])
     sample = ", ".join(
-        f"{p.get('url')} ({ms / 1000:.1f}s; {p.get('ai_referrals', 0)} AI referrals, "
+        f"{p.get('url')} ({_latency_label(ms, p)}; {p.get('ai_referrals', 0)} AI referrals, "
         f"{p.get('ai_live_fetches', 0)} assistant fetches)"
         for ms, p in slow[:5])
     return {
         "id": rec_id,
         "type": "cwv-ttfb-slow",
         "priority": "high",
-        "title": (f"{len(slow)} AI-landed page(s) take over {budget_ms / 1000:.0f}s "
-                  f"to first byte"),
+        "title": (f"AI-landed pages take over {budget_ms / 1000:g}s to first byte "
+                  f"in the audit crawl"),
         "rationale": (
-            "These pages are the ones AI assistants send people to or fetch at "
-            "answer time, and the audit crawl measured each one's server "
-            f"response above the {budget_ms}ms budget. An assistant that "
-            "fetches live gives up after a few seconds, so a slow page is one "
-            "it cannot quote or link. Slowest: " + sample
+            f"{len(slow)} page(s) that AI assistants send people to or fetch at "
+            "answer time had a server response above the "
+            f"{budget_ms}ms budget in the audit crawl (or no response at all). "
+            "An assistant that fetches live gives up after a few seconds, so a "
+            "slow page is one it cannot quote or link. Slowest: " + sample
         ),
         "expected_impact": {"metric": "ai_referral_landings_30d", "horizon_weeks": 2},
         "data_refs": [data_ref],

@@ -193,7 +193,7 @@ Optional blocks and whether each is used today:
 | `data_sources.db.human_clicks[].pages` | **Used** (2026-09-25). Also writes `<name>_pages` = `[{path, clicks}]`, the verified-human clicks split by a column (e.g. ASIN → `/product/{value}`). |
 | `analyzer.audit_seed_queries` | **Used** (2026-09-25). `db-stats.json` blocks whose rows carry `path`. Without a page inventory, the LLM audit fetches these pages first (depth 0) and only fills leftover slots with the homepage/GSC BFS; with one, it moves them to the front. Each audited page carries its AI referrals, live fetches and TTFB into the prompt. |
 | `analyzer.audit_url_cooldown` | **Used** (2026-09-25). Skips a URL that already got `max_recs_per_url` LLM-audit recs in `window_days` (`max_recs_per_exempt_url` for URLs in `exempt_queries`). Before this, one specpicks PDP drew 261 LLM recs in 30 days. |
-| `analyzer.ai_landed_ttfb_budget_ms` | **Used** (2026-09-25). One live-state `cwv-ttfb-slow` rec when an audited AI-landed page is slower than the budget (default 3000 when seeds are configured). |
+| `analyzer.ai_landed_ttfb_budget_ms` | **Used** (2026-09-25). One live-state `cwv-ttfb-slow` rec when an audited AI-landed page is slower than the budget (default 3000 when seeds are configured). Seeds that never answered in the crawl (timeout, 5xx) count as slow. The rec's title carries no page count, so the backlog dispatcher's title dedupe ships the perf work once instead of once per run. |
 | `geo` (top-level) | In the schema, but **no code reads it** (there is no `_add_geo_recs`). |
 | `deployer` | Read by the implementer → deployer chain. See `../deployer/README.md`. |
 

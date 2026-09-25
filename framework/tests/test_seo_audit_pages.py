@@ -118,9 +118,44 @@ def test_slow_ai_landed_rec_only_for_ai_landed_pages_over_budget():
     assert rec["type"] == "cwv-ttfb-slow" and rec["id"] == "rec-007"
     assert rec["sample_urls"] == ["https://example.com/product/B0AAAAAAAA",
                                   "https://example.com/vs/x"]
-    assert "2 AI-landed page(s)" in rec["title"]
+    assert rec["rationale"].startswith("2 page(s)")
     assert ap.slow_ai_landed_rec(pages, budget_ms=0, rec_id="r") is None
     assert ap.slow_ai_landed_rec(pages[1:3], budget_ms=3000, rec_id="r") is None
+
+
+def test_slow_rec_title_is_stable_so_the_dispatcher_dedupes_it():
+    # The backlog dispatcher de-duplicates recs by title. A page count in the
+    # title (7 slow pages, then 8, then 6...) re-dispatched the same perf
+    # work on every run.
+    def page(url, ms):
+        return {"url": url, "audit_seed": "ai_landed_pages", "ai_live_fetches": 1,
+                "ttfb_ms": ms}
+    a = ap.slow_ai_landed_rec([page("https://example.com/a", 9000)],
+                              budget_ms=3000, rec_id="r1")
+    b = ap.slow_ai_landed_rec([page("https://example.com/a", 12000),
+                               page("https://example.com/b", 4000)],
+                              budget_ms=3000, rec_id="r2")
+    assert a["title"] == b["title"]
+    assert "3s" in a["title"]
+
+
+def test_slow_rec_includes_seeds_that_never_answered():
+    # A seed that timed out (status 0) or answered 5xx has no body to audit,
+    # but it is the worst case for an assistant's live fetch.
+    seeds = ap.seed_rows({"ai_landed_pages": [
+        {"path": "/product/B0SLOWSLOW", "referrals": 4, "fetches": 12},
+        {"path": "/reviews/fast", "fetches": 3}]}, ["ai_landed_pages"], BASE)
+    failures = ap.prioritize([
+        {"url": "https://example.com/product/B0SLOWSLOW", "status": 0,
+         "fetch_ms": 41500, "ttfb_ms": 0, "error": "ReadTimeout (after 2 attempts)"},
+        {"url": "https://example.com/not-a-seed", "status": 0, "fetch_ms": 40000,
+         "error": "ReadTimeout"},
+    ], seeds)
+    pages = [{"url": "https://example.com/reviews/fast", "audit_seed": "ai_landed_pages",
+              "ai_live_fetches": 3, "ttfb_ms": 400, "status": 200}]
+    rec = ap.slow_ai_landed_rec(pages + failures, budget_ms=3000, rec_id="r")
+    assert rec["sample_urls"] == ["https://example.com/product/B0SLOWSLOW"]
+    assert "no response after 41.5s" in rec["rationale"]
 
 
 def test_run_ts_datetime():
