@@ -452,7 +452,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "article-wordcount-schema-missing": "article JSON-LD omits wordCount",
     # product
     "product-schema-incomplete": "Product JSON-LD missing name/image/brand/description, OR asserting what the page cannot back: an Offer whose price is older than the site's freshness rule, seller/shipping/return claims, or a rating/Review not shown on the page (never propose adding them)",
-    "product-schema-rich-results": "Product JSON-LD present but invalid for rich results (e.g. a Product node with no offers/review/rating); the fix is to emit Product only where an honest Offer exists (current price), never to add stale offers, third-party ratings or synthetic reviews",
+    "product-schema-rich-results": "Product JSON-LD present but invalid for rich results. In a LIST (ItemList, category, compare) an item with no current Offer should be a name + URL ListItem, not an offer-less Product; on a product's OWN page keep the Product node (name, brand, identifiers, specs) and let its Offer appear only while the price is current. Never add stale offers, third-party ratings or synthetic reviews to make it eligible",
     "product-specs-table-missing": "PDP has no structured specifications table",
     "product-pros-cons-missing": "PDP has no pros/cons block",
     "product-aggregate-rating-thin": "AggregateRating based on too few reviews to display",
