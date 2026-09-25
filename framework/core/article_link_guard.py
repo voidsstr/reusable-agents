@@ -248,8 +248,9 @@ def render_link_directive(proposal: dict,
       kitchen_category_template — category pages (crawlable)
       kitchen_product_template  — product pages (crawlable)
       kitchen_buy_template      — optional affiliate click-out for an
-                                  explicit buy link (the site marks it
-                                  rel=sponsored); omit to not ask for one
+                                  explicit buy link (the site's renderer
+                                  must mark it rel="sponsored nofollow");
+                                  omit to not ask for one
       kitchen_link_template     — the legacy unsplit list (default /k/)
     """
     cfg = link_cfg or {}
@@ -302,8 +303,8 @@ def render_link_directive(proposal: dict,
             if cfg.get("kitchen_buy_template"):
                 lines.append("    For an explicit buy/price link (\"Check price\"), use "
                              + _tpl("kitchen_buy_template", "", "<slug>")
-                             + " — that is the affiliate click-out; the site marks "
-                               "it sponsored. Never write a raw retailer URL.")
+                             + " — that is the affiliate click-out. Never write a "
+                               "raw retailer URL.")
         if kit_cats:
             lines.append(f"  Categories ({len(kit_cats)}):")
             for s in kit_cats[:10]:
