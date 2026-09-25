@@ -189,7 +189,7 @@
 Articles must hook into what's happening NOW (seasonal moments, holidays,
 trending searches), not just evergreen "Best X Guide" pages. A
 `seasonal-occasion` bucket with no Memorial Day cookout guide on Memorial
-Day weekend is a failure even if 50 other articles shipped. Four
+Day weekend is a failure even if 50 other articles shipped. Five
 primitives back this:
 
 1. **`framework/core/seasonal_calendar.py`** — anchored US calendar:
@@ -218,7 +218,18 @@ primitives back this:
    re-queued with a failure addendum naming the slugs to add. No inline
    links = content dead-end (no link equity, no expansion, no conversion).
 
+5. **`framework/core/article_output_gate.py`** — volume is not the goal
+   (2026-09: 298 specpicks articles in 30 days drew 0 Google impressions).
+   Every proposer calls the gate BEFORE its Opus call: default 1 proposal/
+   UTC day per site, and only when an article published 3–14 days ago
+   earned a GSC impression or an AI-referral visit (holiday-tagged deal
+   pieces pass while their occasion is IMMINENT). Knobs: `site.yaml`
+   `proposals.output_gate` + storage `config/article-output-gate-config.json`
+   (`by_agent_id` override, no commit needed).
+
 Hard rules for any new article/news/editorial proposer:
+- ❌ Don't skip `article_output_gate` or raise the daily cap without a
+  traffic signal showing the last batch earned impressions/visits.
 - ❌ Don't roll your own holiday list — call `seasonal_calendar.active_signal()`.
 - ❌ Don't roll your own RSS scraper — call `trends_signal.fetch_trends_cached()`.
 - ❌ Don't ship without a `holiday:<id>` tag rule in the system prompt —
