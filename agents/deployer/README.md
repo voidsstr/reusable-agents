@@ -39,6 +39,13 @@ whether it runs is decided entirely by the implementer.
 - **Content verify must pass** for recs that carry a `content_check` or have
   a type with an inferred check. It runs only when a smoke check is
   configured. Opt out with `RESPONDER_SKIP_CONTENT_VERIFY=1`.
+- **Only committed code ships.** The build runs in a detached git worktree of
+  HEAD under `~/.reusable-agents/deploy-worktrees/`, removed afterwards, so
+  uncommitted or untracked files in the site repo never reach the image. The log
+  says how many dirty tracked files were left out. Opt out per site with
+  `deployer.build.from_clean_checkout: false`, but only when the Dockerfile needs
+  gitignored files it doesn't rebuild. (Added 2026-09-25, after a build from the
+  live tree shipped another agent's half-finished aisleprompt change.)
 - **Tag per deploy.** `{tag}` is the UTC time as `%Y%m%d-%H%M`, unique per
   minute (two deploys in the same minute collide).
 

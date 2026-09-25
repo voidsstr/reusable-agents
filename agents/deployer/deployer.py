@@ -215,6 +215,43 @@ def _expand_local_dev(cmd: str | None, local_dev_block: dict) -> str | None:
     return out
 
 
+def _clean_build_root(repo_root: str | None, site_id: str, *,
+                      enabled: bool = True) -> tuple[str | None, "callable"]:
+    """Return (build_root, cleanup) for the build stage.
+
+    The build used to run in the live working tree, so whatever sat
+    uncommitted there shipped to prod. On 2026-09-25 that deployed another
+    agent's half-finished aisleprompt change (reviews API 500s for ~7 min)
+    and two untracked migrations. A detached worktree of HEAD shares the
+    object store, takes a second, and contains exactly what was committed.
+    Falls back to the live tree (with a warning) when git can't make one.
+    """
+    noop = lambda: None  # noqa: E731
+    if not enabled or not repo_root or not os.path.isdir(os.path.join(repo_root, ".git")):
+        return repo_root, noop
+    base = Path(os.path.expanduser("~/.reusable-agents/deploy-worktrees"))
+    base.mkdir(parents=True, exist_ok=True)
+    wt = base / f"{re.sub(r'[^A-Za-z0-9_-]', '_', site_id or 'site')}-{os.getpid()}"
+    git = ["git", "-C", repo_root]
+    subprocess.run(git + ["worktree", "prune"], capture_output=True)
+    r = subprocess.run(git + ["worktree", "add", "--detach", "--force", str(wt), "HEAD"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"[deployer] WARN clean-checkout build unavailable ({r.stderr.strip()[:200]}); "
+              f"building from the working tree", file=sys.stderr)
+        return repo_root, noop
+    dirty = subprocess.run(git + ["status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print(f"[deployer] building HEAD from {wt}; NOT shipping "
+              f"{len(dirty.splitlines())} uncommitted tracked change(s) in {repo_root}")
+
+    def cleanup() -> None:
+        subprocess.run(git + ["worktree", "remove", "--force", str(wt)], capture_output=True)
+
+    return str(wt), cleanup
+
+
 def run_step(name: str, cwd: str | None, cmd: str, env: dict | None = None,
              timeout: int = 1800,
              repo_root: str | None = None) -> tuple[int, str, str]:
@@ -467,9 +504,15 @@ def main() -> None:
         # ---- 2. Build ----
         b = deployer.get("build", {})
         if b.get("cmd"):
-            rc, _, stderr = run_step("build", b.get("cwd"), repo_root=repo_root, cmd=
-                                     _expand(b["cmd"], deploy_vars, tag, image))
-            deploy_meta["build"] = {"rc": rc, "skipped": False, "stderr_tail": stderr[-1000:]}
+            build_root, cleanup = _clean_build_root(
+                repo_root, cfg.site_id, enabled=b.get("from_clean_checkout", True))
+            try:
+                rc, _, stderr = run_step("build", b.get("cwd"), repo_root=build_root, cmd=
+                                         _expand(b["cmd"], deploy_vars, tag, image))
+            finally:
+                cleanup()
+            deploy_meta["build"] = {"rc": rc, "skipped": False, "stderr_tail": stderr[-1000:],
+                                    "from_clean_checkout": build_root != repo_root}
             if rc != 0:
                 deploy_meta["status"] = "failure"; _save()
                 sys.exit(1)

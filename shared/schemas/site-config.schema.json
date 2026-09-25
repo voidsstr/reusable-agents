@@ -300,7 +300,12 @@
           "type": "object",
           "properties": {
             "cwd": { "type": "string" },
-            "cmd": { "type": "string", "description": "{tag} placeholder substituted with a date-time tag. {image} from deploy.vars." }
+            "cmd": { "type": "string", "description": "{tag} placeholder substituted with a date-time tag. {image} from deploy.vars." },
+            "from_clean_checkout": {
+              "type": "boolean",
+              "default": true,
+              "description": "Build from a detached git worktree of HEAD instead of the live working tree, so uncommitted edits (another agent mid-change, an operator's half-done work, untracked migrations) never ship. Set false only if the image needs gitignored files the Dockerfile does not rebuild."
+            }
           }
         },
         "push": { "type": "object", "properties": { "cwd": { "type": "string" }, "cmd": { "type": "string" } } },
