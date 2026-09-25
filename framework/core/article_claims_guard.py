@@ -88,7 +88,7 @@ _PRICE = r"\$\d[\d,]*(?:\.\d{1,2})?"
 _POINT_PRICE_LABEL = re.compile(
     r"\*\*\s*(?:street\s+|approximate\s+|approx\.?\s+|typical\s+)?price[^*:]{0,20}:?\s*\*\*:?\s*~?(?:about\s+|around\s+)?" + _PRICE, re.I)
 _PAREN_PRICE = re.compile(r"\((?:about|around|roughly|approx\.?|~)?\s*~?" + _PRICE + r"\)")
-_HEADING_PRICE = re.compile(r"^#{2,4}\s+.+?\s[—–-]\s*~?" + _PRICE + r"\s*$", re.M)
+_HEADING_PRICE = re.compile(r"^#{2,4}\s+.+?(?:\s[—–-]|,)\s*~?" + _PRICE + r"\s*$", re.M)
 _TABLE_PRICE_HEADER = re.compile(r"\b(?:price|street\s+price|approx\.?\s+price|typical\s+price)\b", re.I)
 _TABLE_NOT_POINT = re.compile(r"tier|band|range|per[- ]|/\s*year|cost\s+per|total|lifespan", re.I)
 _BAND = re.compile(r"(?:under|below|up\s+to|less\s+than|over)\s*\$|" + _PRICE + r"\s*[-–]\s*\$?\d", re.I)

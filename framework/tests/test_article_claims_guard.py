@@ -45,12 +45,14 @@ def test_point_prices_in_structured_places_only():
         "| Lodge | $34.90 | Searing |\n| Budget | under $30 | Starter |\n\n"
         "**Street price:** $449.99\n\n"
         "### #1 Best Overall: Breville Barista Express — ~$750\n\n"
+        "### Best value — MEGAWISE Vacuum Sealer with starter kit, $33.99\n\n"
         "Recipes cost about $2.50 per serving, and bands like $50–$100 are fine.\n"
     )
     hits = G.find_point_prices(body)
     assert any("$34.90" in h for h in hits)
     assert any("Street price" in h for h in hits)
     assert any("~$750" in h for h in hits)
+    assert any("$33.99" in h for h in hits)
     assert not any("under $30" in h for h in hits)
     assert not any("per serving" in h for h in hits)
 
