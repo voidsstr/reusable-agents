@@ -1543,10 +1543,15 @@ def _add_jsonld_field_completeness_recs(data: Path, recs: list, next_id, max_rec
     pages = _load_pages_by_type(data)
     if not pages:
         return
+    # 2026-09-25 (AI-visibility audit F011): offers and aggregateRating are
+    # NOT required. An affiliate may emit an Offer only while its price is
+    # current (the 24h rule), and a rating only when it is the site's own
+    # and shown on the page -- so their absence is usually correct, and this
+    # rule used to send HIGH-priority recs to re-add stale Offers, scraped
+    # Amazon ratings and synthetic Review nodes to every product page.
     required = {
         "Product": [
             "name", "image", "description", "brand.name",
-            "offers.priceCurrency", "aggregateRating.reviewCount",
         ],
         "Article": [
             "headline", "datePublished", "dateModified",
@@ -1591,22 +1596,26 @@ def _add_jsonld_field_completeness_recs(data: Path, recs: list, next_id, max_rec
                 f"missing rich-result-required fields"
             ),
             "rationale": (
-                f"{type_name} JSON-LD is present but missing fields Google "
-                f"requires for full rich-result eligibility. Studio-supplies "
-                f"emits the complete superset on every page — {type_name}: "
-                f"{', '.join(required[type_name])}. Without these, the page loses "
-                f"star ratings / price callouts / publish dates in the SERP."
+                f"{type_name} JSON-LD is present but missing descriptive fields "
+                f"({', '.join(required[type_name])}) that search and AI engines "
+                f"use to identify the item."
             ),
             "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 6},
             "data_refs": ["data/pages-by-type.jsonl"],
             "implementation_outline": {
                 "approach": (
-                    f"Update the {type_name} JSON-LD template to emit all required "
-                    f"fields. For Product: brand.name, offers.priceCurrency + "
-                    f"availability, aggregateRating (only if reviewCount ≥5 to "
-                    f"avoid Google warnings), sku OR mpn, image[] with ≥3 photos. "
-                    f"For Article: wordCount, dateModified (distinct from "
-                    f"datePublished), author.name."
+                    f"Update the {type_name} JSON-LD template to emit the missing "
+                    f"fields FROM DATA THE PAGE ALREADY SHOWS. For Product: "
+                    f"brand.name, image[] (real photos), description; mpn/gtin "
+                    f"only when a real manufacturer identifier is on file (an "
+                    f"ASIN or marketplace item id is not an MPN). Never add an "
+                    f"Offer whose price is older than the site's freshness rule, "
+                    f"never add seller / shipping / return-policy claims, and "
+                    f"never add aggregateRating or a Review built from "
+                    f"third-party ratings, a template body or a render-time "
+                    f"date. For Article: wordCount, a real dateModified "
+                    f"(distinct from datePublished), author.name from the "
+                    f"site's real people."
                 ),
             },
             "sample_urls": [f["url"] for f in flagged[:5]],

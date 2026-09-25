@@ -451,8 +451,8 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "article-publish-update-dates": "published/updated dates missing, conflicting, or implausible",
     "article-wordcount-schema-missing": "article JSON-LD omits wordCount",
     # product
-    "product-schema-incomplete": "Product JSON-LD missing offers/price/availability/rating",
-    "product-schema-rich-results": "Product JSON-LD present but fails rich-result eligibility",
+    "product-schema-incomplete": "Product JSON-LD missing name/image/brand/description, OR asserting what the page cannot back: an Offer whose price is older than the site's freshness rule, seller/shipping/return claims, or a rating/Review not shown on the page (never propose adding them)",
+    "product-schema-rich-results": "Product JSON-LD present but invalid for rich results (e.g. a Product node with no offers/review/rating); the fix is to emit Product only where an honest Offer exists (current price), never to add stale offers, third-party ratings or synthetic reviews",
     "product-specs-table-missing": "PDP has no structured specifications table",
     "product-pros-cons-missing": "PDP has no pros/cons block",
     "product-aggregate-rating-thin": "AggregateRating based on too few reviews to display",
