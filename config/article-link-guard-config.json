@@ -1,8 +1,29 @@
 {
   "schema_version": "1",
-  "_comment": "Per-site inline-link minima for the article link guard (framework/core/article_link_guard.py). Storage copy at config/article-link-guard-config.json overrides this repo default. Site key matches by substring against the rec's agent_id/site hint.",
-  "default": {"min_recipes": 5, "min_kits": 2, "min_products": 0, "site_root": "https://aisleprompt.com"},
+  "_comment": "Per-site inline-link guard config (framework/core/article_link_guard.py). Storage copy at config/article-link-guard-config.json overrides this repo default. Site key matches by substring against the rec's agent_id/site hint. Kitchen knobs: kitchen_roots = path roots counted as kitchen links; kitchen_category_template / kitchen_product_template = crawlable link shapes the writer is told to use when the proposer split its slugs (expected_kitchen_category_slugs / expected_kitchen_product_slugs); kitchen_buy_template = optional affiliate click-out for an explicit buy link; kitchen_link_template = shape for the legacy unsplit list (default /k/, resolves both kinds).",
+  "default": {
+    "min_recipes": 5,
+    "min_kits": 2,
+    "min_products": 0,
+    "site_root": "https://aisleprompt.com"
+  },
   "sites": {
-    "specpicks": {"min_recipes": 0, "min_kits": 0, "min_products": 3, "site_root": "https://specpicks.com"}
+    "specpicks": {
+      "min_recipes": 0,
+      "min_kits": 0,
+      "min_products": 3,
+      "site_root": "https://specpicks.com"
+    },
+    "aisleprompt": {
+      "kitchen_roots": [
+        "/kitchen/category/",
+        "/kitchen/",
+        "/k/"
+      ],
+      "kitchen_category_template": "{site_root}/kitchen/category/{slug}",
+      "kitchen_product_template": "{site_root}/kitchen/{slug}",
+      "kitchen_buy_template": "{site_root}/k/{slug}?source=amazon",
+      "kitchen_link_template": "{site_root}/k/{slug}"
+    }
   }
 }

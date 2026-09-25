@@ -986,6 +986,7 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                     min_kits=_m["min_kits"],
                     min_products=_m["min_products"],
                     site_root=_m["site_root"] or "https://aisleprompt.com",
+                    link_cfg=_m,
                 )
             except Exception:
                 link_directive_text = ""

@@ -2180,7 +2180,8 @@ for rid, body_p, meta_p in pairs:
             _audit = verify_body(body_md, _proposal_for_guard,
                                   min_recipes=_minima["min_recipes"],
                                   min_kits=_minima["min_kits"],
-                                  min_products=_minima["min_products"])
+                                  min_products=_minima["min_products"],
+                                  kitchen_roots=_minima.get("kitchen_roots"))
             if not _audit.passes:
                 errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
                                     f"(recipes={_audit.recipe_links}, "

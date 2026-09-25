@@ -25,6 +25,9 @@ Slug-pattern matching is lenient — it accepts:
   - `[Anchor](/recipes/<slug>-<id>)` (live aisleprompt URL shape)
   - `[Anchor](https://aisleprompt.com/recipes/<slug>...)` (also live)
   - same shapes under `/k/`, `/product/`, `/reviews/`
+  - crawlable kitchen pages: `/kitchen/category/<slug>[/<sub>]` and
+    `/kitchen/<product-slug>` (count as kitchen links when the site's
+    `kitchen_roots` knob lists them)
 
 It rejects:
   - `[Anchor](recipes/<slug>)` (no leading slash → renders inside /blog)
@@ -49,12 +52,24 @@ from typing import Iterable
 _LINK_RE = re.compile(
     r"\[[^\]]+\]"
     r"\((?:https?://[^/)]*)?"
-    r"(?P<root>/(?:recipes|k|product|reviews|blog)/)"
-    r"(?P<slug>[A-Za-z0-9][A-Za-z0-9-]*)"
+    r"(?P<root>/(?:recipes|k|product|reviews|blog|kitchen/category|kitchen)/)"
+    r"(?P<slug>[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9-]*)?)"
     r"(?:\?[^)]*)?"
     r"(?:#[^)]*)?"
     r"\)"
 )
+
+# Path roots that count toward `kitchen_links` when a site sets no
+# `kitchen_roots` knob. `/k/` is the affiliate click-out (a 302 to the
+# retailer, robots-blocked on purpose), so a site that wants crawlable
+# internal links configures its category/product page roots instead — see
+# config/article-link-guard-config.json.
+DEFAULT_KITCHEN_ROOTS: tuple[str, ...] = ("/k/",)
+
+# Legacy link shape used when a proposal carries only the unsplit
+# `expected_kitchen_slugs` list (categories and products mixed): `/k/`
+# resolves both, so it never 404s.
+DEFAULT_KITCHEN_LINK_TEMPLATE = "{site_root}/k/{slug}"
 
 
 @dataclasses.dataclass
@@ -87,7 +102,7 @@ class LinkAuditResult:
             return (f"only {self.recipe_links} /recipes/ links "
                     f"(min {self.min_recipes})")
         if self.kitchen_links < self.min_kits:
-            return (f"only {self.kitchen_links} /k/ links "
+            return (f"only {self.kitchen_links} kitchen links "
                     f"(min {self.min_kits})")
         if self.product_links < self.min_products:
             return (f"only {self.product_links} /product/ links "
@@ -100,6 +115,7 @@ def _count_by_root(body_md: str) -> dict[str, set[str]]:
     found: dict[str, set[str]] = {
         "/recipes/": set(), "/k/": set(),
         "/product/": set(), "/reviews/": set(), "/blog/": set(),
+        "/kitchen/category/": set(), "/kitchen/": set(),
     }
     for m in _LINK_RE.finditer(body_md or ""):
         root = m.group("root"); slug = m.group("slug")
@@ -107,26 +123,53 @@ def _count_by_root(body_md: str) -> dict[str, set[str]]:
     return found
 
 
+def _expected_kitchen(proposal: dict) -> list[str]:
+    """Every kitchen slug the proposal expects: the split lists (set by a
+    proposer that resolved slugs against its catalog) plus the legacy
+    unsplit `expected_kitchen_slugs`."""
+    out: list[str] = []
+    for key in ("expected_kitchen_category_slugs", "expected_kitchen_product_slugs",
+                "expected_kitchen_slugs"):
+        for s in proposal.get(key) or []:
+            if isinstance(s, str) and s and s not in out:
+                out.append(s)
+    return out
+
+
 def verify_body(body_md: str,
                 proposal: dict,
                 *,
                 min_recipes: int = 5,
                 min_kits: int = 2,
-                min_products: int = 0) -> LinkAuditResult:
-    """Audit `body_md` against the proposal's expected slug lists."""
+                min_products: int = 0,
+                kitchen_roots: Iterable[str] | None = None) -> LinkAuditResult:
+    """Audit `body_md` against the proposal's expected slug lists.
+
+    `kitchen_roots` — path roots whose links count as kitchen links
+    (default `DEFAULT_KITCHEN_ROOTS`). A site whose category/product pages
+    are crawlable (e.g. `/kitchen/category/`, `/kitchen/`) lists them so an
+    article linking the crawlable page satisfies the contract.
+    """
     found = _count_by_root(body_md or "")
     recipes = found.get("/recipes/", set())
-    kitchens = found.get("/k/", set())
+    roots = tuple(kitchen_roots) if kitchen_roots else DEFAULT_KITCHEN_ROOTS
+    kitchens: set[str] = set()
+    for root in roots:
+        kitchens |= found.get(root, set())
     products = found.get("/product/", set())
     blogs = found.get("/blog/", set())
 
     expected_recipe = set(_strip_id(s) for s in
                            (proposal.get("expected_recipe_slugs") or []))
-    expected_kit = set(_strip_id(s) for s in
-                        (proposal.get("expected_kitchen_slugs") or []))
+    expected_kit = set(_strip_id(s) for s in _expected_kitchen(proposal))
 
     matched_r = len(expected_recipe & set(_strip_id(s) for s in recipes))
-    matched_k = len(expected_kit & set(_strip_id(s) for s in kitchens))
+    # `/kitchen/category/<parent>/<sub>` matches an expected `<sub>` too.
+    kit_found = set()
+    for s in kitchens:
+        kit_found.add(_strip_id(s))
+        kit_found.add(_strip_id(s.rsplit("/", 1)[-1]))
+    matched_k = len(expected_kit & kit_found)
 
     return LinkAuditResult(
         recipe_links=len(recipes),
@@ -141,6 +184,30 @@ def verify_body(body_md: str,
         min_kits=min_kits,
         min_products=min_products,
     )
+
+
+def split_kitchen_slugs(slugs: Iterable[str],
+                        category_slugs: Iterable[str],
+                        product_slugs: Iterable[str]) -> dict[str, list[str]]:
+    """Split a proposal's mixed kitchen slugs by what they really are.
+
+    The caller (a site's proposer) resolves the two sets against its own
+    catalog — the guard never queries a site DB. Returns
+    {"categories": [...], "products": [...], "unknown": [...]}; unknown
+    slugs (hallucinated or retired) should not be handed to the writer,
+    because a link to them 404s.
+    """
+    cats = set(category_slugs or [])
+    prods = set(product_slugs or [])
+    out: dict[str, list[str]] = {"categories": [], "products": [], "unknown": []}
+    for s in slugs or []:
+        if not isinstance(s, str) or not s:
+            continue
+        bucket = ("categories" if s in cats else
+                  "products" if s in prods else "unknown")
+        if s not in out[bucket]:
+            out[bucket].append(s)
+    return out
 
 
 def _strip_id(slug: str) -> str:
@@ -164,7 +231,8 @@ def render_link_directive(proposal: dict,
                           min_recipes: int = 5,
                           min_kits: int = 2,
                           min_products: int = 0,
-                          site_root: str = "https://aisleprompt.com") -> str:
+                          site_root: str = "https://aisleprompt.com",
+                          link_cfg: dict | None = None) -> str:
     """Returns a directive block the implementer can paste into its
     aider/claude prompt. The directive lists every expected slug and
     explains the inline-link contract.
@@ -174,17 +242,27 @@ def render_link_directive(proposal: dict,
     Specpicks passes min_products>=3 so the LLM knows to wrap named
     hardware SKUs (ZOTAC RTX 3060 12GB, Ryzen 7 5800X, etc.) in
     /product/<ASIN> markdown links at first mention.
+
+    `link_cfg` is the site's resolved guard config (`resolve_minima()`).
+    Its kitchen link shapes, all `{site_root}`/`{slug}` templates:
+      kitchen_category_template — category pages (crawlable)
+      kitchen_product_template  — product pages (crawlable)
+      kitchen_buy_template      — optional affiliate click-out for an
+                                  explicit buy link (the site marks it
+                                  rel=sponsored); omit to not ask for one
+      kitchen_link_template     — the legacy unsplit list (default /k/)
     """
+    cfg = link_cfg or {}
     recipes: list[str] = proposal.get("expected_recipe_slugs") or []
     kits: list[str] = proposal.get("expected_kitchen_slugs") or []
     products: list[str] = (proposal.get("expected_product_asins")
                              or proposal.get("expected_asins") or [])
     lines: list[str] = [
         "INLINE-LINK CONTRACT (HARD REQUIREMENT — verified after exit):",
-        f"  The wrapper counts /recipes/ + /k/ + /product/ markdown "
+        f"  The wrapper counts /recipes/ + kitchen + /product/ markdown "
         f"links in your output. It rejects the article (EDIT INCOMPLETE) "
         f"if the body contains fewer than {min_recipes} distinct "
-        f"/recipes/ links, {min_kits} distinct /k/ links, and "
+        f"/recipes/ links, {min_kits} distinct kitchen links, and "
         f"{min_products} distinct /product/ links — the article will "
         f"NOT be inserted, the proposal will be re-queued, and you'll "
         f"be asked to do this work again. Better to put the links in "
@@ -204,11 +282,38 @@ def render_link_directive(proposal: dict,
             "each link inline, woven into a sentence in the body — not "
             "as a bare list at the bottom.")
         lines.append("")
-    if kits:
-        lines.append(f"  KITCHEN CATEGORIES TO LINK ({len(kits)} provided — "
+    kit_cats: list[str] = proposal.get("expected_kitchen_category_slugs") or []
+    kit_prods: list[str] = proposal.get("expected_kitchen_product_slugs") or []
+    split = bool(kit_cats or kit_prods)
+
+    def _tpl(key: str, default: str, slug: str) -> str:
+        return (cfg.get(key) or default).format(site_root=site_root, slug=slug)
+
+    if split:
+        cat_tpl_default = cfg.get("kitchen_link_template") or DEFAULT_KITCHEN_LINK_TEMPLATE
+        lines.append(f"  KITCHEN LINKS — at least {min_kits} distinct, from the "
+                     f"slugs below verbatim (they were checked against the live "
+                     f"catalog; do not invent others):")
+        if kit_prods:
+            lines.append(f"  Products ({len(kit_prods)}) — link the product NAME at "
+                         f"first mention to its page:")
+            for s in kit_prods[:10]:
+                lines.append(f"    [Product Name]({_tpl('kitchen_product_template', cat_tpl_default, s)})")
+            if cfg.get("kitchen_buy_template"):
+                lines.append("    For an explicit buy/price link (\"Check price\"), use "
+                             + _tpl("kitchen_buy_template", "", "<slug>")
+                             + " — that is the affiliate click-out; the site marks "
+                               "it sponsored. Never write a raw retailer URL.")
+        if kit_cats:
+            lines.append(f"  Categories ({len(kit_cats)}):")
+            for s in kit_cats[:10]:
+                lines.append(f"    [Category Name]({_tpl('kitchen_category_template', cat_tpl_default, s)})")
+        lines.append("")
+    elif kits:
+        lines.append(f"  KITCHEN LINKS ({len(kits)} provided — "
                      f"use these slugs verbatim; pick at least {min_kits}):")
         for s in kits[:10]:
-            lines.append(f"    [Category Name]({site_root}/k/{s})")
+            lines.append(f"    [Name]({_tpl('kitchen_link_template', DEFAULT_KITCHEN_LINK_TEMPLATE, s)})")
         lines.append("")
     if min_products > 0:
         lines.append(f"  PRODUCTS TO LINK — wrap named hardware SKUs "
@@ -234,7 +339,7 @@ def render_link_directive(proposal: dict,
             "link — but hit the minimum with other named SKUs.")
         lines.append("")
     lines.append(
-        "  Use absolute paths (`/recipes/...`, `/k/...`, `/product/...`) "
+        "  Use absolute paths (`/recipes/...`, `/kitchen/...`, `/product/...`) "
         "— relative paths resolve under /blog and break.")
     lines.append("")
     return "\n".join(lines)
@@ -247,7 +352,7 @@ def render_failure_addendum(audit: LinkAuditResult) -> str:
         "INLINE-LINK CONTRACT — VIOLATED. You wrote "
         f"{audit.recipe_links}/{audit.min_recipes} required /recipes/ "
         f"links, {audit.kitchen_links}/{audit.min_kits} required "
-        f"/k/ links, and {audit.product_links}/{audit.min_products} "
+        f"kitchen links, and {audit.product_links}/{audit.min_products} "
         f"required /product/ links. The article is NOT shippable in "
         f"this state. Add additional inline links to the body using "
         f"the expected slugs / ASINs already provided; do not delete "
@@ -270,7 +375,9 @@ _CONFIG_KEY = "config/article-link-guard-config.json"
 
 
 def resolve_minima(site_hint: str, storage=None) -> dict:
-    """Return {min_recipes, min_kits, min_products, site_root} for a site.
+    """Return the site's guard config: {min_recipes, min_kits, min_products,
+    site_root} plus the optional kitchen knobs (kitchen_roots,
+    kitchen_*_template) that `verify_body` / `render_link_directive` read.
 
     `site_hint` is whatever the caller has — a per-site agent_id
     ("specpicks-article-proposal-agent") or a bare site name; matching is
