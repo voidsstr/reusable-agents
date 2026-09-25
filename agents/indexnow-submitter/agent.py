@@ -198,7 +198,7 @@ class IndexnowSubmitter(AgentBase):
             proc = subprocess.run(
                 cmd, cwd=run_cwd, env=env,
                 capture_output=True, text=True,
-                timeout=int(os.environ.get("INDEXNOW_TIMEOUT_S", "900")),
+                timeout=int(os.environ.get("INDEXNOW_TIMEOUT_S", "1500")),
             )
             Path(out_path).write_text((proc.stdout or "") + "\n" + (proc.stderr or ""))
             output = (proc.stdout or "") + "\n" + (proc.stderr or "")

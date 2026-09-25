@@ -129,7 +129,7 @@ no goal id. The specpicks manifest sets none.
 | `AGENT_ID` | engine id | Per-site id |
 | `INDEXNOW_TS_APP_DIR` | `/home/voidsstr/development/specpicks` | Supplies `node_modules` (ts-node + pg) |
 | `NODE_PATH` | `npm root -g` | Fallback modules when the app dir has no `node_modules` |
-| `INDEXNOW_TIMEOUT_S` | `900` | Timeout for the `submit.ts` subprocess |
+| `INDEXNOW_TIMEOUT_S` | `1500` | Timeout for the `submit.ts` subprocess (sitemap intake + up to `verify.budgetSeconds` of page checks fit inside it) |
 | `SITE_CONFIG_PATHS` | unset | Comma-separated config files; overrides discovery in `submit.ts` (and in `gsc-coverage-auditor`) |
 | `INDEXNOW_GSC_OAUTH_FILE` / `GSC_OAUTH_FILE` | `~/.reusable-agents/seo/.oauth.json` | Token for the GSC sitemap PUT |
 | `INDEXNOW_QUEUE_ROOT` | derived | Force-queue dir. `queue-publish.py` walks up from a claude-pool `HOME` to the real `.reusable-agents` root; `submit.ts` defaults to the watermark file's dir (the same place) |
