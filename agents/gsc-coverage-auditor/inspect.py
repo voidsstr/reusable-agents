@@ -174,9 +174,9 @@ def load_site(site_name: str) -> dict:
     explicit = os.environ.get("SITE_CONFIG_PATHS")
     if explicit:
         candidates.extend(p.strip() for p in explicit.split(",") if p.strip())
-    home = os.path.expanduser("~/development")
-    for site in ("aisleprompt", "specpicks"):
-        candidates.append(f"{home}/{site}/agents/seo-config/site-indexnow.json")
+    # Discover every site repo's config (no site names in framework code).
+    home = os.environ.get("INDEXNOW_SITE_REPOS_ROOT") or os.path.expanduser("~/development")
+    candidates.extend(sorted(str(p) for p in Path(home).glob("*/agents/seo-config/site-indexnow.json")))
     candidates.append(str(SITES_JSON))
     seen = set()
     for path_ in candidates:

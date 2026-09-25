@@ -46,32 +46,34 @@ run this engine. `aisleprompt-indexnow-bulk` has its own `AGENT.md`;
 1. **Resolve the site and mode.** The site comes from `INDEXNOW_SITE` (or `INDEXNOW_TARGET_SITE`); empty means all configured sites. `INDEXNOW_BULK=1` selects bulk mode.
 2. **Pick node modules.** Uses `$INDEXNOW_TS_APP_DIR/node_modules` (default `/home/voidsstr/development/specpicks`). If that dir is absent, as on a freshly cloned host, it falls back to `NODE_PATH` or `npm root -g` with `npx --no-install`.
 3. **Run the worker.** Executes `npx ts-node --transpile-only … submit.ts [--site=<site>] [--bulk]` with timeout `INDEXNOW_TIMEOUT_S` (900 s). The output is written to a `NamedTemporaryFile` `/tmp/tmp*.log`, which is never deleted and not echoed to the unit log.
-4. **submit.ts, per site:**
-   1. **Config.** Loads `SITE_CONFIG_PATHS` if set. Otherwise it auto-discovers `~/development/{aisleprompt,specpicks}/agents/seo-config/site-indexnow.json` (both are loaded, then filtered by `--site`). The legacy `sites.json` in this dir is the last-resort fallback.
-   2. **Watermark.** Reads the ISO timestamp in `watermarkFile` (default epoch).
-   3. **Query sets.** Sets with `incrementalSql` run it with `$1` = watermark. `bulkOnly` sets **always** run their `bulkSql`. `--bulk` runs every `bulkSql`. `$SITE_ID` and `$SITE_IDS` are interpolated.
-   4. **Sitemaps.** Fetches `sitemapUrls`, following index files to depth 2 with at most 25 fetches and a 30 s timeout each. Only same-host `<loc>` entries count. Incremental runs keep entries whose `<lastmod>` ≥ watermark, or whose `<lastmod>` is missing or unparseable.
-   5. **Static paths.** Adds every `staticPaths` entry when any dynamic URL was found (always in bulk mode).
-   6. **Submit.** POSTs batches of ≤ 10,000 URLs to `https://api.indexnow.org/indexnow` with `{host, key, keyLocation: https://<host>/<key>.txt, urlList}`.
-   7. **Advance the watermark.** Sets it to the run's start time only if `failed == 0`. That includes runs with nothing to submit, and **dry runs**.
-   8. **Report.** Prints `[indexnow:<site>] done submitted=N failed=M`, and exits 1 if any site hit a fatal error.
+4. **submit.ts, per site** (rewritten 2026-09-25 after the AI-visibility audit found the full catalog re-sent daily, the same ~277 URLs every 15 minutes, and 404/noindex URLs in the batches). Every candidate passes three gates — SOURCE → LEDGER → VERIFY:
+   1. **Config.** `SITE_CONFIG_PATHS` if set, else every `<INDEXNOW_SITE_REPOS_ROOT or ~/development>/*/agents/seo-config/site-indexnow.json` (discovered, no site names in code), else the legacy `sites.json`.
+   2. **Sources.**
+      - *querySets* — incremental runs `incrementalSql` with `$1` = watermark; `--bulk` runs `bulkSql`. `bulkOnly` sets run in `--bulk` only; `incrementalOnly` sets never run in `--bulk`. An optional `lastmod` column (or `lastmodColumn`) is the change token. `excludeIfMatches: {column: regex}` drops rows in JS (e.g. a site's noindex title terms). `verify: true` forces a live check of every URL the set yields.
+      - *force queue* — `<site>.force-submit.txt` (queue-publish.py + agent.py's coverage gap). Drained by incremental runs; URLs not reached this tick stay queued.
+      - *sitemaps* — incremental: a snapshot DIFF (`<site>.sitemap-snapshot.json`) at most every `policy.sitemapIntervalHours`: URLs new to the site-wide snapshot or whose `<lastmod>` changed. A child sitemap whose lastmod is "today" on ≥90% of URLs is treated as synthetic (only new locs count). A child that fails, times out (90 s) or collapses (<10% of its previous URL count) keeps its previous snapshot, so an outage never reads as a mass deletion or, on recovery, a mass addition. The first run is a baseline (no diffs). `--bulk`: every `<loc>`.
+      - *staticPaths* — `--bulk` only.
+   3. **Ledger** (`<site>.indexnow-ledger.tsv`: url, status, time, token). New → submit. Sent inside `minResubmitHours` (24) → skip. Both tokens present: changed → submit, same → skip (incremental), or re-confirm after `bulkResubmitDays` (28) in `--bulk`. No comparable token → re-send after `resubmitDays` (7). Rejected → skip for `rejectRecheckDays` (3), then re-verify. `--bulk` sends at most `bulkMaxPerRun`, new/changed first, then least-recently sent — a rotation, not a daily full re-send.
+   4. **Verify.** Untrusted candidates (`verify.sources`: force, sitemap diff, static; plus `verify: true` sets and re-checks) are fetched (GET, no redirect follow, honest `IndexNowVerifier` UA) and dropped unless 200, no `noindex` in X-Robots-Tag or meta robots/bingbot, and a self-canonical. A random sample of trusted DB candidates (`sampleTrusted` / `sampleTrustedBulk`) is checked as a drift canary. Rejections go to the ledger. Bounded by `maxPerRun`, `concurrency`, `budgetSeconds`; overflow is deferred to the force queue (incremental) or the next bulk.
+   5. **Submit** in ≤10,000-URL batches; ledger entries are written only for batches that returned 2xx.
+   6. **Persist** (never on `--dry-run`): ledger (merged with any concurrent writer), snapshot, force queue (keeps lines other writers appended meanwhile), watermark — advanced only when every batch succeeded AND every query ran.
+   7. **Report.** `[indexnow:<site>] stats {json}` then `done submitted=N failed=M`.
 5. **Parse counts.** Parses the `done` lines. Only the site's own lines count when a site is set.
 6. **Layer-A metrics.** Records `goal-urls-submitted-30d` and `goal-runs-success-rate-7d` through `metric_helper.record_many`.
-7. **Canonical coverage.** Runs only when a site is set and the legacy `sites.json` entry has `canonical_urls_endpoint`. It fetches that endpoint, diffs it against every `<loc>` in the sitemaps, and emits `canonical_urls_*` and `sitemap_coverage_pct` metrics. Missing URLs **overwrite** `~/.reusable-agents/indexnow-submitter/<site>.force-submit.txt` (at most 5,000).
+7. **Canonical coverage** (at most every `INDEXNOW_COVERAGE_INTERVAL_H`, default 6 h — it crawls every sitemap child). Runs only when a site is set and the legacy `sites.json` entry has `canonical_urls_endpoint`. Emits `canonical_urls_*` and `sitemap_coverage_pct`. Missing URLs are **appended** to `<site>.force-submit.txt`, de-duplicated against the queue and against URLs the ledger sent (7 d) or rejected (3 d) recently; submit.ts live-verifies them.
 8. **Sitemap checks and GSC submit.** Uses the legacy `sites.json` `sitemapUrls`, and runs for all sites when no site is set. For each sitemap it sends a HEAD request; if that returns 2xx, it PUTs `webmasters/v3/sites/<gsc_property>/sitemaps/<sitemap>`. Finally, one robots.txt check looks for a `Sitemap:` line. With 7 sitemaps, aisleprompt makes 7 + 7 + 1 = 15 checks; specpicks makes 1 + 1 + 1 = 3.
 9. **Result.** A non-zero `submit.ts` rc gives `RunResult(failure)`, with the metrics kept. Otherwise `success`, with the summary `submitted N URLs (failed=M) to IndexNow across K site(s); sitemap pings ok=X/Y`.
 
-### URL families (per-site `site-indexnow.json`, 2026-09-23)
+### URL families (per-site `site-indexnow.json`, 2026-09-25)
 
-| Site | Query sets (`*` = bulkOnly, re-sent every run) | Static paths | Sitemaps |
+| Site | Query sets (`b` = bulkOnly, `i` = incrementalOnly, `v` = verify every URL) | Static paths | Sitemaps |
 |---|---|---|---|
-| aisleprompt | `recipes`, `kitchen-products`, `kitchen-categories*`, `recipe-categories*`, `recipe-cuisines*`, `blog-articles` | 36 | 6 in `site-indexnow.json`; 7 in legacy `sites.json` (`sitemap-recipes-1/-2.xml`) |
-| specpicks | `products`, `articles`, `categories*`, `buying-guides*`, `brands`, `reviews`, `benchmarks`, `trending-comparisons-product` (`/vs/<a>/<b>`), `trending-comparisons-hardware` (`/compare/…`), `retro-marketplace-categories*` | 23 | 1 (`/sitemap.xml`) |
+| aisleprompt | `recipes`(i,v — bulk takes recipe URLs from the sitemap, which has the canonical slugs), `kitchen-products` (noindex categories excluded in SQL, noindex title terms via `excludeIfMatches`), `kitchen-categories`(b,v), `blog-articles`(v — the YMYL guard noindexes some) | 36 | `/sitemap.xml` index (9 children) |
+| specpicks | `products` (the product sitemap's (A) price / (B) eBay-routed predicate, every site_id), `ai-used-products` (PDPs AI assistants used — `ai_traffic_log`), `articles`, `categories`(b,v), `buying-guides`(b,v — some slugs 301/410), `brands`, `reviews`, `benchmarks` | 21 | `/sitemap.xml` index (16 children) |
 
-Observed candidate mix (captured `submit.ts` output, 2026-09-23):
+Removed 2026-09-25: aisleprompt `recipe-categories`/`recipe-cuisines` (slugify of the raw column built 404s like `/recipes/category/bbq-smoked`; the site's slugs come via `sitemap-core.xml`/`sitemap-cuisines.xml`); specpicks `trending-comparisons-*` (2,928 pairs outside the filtered compare sitemap, mostly 404; the hardware template also dropped `-vs-`) and `retro-marketplace-categories` (all 404); `/products` and `/search` static paths (404 / noindex). Both configs dropped the plaintext `databaseUrlFallback` DSN; `databaseUrlEnv` is now `DATABASE_URL_<SITE>` from secrets.env.
 
-- **aisleprompt 17:15 UTC:** `recipes=0 kitchen-products=0 kitchen-categories=10 recipe-categories=94 recipe-cuisines=126 blog-articles=8 sitemap=0 static=36 → 274`. The three bulkOnly sets always return rows, so the same ~230 category/cuisine URLs plus the 36 static paths are resubmitted on every 15-minute tick.
-- **specpicks 14:18 UTC:** `categories=56 buying-guides=56 trending-comparisons-product=2931 trending-comparisons-hardware=200 retro-marketplace-categories=8 sitemap=22 static=23 → 3277`.
+Dry runs on 2026-09-25 (production data): aisleprompt incremental 370 candidates → 1 submittable (24 of the first 25 force-queue URLs were 404/noindex/canonical-elsewhere); `--bulk` 157k candidates → 30k rotation, drift canary 0/40. specpicks incremental 9,004 candidates (5,829 changed products, 389 AI-used PDPs, 2,947 queued) → ~6.4k + verified queue; `--bulk` 94.9k → 25k rotation.
 
 ## Inputs
 
@@ -90,7 +92,9 @@ Observed candidate mix (captured `submit.ts` output, 2026-09-23):
 |---|---|
 | IndexNow POSTs | Batched URL lists per site |
 | Watermark | `~/.reusable-agents/indexnow-submitter/<site>-watermark.txt` |
-| Force-submit file | `~/.reusable-agents/indexnow-submitter/<site>.force-submit.txt`. Written by step 7 above and by `queue-publish.py`. **No code reads it** (see Known issues) |
+| Force-submit file | `~/.reusable-agents/indexnow-submitter/<site>.force-submit.txt`. Appended by `queue-publish.py` and the coverage gap; **drained by submit.ts** (incremental runs) |
+| Ledger | `<site>.indexnow-ledger.tsv` next to the watermark (url, `sent`/`rej:<reason>`, epoch ms, token). Pruned after 120 days |
+| Sitemap snapshot | `<site>.sitemap-snapshot.json` next to the watermark (per child sitemap: loc → lastmod) |
 | GSC | Sitemap resubmission on every run |
 | Temp files | `/tmp/tmp*.log`, one per run, holding the `submit.ts` output. This is the only place the per-query-set candidate counts are kept |
 | Recs / emails | No recs. The only email is the AgentBase run summary (framework default), addressed to the manifest `owner`. Under the wrapper's `DIGEST_ONLY=1` both successes and failures end up in the digest queue (failures through the digest gate in `send_via_msmtp`) |
@@ -128,10 +132,31 @@ no goal id. The specpicks manifest sets none.
 | `INDEXNOW_TIMEOUT_S` | `900` | Timeout for the `submit.ts` subprocess |
 | `SITE_CONFIG_PATHS` | unset | Comma-separated config files; overrides discovery in `submit.ts` (and in `gsc-coverage-auditor`) |
 | `INDEXNOW_GSC_OAUTH_FILE` / `GSC_OAUTH_FILE` | `~/.reusable-agents/seo/.oauth.json` | Token for the GSC sitemap PUT |
-| `INDEXNOW_QUEUE_ROOT` | derived | `queue-publish.py` only. Otherwise it walks up from a claude-pool `HOME` to the real `.reusable-agents` root |
+| `INDEXNOW_QUEUE_ROOT` | derived | Force-queue dir. `queue-publish.py` walks up from a claude-pool `HOME` to the real `.reusable-agents` root; `submit.ts` defaults to the watermark file's dir (the same place) |
+| `INDEXNOW_SITE_REPOS_ROOT` | `~/development` | Parent dir scanned for `*/agents/seo-config/site-indexnow.json` (submit.ts + gsc-coverage-auditor) |
+| `INDEXNOW_ENDPOINT` | `https://api.indexnow.org/indexnow` | Tests point it at a mock |
+| `INDEXNOW_COVERAGE_INTERVAL_H` | `6` | Minimum hours between canonical-coverage crawls |
+
+Per-site knobs in `site-indexnow.json` (all optional; defaults in `submit.ts` `DEFAULT_POLICY` / `DEFAULT_VERIFY`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `policy.resubmitDays` | 7 | Token-less candidates re-send after this |
+| `policy.bulkResubmitDays` | 28 | `--bulk` re-confirms unchanged URLs after this |
+| `policy.minResubmitHours` | 24 | Hard floor between two sends of one URL |
+| `policy.bulkMaxPerRun` | 0 (∞) | `--bulk` rotation size (aisleprompt 30,000; specpicks 25,000) |
+| `policy.sitemapIntervalHours` | 6 | Incremental sitemap-snapshot refresh interval (specpicks 4) |
+| `policy.rejectRecheckDays` | 3 | Re-verify a rejected URL after this |
+| `policy.queryTimeoutMs` | 120,000 | Per-query `statement_timeout` |
+| `verify.sources` | `["force","sitemap","static"]` | Sources that must pass a live fetch |
+| `verify.maxPerRun` / `concurrency` / `budgetSeconds` / `timeoutMs` | 300 / 4 / 300 / 20,000 | Fetch bounds |
+| `verify.sampleTrusted` / `sampleTrustedBulk` | 5 / 50 | Drift-canary sample of trusted DB URLs |
+| `verify.minTextChars` | 0 (off) | Reject 200 pages with less visible text |
+| `origin`, `ledgerFile`, `snapshotFile`, `forceSubmitFile` | derived | Paths / scheme overrides (tests) |
 
 `submit.ts` CLI flags: `--site=<name>`, `--bulk`, `--dry-run` (logs, no
-POST), `--no-sitemap`. `agent.py` only ever passes `--site` and `--bulk`.
+POST, **writes no state** — ledger, snapshot, queue and watermark are
+untouched), `--no-sitemap`. `agent.py` only ever passes `--site` and `--bulk`.
 
 **URL templates** (`submit.ts` `buildUrl`):
 
@@ -140,8 +165,13 @@ POST), `--no-sitemap`. `agent.py` only ever passes `--site` and `--bulk`.
 - `slugify:slug` → a slugified free-text column.
 - `compose:a|<sep>|b` → `a` + `<sep>` + `b`, verbatim.
 
-A separator must match `^[-_.\\/]+$` (only `-`, `_`, `.`, `\`, `/`).
-Anything else is read as a column name.
+A part that is a column of the row is substituted; an identifier-shaped part
+the row lacks means the SQL forgot a column and the URL is skipped; anything
+else (`-`, `/`, `-vs-`) is a literal. `lit:<text>` forces a literal.
+`slugify` strips diacritics first.
+
+Tests: `framework/tests/test_indexnow_submitter.py` runs `submit.test.ts`
+(unit + an end-to-end run against a mock site and mock IndexNow endpoint).
 
 ## Short-circuit & idempotency
 
@@ -170,9 +200,9 @@ curl -s -X POST -H "Authorization: Bearer $FRAMEWORK_API_TOKEN" \
 
 **Before a manual dry run:**
 
-- `--dry-run` still **advances the watermark**, because `failed` stays 0.
-  Copy `~/.reusable-agents/indexnow-submitter/<site>-watermark.txt` first
-  and restore it afterwards.
+- `--dry-run` writes no state (since 2026-09-25), but it still live-fetches
+  up to `verify.maxPerRun` pages. Point `SITE_CONFIG_PATHS` at a copy of the
+  site config with a smaller `verify.maxPerRun` to keep it light.
 - `submit.sh --site=<x>` also records goal points (treating dry-run counts
   as submitted) and logs to `/tmp/reusable-agents-indexnow.log`.
 
@@ -228,35 +258,24 @@ currently submits that file).
 | `sitemap pings ok=1/2` (specpicks, 03:11 UTC on 2026-09-23) | The sitemap HEAD failed (`sitemap.xml=HTTP 0` in that run's `decisions.jsonl`), so the GSC PUT was skipped; robots.txt passed | Check `curl -sI https://specpicks.com/sitemap.xml`. It recovered on the next tick |
 | Queued URLs never submitted, via a claude-pool `HOME` | Historical, fixed 2026-09-11 (`19a8e27`): `queue-publish.py` wrote under the profile's shadow `~/.reusable-agents` | none |
 
-### Known issues (verified 2026-09-23)
+### Known issues
 
-1. **The force-submit file is write-only.** `submit.ts` never reads
-   `<site>.force-submit.txt`. URLs from `queue-publish.py` (called per
-   `agents/implementer/ARTICLE_AUTHOR.md`) and from the canonical-coverage
-   gap are never submitted by this path. `agent.py` also overwrites the
-   file whenever it finds a gap, which drops earlier `queue-publish.py`
-   entries. On 2026-09-23 the aisleprompt file held the 362 canonical URLs
-   missing from the sitemaps (`sitemap coverage 100503/100865`, 18:00 UTC
-   run). The specpicks file held 144 `/reviews/` URLs in `queue-publish.py`'s
-   format, last written at 13:04 UTC; the 14:18 UTC run logged no coverage
-   result and did not rewrite it.
-2. **`gsc-coverage-unknown` / `indexnow-submit` handoffs are stranded.**
-   These rec types route to the generic id `indexnow-submitter`
+Fixed 2026-09-25 (were issues 1, 3 and 4a below the 09-23 audit): the
+force-submit file is now drained and the coverage writer appends instead of
+overwriting; `compose:` keeps non-column parts as literals (`-vs-`); dry runs
+no longer advance the watermark.
+
+Still open:
+1. **`gsc-coverage-unknown` / `indexnow-submit` handoffs are stranded.** These
+   rec types route to the generic id `indexnow-submitter`
    (`work_types.DEFAULT_REC_ROUTING`), which no registered agent drains.
-   `agents/indexnow-submitter/handoff-queue/` held 93 items. The 25
-   readable ones (2026-09-11 to 2026-09-23) are from `implementer` with rec
-   type `gsc-coverage-unknown`. The other 68 (2026-05-05 to 2026-05-13) are
-   in the Azure Archive tier and cannot be read.
-3. **The hardware comparison URLs are likely malformed (from code reading).**
-   specpicks `trending-comparisons-hardware` uses
-   `compose:left_ref|-vs-|right_ref`. `-vs-` fails the separator test, so it
-   is read as a column and becomes empty, and URLs are built as
-   `/compare/<a><b>` instead of `/compare/<a>-vs-<b>` (200 per run on
-   2026-09-23). This is unverified against the live POST body.
-   `gsc-coverage-auditor`'s own URL renderer builds these correctly.
-4. The 30-day goal is not cumulative (see Goals & metrics). `signals()` never
-   fires (see Short-circuit). `/tmp/tmp*.log` files accumulate until the
-   next reboot.
+2. **The 30-day goal is not cumulative** (see Goals & metrics). `signals()`
+   never fires (see Short-circuit). `/tmp/tmp*.log` files accumulate until
+   the next reboot.
+3. **The ledger, snapshot and queue are host-local** (like the watermark).
+   A fleet-host move without `~/.reusable-agents/indexnow-submitter/`
+   costs one baseline: the first incremental run re-sends changed rows and
+   the first bulks re-send the catalog on the `bulkMaxPerRun` rotation.
 
 ## Files
 

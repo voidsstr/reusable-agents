@@ -7,13 +7,7 @@
       "databaseUrlEnv": "AISLEPROMPT_DATABASE_URL",
       "watermarkFile": "${HOME}/.reusable-agents/indexnow-submitter/aisleprompt-watermark.txt",
       "sitemapUrls": [
-        "https://aisleprompt.com/sitemap.xml",
-        "https://aisleprompt.com/sitemap-core.xml",
-        "https://aisleprompt.com/sitemap-recipes-1.xml",
-        "https://aisleprompt.com/sitemap-recipes-2.xml",
-        "https://aisleprompt.com/sitemap-cuisines.xml",
-        "https://aisleprompt.com/sitemap-shop.xml",
-        "https://aisleprompt.com/sitemap-blog.xml"
+        "https://aisleprompt.com/sitemap.xml"
       ],
       "staticPaths": [
         "/",
@@ -205,8 +199,7 @@
           "urlPrefix": "/retro/marketplace/"
         }
       ],
-      "gsc_property": "sc-domain:specpicks.com",
-      "canonical_urls_endpoint": "https://specpicks.com/api/seo/canonical-urls"
+      "gsc_property": "sc-domain:specpicks.com"
     }
   ]
 }

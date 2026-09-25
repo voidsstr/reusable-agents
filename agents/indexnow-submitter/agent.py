@@ -37,6 +37,76 @@ from framework.core import metric_helper  # noqa: E402
 _DONE_RE = re.compile(
     r"\[indexnow:(?P<site>[\w-]+)\]\s+done\s+submitted=(?P<submitted>\d+)\s+failed=(?P<failed>\d+)"
 )
+# submit.ts prints one JSON stats line per site before the done line.
+_STATS_RE = re.compile(r"\[indexnow:(?P<site>[\w-]+)\]\s+stats\s+(?P<json>\{.*\})\s*$")
+
+_STATE_DIR = Path(os.path.expanduser("~/.reusable-agents/indexnow-submitter"))
+
+
+def _ledger_recent(site: str, *, sent_days: float = 7.0, rej_days: float = 3.0) -> set[str]:
+    """URLs the worker submitted (or rejected) recently, from its ledger.
+
+    Used to keep the coverage-gap writer from re-queueing the same URLs every
+    tick: the old behaviour re-sent 358 aisleprompt URLs (18 of them 404s)
+    forever because the gap is permanent.
+    """
+    import time as _time
+    path = _STATE_DIR / f"{site}.indexnow-ledger.tsv"
+    out: set[str] = set()
+    now_ms = _time.time() * 1000
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 3:
+                    continue
+                url, status, at = parts[0], parts[1], parts[2]
+                try:
+                    age_days = (now_ms - float(at)) / 86_400_000
+                except ValueError:
+                    continue
+                if (status == "sent" and age_days < sent_days) or (status != "sent" and age_days < rej_days):
+                    out.add(url)
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _append_force_queue(site: str, urls: list[str], *, cap: int = 5000) -> int:
+    """Append `urls` to <site>.force-submit.txt, de-duplicated against what is
+    already queued and what the ledger says went out (or was rejected)
+    recently. Never overwrites: queue-publish.py entries survive."""
+    path = _STATE_DIR / f"{site}.force-submit.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = path.read_text() if path.exists() else ""
+    have = set(u.strip() for u in raw.splitlines() if u.strip()) | _ledger_recent(site)
+    new = [u for u in dict.fromkeys(urls) if u and u not in have][:cap]
+    if new:
+        with open(path, "a", encoding="utf-8") as fh:
+            if raw and not raw.endswith("\n"):
+                fh.write("\n")
+            fh.write("\n".join(new) + "\n")
+    return len(new)
+
+
+def _coverage_due(site: str, interval_h: float) -> bool:
+    """The canonical-coverage check crawls every sitemap child plus the
+    canonical endpoint. Every 15 minutes that was ~100 heavy sitemap renders
+    a day against a 2-vCore shared DB; once per `interval_h` is plenty."""
+    import time as _time
+    stamp = _STATE_DIR / f"{site}.coverage-last.txt"
+    try:
+        last = float(stamp.read_text().strip())
+    except Exception:
+        last = 0.0
+    if _time.time() - last < interval_h * 3600:
+        return False
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(_time.time()))
+    except Exception:
+        pass
+    return True
 
 
 class IndexnowSubmitter(AgentBase):
@@ -149,7 +219,15 @@ class IndexnowSubmitter(AgentBase):
         submitted = 0
         failed = 0
         per_site_seen: list[str] = []
+        worker_stats: dict = {}
         for line in output.splitlines():
+            ms = _STATS_RE.search(line)
+            if ms and (not site or ms.group("site") == site):
+                try:
+                    import json as _json
+                    worker_stats = _json.loads(ms.group("json"))
+                except Exception:
+                    pass
             m = _DONE_RE.search(line)
             if not m:
                 continue
@@ -172,6 +250,32 @@ class IndexnowSubmitter(AgentBase):
             # Will be the per-tick add; the cache aggregates over time.
             "rc": float(rc),
         }
+        # Gate accounting from submit.ts: how many candidates the ledger held
+        # back as unchanged/too-soon, how many a live fetch rejected (404,
+        # redirect, noindex, canonical elsewhere), and the drift canary.
+        if worker_stats:
+            skipped = worker_stats.get("skipped") or {}
+            rejected = worker_stats.get("rejected") or {}
+            metrics.update({
+                "candidates": float(worker_stats.get("candidates") or 0),
+                "urls_skipped_unchanged": float(sum(v for k, v in skipped.items()
+                                                    if k in ("unchanged", "too-soon"))),
+                "urls_skipped_recently_rejected": float(skipped.get("recently-rejected") or 0),
+                "urls_rejected_by_verify": float(sum(rejected.values())),
+                "urls_verified_ok": float(worker_stats.get("verified_ok") or 0),
+                "urls_deferred": float(worker_stats.get("deferred") or 0),
+                "force_queue_remaining": float(worker_stats.get("queue_left") or 0),
+                "trusted_sample_bad": float(worker_stats.get("sample_bad") or 0),
+                "query_failures": float(worker_stats.get("query_failures") or 0),
+            })
+            if rejected:
+                self.decide("observation",
+                            f"verification rejected {sum(rejected.values())} URL(s): {rejected}")
+            if worker_stats.get("sample_bad"):
+                self.decide("warning",
+                            f"drift canary: {worker_stats['sample_bad']}/{worker_stats.get('sample_checked')} "
+                            f"sampled DB URLs failed verification — a querySet is emitting URLs the site "
+                            f"serves as 404/redirect/noindex")
 
         # Layer-A: replicate the old run.sh metric-emit path so site-
         # goals-tracker still sees goal-urls-submitted-30d updates.
@@ -204,7 +308,9 @@ class IndexnowSubmitter(AgentBase):
         # missing from the sitemap, surface the gap AND queue them as
         # IndexNow submissions so we don't lose indexing-velocity while
         # the sitemap generator catches up.
-        coverage = _check_canonical_coverage_for_site(site) if site else None
+        coverage = None
+        if site and _coverage_due(site, float(os.environ.get("INDEXNOW_COVERAGE_INTERVAL_H", "6"))):
+            coverage = _check_canonical_coverage_for_site(site)
         if coverage:
             metrics["canonical_urls_total"] = float(coverage["total"])
             metrics["canonical_urls_in_sitemap"] = float(coverage["in_sitemap"])
@@ -216,19 +322,17 @@ class IndexnowSubmitter(AgentBase):
                 f"sitemap coverage {coverage['in_sitemap']}/{coverage['total']} "
                 f"({metrics['sitemap_coverage_pct']}%); "
                 f"missing={coverage['missing']}")
-            # If we found gaps, queue them for IndexNow on next tick by
-            # writing to the watermark file's neighbouring 'force-submit.txt'
-            # (the submit.ts runner reads this and includes them).
+            # Queue the gap for the next tick. APPEND (never overwrite — that
+            # erased queue-publish.py's publish-time entries) and skip URLs
+            # the ledger already sent or rejected recently; submit.ts
+            # live-verifies each one (200, indexable, self-canonical) before
+            # it goes to IndexNow.
             if coverage["missing"] and coverage.get("missing_urls"):
                 try:
-                    queue_path = Path(os.path.expanduser(
-                        f"~/.reusable-agents/indexnow-submitter/{site}.force-submit.txt"
-                    ))
-                    queue_path.parent.mkdir(parents=True, exist_ok=True)
-                    queue_path.write_text("\n".join(coverage["missing_urls"][:5000]))
+                    n = _append_force_queue(site, coverage["missing_urls"])
                     self.decide("action",
-                        f"queued {len(coverage['missing_urls'][:5000])} missing URLs "
-                        f"for next-tick IndexNow submission at {queue_path.name}")
+                        f"queued {n} new gap URL(s) (of {len(coverage['missing_urls'])} missing) "
+                        f"for next-tick IndexNow submission")
                 except Exception as e:
                     self.decide("warning", f"force-submit queue write failed: {e}")
 
