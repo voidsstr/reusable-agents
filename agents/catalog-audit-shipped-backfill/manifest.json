@@ -10,7 +10,7 @@
   "owner": "perrymb@gmail.com",
   "runbook": "AGENT.md",
   "skill": "SKILL.md",
-  "entry_command": "DATABASE_URL_AISLEPROMPT='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/aisleprompt?sslmode=require' DATABASE_URL_SPECPICKS='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require' PYTHONPATH=/home/voidsstr/development/reusable-agents python3 /home/voidsstr/development/reusable-agents/agents/catalog-audit-shipped-backfill/agent.py",
+  "entry_command": "PYTHONPATH=/home/voidsstr/development/reusable-agents python3 /home/voidsstr/development/reusable-agents/agents/catalog-audit-shipped-backfill/agent.py",
   "metadata": {
     "framework": "reusable-agents",
     "source_repo": "reusable-agents",
