@@ -98,8 +98,37 @@ tiered site never runs its full suite per batch. A site with a single legacy
    - Sleeps `settle_seconds` (default 60), then GETs each path; a code in
      200–399 passes.
    - On a miss it retries once after 30 s.
-   - Still failing → status `failure` and "SMOKE FAILED — manual rollback
-     needed". **No automatic rollback.**
+   - Still failing → `deployer.rollback` (below) redeploys the prior image
+     → status `rolled-back`; without a usable rollback config, status
+     `failure` and "SMOKE FAILED — manual rollback needed".
+5b. **Indexability + latency gate** (`smoke_check.gate`,
+   `framework/core/deploy_gate.py`, added 2026-09-25 after audit F115: a
+   release that noindexed 99.8% of aisleprompt's recipes shipped through 39
+   releases, and a shop-sitemap 500 went unnoticed, because step 5 only
+   checks status codes).
+   - **Baseline.** Before step 4 the gate measures the live site: every
+     `expect_indexable_paths` canary (200, no noindex in X-Robots-Tag or
+     meta robots/bingbot, self-canonical, ≥ `min_text_chars` visible text;
+     cold TTFB + a warm re-fetch), every child of `sitemap_index` (200 with
+     ≥1 URL; RSS/Atom feeds count), and `sitemap_sample` random page URLs.
+   - **After the deploy** it measures the same things (same sample URLs) and
+     fails only on **regressions** — a check that passed before and fails
+     now; a warm TTFB over `warm_max_ttfb_s` that was within it before; a
+     sample non-indexable share above `max_bad_ratio` and ≥15 points worse.
+     Problems that already existed are warnings, so a broken page never
+     blocks the deploy that fixes it. Cold TTFB ≥ `cold_fail_s` is a warning
+     (a new revision starts with empty caches).
+   - A failing gate is re-measured once after 45 s, then rolls back.
+   - Fetches use an honest `IndexabilityCheck` UA — never an AI-crawler UA,
+     which the sites log into their AI-traffic tables.
+   - Results land in `deploy.json` → `gate{pre,post,failures,warnings,ok}`.
+5c. **Rollback** (`deployer.rollback`). `capture_cmd` runs before the deploy
+   and must print the image being served (recorded as `prior_image`);
+   `cmd` redeploys it via `{prior_image}` when the smoke check
+   (`on_smoke_failure`) or the gate (`on_gate_failure`) fails. Cloud
+   specifics live in these templates, not in `deployer.py`. The failing
+   commits stay on the branch: the next deploy rebuilds them and fails the
+   gate again until the regression is fixed.
 6. **Content verify.** Runs only as part of the smoke-check step (so only
    when `smoke_check.base_url` and `paths` are set). Skipped when
    `RESPONDER_SKIP_CONTENT_VERIFY=1`.
@@ -120,9 +149,9 @@ tiered site never runs its full suite per batch. A site with a single legacy
    | `indexing-sitemap-404` | `/sitemap.xml` contains `<urlset` |
    | `article-author-proposal` | slug present (only the `/articles/` prefix is actually tried) |
 7. **Success.**
-   1. `deploy.json` gets `status: success` and `rollback_cmd` (the deploy
-      command with `<PRIOR_TAG>` as a placeholder; the prior tag is **not**
-      recorded).
+   1. `deploy.json` gets `status: success` and `rollback_cmd` (the expanded
+      `rollback.cmd` with the captured `prior_image`; without a rollback
+      config, the deploy command with a `<PRIOR_TAG>` placeholder).
    2. `install/push-unpushed.sh <repo_root>` pushes the deployed commits.
    3. `install/tag-release.sh <site> <tag>` stamps
       `release/<site>/NNNN` on HEAD and pushes the tag.
@@ -166,8 +195,9 @@ Any step that exceeds `run_step`'s 1800 s timeout → `failure` and exit 2.
 - `<run-dir>/deploy.json`, with fields `site`, `tag`, `image`,
   `started_at`/`ended_at`, `test{rc,scope,skipped,stderr_tail}`,
   `build`/`push`/`deploy{rc,…,verified_via_revision}`,
-  `smoke{ok,results,retried}`, `content_verify`, `status`
-  (`running|blocked|failure|dry-run|success`), `rollback_cmd`,
+  `smoke{ok,results,retried}`, `gate{pre,post,failures,warnings,ok}`,
+  `content_verify`, `prior_image`, `rollback{attempted,rc,…}`, `status`
+  (`running|blocked|failure|rolled-back|dry-run|success`), `rollback_cmd`,
   `shipped_rec_count` and `error`.
 - `<run-dir>/test-failure-context.json` when the test gate fails.
 - The updated `<run-dir>/recommendations.json` (shipped markers).

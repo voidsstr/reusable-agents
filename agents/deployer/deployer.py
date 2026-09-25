@@ -25,6 +25,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from shared.site_config import load_config_from_env  # noqa: E402
+from framework.core import deploy_gate  # noqa: E402
 
 
 def _now_iso() -> str:
@@ -364,6 +365,56 @@ def smoke_check(base_url: str, paths: list[str], timeout: int = 30) -> tuple[boo
     return all(r["ok"] for r in results), results
 
 
+_IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:@]*$")
+
+
+def _capture_prior_image(rb: dict, deploy_vars: dict, tag: str, image: str,
+                         repo_root: str | None) -> str:
+    """Run deployer.rollback.capture_cmd (e.g. `az containerapp show ...
+    --query <image> -o tsv`) BEFORE the deploy and return the image the site
+    is serving now — the rollback target. '' when not configured / unusable."""
+    cmd = (rb or {}).get("capture_cmd")
+    if not cmd:
+        return ""
+    rc, out, err = run_step("rollback-capture", None, _expand(cmd, deploy_vars, tag, image),
+                            timeout=120, repo_root=repo_root)
+    ref = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
+    if rc != 0 or not _IMAGE_REF_RE.match(ref or "-"):
+        print(f"[deployer] rollback capture unusable (rc={rc}, out={ref[:120]!r}); "
+              f"a failed gate will need a manual rollback", file=sys.stderr)
+        return ""
+    return ref
+
+
+def _rollback(rb: dict, deploy_vars: dict, tag: str, image: str, prior_image: str,
+              repo_root: str | None, deploy_meta: dict, reason: str) -> bool:
+    """Run deployer.rollback.cmd with {prior_image}. True when it ran clean."""
+    cmd = (rb or {}).get("cmd")
+    if not (cmd and prior_image):
+        deploy_meta["rollback"] = {"attempted": False, "reason": reason,
+                                   "why_not": "no rollback.cmd" if not cmd else "prior image unknown"}
+        return False
+    expanded = _expand(cmd, {**deploy_vars, "prior_image": prior_image}, tag, image)
+    print(f"[deployer] ROLLING BACK to {prior_image}: {reason}", file=sys.stderr)
+    rc, _o, err = run_step("rollback", None, expanded, timeout=900, repo_root=repo_root)
+    deploy_meta["rollback"] = {"attempted": True, "reason": reason, "prior_image": prior_image,
+                               "rc": rc, "stderr_tail": (err or "")[-800:]}
+    return rc == 0
+
+
+def _gate_summary(snap: dict) -> dict:
+    """Compact view of a deploy_gate snapshot for deploy.json."""
+    pages = snap.get("pages", {})
+    sample = snap.get("sample", {})
+    return {
+        "pages": pages,
+        "sitemaps": snap.get("sitemaps", {}),
+        "sample_bad": sum(1 for v in sample.values() if not v.get("indexable")),
+        "sample_n": len(sample),
+        "sample_rejects": {u: v.get("reason") for u, v in sample.items() if not v.get("indexable")},
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True)
@@ -546,6 +597,26 @@ def main() -> None:
         # losing the deploy. We try up to 3 attempts (60s/180s/360s)
         # before giving up.
         d = deployer.get("deploy", {})
+        # ---- 3b. Pre-deploy baseline + rollback target ----
+        # The post-deploy gate fails only on REGRESSIONS against this
+        # baseline, so a page/sitemap that is already broken never blocks
+        # the deploy that may fix it (framework/core/deploy_gate.py).
+        sc = deployer.get("smoke_check", {}) or {}
+        gate_cfg = sc.get("gate") or None
+        rb = deployer.get("rollback") or {}
+        gate_pre = None
+        if gate_cfg and sc.get("base_url") and d.get("cmd") and gate_cfg.get("baseline", True):
+            try:
+                gate_pre = deploy_gate.measure(sc["base_url"], gate_cfg)
+                deploy_meta["gate"] = {"pre": _gate_summary(gate_pre)}
+            except Exception as e:
+                print(f"[deployer] gate baseline failed ({e}); post-deploy gate "
+                      f"will treat every failing check as a regression", file=sys.stderr)
+        prior_image = _capture_prior_image(rb, deploy_vars, tag, image, repo_root) if d.get("cmd") else ""
+        if prior_image:
+            deploy_meta["prior_image"] = prior_image
+            if rb.get("cmd"):
+                deploy_meta["rollback_cmd"] = _expand(rb["cmd"], {**deploy_vars, "prior_image": prior_image}, tag, image)
         if d.get("cmd"):
             deploy_cmd = _expand(d["cmd"], deploy_vars, tag, image)
             rc, _, stderr = 1, "", ""
@@ -642,9 +713,47 @@ def main() -> None:
                 )
                 deploy_meta["smoke"] = {"ok": ok, "results": results, "retried": True}
             if not ok:
-                deploy_meta["status"] = "failure"; _save()
-                print(f"[deployer] SMOKE FAILED — manual rollback needed", file=sys.stderr)
+                bad = [r["url"] for r in results if not r["ok"]]
+                rolled = rb.get("on_smoke_failure", True) and _rollback(
+                    rb, deploy_vars, tag, image, prior_image, repo_root, deploy_meta,
+                    f"smoke check failed: {bad}")
+                deploy_meta["status"] = "rolled-back" if rolled else "failure"; _save()
+                print(f"[deployer] SMOKE FAILED — "
+                      f"{'rolled back to ' + prior_image if rolled else 'manual rollback needed'}",
+                      file=sys.stderr)
                 sys.exit(1)
+
+            # ── Indexability + latency gate (regressions only) ──────
+            # A 200 is not "working": the 99.8%-noindex release and the
+            # shop-sitemap 500 both passed the URL smoke above.
+            if gate_cfg:
+                post = deploy_gate.measure(sc["base_url"], gate_cfg,
+                                           sample_urls=(gate_pre or {}).get("sample_urls"))
+                failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                if failures:
+                    # Re-measure once: a cold revision and a transient 5xx
+                    # must fail twice before we act.
+                    print(f"[deployer] gate failed first pass ({len(failures)}): "
+                          f"{failures[:5]}; re-measuring in 45s", file=sys.stderr)
+                    time.sleep(45)
+                    post = deploy_gate.measure(sc["base_url"], gate_cfg,
+                                               sample_urls=(gate_pre or {}).get("sample_urls"))
+                    failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                deploy_meta.setdefault("gate", {})
+                deploy_meta["gate"].update({"post": _gate_summary(post), "failures": failures,
+                                            "warnings": warnings, "ok": not failures})
+                for w in warnings:
+                    print(f"[deployer] gate warning: {w}", file=sys.stderr)
+                if failures:
+                    rolled = rb.get("on_gate_failure", True) and _rollback(
+                        rb, deploy_vars, tag, image, prior_image, repo_root, deploy_meta,
+                        f"indexability/latency gate: {failures[:5]}")
+                    deploy_meta["status"] = "rolled-back" if rolled else "failure"; _save()
+                    print(f"[deployer] INDEXABILITY GATE FAILED — {failures}", file=sys.stderr)
+                    print(f"[deployer] "
+                          f"{'rolled back to ' + prior_image if rolled else 'manual rollback needed'}",
+                          file=sys.stderr)
+                    sys.exit(1)
 
             # ── Content-level verification (per-rec) ────────────────
             # Previous smoke just checked URLs respond 200. That passes
@@ -708,7 +817,8 @@ def main() -> None:
                     sys.exit(1)
 
         deploy_meta["status"] = "success"
-        deploy_meta["rollback_cmd"] = _expand(d.get("cmd", ""), deploy_vars, "<PRIOR_TAG>", image)
+        if not deploy_meta.get("rollback_cmd"):
+            deploy_meta["rollback_cmd"] = _expand(d.get("cmd", ""), deploy_vars, "<PRIOR_TAG>", image)
         _save()
         print(f"[deployer] deployed {image}:{tag}", file=sys.stderr)
 

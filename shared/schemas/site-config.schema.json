@@ -387,7 +387,37 @@
           "properties": {
             "base_url": { "type": "string" },
             "paths":    { "type": "array", "items": { "type": "string" } },
-            "timeout_seconds": { "type": "integer", "default": 30 }
+            "timeout_seconds": { "type": "integer", "default": 30 },
+            "settle_seconds": { "type": "integer", "default": 60, "description": "Wait after the deploy before smoke-checking (revision warm-up)." },
+            "gate": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Post-deploy indexability + latency gate (framework/core/deploy_gate.py). Measured once before the deploy (baseline) and once after; only REGRESSIONS fail the deploy (and trigger deployer.rollback), so an already-broken page or sitemap never blocks the deploy that fixes it. A 200 is not enough: a 99.8%-noindex release and a sitemap 500 both passed the URL smoke.",
+              "properties": {
+                "expect_indexable_paths": { "type": "array", "items": { "type": "string" }, "description": "Canary pages that must stay 200 + no noindex (X-Robots-Tag or meta robots/bingbot) + self-canonical + min_text_chars of visible text. Pick pages that are indexable by design (not YMYL-gated or thin)." },
+                "min_text_chars": { "type": "integer", "minimum": 0, "default": 0, "description": "Empty-shell guard: a canary rendering less visible text than this counts as not indexable." },
+                "sitemap_index": { "type": "string", "default": "/sitemap.xml", "description": "Sitemap index whose every child must return 200 with >=1 <url>. Empty string skips sitemap checks." },
+                "allow_empty_sitemaps": { "type": "array", "items": { "type": "string" }, "description": "Child sitemaps (URL or path) allowed to contain 0 URLs." },
+                "sitemap_sample": { "type": "integer", "minimum": 0, "default": 0, "description": "Random page URLs from the children re-checked for indexability (the same URLs before and after)." },
+                "max_bad_ratio": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.25, "description": "Share of the sample allowed to be non-indexable; a jump of >=15 points over the baseline above this fails." },
+                "warm_max_ttfb_s": { "type": "number", "default": 3.0, "description": "Budget for each canary's warm re-fetch TTFB; exceeding it when the baseline was within budget fails." },
+                "cold_fail_s": { "type": "number", "default": 14, "description": "Cold TTFB at or above this on the new revision is reported as a warning (just under a 15 s DB statement timeout)." },
+                "user_agent": { "type": "string", "description": "UA for gate fetches. Default is an honest IndexabilityCheck UA; do not spoof AI crawlers — sites log those into their AI-traffic tables." },
+                "timeout_s": { "type": "number", "default": 30 },
+                "baseline": { "type": "boolean", "default": true, "description": "Measure before the deploy and fail only on regressions. false = every failing check fails." }
+              }
+            }
+          }
+        },
+        "rollback": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Automatic rollback when the post-deploy smoke check or gate fails. capture_cmd runs BEFORE the deploy and must print the image the site is serving (the rollback target); cmd redeploys it via {prior_image}. Cloud specifics stay in these templates, not in deployer.py.",
+          "properties": {
+            "capture_cmd": { "type": "string", "description": "e.g. az containerapp show --name {app} --resource-group {rg} --query properties.template.containers[0].image -o tsv" },
+            "cmd": { "type": "string", "description": "e.g. az containerapp update --name {app} --resource-group {rg} --image {prior_image}" },
+            "on_smoke_failure": { "type": "boolean", "default": true },
+            "on_gate_failure": { "type": "boolean", "default": true }
           }
         }
       }

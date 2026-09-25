@@ -139,6 +139,36 @@ deployer:
     - /meal-plan
     - /shoppinglist
     timeout_seconds: 30
+    # Indexability + latency gate (reusable-agents framework/core/deploy_gate.py).
+    # Measured before and after every deploy; only REGRESSIONS fail it (then
+    # deployer.rollback redeploys the prior image), so an already-broken page
+    # or sitemap never blocks the deploy that fixes it. Canaries are indexable
+    # by design: no YMYL-gated or thin pages. Honest UA — never spoof AI bots.
+    gate:
+      expect_indexable_paths:
+      - /
+      - /recipes
+      - /kitchen/buying-guides
+      - /kitchen/category/cookware
+      - /blog/best-waffle-makers-2026-belgian-classic-mini-picks-buying-guide
+      - /blog/best-baking-sheets-2026-top-picks-buying-guide
+      - /blog/best-air-fryers-under-150-2026-budget-friendly-picks-actually-perform
+      - /recipes/creamy-saag-paneer-with-spice-mix-155351
+      - /recipes/quick-spanish-tortilla-with-potatoes-and-onion-138547
+      - /recipes/white-lotus-blossom-martini-120824
+      - /kitchen/instant-pot-vortex-5-7qt-air-fryer-custom-program-options-4-in-1-functions-evencrisp-technology-that-crisps-roasts-bakes-and-reheats-100-in-app-recipes-from-the-makers-of-instant-pot-black
+      - /kitchen/teewe-carbon-steel-wok-13-inch-woks-stir-fry-pans-nonstick-wok-pan-with-lid-spatula-and-dish-brush-pre-seasoned-flat-bottom-chinese-woks-for-induction-electric-gas-all-stoves
+      min_text_chars: 200
+      sitemap_index: /sitemap.xml
+      sitemap_sample: 20
+      max_bad_ratio: 0.25
+      warm_max_ttfb_s: 3.0
+      cold_fail_s: 14
+  # Automatic rollback when the smoke check or the gate fails: capture the
+  # image being served BEFORE the deploy, redeploy it on failure.
+  rollback:
+    capture_cmd: az containerapp show --name {app} --resource-group {rg} --query "properties.template.containers[0].image" -o tsv
+    cmd: az containerapp update --name {app} --resource-group {rg} --image {prior_image}
 reporter:
   email:
     to:

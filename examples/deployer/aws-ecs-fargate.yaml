@@ -76,3 +76,14 @@ deployer:
       - /
       - /healthz
     timeout_seconds: 120       # ECS rolling deploys are slower than ACA
+    # Indexability + latency gate (framework/core/deploy_gate.py).
+    gate:
+      expect_indexable_paths: [/]
+      sitemap_index: /sitemap.xml
+      warm_max_ttfb_s: 3.0
+
+  # Redeploy the task definition that was serving before, when smoke or gate
+  # fails. capture_cmd must print the rollback target; cmd receives it.
+  rollback:
+    capture_cmd: aws ecs describe-services --cluster {cluster} --services {service} --query "services[0].taskDefinition" --output text
+    cmd: aws ecs update-service --cluster {cluster} --service {service} --task-definition {prior_image} --force-new-deployment

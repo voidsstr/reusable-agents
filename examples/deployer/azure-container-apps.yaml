@@ -45,3 +45,16 @@ deployer:
       - /meal-plan
       - /shoppinglist
     timeout_seconds: 30
+    # Indexability + latency gate (framework/core/deploy_gate.py): measured
+    # before and after the deploy; only regressions fail it.
+    gate:
+      expect_indexable_paths: [/, /recipes]
+      min_text_chars: 200
+      sitemap_index: /sitemap.xml
+      sitemap_sample: 20
+      warm_max_ttfb_s: 3.0
+
+  # Redeploy the image that was serving before, when smoke or gate fails.
+  rollback:
+    capture_cmd: az containerapp show --name {app} --resource-group {rg} --query "properties.template.containers[0].image" -o tsv
+    cmd: az containerapp update --name {app} --resource-group {rg} --image {prior_image}
