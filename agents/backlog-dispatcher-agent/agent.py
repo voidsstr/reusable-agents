@@ -1053,7 +1053,21 @@ class BacklogDispatcher(AgentBase):
 
         # Persist queued ids so we don't double-queue. Bounded so state
         # doesn't grow unbounded — keep the most recent 2000 we've seen.
-        new_state_queued = list(already | set(queued_now))[-2000:]
+        # Order-preserving, oldest dropped first. This used to be
+        # `list(already | set(queued_now))[-2000:]`, and a set has no order,
+        # so every tick past the cap evicted 2000-odd RANDOM keys. That
+        # included fresh ones, so already-dispatched recs came back as "new"
+        # and were dispatched again. It fed the head-to-head rewrite loop
+        # (0 h2h keys survived) and would let retired article recs bypass
+        # the article output gate. Found 2026-09-24.
+        _prior_order = [k for k in (self.state or {}).get("queued_ids", [])]
+        _seen_now: set[str] = set()
+        _fresh = []
+        for k in queued_now:
+            if k not in already and k not in _seen_now:
+                _seen_now.add(k)
+                _fresh.append(k)
+        new_state_queued = (_prior_order + _fresh)[-2000:]
         next_state = dict(self.state or {})
         next_state["queued_ids"] = new_state_queued
         # Persist claude_cap so we can detect transitions next tick.
