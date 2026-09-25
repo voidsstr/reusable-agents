@@ -2273,6 +2273,40 @@ for rid, body_p, meta_p in pairs:
             print(f"[article-insert] {rid}: metadata-guard error: {_me} (continuing)",
                   file=sys.stderr)
 
+        # ── CLAIMS GUARD (honesty) ──────────────────────────────────
+        # 2026-09-25 AI-visibility audit F119/F075/F100/F108/F120: guides
+        # shipped invented first-hand tests ("we ran five sealers through a
+        # four-part protocol"), copied Amazon star counts and stale point
+        # prices that AI assistants then quoted. Policy per site/bucket lives
+        # in config/article-claims-guard-config.json; "reject" refuses the
+        # INSERT and re-queues with the offending sentences as the addendum
+        # (the rewrite stays with the Opus author — this never edits prose).
+        try:
+            from framework.core.article_claims_guard import check as _claims_check
+            _rec_c = recs_doc.get(rid) or {}
+            _prop_c = (_rec_c.get("proposal") or _rec_c.get("article_proposal") or {})
+            _claims = _claims_check(
+                body_md,
+                bucket=str(_prop_c.get("bucket") or _prop_c.get("category") or ""),
+                site_hint=str(_rec_c.get("agent_id") or _prop_c.get("site") or ""),
+            )
+            for _w in _claims.warnings():
+                print(f"[article-insert] {rid}: CLAIMS-GUARD warn: {_w}", file=sys.stderr)
+            if not _claims.passes:
+                errors.append((rid, _claims.failure_reason() +
+                               " — refusing INSERT; re-queue with addendum"))
+                print(f"[article-insert] {rid}: ✗ CLAIMS-GUARD "
+                      f"first_hand={len(_claims.first_hand)} "
+                      f"ratings={len(_claims.star_ratings)} "
+                      f"prices={len(_claims.point_prices)} — SKIP",
+                      file=sys.stderr)
+                continue
+        except ImportError:
+            pass  # primitive not available in this checkout
+        except Exception as _ce:
+            print(f"[article-insert] {rid}: claims-guard error: {_ce} (continuing)",
+                  file=sys.stderr)
+
         # ── INTEGRITY CHECK: body H1 must match proposal title ──────
         # Defends against the cross-run rec_id collision class that
         # shipped 4 mismatched specpicks articles (wrong body content
@@ -2348,6 +2382,22 @@ for rid, body_p, meta_p in pairs:
                       f"(was {_raw_excerpt[:80]!r})", file=sys.stderr)
         except ImportError:
             _clean_sub, _clean_exc = _raw_subtitle, _raw_excerpt
+        # A subtitle/excerpt (the excerpt is the meta description AI
+        # assistants quote) that claims first-hand testing or recites a star
+        # rating is scrubbed to "" — same treatment as a metadata leak.
+        try:
+            from framework.core.article_claims_guard import (
+                find_first_hand_claims as _fh, find_star_ratings as _sr)
+            if _clean_sub and (_fh(_clean_sub) or _sr(_clean_sub)):
+                print(f"[article-insert] {rid}: CLAIMS-GUARD subtitle scrubbed "
+                      f"(was {_clean_sub[:80]!r})", file=sys.stderr)
+                _clean_sub = ""
+            if _clean_exc and (_fh(_clean_exc) or _sr(_clean_exc)):
+                print(f"[article-insert] {rid}: CLAIMS-GUARD excerpt scrubbed "
+                      f"(was {_clean_exc[:80]!r})", file=sys.stderr)
+                _clean_exc = ""
+        except ImportError:
+            pass
         meta = {
             "slug":  proposal["slug"],
             "title": proposal.get("title") or proposal["slug"],
@@ -2495,6 +2545,20 @@ ART_PY
                         python3 -m framework.cli.article_heading_repair \
                         --site "${RESPONDER_SITE:-}" --since-hours 6 --commit \
                         2>&1 | sed 's/^/[heading-repair] /' >&2 || true
+                fi
+
+                # Honesty sweep (report only): rows the author INSERTed
+                # itself skip the wrapper's claims guard, so report any
+                # freshly written body that claims first-hand testing,
+                # recites star ratings or quotes point prices. Never edits
+                # prose — the fix is an Opus rewrite. See
+                # framework/core/article_claims_guard.py.
+                if [ -n "${DATABASE_URL:-}" ] && [ -n "${RESPONDER_SITE:-}" ]; then
+                    DATABASE_URL="$DATABASE_URL" \
+                        PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                        python3 -m framework.cli.article_claims_guard \
+                        --site "${RESPONDER_SITE}" --since-hours 6 \
+                        2>&1 | sed 's/^/[claims-guard] /' >&2 || true
                 fi
 
                 # Shipped-flag reconciler: walks every article-author

@@ -185,12 +185,38 @@ and read as filler. The SEO analyzer flags any shipped article whose
 `wordCount` JSON-LD value is below the site's `min_words` threshold;
 those get auto-queued back for expansion the same way as a fresh rec.
 If your draft is short, add:
-- A "Real-world numbers" or "Benchmark table" section with concrete
-  measurements (FPS, watts, $, tokens/sec, RPS, etc.)
+- A spec or benchmark table built from manufacturer specs, the catalog,
+  or a cited third-party measurement (name the source under the table) —
+  never a number nobody measured
 - A "Common pitfalls" or "Gotchas" section with 3-5 specific failure
-  modes you've seen for this hardware/topic
+  modes that owners report or cited reviewers document
 - A "When NOT to" section with a clear no-fit case
 - Comparison tables (markdown tables — see formatting rule below)
+
+### Honesty — no invented testing, star counts or point prices (HARD GATE)
+
+2026-09-25 AI-visibility audit: kitchen guides shipped "How we tested"
+sections for tests that never ran ("we ran five sealers through a
+four-part protocol", "4,000 cracked eggs", a Wolf range and a calibrated
+Fluke thermometer), Amazon star counts ("4.6 (4,318)") and point prices
+the page's own live price button contradicted. AI assistants quoted them.
+
+- **No first-hand testing claims** — no "we tested / ran / measured /
+  timed", "in our test kitchen", "after N months of daily use",
+  "survived N cycles", no invented protocol, temperature or duration —
+  unless the rec carries a real test record. Write "How we picked"
+  (specs, catalog shortlist, cited third-party tests, what owners report).
+  Attributed findings are fine ("Serious Eats found…", "owners report…").
+- **No star ratings or review counts** in prose, tables, subtitle or
+  excerpt.
+- **No point prices in pick headings, verdicts, table price columns or
+  the opener.** Use tiers ("under $50", "premium") where the site's
+  config asks for it; the page's live price widget carries the price.
+
+`framework/core/article_claims_guard.py` enforces this at INSERT
+(`config/article-claims-guard-config.json` sets reject/warn per site and
+bucket) and `framework.cli.article_claims_guard` reports rows written
+outside the wrapper.
 
 ### Markdown table formatting — MANDATORY shape
 
@@ -288,8 +314,9 @@ model knows the contract before it writes a single word — see
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial
   site — readers are technical buyers, not novices.
-- Specific numbers wherever possible (VRAM, watts, MHz, $, FPS,
-  tokens/sec). Avoid "fast" / "good" / "decent" without numbers.
+- Specific numbers wherever possible (VRAM, watts, MHz, FPS,
+  tokens/sec) — from specs or a cited source, never invented. Avoid
+  "fast" / "good" / "decent" without numbers.
 - Year-stamp current claims ("as of 2026") so the article ages well.
 - Cite first-party sources inline by hostname when relevant
   (anandtech.com, techpowerup.com, official manufacturer docs).
@@ -405,7 +432,7 @@ For buying-guide bucket articles: write to `editorial_articles` with
 ## Top picks
 
 ### #1: NVIDIA RTX 5090
-**Verdict:** Best for 32B models with full BF16, $1999, 32GB VRAM
+**Verdict:** Best for 32B models with full BF16 — flagship tier, 32GB VRAM
 
 This is the only consumer card with enough VRAM to load BF16 weights of
 27B-32B models without offload. Power-hungry (575W TGP) but worth it
