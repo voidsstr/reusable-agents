@@ -2166,13 +2166,19 @@ for rid, body_p, meta_p in pairs:
         try:
             from framework.core.article_link_guard import (
                 resolve_minima as _rm_ks, repair_kitchen_links, kitchen_slug_resolver_from_db,
+                site_hosts_from_root,
             )
             _rec_ks = recs_doc.get(rid) or {}
             _prop_ks = _rec_ks.get("proposal") or _rec_ks.get("article_proposal") or {}
-            _ks_cfg = (_rm_ks(_rec_ks.get("agent_id") or _prop_ks.get("site") or "") or {}).get("kitchen_slug_check")
+            _ks_min = _rm_ks(_rec_ks.get("agent_id") or _prop_ks.get("site") or "") or {}
+            _ks_cfg = _ks_min.get("kitchen_slug_check")
             if _ks_cfg:
                 _ks_resolve = kitchen_slug_resolver_from_db(conn, body_md, _ks_cfg)
-                body_md, _ks_notes = repair_kitchen_links(body_md, _ks_resolve)
+                # Absolute links are judged only on the site's own host; a
+                # citation to another site's /kitchen/ path is left alone.
+                body_md, _ks_notes = repair_kitchen_links(
+                    body_md, _ks_resolve,
+                    own_hosts=site_hosts_from_root(_ks_min.get("site_root") or ""))
                 conn.rollback()  # the lookups opened a read transaction
                 if _ks_notes:
                     print(f"[article-insert] {rid}: kitchen-slug repair: "

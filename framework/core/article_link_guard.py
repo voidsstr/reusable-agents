@@ -253,16 +253,35 @@ def kitchen_link_slugs(body_md: str) -> list[tuple[str, str]]:
     return [(m.group("root"), m.group("slug")) for m in _KITCHEN_LINK_RE.finditer(body_md or "")]
 
 
-def repair_kitchen_links(body_md: str, resolve) -> tuple[str, list[str]]:
+def site_hosts_from_root(site_root: str) -> set[str]:
+    """{"example.com", "www.example.com"} for a site_root like
+    "https://example.com" — the hosts whose absolute links are the site's own."""
+    host = re.sub(r"^https?://", "", str(site_root or "").strip().lower()).split("/")[0]
+    if not host:
+        return set()
+    bare = host[4:] if host.startswith("www.") else host
+    return {bare, f"www.{bare}"}
+
+
+def repair_kitchen_links(body_md: str, resolve, own_hosts: Iterable[str] | None = None) -> tuple[str, list[str]]:
     """Canonicalize or unlink kitchen links that do not resolve.
 
     `resolve(root, slug)` returns "keep", ("rewrite", new_slug) or "unlink".
     An unlinked link keeps its anchor text as plain prose — nothing a reader
     sees is lost, and a 404 never ships. Returns (body, notes).
+
+    Only the site's own links are judged: a relative link, or an absolute one
+    whose host is in `own_hosts` (see site_hosts_from_root). A citation to
+    another site whose path happens to start with /kitchen/ or /k/ is never
+    touched — the site's catalog says nothing about it.
     """
     notes: list[str] = []
+    hosts = {h.lower() for h in (own_hosts or [])}
 
     def _fix(m: "re.Match[str]") -> str:
+        host = (m.group("host") or "").lower()
+        if host and re.sub(r"^https?://", "", host) not in hosts:
+            return m.group(0)
         root, slug = m.group("root"), m.group("slug")
         verdict = resolve(root, slug)
         if verdict == "keep" or verdict is None:

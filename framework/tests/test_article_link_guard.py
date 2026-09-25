@@ -158,3 +158,26 @@ def test_de_stutter_handles_tripled_brand():
     assert g.de_stutter_candidates("piklohas-piklohas-piklohas-bread-slicer") == [
         "piklohas-piklohas-bread-slicer", "piklohas-bread-slicer"]
     assert g.de_stutter_candidates("lodge-skillet") == []
+
+
+def test_repair_only_judges_the_sites_own_links():
+    # Review 2026-09-25: the link pattern accepted any host, so a citation to
+    # another site whose path starts with /kitchen/ or /k/ would have been
+    # unlinked as an "invented slug".
+    conn = _FakeConn({"kitchen_products": ["lodge-skillet"], "kitchen_categories": []})
+    body = ("[ours](https://aisleprompt.com/k/made-up-thing) "
+            "[ours www](https://www.aisleprompt.com/kitchen/lodge-lodge-skillet) "
+            "[theirs](https://www.example-kitchen.com/kitchen/some-review) "
+            "[theirs k](https://other.example/k/abc-def)")
+    resolve = g.kitchen_slug_resolver_from_db(conn, body, CHECK)
+    hosts = g.site_hosts_from_root("https://aisleprompt.com")
+    assert hosts == {"aisleprompt.com", "www.aisleprompt.com"}
+    out, notes = g.repair_kitchen_links(body, resolve, own_hosts=hosts)
+    assert out.startswith("ours ")                                   # own invented slug: unlinked
+    assert "[ours www](https://www.aisleprompt.com/kitchen/lodge-skillet)" in out
+    assert "[theirs](https://www.example-kitchen.com/kitchen/some-review)" in out
+    assert "[theirs k](https://other.example/k/abc-def)" in out
+    assert len(notes) == 2
+    # Without the site's hosts, absolute links are never touched.
+    out2, notes2 = g.repair_kitchen_links(body, resolve)
+    assert out2 == body and notes2 == []
