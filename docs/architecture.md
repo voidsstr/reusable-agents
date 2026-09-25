@@ -182,7 +182,7 @@ because it rewrites only the base units):
 
 | Drop-in | Effect |
 |---|---|
-| `~/.config/systemd/user/service.d/10-fleet-path.conf` | Sets `PATH` for every user service. Node from nvm is otherwise invisible to systemd. |
+| `~/.config/systemd/user/service.d/10-fleet-path.conf` | Sets `PATH` for every user service, with `~/.reusable-agents/claude-pool/bin` FIRST so a bare `claude` goes through the pool (rotation + limit tracking) instead of the operator's personal login. Written by `standup-fleet-host.sh` phase `claude-pool`. Node from nvm is otherwise invisible to systemd. |
 | `agent-<id>.timer.d/20-stagger-gpu.conf` (6 image agents: the recipe-image archiver/refiller/verifier, both article-hero curators, the news-hero curator) | Replaces the manifest schedule with staggered minutes and `Persistent=false`, so GPU jobs don't collide. |
 | `agent-digest-rollup-agent.timer.d/10-daily.conf` | Replaces the manifest's `16 */5 * * *` with daily 07:30. The manifest still says `enabled: false`, so re-registering it as-is stops and disables the timer. |
 

@@ -248,6 +248,22 @@ EOF
     chmod +x "$pool_dir/bin/claude"
     green "shim at $pool_dir/bin/claude"
 
+    # Fleet-wide PATH for every user service, with the shim FIRST. Agents that
+    # run a bare `claude --print` (product-hydration, benchmark-research, both
+    # article proposers, agent-doctor, trending-recipe-discovery, ...) resolved
+    # ~/.local/bin/claude otherwise: the operator's personal login, no pool
+    # rotation. On 2026-09-25 that account hit its weekly limit and hydration
+    # failed 80/80 while three pool profiles sat idle. The shim skips itself
+    # when locating the real binary, so shim-first is safe.
+    local dropin="$HOME/.config/systemd/user/service.d/10-fleet-path.conf"
+    mkdir -p "$(dirname "$dropin")"
+    cat > "$dropin" <<EOF
+[Service]
+Environment=PATH=$pool_dir/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EOF
+    systemctl --user daemon-reload 2>/dev/null || true
+    green "fleet PATH drop-in routes bare \`claude\` through the pool"
+
     local authed
     authed=$(python3 - "$pool_dir/state.json" <<'PY' 2>/dev/null || echo 0
 import json, sys
