@@ -77,6 +77,18 @@ def test_sql_spoof_filter_status_and_prefix():
     assert "%" not in stripped
 
 
+def test_null_status_rows_still_count():
+    # A status column added to a live table leaves every older row NULL.
+    # Those rows are unknown, not failures; `status = 200` alone would drop
+    # the whole history the moment the column appears (aisleprompt, 2026-09-25).
+    cfg = at.resolve_columns(_Conn(AP_COLS + ["status_code", "duration_ms"]), at.config())
+    assert cfg["status_column"] == "status_code"
+    sql, _ = at.build_landed_paths_sql(cfg)
+    assert "(l.status_code IS NULL OR l.status_code = 200)" in sql
+    rsql, _ = at.build_referral_counts_sql(cfg)
+    assert "(l.status_code IS NULL OR l.status_code = 200)" in rsql
+
+
 def test_sql_without_status_column_skips_status_filter():
     cfg = at.resolve_columns(_Conn(AP_COLS), at.config())
     sql, _ = at.build_landed_paths_sql(cfg)

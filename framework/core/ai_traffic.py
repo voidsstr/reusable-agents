@@ -97,6 +97,9 @@ DEFAULTS: dict[str, Any] = {
     "exclude_ips": [],
     # Only count landings that served a 200 (when a status column exists):
     # a 301 hit on an ASIN URL is counted on the slug URL it redirects to.
+    # A NULL status means "logged before the site recorded status" (a column
+    # added to a live table, e.g. aisleprompt 2026-09-25), not a failure, so
+    # it still counts; otherwise adding the column would erase the history.
     "only_status_200": True,
     "statement_timeout_ms": 30000,
 }
@@ -202,7 +205,7 @@ def build_landed_paths_sql(cfg: dict, *, prefixes: Sequence[str] = (),
             AND l.{ts} > NOW() - make_interval(days => %(ref_days)s)){fetch_arm}
          )"""]
     if status and cfg.get("only_status_200", True):
-        where.append(f"l.{status} = 200")
+        where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
     if prefixes:
         params["prefix_likes"] = [_like_prefix(p) for p in prefixes]
         where.append(f"l.{path} LIKE ANY(%(prefix_likes)s)")
@@ -316,7 +319,7 @@ def build_referral_counts_sql(cfg: dict, windows: Sequence[int] = (7, 30),
         params["ref_sources"] = list(cfg["referral_sources"])
         where.append(f"l.{src} = ANY(%(ref_sources)s)")
     if status and cfg.get("only_status_200", True):
-        where.append(f"l.{status} = 200")
+        where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
     cols = []
     for w in wins:
         params[f"d{w}"] = w
