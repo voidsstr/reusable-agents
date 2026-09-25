@@ -4134,6 +4134,8 @@ def _page_record(page) -> dict:
         rec["jsonld_types"] = list(page.jsonld_types)
     if getattr(page, "robots_meta", ""):
         rec["robots_meta"] = page.robots_meta
+    if getattr(page, "x_robots_tag", ""):
+        rec["x_robots_tag"] = page.x_robots_tag
     if getattr(page, "redirected_from", ""):
         rec["redirected_from"] = page.redirected_from
     return rec
@@ -4174,22 +4176,35 @@ def _crawl_for_audit(cfg, run_dir, seeds: Optional[list] = None,
     pages: list[dict] = []
     have: set[str] = set()
 
+    try:  # noindexed pages can't rank or be cited — don't spend a slot
+        from llm_audit import page_is_noindex as _page_is_noindex
+    except Exception:
+        _page_is_noindex = lambda _rec: False  # noqa: E731
+
     def _keep(page) -> None:
         if 200 <= page.status_code < 300 and page.body_text:
             rec = _page_record(page)
+            if _page_is_noindex(rec):
+                print(f"  [llm-audit] not auditing noindexed {rec['url']}",
+                      file=sys.stderr)
+                return
             key = _audit_pages.norm_url(rec["url"])
             if key and key not in have:
                 have.add(key)
                 pages.append(rec)
 
-    seed_urls = [s["url"] for s in (seeds or []) if s.get("url")][:max_pages]
+    # Up to 2x the slots: a seed that is noindexed or not 2xx is skipped and
+    # the next seed takes its slot; the fetch stops as soon as slots are full.
+    seed_urls = [s["url"] for s in (seeds or []) if s.get("url")][:max_pages * 2]
     if seed_urls:
-        print(f"  [llm-audit] seed crawl: {len(seed_urls)} page(s) from "
+        print(f"  [llm-audit] seed crawl: up to {len(seed_urls)} page(s) from "
               f"analyzer.audit_seed_queries", file=sys.stderr)
         for page in _crawl(base_url=base_url, seed_urls=seed_urls,
                            use_sitemap=False, max_depth=0,
                            max_pages=len(seed_urls), **common):
             _keep(page)
+            if len(pages) >= max_pages:
+                break
 
     remaining = max_pages - len(pages)
     if remaining <= 0:

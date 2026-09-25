@@ -100,3 +100,52 @@ def test_crawler_records_x_robots_tag(monkeypatch):
     assert pages[0].x_robots_tag == "noindex, follow"
     assert pages[0].robots_meta == "noindex, follow"
     assert llm_audit.page_is_noindex(pages[0].to_dict())
+
+
+def test_crawl_for_audit_spends_no_slot_on_a_noindexed_page(monkeypatch):
+    """The noindexed seed is dropped at crawl time, so its audit slot goes
+    to the next page instead of being wasted."""
+    import types
+    analyzer_dir = str(_ROOT / "agents" / "seo-opportunity-agent" / "lib" / "analyzer")
+    monkeypatch.syspath_prepend(analyzer_dir)
+    spec = iu.spec_from_file_location("seo_analyzer_noindex_under_test",
+                                      Path(analyzer_dir) / "analyzer.py")
+    an = iu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(an)
+    except ImportError as e:  # optional deps not installed here
+        pytest.skip(f"analyzer deps unavailable: {e}")
+
+    def page(url, robots="", xrt=""):
+        return SimpleNamespace(url=url, status_code=200, body_text="body", title="t",
+                               h1="h", description="d", canonical=url,
+                               robots_meta=robots, x_robots_tag=xrt,
+                               jsonld_types=[], redirected_from="", fetch_ms=5,
+                               ttfb_ms=5)
+
+    fetched = {
+        "https://site.test/kitchen/grocery-a": page("https://site.test/kitchen/grocery-a",
+                                                    robots="noindex, follow"),
+        "https://site.test/kitchen/grocery-b": page("https://site.test/kitchen/grocery-b",
+                                                    xrt="noindex"),
+        "https://site.test/blog/best-x": page("https://site.test/blog/best-x",
+                                              robots="index, follow"),
+        "https://site.test/": page("https://site.test/"),
+    }
+
+    def fake_crawl(*, base_url, seed_urls, max_pages, **_kw):
+        for u in list(seed_urls)[:max_pages]:
+            u = u if u.startswith("http") else base_url + u
+            if u in fetched:
+                yield fetched[u]
+
+    monkeypatch.setitem(sys.modules, "crawler", types.SimpleNamespace(crawl=fake_crawl))
+    cfg = {"site": {"domain": "site.test"}}
+    seeds = [{"url": "https://site.test/kitchen/grocery-a"},
+             {"url": "https://site.test/kitchen/grocery-b"},
+             {"url": "https://site.test/blog/best-x"}]
+    pages = an._crawl_for_audit(cfg, Path("/nonexistent-run"), seeds=seeds, max_pages=2)
+    urls = [p["url"] for p in pages]
+    assert "https://site.test/blog/best-x" in urls
+    assert not any("grocery" in u for u in urls)
+    assert urls == ["https://site.test/blog/best-x", "https://site.test/"]
