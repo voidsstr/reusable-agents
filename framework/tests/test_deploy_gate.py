@@ -215,3 +215,68 @@ def test_parse_sitemap_accepts_feeds():
     atom = '<feed><entry><link href="https://x.test/b"/></entry></feed>'
     assert pi.parse_sitemap(rss) == (["https://x.test/a"], [])
     assert pi.parse_sitemap(atom) == (["https://x.test/b"], [])
+
+
+def _deployer_cfg(tmp_path, site, flag, rolled):
+    import yaml
+    cfg = {
+        "site": {"id": "gate-test", "domain": "gate.example", "mode": "implement"},
+        "data_sources": {"gsc": {"site_url": "sc-domain:gate.example"}, "ga4": {"property_id": "1"}},
+        "deployer": {
+            "deploy": {"cmd": f"echo deploying {{image}}:{{tag}}; {flag}", "vars": {"image": "reg/x"}},
+            "smoke_check": {"base_url": _base(site), "paths": ["/"], "settle_seconds": 0,
+                            "timeout_seconds": 5,
+                            "gate": {"expect_indexable_paths": ["/guide"], "min_text_chars": 100,
+                                     "sitemap_index": "/sitemap.xml", "timeout_s": 5}},
+            "rollback": {"capture_cmd": "echo reg/x:20260925-0400",
+                         "cmd": f"echo {{prior_image}} > {rolled}"},
+        },
+    }
+    p = tmp_path / "site.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    return p
+
+
+def _run_deployer(monkeypatch, cfg_path, run_dir):
+    import json as _json
+    import sys as _sys
+    d = _load_deployer()
+    monkeypatch.setattr(d.time, "sleep", lambda s: None)
+    monkeypatch.setenv("SEO_AGENT_CONFIG", str(cfg_path))
+    monkeypatch.setenv("RESPONDER_SKIP_CONTENT_VERIFY", "1")
+    monkeypatch.setattr(_sys, "argv", ["deployer.py", "--run-dir", str(run_dir), "--skip-test"])
+    code = 0
+    try:
+        d.main()
+    except SystemExit as e:
+        code = e.code or 0
+    return code, _json.loads((run_dir / "deploy.json").read_text())
+
+
+def test_deployer_rolls_back_a_deploy_that_noindexes_a_canary(site, tmp_path, monkeypatch):
+    # The "deploy" flips /guide to noindex (via a flag file the mock site reads).
+    flag_file = tmp_path / "noindex.flag"
+    orig = site.page
+    site.page = lambda path: (orig(path).replace("<title>", '<meta name="robots" content="noindex"><title>')
+                              if path == "/guide" and flag_file.exists() else orig(path))
+    rolled = tmp_path / "rolled.txt"
+    cfg = _deployer_cfg(tmp_path, site, f"touch {flag_file}", rolled)
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    code, meta = _run_deployer(monkeypatch, cfg, run_dir)
+    assert code == 1
+    assert meta["status"] == "rolled-back"
+    assert meta["prior_image"] == "reg/x:20260925-0400"
+    assert rolled.read_text().strip() == "reg/x:20260925-0400"
+    assert any("/guide not indexable" in f for f in meta["gate"]["failures"])
+    assert meta["gate"]["pre"]["pages"]
+
+
+def test_deployer_healthy_deploy_passes_gate(site, tmp_path, monkeypatch):
+    rolled = tmp_path / "rolled.txt"
+    cfg = _deployer_cfg(tmp_path, site, "true", rolled)
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    code, meta = _run_deployer(monkeypatch, cfg, run_dir)
+    assert code == 0, meta
+    assert meta["status"] == "success" and meta["gate"]["ok"] is True
+    assert not rolled.exists()
+    assert "reg/x:20260925-0400" in meta["rollback_cmd"]
