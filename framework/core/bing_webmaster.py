@@ -77,7 +77,7 @@ def call(method: str, site_url: str, *, key: Optional[str] = None,
             detail = e.read().decode("utf-8", "replace")[:200]
         except Exception:
             detail = ""
-        return {"error": f"HTTP {e.code} {detail}".strip()}
+        return {"error": f"HTTP {e.code} {detail}".strip().replace(k, "***")}
     except Exception as e:
         # Never echo the URL: it carries the API key.
         return {"error": f"{type(e).__name__}: {str(e)[:160]}".replace(k, "***")}
@@ -139,20 +139,46 @@ def collect(site_url: str, *, key: Optional[str] = None, timeout: float = 60.0,
             rows = sorted(rows, key=lambda x: x.get("Impressions", 0), reverse=True)
         return rows[:n] if rows or isinstance(v, list) else v
 
-    out["crawl_stats"] = call("GetCrawlStats", site_url, key=k, timeout=timeout)
-    out["rank_and_traffic"] = call("GetRankAndTrafficStats", site_url, key=k, timeout=timeout)
-    out["top_queries"] = top(call("GetQueryStats", site_url, key=k, timeout=timeout), top_queries)
-    out["top_pages"] = top(call("GetPageStats", site_url, key=k, timeout=timeout), top_pages)
-    out["sitemaps"] = call("GetFeeds", site_url, key=k, timeout=timeout)
-    out["crawl_issues"] = call("GetCrawlIssues", site_url, key=k, timeout=timeout)
-    out["url_submission_quota"] = call("GetUrlSubmissionQuota", site_url, key=k, timeout=timeout)
-    errors = {s: v["error"] for s, v in out.items() if isinstance(v, dict) and "error" in v}
+    raw = {
+        "crawl_stats": call("GetCrawlStats", site_url, key=k, timeout=timeout),
+        "rank_and_traffic": call("GetRankAndTrafficStats", site_url, key=k, timeout=timeout),
+        "top_queries": top(call("GetQueryStats", site_url, key=k, timeout=timeout), top_queries),
+        "top_pages": top(call("GetPageStats", site_url, key=k, timeout=timeout), top_pages),
+        "sitemaps": call("GetFeeds", site_url, key=k, timeout=timeout),
+        "crawl_issues": call("GetCrawlIssues", site_url, key=k, timeout=timeout),
+        "url_submission_quota": call("GetUrlSubmissionQuota", site_url, key=k, timeout=timeout),
+    }
+    errors = {s: v["error"] for s, v in raw.items() if isinstance(v, dict) and "error" in v}
+    # Metrics come from the full series; the payload below is ordered and
+    # trimmed for readers that truncate it (a growth brief hands the first
+    # ~14k chars to an LLM — months of daily crawl rows used to crowd out the
+    # queries and pages).
+    out["metrics"] = summarize(raw)
     if errors:
         out["errors"] = errors
-        if len(errors) >= 7:          # every call failed (bad key / unverified site)
+        if len(errors) >= len(raw):   # every call failed (bad key / unverified site)
             out["available"] = False
-    out["metrics"] = summarize(out)
+    out["top_queries"] = raw["top_queries"]
+    out["top_pages"] = raw["top_pages"]
+    out["crawl_issues"] = _head(raw["crawl_issues"], 50)
+    out["crawl_stats"] = _latest(raw["crawl_stats"], 14)
+    out["sitemaps"] = _head(raw["sitemaps"], 20)
+    out["rank_and_traffic"] = _latest(raw["rank_and_traffic"], 28)
+    out["url_submission_quota"] = raw["url_submission_quota"]
     return out
+
+
+def _head(v: Any, n: int) -> Any:
+    return v[:n] if isinstance(v, list) else v
+
+
+def _latest(v: Any, n: int) -> Any:
+    """The `n` most recent rows of a daily series (by its Date), oldest first."""
+    if not isinstance(v, list):
+        return v
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    rows = sorted(_rows(v), key=lambda r: parse_date(r.get("Date")) or floor)
+    return rows[-n:]
 
 
 def url_info(site_url: str, url: str, *, key: Optional[str] = None, timeout: float = 60.0) -> Any:

@@ -95,3 +95,17 @@ def test_bad_key_marks_unavailable_and_never_leaks_key(api, monkeypatch):
     out = bwt.collect("https://s.test/")
     assert out["available"] is False
     assert "wrong-key-xyz" not in json.dumps(out)
+
+
+def test_payload_puts_queries_first_and_trims_daily_series(api, monkeypatch):
+    """The growth brief hands the first ~14k chars of this payload to an LLM;
+    40 days of traffic rows must not push the queries out of that window."""
+    monkeypatch.setenv("BING_WEBMASTER_API_KEY", "k123")
+    out = bwt.collect("https://s.test/")
+    keys = list(out)
+    assert keys.index("metrics") < keys.index("top_queries") < keys.index("crawl_stats")
+    assert keys.index("top_pages") < keys.index("rank_and_traffic")
+    assert len(out["rank_and_traffic"]) == 28                          # trimmed …
+    assert out["metrics"]["clicks_28d"] == 56                           # … after the metrics
+    newest = max(bwt.parse_date(r["Date"]) for r in out["rank_and_traffic"])
+    assert newest == bwt.parse_date(_d(T0))                             # kept the latest days
