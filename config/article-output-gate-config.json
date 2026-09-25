@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "_comment": "Article output gate (framework/core/article_output_gate.py). `defaults` deep-merges over the module DEFAULTS; the proposer's site.yaml `proposals.output_gate` block merges over that; `by_agent_id.<agent-id>` merges last (operator override, e.g. {\"enabled\": false} to lift the gate without a commit). A storage copy at config/article-output-gate-config.json replaces this repo file wholesale.",
+  "defaults": {
+    "max_proposals_per_day": 1,
+    "window": "calendar-day",
+    "timezone": "UTC",
+    "traffic_gate": {
+      "enabled": true,
+      "lookback_days": 14,
+      "min_age_days": 3,
+      "min_impressions": 1,
+      "min_ai_visits": 1
+    },
+    "seasonal_override": {"enabled": true, "windows": ["now", "imminent"]}
+  },
+  "by_agent_id": {}
+}
