@@ -368,11 +368,12 @@ def smoke_check(base_url: str, paths: list[str], timeout: int = 30) -> tuple[boo
 _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/:@]*$")
 
 
-def _capture_prior_image(rb: dict, deploy_vars: dict, tag: str, image: str,
-                         repo_root: str | None) -> str:
+def _capture_serving_ref(rb: dict, deploy_vars: dict, tag: str, image: str,
+                        repo_root: str | None, *, what: str) -> str:
     """Run deployer.rollback.capture_cmd (e.g. `az containerapp show ...
-    --query <image> -o tsv`) BEFORE the deploy and return the image the site
-    is serving now — the rollback target. '' when not configured / unusable."""
+    --query <image> -o tsv`) and return what the site is serving now (an
+    image ref, or e.g. an ECS task-definition ARN). '' when not configured
+    or unusable."""
     cmd = (rb or {}).get("capture_cmd")
     if not cmd:
         return ""
@@ -380,20 +381,46 @@ def _capture_prior_image(rb: dict, deploy_vars: dict, tag: str, image: str,
                             timeout=120, repo_root=repo_root)
     ref = (out or "").strip().splitlines()[-1].strip() if (out or "").strip() else ""
     if rc != 0 or not _IMAGE_REF_RE.match(ref or "-"):
-        print(f"[deployer] rollback capture unusable (rc={rc}, out={ref[:120]!r}); "
-              f"a failed gate will need a manual rollback", file=sys.stderr)
+        print(f"[deployer] rollback capture ({what}) unusable (rc={rc}, out={ref[:120]!r})",
+              file=sys.stderr)
         return ""
     return ref
 
 
+def _capture_prior_image(rb: dict, deploy_vars: dict, tag: str, image: str,
+                         repo_root: str | None) -> str:
+    """The capture taken BEFORE the deploy — the rollback target."""
+    ref = _capture_serving_ref(rb, deploy_vars, tag, image, repo_root, what="before deploy")
+    if not ref and (rb or {}).get("capture_cmd"):
+        print("[deployer] no rollback target; a failed gate will need a manual rollback",
+              file=sys.stderr)
+    return ref
+
+
 def _rollback(rb: dict, deploy_vars: dict, tag: str, image: str, prior_image: str,
-              repo_root: str | None, deploy_meta: dict, reason: str) -> bool:
-    """Run deployer.rollback.cmd with {prior_image}. True when it ran clean."""
+              repo_root: str | None, deploy_meta: dict, reason: str, *,
+              deployed_ref: str = "") -> bool:
+    """Run deployer.rollback.cmd with {prior_image}. True when it ran clean.
+
+    `deployed_ref` is what capture_cmd returned right after THIS deploy. The
+    rollback only replaces that: if the site now serves something else (a
+    newer deploy, an operator's manual deploy, or a rollback that already
+    happened), redeploying our prior image would clobber it, so we don't."""
     cmd = (rb or {}).get("cmd")
     if not (cmd and prior_image):
         deploy_meta["rollback"] = {"attempted": False, "reason": reason,
                                    "why_not": "no rollback.cmd" if not cmd else "prior image unknown"}
         return False
+    if deployed_ref:
+        now_ref = _capture_serving_ref(rb, deploy_vars, tag, image, repo_root, what="before rollback")
+        if now_ref and now_ref != deployed_ref:
+            deploy_meta["rollback"] = {
+                "attempted": False, "reason": reason,
+                "why_not": (f"site now serves {now_ref}, not this deploy's {deployed_ref} — "
+                            f"a newer deploy or a manual rollback happened; not overwriting it"),
+            }
+            print(f"[deployer] NOT rolling back: {deploy_meta['rollback']['why_not']}", file=sys.stderr)
+            return False
     expanded = _expand(cmd, {**deploy_vars, "prior_image": prior_image}, tag, image)
     print(f"[deployer] ROLLING BACK to {prior_image}: {reason}", file=sys.stderr)
     rc, _o, err = run_step("rollback", None, expanded, timeout=900, repo_root=repo_root)
@@ -610,9 +637,10 @@ def main() -> None:
                 gate_pre = deploy_gate.measure(sc["base_url"], gate_cfg)
                 deploy_meta["gate"] = {"pre": _gate_summary(gate_pre)}
             except Exception as e:
-                print(f"[deployer] gate baseline failed ({e}); post-deploy gate "
-                      f"will treat every failing check as a regression", file=sys.stderr)
+                print(f"[deployer] gate baseline failed ({e}); the post-deploy gate "
+                      f"will report but not roll back (no baseline to compare)", file=sys.stderr)
         prior_image = _capture_prior_image(rb, deploy_vars, tag, image, repo_root) if d.get("cmd") else ""
+        deployed_ref = ""
         if prior_image:
             deploy_meta["prior_image"] = prior_image
             if rb.get("cmd"):
@@ -686,6 +714,13 @@ def main() -> None:
             if rc != 0 and not verified_via_revision:
                 deploy_meta["status"] = "failure"; _save()
                 sys.exit(1)
+            # What this deploy put in place — a later rollback replaces only
+            # that, never a newer deploy that landed meanwhile.
+            if prior_image and rb.get("cmd"):
+                deployed_ref = _capture_serving_ref(rb, deploy_vars, tag, image, repo_root,
+                                                    what="after deploy")
+                if deployed_ref:
+                    deploy_meta["deployed_ref"] = deployed_ref
         else:
             deploy_meta["deploy"]["skipped"] = True
 
@@ -716,7 +751,7 @@ def main() -> None:
                 bad = [r["url"] for r in results if not r["ok"]]
                 rolled = rb.get("on_smoke_failure", True) and _rollback(
                     rb, deploy_vars, tag, image, prior_image, repo_root, deploy_meta,
-                    f"smoke check failed: {bad}")
+                    f"smoke check failed: {bad}", deployed_ref=deployed_ref)
                 deploy_meta["status"] = "rolled-back" if rolled else "failure"; _save()
                 print(f"[deployer] SMOKE FAILED — "
                       f"{'rolled back to ' + prior_image if rolled else 'manual rollback needed'}",
@@ -735,6 +770,13 @@ def main() -> None:
                     # A broken gate must not fail (or roll back) a good deploy.
                     print(f"[deployer] gate errored ({e}); not gating this deploy", file=sys.stderr)
                     post, failures, warnings = {}, [], [f"gate errored: {e}"]
+                if failures and gate_pre is None and gate_cfg.get("baseline", True) is not False:
+                    # The baseline was meant to be taken but wasn't (it errored,
+                    # or there was no deploy step). Without it an already-broken
+                    # page or sitemap is indistinguishable from a regression, so
+                    # report — never roll back a deploy on that.
+                    warnings = [f"(no baseline — not gating) {f}" for f in failures] + warnings
+                    failures = []
                 if failures:
                     # Re-measure once: a cold revision and a transient 5xx
                     # must fail twice before we act.
@@ -756,7 +798,7 @@ def main() -> None:
                 if failures:
                     rolled = rb.get("on_gate_failure", True) and _rollback(
                         rb, deploy_vars, tag, image, prior_image, repo_root, deploy_meta,
-                        f"indexability/latency gate: {failures[:5]}")
+                        f"indexability/latency gate: {failures[:5]}", deployed_ref=deployed_ref)
                     deploy_meta["status"] = "rolled-back" if rolled else "failure"; _save()
                     print(f"[deployer] INDEXABILITY GATE FAILED — {failures}", file=sys.stderr)
                     print(f"[deployer] "

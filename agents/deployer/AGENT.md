@@ -119,6 +119,9 @@ tiered site never runs its full suite per batch. A site with a single legacy
      blocks the deploy that fixes it. Cold TTFB ≥ `cold_fail_s` is a warning
      (a new revision starts with empty caches).
    - A failing gate is re-measured once after 45 s, then rolls back.
+   - If the baseline was expected but could not be taken, the gate only
+     reports (`(no baseline — not gating)` warnings) and never rolls back:
+     without a baseline a pre-existing problem looks like a regression.
    - Fetches use an honest `IndexabilityCheck` UA — never an AI-crawler UA,
      which the sites log into their AI-traffic tables.
    - Results land in `deploy.json` → `gate{pre,post,failures,warnings,ok}`.
@@ -129,6 +132,11 @@ tiered site never runs its full suite per batch. A site with a single legacy
    specifics live in these templates, not in `deployer.py`. The failing
    commits stay on the branch: the next deploy rebuilds them and fails the
    gate again until the regression is fixed.
+   `capture_cmd` also runs right after the deploy (`deployed_ref`) and again
+   just before a rollback: if the site no longer serves `deployed_ref` (a
+   newer or manual deploy landed while the gate ran, or someone already
+   rolled back), the rollback is skipped (`rollback.why_not`) so it never
+   clobbers a newer deploy.
 6. **Content verify.** Runs only as part of the smoke-check step (so only
    when `smoke_check.base_url` and `paths` are set). Skipped when
    `RESPONDER_SKIP_CONTENT_VERIFY=1`.

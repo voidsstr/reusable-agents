@@ -218,18 +218,23 @@ def test_parse_sitemap_accepts_feeds():
 
 
 def _deployer_cfg(tmp_path, site, flag, rolled):
+    """A deploy whose 'cloud' is a file: deploy writes reg/x:<tag> into it,
+    capture_cmd reads it, rollback writes the prior image back."""
     import yaml
+    serving = tmp_path / "serving.txt"
+    if not serving.exists():
+        serving.write_text("reg/x:20260925-0400\n")
     cfg = {
         "site": {"id": "gate-test", "domain": "gate.example", "mode": "implement"},
         "data_sources": {"gsc": {"site_url": "sc-domain:gate.example"}, "ga4": {"property_id": "1"}},
         "deployer": {
-            "deploy": {"cmd": f"echo deploying {{image}}:{{tag}}; {flag}", "vars": {"image": "reg/x"}},
+            "deploy": {"cmd": f"echo {{image}}:{{tag}} > {serving}; {flag}", "vars": {"image": "reg/x"}},
             "smoke_check": {"base_url": _base(site), "paths": ["/"], "settle_seconds": 0,
                             "timeout_seconds": 5,
                             "gate": {"expect_indexable_paths": ["/guide"], "min_text_chars": 100,
                                      "sitemap_index": "/sitemap.xml", "timeout_s": 5}},
-            "rollback": {"capture_cmd": "echo reg/x:20260925-0400",
-                         "cmd": f"echo {{prior_image}} > {rolled}"},
+            "rollback": {"capture_cmd": f"cat {serving}",
+                         "cmd": f"echo {{prior_image}} > {serving}; echo {{prior_image}} > {rolled}"},
         },
     }
     p = tmp_path / "site.yaml"
@@ -237,11 +242,13 @@ def _deployer_cfg(tmp_path, site, flag, rolled):
     return p
 
 
-def _run_deployer(monkeypatch, cfg_path, run_dir):
+def _run_deployer(monkeypatch, cfg_path, run_dir, patch=None):
     import json as _json
     import sys as _sys
     d = _load_deployer()
     monkeypatch.setattr(d.time, "sleep", lambda s: None)
+    if patch:
+        patch(d)
     monkeypatch.setenv("SEO_AGENT_CONFIG", str(cfg_path))
     monkeypatch.setenv("RESPONDER_SKIP_CONTENT_VERIFY", "1")
     monkeypatch.setattr(_sys, "argv", ["deployer.py", "--run-dir", str(run_dir), "--skip-test"])
@@ -280,3 +287,56 @@ def test_deployer_healthy_deploy_passes_gate(site, tmp_path, monkeypatch):
     assert meta["status"] == "success" and meta["gate"]["ok"] is True
     assert not rolled.exists()
     assert "reg/x:20260925-0400" in meta["rollback_cmd"]
+
+
+def test_deployer_never_rolls_back_over_a_newer_deploy(site, tmp_path, monkeypatch):
+    """A manual/operator deploy that lands while our gate runs must not be
+    clobbered by our rollback to OUR prior image."""
+    flag_file = tmp_path / "noindex.flag"
+    serving = tmp_path / "serving.txt"
+    orig = site.page
+
+    def page(path):
+        if path == "/guide" and flag_file.exists():
+            serving.write_text("reg/x:operator-hotfix\n")      # someone else deploys
+            return orig(path).replace("<title>", '<meta name="robots" content="noindex"><title>')
+        return orig(path)
+    site.page = page
+    rolled = tmp_path / "rolled.txt"
+    cfg = _deployer_cfg(tmp_path, site, f"touch {flag_file}", rolled)
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    code, meta = _run_deployer(monkeypatch, cfg, run_dir)
+    assert code == 1
+    assert meta["status"] == "failure"
+    assert meta["deployed_ref"].startswith("reg/x:2")
+    assert meta["rollback"]["attempted"] is False
+    assert "operator-hotfix" in meta["rollback"]["why_not"]
+    assert serving.read_text().strip() == "reg/x:operator-hotfix"
+    assert not rolled.exists()
+
+
+def test_deployer_without_a_baseline_reports_but_never_rolls_back(site, tmp_path, monkeypatch):
+    """If the baseline could not be taken, a pre-existing problem looks like a
+    regression; the gate must report it, not roll back a good deploy."""
+    site.noindex.add("/guide")                                  # broken before the deploy
+    rolled = tmp_path / "rolled.txt"
+    cfg = _deployer_cfg(tmp_path, site, "true", rolled)
+    run_dir = tmp_path / "run"; run_dir.mkdir()
+    calls = {"n": 0}
+
+    def patch(d):
+        real = d.deploy_gate.measure
+
+        def flaky_measure(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("baseline blew up")
+            return real(*a, **k)
+        monkeypatch.setattr(d.deploy_gate, "measure", flaky_measure)
+
+    code, meta = _run_deployer(monkeypatch, cfg, run_dir, patch=patch)
+    assert code == 0, meta
+    assert meta["status"] == "success"
+    assert meta["gate"]["ok"] is True and meta["gate"]["failures"] == []
+    assert any("(no baseline" in w and "/guide" in w for w in meta["gate"]["warnings"])
+    assert not rolled.exists()
