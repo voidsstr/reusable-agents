@@ -85,3 +85,25 @@ def test_metric_helper_never_reaccomplishes_a_retired_goal(storage):
     assert by["goal-implemented"]["status"] == "abandoned"
     assert by["goal-implemented"]["metric"]["current"] == 250
     assert by["goal-live"]["status"] == "accomplished"   # live goals unchanged
+
+
+def test_goals_tracker_digest_leaves_out_retired_goals(storage, monkeypatch):
+    """A retired goal is no longer measured; the daily digest must not list
+    it (it would read as a permanently stale goal)."""
+    import importlib.util as iu
+    import types
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    spec = iu.spec_from_file_location("goals_tracker_under_test",
+                                      root / "agents" / "goals-tracker" / "agent.py")
+    gt = iu.module_from_spec(spec)
+    spec.loader.exec_module(gt)
+    g.init_goals("a", [_goal("goal-live"), _goal("goal-recs-per-run")], storage=storage)
+    g.init_goals("a", [{"id": "goal-recs-per-run", "status": "abandoned"}], storage=storage)
+    monkeypatch.setattr(gt, "get_storage", lambda: storage)
+    monkeypatch.setattr(gt.registry, "list_agents", lambda storage=None: [
+        types.SimpleNamespace(id="a", name="A", category="seo", enabled=True,
+                              metadata={}, cron_expr="")])
+    rows = gt.collect_all_agents()
+    assert [x["id"] for x in rows[0]["goals"]] == ["goal-live"]
+    assert rows[0]["n_goals"] == 1

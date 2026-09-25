@@ -87,6 +87,11 @@ def collect_all_agents() -> list[dict]:
             gid = g.get("id", "")
             if not gid:
                 continue
+            # A retired goal (status "abandoned", goals.init_goals) keeps its
+            # history but is no longer tracked, so it would sit in the digest
+            # as a permanently "stale" goal.
+            if g.get("status") == "abandoned":
+                continue
             metric = g.get("metric") or {}
             cache_entry = cache_goals.get(gid) or {}
             points = cache_entry.get("points") or []
