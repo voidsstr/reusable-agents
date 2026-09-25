@@ -89,3 +89,72 @@ def test_repo_config_resolves_site_knobs():
     sp = g.resolve_minima("specpicks-article-proposal-agent")
     assert sp["min_products"] == 3 and sp["min_kits"] == 0
     assert "kitchen_roots" not in sp
+
+
+# ── Kitchen slug repair (2026-09-25 audit F101/F118) ──────────────────────
+
+class _FakeCursor:
+    def __init__(self, tables):
+        self.tables = tables
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        table = sql.split(" FROM ")[1].split()[0]
+        wanted = set(params[0])
+        self._rows = [(s,) for s in self.tables.get(table, []) if s in wanted]
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def cursor(self):
+        return _FakeCursor(self.tables)
+
+
+CHECK = {"product_table": "kitchen_products", "product_active_column": "is_active",
+         "category_table": "kitchen_categories", "static_slugs": ["woks"],
+         "reserved_slugs": ["buying-guides"]}
+
+
+def test_repair_unlinks_invented_slugs_and_canonicalizes_doubled_brands():
+    conn = _FakeConn({"kitchen_products": ["lodge-skillet", "acme-pan"], "kitchen_categories": ["cookware"]})
+    body = ("Get the [Lodge](/k/lodge-skillet?source=amazon), the [Acme pan](/kitchen/acme-acme-acme-pan), "
+            "a [thermometer](/k/thermoworks-thermapen-one), [cookware](/kitchen/category/cookware), "
+            "[woks](/k/woks), [bad hub](/kitchen/category/not-a-cat/x), [guides](/kitchen/buying-guides) "
+            "and a [recipe](/recipes/stew-12).")
+    resolve = g.kitchen_slug_resolver_from_db(conn, body, CHECK)
+    out, notes = g.repair_kitchen_links(body, resolve)
+    assert "[Lodge](/k/lodge-skillet?source=amazon)" in out
+    assert "[Acme pan](/kitchen/acme-pan)" in out
+    assert "a thermometer," in out and "thermapen" not in out
+    assert "[cookware](/kitchen/category/cookware)" in out
+    assert "[woks](/k/woks)" in out
+    assert "bad hub" in out and "not-a-cat" not in out
+    assert "[guides](/kitchen/buying-guides)" in out
+    assert "[recipe](/recipes/stew-12)" in out
+    assert len(notes) == 3
+    # The guard then counts only links that resolve.
+    a = g.verify_body(out, {}, min_recipes=0, min_kits=1, kitchen_roots=AP["kitchen_roots"])
+    assert a.kitchen_links == 5
+
+
+def test_resolver_rejects_non_identifier_table_names():
+    import pytest
+    with pytest.raises(ValueError):
+        g.kitchen_slug_resolver_from_db(_FakeConn({}), "[a](/k/x)", {"product_table": "kitchen_products; drop table x"})
+
+
+def test_de_stutter_handles_tripled_brand():
+    assert g.de_stutter_candidates("piklohas-piklohas-piklohas-bread-slicer") == [
+        "piklohas-piklohas-bread-slicer", "piklohas-bread-slicer"]
+    assert g.de_stutter_candidates("lodge-skillet") == []

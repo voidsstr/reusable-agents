@@ -210,6 +210,125 @@ def split_kitchen_slugs(slugs: Iterable[str],
     return out
 
 
+# ── Kitchen slug repair (2026-09-25 audit F101/F118) ─────────────────────
+# The guard counted kitchen links without checking that they resolve, so an
+# invented slug (/k/thermoworks-thermapen-one, /k/kitchen-scales) counted
+# toward min_kits and shipped as a 404: 53 dead links in 23 aisleprompt
+# articles. The site-agnostic part lives here; the caller supplies the lookup
+# (kitchen_slug_resolver_from_db reads table names from the site's
+# `kitchen_slug_check` config — the guard never names a site's schema).
+
+_KITCHEN_LINK_RE = re.compile(
+    r"\[(?P<text>[^\]]+)\]"
+    r"\((?P<host>https?://[^/)]*)?"
+    r"(?P<root>/(?:kitchen/category|kitchen|k)/)"
+    r"(?P<slug>[a-z0-9][a-z0-9-]*)(?P<rest>(?:/[a-z0-9-]+)?(?:[?#][^)]*)?)\)"
+)
+_SQL_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def de_stutter_candidates(slug: str) -> list[str]:
+    """Doubled / tripled leading-token forms of a slug ("acme-acme-pan" ->
+    "acme-pan"), nearest first. A lookup keeps whichever exists."""
+    out: list[str] = []
+    frontier = [slug]
+    for _ in range(3):
+        nxt: list[str] = []
+        for s in frontier:
+            parts = s.split("-")
+            for k in range(1, 5):
+                if 2 * k > len(parts):
+                    break
+                if parts[:k] == parts[k:2 * k]:
+                    c = "-".join(parts[k:])
+                    if c and c != slug and c not in out:
+                        out.append(c)
+                        nxt.append(c)
+        frontier = nxt
+    return out
+
+
+def kitchen_link_slugs(body_md: str) -> list[tuple[str, str]]:
+    """(root, slug) of every kitchen markdown link, in body order."""
+    return [(m.group("root"), m.group("slug")) for m in _KITCHEN_LINK_RE.finditer(body_md or "")]
+
+
+def repair_kitchen_links(body_md: str, resolve) -> tuple[str, list[str]]:
+    """Canonicalize or unlink kitchen links that do not resolve.
+
+    `resolve(root, slug)` returns "keep", ("rewrite", new_slug) or "unlink".
+    An unlinked link keeps its anchor text as plain prose — nothing a reader
+    sees is lost, and a 404 never ships. Returns (body, notes).
+    """
+    notes: list[str] = []
+
+    def _fix(m: "re.Match[str]") -> str:
+        root, slug = m.group("root"), m.group("slug")
+        verdict = resolve(root, slug)
+        if verdict == "keep" or verdict is None:
+            return m.group(0)
+        if isinstance(verdict, tuple) and verdict[0] == "rewrite":
+            notes.append(f"{root}{slug} -> {root}{verdict[1]}")
+            return f"[{m.group('text')}]({m.group('host') or ''}{root}{verdict[1]}{m.group('rest')})"
+        notes.append(f"unlinked {root}{slug}")
+        return m.group("text")
+
+    return _KITCHEN_LINK_RE.sub(_fix, body_md or ""), notes
+
+
+def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
+    """Build a `resolve` for repair_kitchen_links from the site's catalog.
+
+    `check_cfg` (the site's `kitchen_slug_check` guard config):
+      product_table / product_active_column — the product rows (/k/<slug>,
+          /kitchen/<slug>); only active rows count;
+      category_table — top-level category slugs (/k/<slug>,
+          /kitchen/category/<slug>);
+      static_slugs — slugs the site resolves in code (e.g. subcategories);
+      reserved_slugs — non-product pages under the product root
+          (/kitchen/buying-guides), always kept.
+    One query per table for all slugs in the body.
+    """
+    prod_t = str(check_cfg.get("product_table") or "")
+    active_c = str(check_cfg.get("product_active_column") or "")
+    cat_t = str(check_cfg.get("category_table") or "")
+    for ident in (prod_t, active_c, cat_t):
+        if ident and not _SQL_IDENT_RE.match(ident):
+            raise ValueError(f"kitchen_slug_check: bad identifier {ident!r}")
+    static = set(check_cfg.get("static_slugs") or [])
+    reserved = set(check_cfg.get("reserved_slugs") or [])
+    pairs = kitchen_link_slugs(body_md)
+    slugs = {s for _, s in pairs}
+    cands = set(slugs)
+    for s in slugs:
+        cands.update(de_stutter_candidates(s))
+    active: set[str] = set()
+    cats: set[str] = set()
+    if cands:
+        with conn.cursor() as cur:
+            if prod_t:
+                where_active = f" AND {active_c} = TRUE" if active_c else ""
+                cur.execute(f"SELECT slug FROM {prod_t} WHERE slug = ANY(%s){where_active}", (list(cands),))
+                active = {r[0] for r in cur.fetchall()}
+            if cat_t:
+                cur.execute(f"SELECT slug FROM {cat_t} WHERE slug = ANY(%s)", (list(cands),))
+                cats = {r[0] for r in cur.fetchall()}
+
+    def resolve(root: str, slug: str):
+        if slug in reserved:
+            return "keep"
+        if root == "/kitchen/category/":
+            return "keep" if (slug in cats or slug in static) else "unlink"
+        if slug in active or slug in cats or slug in static:
+            return "keep"
+        for c in de_stutter_candidates(slug):
+            if c in active:
+                return ("rewrite", c)
+        return "unlink"
+
+    return resolve
+
+
 def _strip_id(slug: str) -> str:
     """Normalize 'foo-bar-12345' → 'foo-bar'.
 

@@ -2156,6 +2156,37 @@ for rid, body_p, meta_p in pairs:
             errors.append((rid, f"body too short ({word_count} words "
                                 "< 400 floor) — skipping insert"))
             continue
+        # ── KITCHEN-SLUG REPAIR (2026-09-25 audit F101/F118) ─────────
+        # Before the guard counts kitchen links: canonicalize doubled-brand
+        # slugs and unlink (keep the anchor text of) links whose slug is no
+        # active product / category / static slug of the site's catalog —
+        # an invented /k/<slug> used to count toward min_kits and ship as a
+        # 404. Opt-in per site via `kitchen_slug_check` in
+        # config/article-link-guard-config.json; table names are config.
+        try:
+            from framework.core.article_link_guard import (
+                resolve_minima as _rm_ks, repair_kitchen_links, kitchen_slug_resolver_from_db,
+            )
+            _rec_ks = recs_doc.get(rid) or {}
+            _prop_ks = _rec_ks.get("proposal") or _rec_ks.get("article_proposal") or {}
+            _ks_cfg = (_rm_ks(_rec_ks.get("agent_id") or _prop_ks.get("site") or "") or {}).get("kitchen_slug_check")
+            if _ks_cfg:
+                _ks_resolve = kitchen_slug_resolver_from_db(conn, body_md, _ks_cfg)
+                body_md, _ks_notes = repair_kitchen_links(body_md, _ks_resolve)
+                conn.rollback()  # the lookups opened a read transaction
+                if _ks_notes:
+                    print(f"[article-insert] {rid}: kitchen-slug repair: "
+                          + "; ".join(_ks_notes[:12]), file=sys.stderr)
+        except ImportError:
+            pass
+        except Exception as _kse:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[article-insert] {rid}: kitchen-slug repair error: {_kse} (continuing)",
+                  file=sys.stderr)
+
         # ── INLINE-LINK GUARD ──────────────────────────────────────
         # The proposal carries `expected_recipe_slugs` /
         # `expected_kitchen_slugs`. The wrapper enforces that the
