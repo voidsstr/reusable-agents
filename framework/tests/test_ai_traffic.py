@@ -1,4 +1,6 @@
 """Tests for framework.core.ai_traffic (no DB — a fake connection)."""
+import re
+
 import pytest
 
 from framework.core import ai_traffic as at
@@ -87,6 +89,29 @@ def test_null_status_rows_still_count():
     assert "(l.status_code IS NULL OR l.status_code = 200)" in sql
     rsql, _ = at.build_referral_counts_sql(cfg)
     assert "(l.status_code IS NULL OR l.status_code = 200)" in rsql
+
+
+def test_discovery_files_are_not_landed_pages():
+    # Crawler fetches of robots.txt / llms.txt / sitemaps are logged so a
+    # failing sitemap is visible, but they are not pages an assistant used:
+    # OAI-SearchBot (a live-fetch source) re-reads them daily and would top
+    # every unprefixed landed_paths() list (aisleprompt, 2026-09-25).
+    cfg = at.resolve_columns(_Conn(AP_COLS + ["status_code"]), at.config())
+    sql, params = at.build_landed_paths_sql(cfg)
+    assert "split_part(l.path, '?', 1) !~* %(exclude_path_re)s" in sql
+    rx = re.compile(params["exclude_path_re"], re.I)
+    for p in ("/robots.txt", "/llms.txt", "/llms-full.txt", "/sitemap.xml",
+              "/sitemap-shop-1.xml", "/SITEMAP-CORE.XML"):
+        assert rx.search(p), p
+    for p in ("/", "/blog/best-air-fryers-2026", "/kitchen/lodge-skillet",
+              "/recipes/soup-12", "/product/B0TXT12345"):
+        assert not rx.search(p), p
+    rsql, rparams = at.build_referral_counts_sql(cfg)
+    assert "!~* %(exclude_path_re)s" in rsql and rparams["exclude_path_re"]
+    # A site can switch it off.
+    off = dict(cfg, exclude_path_regex="")
+    sql_off, params_off = at.build_landed_paths_sql(off)
+    assert "exclude_path_re" not in sql_off and "exclude_path_re" not in params_off
 
 
 def test_sql_without_status_column_skips_status_filter():

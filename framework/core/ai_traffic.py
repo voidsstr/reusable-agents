@@ -101,6 +101,14 @@ DEFAULTS: dict[str, Any] = {
     # added to a live table, e.g. aisleprompt 2026-09-25), not a failure, so
     # it still counts; otherwise adding the column would erase the history.
     "only_status_200": True,
+    # Paths that are never a page an assistant used: the discovery files
+    # crawlers fetch (robots.txt, llms.txt, sitemap*.xml). Sites log them so
+    # a failing sitemap is visible (specpicks always has; aisleprompt since
+    # 2026-09-25), but OAI-SearchBot re-reads robots.txt and the sitemaps
+    # every day, so without this they top every "AI-landed pages" list and
+    # inflate distinct-page counts. POSIX regex, case-insensitive, on the path
+    # without its query string. "" disables.
+    "exclude_path_regex": r"\.(xml|txt)$",
     "statement_timeout_ms": 30000,
 }
 
@@ -166,6 +174,15 @@ def resolve_columns(conn, cfg: dict) -> dict:
     return cfg
 
 
+def _exclude_path_clause(cfg: dict, path_col: str, params: dict,
+                         where: list[str]) -> None:
+    """Append the non-page path filter (``exclude_path_regex``) to `where`."""
+    rx = cfg.get("exclude_path_regex")
+    if rx:
+        params["exclude_path_re"] = str(rx)
+        where.append(f"split_part(l.{path_col}, '?', 1) !~* %(exclude_path_re)s")
+
+
 def _like_prefix(prefix: str) -> str:
     return (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             + "%")
@@ -206,6 +223,7 @@ def build_landed_paths_sql(cfg: dict, *, prefixes: Sequence[str] = (),
          )"""]
     if status and cfg.get("only_status_200", True):
         where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
+    _exclude_path_clause(cfg, path, params, where)
     if prefixes:
         params["prefix_likes"] = [_like_prefix(p) for p in prefixes]
         where.append(f"l.{path} LIKE ANY(%(prefix_likes)s)")
@@ -320,6 +338,7 @@ def build_referral_counts_sql(cfg: dict, windows: Sequence[int] = (7, 30),
         where.append(f"l.{src} = ANY(%(ref_sources)s)")
     if status and cfg.get("only_status_200", True):
         where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
+    _exclude_path_clause(cfg, _ident(cfg["path_column"]), params, where)
     cols = []
     for w in wins:
         params[f"d{w}"] = w
