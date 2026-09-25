@@ -4,6 +4,11 @@ site:
   label: AislePrompt
   mode: recommend
 data_sources:
+  # Bing Webmaster Tools — the index behind ChatGPT search / Copilot.
+  # Read by the collector (framework/core/bing_webmaster.py) when
+  # BING_WEBMASTER_API_KEY is in secrets.env; unavailable otherwise.
+  bing:
+    site_url: https://aisleprompt.com/
   gsc:
     site_url: sc-domain:aisleprompt.com
     default_country_filter: usa

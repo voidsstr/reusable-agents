@@ -256,6 +256,21 @@ SP_SEO_GOALS='{"goals":[
 ]}'
 put_goals "specpicks-seo-opportunity-agent" "$SP_SEO_GOALS"
 
+# ── seo-opportunity-agent — Bing index coverage (audit F090, 2026-09-25) ────
+# Bing's index serves ChatGPT search, Copilot, DuckDuckGo and Yahoo. Bound to
+# the collector's data_sources.bing metrics (framework/core/bing_webmaster.py
+# → finalizer bing.<metric>); stays flat until BING_WEBMASTER_API_KEY is in
+# secrets.env. Targets ≈ half of each site's indexable sitemap URLs.
+BING_GOAL_TMPL='{"goals":[
+  {"id":"goal-bing-pages-in-index","title":"Pages in Bing'\''s index (the index behind ChatGPT search)",
+   "description":"InIndex from Bing Webmaster Tools GetCrawlStats (latest day). A page Bing has not indexed cannot be cited by ChatGPT search or Copilot. Read-only signal; moved by submitting only live, indexable, changed URLs (IndexNow ledger + verify) and fixing what Bing reports as crawl issues.",
+   "metric":{"name":"bing_pages_in_index","current":0,"target":__TARGET__,"direction":"increase","unit":"pages","horizon_weeks":16},
+   "target_metric":"bing.in_index",
+   "directives":["check data/bing.json crawl_issues and crawl_errors_1d before proposing net-new pages","never ask for bulk re-submission of unchanged URLs — IndexNow sends only new/changed indexable URLs"]}
+]}'
+put_goals "aisleprompt-seo-opportunity-agent" "${BING_GOAL_TMPL/__TARGET__/75000}"
+put_goals "specpicks-seo-opportunity-agent" "${BING_GOAL_TMPL/__TARGET__/45000}"
+
 # ── responder-agent ─────────────────────────────────────────────────────────
 RESP_GOALS='{"goals":[
   {"id":"goal-zero-stuck-replies","title":"Zero unrouted user replies",

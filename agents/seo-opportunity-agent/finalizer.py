@@ -278,6 +278,14 @@ def _collect_measured_metrics(run_dir: Path) -> dict:
                 n = _num(v)
                 if n is not None:
                     m[f"db.{block}.{col}"] = n
+    # Bing Webmaster Tools (collector collect_bing → data/bing.json):
+    # bing.in_index, bing.clicks_28d, bing.crawl_errors_1d, ...
+    bing = _read("data/bing.json")
+    if isinstance(bing, dict) and bing.get("available"):
+        for k, v in (bing.get("metrics") or {}).items():
+            n = _num(v)
+            if n is not None:
+                m[f"bing.{k}"] = n
     return m
 
 

@@ -116,6 +116,16 @@
             "developer_token": { "type": "string", "description": "Developer token for the Google Ads API. Treated as a secret — keep out of git." },
             "login_customer_id": { "type": "string", "description": "MCC manager account id, only required if customer_id is below an MCC. Digits only." }
           }
+        },
+        "bing": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "Optional: Bing Webmaster Tools (framework/core/bing_webmaster.py) — the index behind ChatGPT search, Copilot, DuckDuckGo and Yahoo. The collector writes data/bing.json (index size, crawl errors, 28d clicks/impressions, sitemaps, crawl issues) and the finalizer emits bing.<metric> RunResult metrics. Needs BING_WEBMASTER_API_KEY in the environment (secrets.env); without it the run records bing as unavailable and carries on.",
+          "properties": {
+            "site_url": { "type": "string", "description": "The property URL exactly as registered in Bing Webmaster Tools, e.g. https://example.com/" },
+            "enabled": { "type": "boolean", "default": true }
+          },
+          "required": ["site_url"]
         }
       }
     },

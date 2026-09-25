@@ -581,6 +581,37 @@ def collect_sitemap_inventory(cfg, data: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bing Webmaster Tools (framework.core.bing_webmaster) — optional
+# ---------------------------------------------------------------------------
+
+def collect_bing(cfg, data: Path) -> None:
+    """Bing's index + crawl + traffic view of the site → data/bing.json.
+
+    Enabled by site.yaml `data_sources.bing.site_url` (schema:
+    shared/schemas/site-config.schema.json). Bing's index is the one behind
+    ChatGPT search / Copilot / DuckDuckGo. Without BING_WEBMASTER_API_KEY the
+    file records {"available": false, ...} and the run carries on; the
+    finalizer turns `metrics` into `bing.<key>` RunResult metrics
+    (e.g. bing.in_index, bing.clicks_28d, bing.crawl_errors_1d).
+    """
+    src = ((cfg.get("data_sources") or {}).get("bing") or {})
+    site_url = src.get("site_url")
+    if not site_url or src.get("enabled") is False:
+        return
+    try:
+        from framework.core import bing_webmaster
+        raw = bing_webmaster.collect(site_url)
+    except Exception as e:  # never fail the collector on an optional source
+        raw = {"site": site_url, "available": False, "error": f"{type(e).__name__}: {e}"[:200],
+               "metrics": {}}
+    (data / "bing.json").write_text(json.dumps(raw, default=str, indent=2))
+    if raw.get("available"):
+        warn(f"  bing: {raw.get('metrics')}")
+    else:
+        warn(f"  bing: unavailable — {raw.get('error') or raw.get('errors')}")
+
+
+# ---------------------------------------------------------------------------
 
 def run_into(data: Path, cfg) -> None:
     data.mkdir(parents=True, exist_ok=True)
@@ -593,6 +624,7 @@ def run_into(data: Path, cfg) -> None:
     collect_ga4(token, cfg, data)
     collect_db(cfg, data)
     collect_ai_traffic(cfg, data)
+    collect_bing(cfg, data)
     collect_site_signals(cfg, data)
     collect_sitemap_inventory(cfg, data)
 
