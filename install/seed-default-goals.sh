@@ -169,6 +169,68 @@ AP_REV_GOALS='{"goals":[
 ]}'
 put_goals "aisleprompt-seo-opportunity-agent" "$AP_REV_GOALS"
 
+# ── aisleprompt — AI-visibility + verified-human outcome goals (2026-09-25) ─
+# The aisleprompt SEO agent is the one agent that feeds its goals into its
+# LLM prompt, and its goal set rewarded emitting recs ("recs per run",
+# "geo/cwv/eeat violations = 0 accomplished") while goal-amazon-clicks-30d
+# read a GA4 event that reports ~0. Bind goals to what the site measures:
+# verified-human Amazon clicks (data_sources.db.human_clicks →
+# revenue_28d.amazon-clicks_db_30d), AI referrals and AI answer-time fetches
+# (db-queries blocks ai_referrals_30d / ai_live_fetches_30d → db.<block>.<col>
+# metrics). Status-only entries retire an existing goal and keep its history
+# (framework/core/goals.py init_goals).
+AP_AI_GOALS='{"goals":[
+  {"id":"goal-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d (REVENUE)",
+   "description":"Amazon affiliate clicks by real people in the last 30 days: kitchen_click_events rows that pass framework/core/human_clicks.py (site bot flag, headless/stale-browser UAs, datacenter IPs, no referer, velocity). Same definition as the site-goals-tracker goal. It used to read the GA4 kitchen_click event, which reported 0-1 while people were clicking.",
+   "metric":{"name":"human_amazon_clicks_30d","current":135,"target":200,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "target_metric":"revenue_28d.amazon-clicks_db_30d",
+   "directives":["prefer fixes on the pages that already produce human Amazon clicks and on the /blog/best-* guides AI assistants fetch","one clear Amazon link with the affiliate tag and rel=\"sponsored nofollow\" where the reader decides; never show a price that is not fresh"]},
+  {"id":"goal-ai-referrals-30d","title":"Visits sent by AI assistants / 30d",
+   "description":"Visits referred from ChatGPT, Perplexity, Copilot or Claude in the last 30 days (ai_traffic_log kind=referral; db-queries block ai_referrals_30d).",
+   "metric":{"name":"ai_referrals_30d","current":26,"target":75,"direction":"increase","unit":"visits","horizon_weeks":16},
+   "target_metric":"db.ai_referrals_30d.last_30d",
+   "directives":["work on the pages AI assistants already fetch and cite (homepage, /blog/best-* guides) before net-new pages","state the answer or verdict in the first screen of text; keep structured data honest and matching visible text"]},
+  {"id":"goal-ai-fetched-pages-30d","title":"Pages AI assistants fetch while answering / 30d",
+   "description":"Distinct pages fetched by ChatGPT-User, Perplexity-User and Claude-User in the last 30 days, spoof-filtered (db-queries block ai_live_fetches_30d). A page an assistant fetches while answering a user is a page it can cite.",
+   "metric":{"name":"ai_fetched_pages_30d","current":260,"target":500,"direction":"increase","unit":"pages","horizon_weeks":16},
+   "target_metric":"db.ai_live_fetches_30d.distinct_pages_30d",
+   "directives":["keep AI-fetched pages fast and indexable (no noindex, no soft-404)","never trade honesty (prices, availability, authorship, testing claims) for visibility"]},
+  {"id":"goal-recs-emitted-per-run","status":"abandoned"},
+  {"id":"goal-recs-shipped-30d","status":"abandoned"},
+  {"id":"goal-schema-coverage","status":"abandoned"},
+  {"id":"goal-eeat-baseline","status":"abandoned"},
+  {"id":"goal-cwv-pass","status":"abandoned"},
+  {"id":"goal-ai-search-readiness","status":"abandoned"},
+  {"id":"goal-internal-linking","status":"abandoned"}
+]}'
+put_goals "aisleprompt-seo-opportunity-agent" "$AP_AI_GOALS"
+
+# aisleprompt PI: the two goals that counted its own output.
+AP_PI_RETIRE='{"goals":[
+  {"id":"goal-issues-found-per-run","status":"abandoned"},
+  {"id":"goal-issues-fixed-30d","status":"abandoned"}
+]}'
+put_goals "aisleprompt-progressive-improvement-agent" "$AP_PI_RETIRE"
+
+# aisleprompt user-growth-strategist: mirror the site outcomes it steers by
+# (agent.py _mirror_site_goals copies the site-goals-tracker's values) instead
+# of counting its own memo recs.
+AP_GROWTH_GOALS='{"goals":[
+  {"id":"goal-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d",
+   "description":"Mirrored each run from aisleprompt-site-goals-tracker goal-amazon-clicks-30d (framework/core/human_clicks.py). The memo is judged by whether this moves.",
+   "metric":{"name":"human_amazon_clicks_30d","current":135,"target":200,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "target_metric":"human_amazon_clicks_30d",
+   "directives":["every lever names the AI-landed or human-click pages it works on and its expected change in verified-human Amazon clicks"]},
+  {"id":"goal-ai-assistant-sessions-30d","title":"AI-assistant sessions / 30d",
+   "description":"Mirrored each run from aisleprompt-site-goals-tracker goal-ai-assistant-sessions-30d (GA4 AI Assistant channel).",
+   "metric":{"name":"ai_assistant_sessions_30d","current":26,"target":50,"direction":"increase","unit":"sessions","horizon_weeks":12},
+   "target_metric":"ai_assistant_sessions_30d",
+   "directives":["prefer levers on the pages AI assistants already fetch and refer people from"]},
+  {"id":"goal-strategy-recs-per-run","status":"abandoned"},
+  {"id":"goal-strategy-recs-implemented-30d","status":"abandoned"}
+]}'
+put_goals "aisleprompt-user-growth-strategist" "$AP_GROWTH_GOALS"
+
 # ── seo-opportunity-agent — specpicks outcome goals (2026-09-25) ────────────
 # SpecPicks has ~0 Google clicks; its measured demand is AI assistants.
 # Bind goals to what the site actually measures — AI referral landings
