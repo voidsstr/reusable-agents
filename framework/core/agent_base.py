@@ -580,6 +580,8 @@ class AgentBase:
                 tm = g.get("target_metric") or ""
                 if not gid or gid in scored_ids or not tm or tm not in metrics:
                     continue
+                if g.get("status") == "abandoned":
+                    continue  # retired goal — stop tracking it
                 try:
                     val = float(metrics[tm])
                 except (TypeError, ValueError):

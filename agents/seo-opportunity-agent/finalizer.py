@@ -176,7 +176,13 @@ def finalize(agent, *, cfg, run_ts: str, run_dir: Path) -> dict:
     # `llm-search-direct-answer-missing`, `internal-link-anchor-thin`.
     per_category = _category_rec_counts(recs)
 
-    metrics = {"rec_count": len(rec_ids), **north_star, **per_category}
+    # Measured site outcomes — revenue KPIs and the site's own db-queries
+    # blocks — so a goal can bind `revenue_28d.<kpi>_db_30d` or
+    # `db.<block>.<column>` and be auto-tracked (AgentBase layer b).
+    measured = _collect_measured_metrics(run_dir)
+
+    metrics = {"rec_count": len(rec_ids), **north_star, **per_category,
+               **measured}
 
     return {
         "summary": summary,
@@ -216,6 +222,63 @@ def _category_rec_counts(recs: list) -> dict:
             out["recs_shipped_count"] += 1
     # Convert to float for consistent metric typing
     return {k: float(v) for k, v in out.items()}
+
+
+def _collect_measured_metrics(run_dir: Path) -> dict:
+    """Flatten the run's measured outcomes into RunResult.metrics keys.
+
+      revenue_28d.<key>         every key of snapshot.json["revenue_28d"]
+                                (e.g. revenue_28d.amazon-clicks_db_30d)
+      db.<block>.<column>       every numeric column of a single-row block
+                                in data/db-stats.json (the site's
+                                db-queries file + data_sources.db.human_clicks)
+
+    Before this, the only goal-bindable metrics were GSC/GA4 counters and
+    per-run rec counts, so goals could reward emitting recs but could not
+    see AI referrals or verified-human affiliate clicks at all. The keys are
+    data-driven: a site adds a db-queries block and a goal whose
+    target_metric names it — no code change.
+    """
+    import json as _json
+    m: dict = {}
+
+    def _read(rel: str):
+        p = run_dir / rel
+        if not p.is_file():
+            return None
+        try:
+            return _json.loads(p.read_text())
+        except Exception:
+            return None
+
+    def _num(v):
+        if isinstance(v, bool) or v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            try:
+                return float(v)
+            except ValueError:
+                return None
+        return None
+
+    snap = _read("snapshot.json")
+    if isinstance(snap, dict):
+        for k, v in (snap.get("revenue_28d") or {}).items():
+            n = _num(v)
+            if n is not None:
+                m[f"revenue_28d.{k}"] = n
+    stats = _read("data/db-stats.json")
+    if isinstance(stats, dict):
+        for block, row in stats.items():
+            if not isinstance(row, dict):
+                continue  # multi-row blocks are lists — not a single metric
+            for col, v in row.items():
+                n = _num(v)
+                if n is not None:
+                    m[f"db.{block}.{col}"] = n
+    return m
 
 
 def _collect_north_star_metrics(run_dir: Path) -> dict:

@@ -63,7 +63,24 @@
           "properties": {
             "type": { "type": "string", "enum": ["docker-exec", "postgres", "sqlite"] },
             "container": { "type": "string", "description": "For type=docker-exec: container name to docker exec into." },
-            "queries_file": { "type": "string", "description": "Path (relative to config) to SQL or .js script that emits stats JSON to stdout." }
+            "queries_file": { "type": "string", "description": "Path (relative to config) to SQL or .js script that emits stats JSON to stdout." },
+            "dsn_env": { "type": "string", "description": "Env var holding the postgres DSN (default DATABASE_URL)." },
+            "human_clicks": {
+              "type": "array",
+              "description": "Verified-human affiliate-click counts (framework/core/human_clicks.py). Each entry is written to db-stats.json as <name>_30d = {last_7d, last_30d, raw_30d, verdicts_30d}, so a revenue_kpis entry with db_table: <name> reads the human count instead of raw rows (which are mostly crawlers). Numeric columns also surface as RunResult.metrics db.<name>_30d.<column> for goal binding.",
+              "items": {
+                "type": "object",
+                "required": ["name", "table"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z0-9_]+$", "description": "Key prefix in db-stats.json and the revenue_kpis db_table value." },
+                  "table": { "type": "string", "description": "Click table to classify (e.g. the site's outbound/affiliate click log)." },
+                  "spec": { "type": "object", "description": "human_clicks column spec: time_col, ua_col, ip_col, referer_col, country_col, bot_flag_col, plus any rule override." },
+                  "match": { "type": "object", "description": "Column filters for the counted rows, e.g. {\"source\": \"amazon\"}; a list value means IN." },
+                  "profile": { "type": "string", "description": "Operator-override profile in storage config/human-click-filter-config.json (by_profile). Defaults to the agent id." }
+                }
+              }
+            }
           }
         },
         "google_ads": {

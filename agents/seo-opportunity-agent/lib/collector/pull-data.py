@@ -259,6 +259,7 @@ def collect_db(cfg, data: Path) -> None:
                 conn.rollback()
                 warn(f"  ! db query {name} failed: {str(e)[:120]}")
                 out[name] = []
+        out.update(collect_human_clicks(conn, src.get("human_clicks") or []))
     finally:
         try:
             conn.close()
@@ -266,6 +267,59 @@ def collect_db(cfg, data: Path) -> None:
             pass
     (data / "db-stats.json").write_text(json.dumps(out, indent=1, default=str))
     warn(f"  ✓ db-stats.json: {len(out)} query blocks")
+
+
+def collect_human_clicks(conn, entries: list) -> dict[str, Any]:
+    """`data_sources.db.human_clicks` → verified-human click counts.
+
+    Each entry {name, table, spec, match} is counted with
+    framework/core/human_clicks.py — the fleet's single definition of "a
+    person clicked a buy link" — and stored as db-stats["<name>_30d"] =
+    {last_7d, last_30d, raw_30d}, the shape a revenue_kpis `db_table: <name>`
+    reads. A raw row count of an affiliate click table is mostly crawlers
+    (one reference site: 6,418 Amazon rows in 30 days, 135 human), so a KPI
+    read off it steers the LLM toward bot traffic. A failed entry is left
+    out (unmeasured), never written as 0.
+    """
+    out: dict[str, Any] = {}
+    if not entries:
+        return out
+    try:
+        from framework.core import human_clicks
+    except Exception as e:
+        warn(f"  ! human_clicks unavailable: {e}")
+        return out
+    for ent in entries:
+        if not isinstance(ent, dict) or not ent.get("name") or not ent.get("table"):
+            warn(f"  ! human_clicks entry skipped (needs name + table): {ent!r:.120}")
+            continue
+        name = str(ent["name"])
+        try:
+            # Operator override: storage config/human-click-filter-config.json
+            # by_profile[<profile>], default profile = this agent's id.
+            spec = human_clicks.resolve_spec(
+                ent.get("spec") or {},
+                profile=ent.get("profile") or os.environ.get("AGENT_ID", ""))
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 60000")
+            kw = {"table": ent["table"], "match": ent.get("match") or None}
+            bd30 = human_clicks.breakdown(conn, spec, window_days=30, **kw)
+            bd7 = human_clicks.breakdown(conn, spec, window_days=7, **kw)
+            out[f"{name}_30d"] = {
+                "last_7d": bd7[human_clicks.VERDICT_HUMAN],
+                "last_30d": bd30[human_clicks.VERDICT_HUMAN],
+                "raw_30d": bd30["_total"],
+                "verdicts_30d": {k: v for k, v in bd30.items() if k != "_total"},
+            }
+            warn(f"  ✓ human_clicks {name}: {bd30[human_clicks.VERDICT_HUMAN]} human "
+                 f"of {bd30['_total']} rows (30d)")
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            warn(f"  ! human_clicks {name} failed: {str(e)[:160]}")
+    return out
 
 
 # ---------------------------------------------------------------------------

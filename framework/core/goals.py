@@ -94,7 +94,9 @@ def init_goals(
             cur = by_id[gid]
             # Update only TITLE/DESCRIPTION/DIRECTIVES/TARGET if changed; keep history
             cur["title"] = g.get("title", cur.get("title"))
-            cur["description"] = g.get("description", cur.get("description"))
+            _desc = g.get("description", cur.get("description"))
+            if _desc is not None:  # a status-only retire entry has none
+                cur["description"] = _desc
             cur["directives"] = g.get("directives", cur.get("directives", []))
             # Top-level fields read by agent_base auto-tracking + UI;
             # update them on re-seed so wiring changes actually stick.
@@ -103,6 +105,18 @@ def init_goals(
                        "is_revenue_goal"):
                 if _k in g:
                     cur[_k] = g[_k]
+            # Explicit retire / un-retire. A seed may only move a goal into
+            # or out of "abandoned" (accomplished stays owned by
+            # record_goal_progress). Retiring is how a vanity goal ("recs
+            # emitted per run") stops steering prompts and re-accomplishing
+            # itself every run without losing its history.
+            want = g.get("status")
+            if want == "abandoned" and cur.get("status") != "abandoned":
+                cur["status"] = "abandoned"
+                cur["abandoned_at"] = _now()
+            elif want == "active" and cur.get("status") == "abandoned":
+                cur["status"] = "active"
+                cur.pop("abandoned_at", None)
             if "metric" in g:
                 cur_metric = cur.get("metric", {})
                 cur_metric.update({
@@ -115,6 +129,8 @@ def init_goals(
                     cur_metric["current"] = g["metric"].get("current", 0)
                 cur["metric"] = cur_metric
             merged.append(cur)
+        elif g.get("status") == "abandoned" and not g.get("title"):
+            continue  # retire entry for a goal this agent never had
         else:
             seeded = dict(g)
             seeded.setdefault("status", "active")
@@ -179,8 +195,9 @@ def record_goal_progress(
         elif accomplished is False:
             g["status"] = "active"
             g["accomplished_at"] = None
-        # Auto-detect accomplishment if metric.target reached
-        elif accomplished is None and "target" in m:
+        # Auto-detect accomplishment if metric.target reached. A retired
+        # (abandoned) goal keeps its measurements but never flips status.
+        elif accomplished is None and "target" in m and g.get("status") != "abandoned":
             target = m.get("target")
             direction = m.get("direction", "increase")
             if direction == "increase" and value >= target and g.get("status") != "accomplished":
@@ -217,9 +234,10 @@ def goals_directives_text(
 ) -> str:
     """Render active goals + their directives as a plain-text block the
     agent can paste into its LLM system prompt at run start. Drops
-    accomplished goals."""
+    accomplished and abandoned (retired) goals."""
     goals = read_active_goals(agent_id, storage=storage)
-    active = [g for g in goals if g.get("status") != "accomplished"]
+    active = [g for g in goals
+              if g.get("status") not in ("accomplished", "abandoned")]
     if not active:
         return ""
     lines = ["AGENT GOALS — bias every run toward advancing these:"]
