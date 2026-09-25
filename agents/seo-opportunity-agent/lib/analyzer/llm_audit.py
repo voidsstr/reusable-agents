@@ -589,6 +589,36 @@ _PAGE_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+# robots directives that keep a page out of the index: "noindex", or "none"
+# (= noindex, nofollow). Matched per comma-separated directive, optionally
+# bot-scoped ("googlebot: noindex").
+_NOINDEX_DIRECTIVES = frozenset({"noindex", "none"})
+
+
+def page_is_noindex(page: dict) -> bool:
+    """True when the page asks search engines not to index it, via
+    `<meta name="robots">` (`robots_meta`) or the X-Robots-Tag header
+    (`x_robots_tag`).
+
+    The SEO audit skips these. A noindexed page cannot rank or be cited from
+    a search index, so every on-page rec for it is wasted work — one site's
+    agent spent 14 of 47 commits in three days re-titling grocery product
+    pages its own server marks noindex, because they were 1-impression rows
+    in the GSC top-10 the audit crawl was seeded from.
+    """
+    if not isinstance(page, dict):
+        return False
+    for key in ("robots_meta", "x_robots_tag"):
+        val = page.get(key)
+        if not isinstance(val, str) or not val:
+            continue
+        for part in val.lower().split(","):
+            directive = part.split(":")[-1].strip()
+            if directive in _NOINDEX_DIRECTIVES:
+                return True
+    return False
+
+
 def format_pages_for_audit(pages: Iterable[dict], cap_chars: int = 2500) -> str:
     """Render page records into the prompt's PAGES block.
 
@@ -798,6 +828,14 @@ def run_llm_audit(
     if ai_chat_callable is None:
         return []
     clean_pages = [p for p in (pages or []) if isinstance(p, dict)]
+    # Noindexed pages cannot rank or be cited from an index; auditing them
+    # only produces recs for pages the site deliberately keeps out.
+    noindexed = [p for p in clean_pages if page_is_noindex(p)]
+    if noindexed:
+        print(f"  [llm-audit] skipped {len(noindexed)} noindexed page(s): "
+              + ", ".join(str(p.get("url") or "?") for p in noindexed[:5]),
+              file=sys.stderr)
+        clean_pages = [p for p in clean_pages if not page_is_noindex(p)]
     if not clean_pages:
         return []
     batch_size = max(1, int(batch_size or 1))

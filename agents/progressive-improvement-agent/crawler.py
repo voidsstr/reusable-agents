@@ -46,6 +46,7 @@ class Page:
     jsonld_count: int = 0                                   # number of <script type="application/ld+json"> blocks
     og_type: str = ""                                       # og:type meta (article/website/product/etc)
     robots_meta: str = ""                                   # <meta name="robots"> directives
+    x_robots_tag: str = ""                                  # X-Robots-Tag response header
     twitter_card: str = ""                                  # twitter:card meta value
     # 2026-09-02: how many fetches it took to produce this Page. >1 means an
     # earlier attempt hit a transport error or a 5xx and we retried. Callers
@@ -363,6 +364,9 @@ def crawl(
             attempts=attempts, redirected_from=redirected_from,
             content_type=(r.headers.get("Content-Type") or "").split(";")[0].strip(),
         )
+        # A server can noindex a page by header alone (no meta tag);
+        # consumers that skip noindexed pages must see both.
+        page.x_robots_tag = (r.headers.get("X-Robots-Tag") or "").strip()[:200]
         if "html" not in page.content_type.lower() and "xml" not in page.content_type.lower():
             # Non-HTML: record + don't extract
             yield page
