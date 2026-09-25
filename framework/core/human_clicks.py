@@ -375,12 +375,17 @@ def _reason_case(spec: Mapping, *, today: Optional[date] = None) -> tuple[str, l
 
 def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
                           match: Optional[Mapping[str, Any]] = None,
-                          today: Optional[date] = None) -> tuple[str, list]:
+                          today: Optional[date] = None,
+                          group_col: Optional[str] = None) -> tuple[str, list]:
     """SQL returning (verdict, count) rows for clicks in the window.
 
     `match` narrows the COUNTED rows ({"target": "amazon"}; a list value
     means IN). The velocity window deliberately spans ALL rows of the table
     in the window, so an IP spraying clicks across targets is still caught.
+
+    `group_col` adds a second output column (verdict, <group value>, count):
+    the same verdicts, split by e.g. the referer column so a caller can say
+    WHICH pages produced the human clicks without a second definition.
     """
     tbl = _ident(table, "table")
     t = _ident(spec.get("time_col"), "time_col")
@@ -389,6 +394,9 @@ def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
     match = dict(match or {})
     mcols = [_ident(c, "match column") for c in match]
     sel_match = "".join(f", {c}" for c in mcols)
+    grp = _ident(group_col, "group_col") if group_col else ""
+    if grp:
+        sel_match += f", {grp} AS _grp"
     where_match: list[str] = []
     mparams: list = []
     for c, v in match.items():
@@ -412,10 +420,12 @@ def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
         " FROM w"
         ")"
         " SELECT CASE WHEN _reason IS NOT NULL THEN _reason "
-        f"{velocity}ELSE '{VERDICT_HUMAN}' END AS verdict, COUNT(*)"
+        f"{velocity}ELSE '{VERDICT_HUMAN}' END AS verdict,"
+        + (" _grp," if grp else "")
+        + " COUNT(*)"
         " FROM v"
         + (" WHERE " + " AND ".join(where_match) if where_match else "")
-        + " GROUP BY 1 ORDER BY 2 DESC"
+        + (" GROUP BY 1, 2 ORDER BY 3 DESC" if grp else " GROUP BY 1 ORDER BY 2 DESC")
     )
     return sql, rparams + [int(window_days)] + mparams
 
@@ -427,7 +437,10 @@ def breakdown(conn, spec: Mapping, *, table: str, window_days: int = 30,
                                         window_days=window_days, match=match)
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        out = {str(v): int(n) for v, n in cur.fetchall()}
+        # Tuple rows, or dict rows from a RealDictCursor connection.
+        out = {str(r["verdict"] if isinstance(r, Mapping) else r[0]):
+               int(r["count"] if isinstance(r, Mapping) else r[1])
+               for r in cur.fetchall()}
     out.setdefault(VERDICT_HUMAN, 0)
     out["_total"] = sum(n for k, n in out.items() if k != "_total")
     return out
@@ -438,3 +451,26 @@ def count_human(conn, spec: Mapping, *, table: str, window_days: int = 30,
     """Verified-human click count for the window."""
     return breakdown(conn, spec, table=table, window_days=window_days,
                      match=match)[VERDICT_HUMAN]
+
+
+def human_counts_by(conn, spec: Mapping, *, table: str, group_col: str,
+                    window_days: int = 30,
+                    match: Optional[Mapping[str, Any]] = None) -> dict[str, int]:
+    """{<group_col value>: verified-human count} for the window, largest first.
+
+    Same verdicts as :func:`breakdown`; NULL group values come back as "".
+    Typical use: human clicks per referring page (`group_col="referer"`).
+    """
+    sql, params = build_breakdown_query(spec, table=table,
+                                        window_days=window_days, match=match,
+                                        group_col=group_col)
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        for row in cur.fetchall():
+            verdict, grp, n = (row[k] for k in ("verdict", "_grp", "count")) \
+                if isinstance(row, Mapping) else row
+            if verdict == VERDICT_HUMAN:
+                key = "" if grp is None else str(grp)
+                out[key] = out.get(key, 0) + int(n)
+    return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))

@@ -73,6 +73,71 @@ def test_breakdown_query_shape_and_params():
     assert ["SG"] in params
 
 
+def test_group_col_splits_the_same_verdicts():
+    spec = hc.resolve_spec({"referer_col": "referer", "bot_flag_col": "is_bot"},
+                           config={})
+    plain, pparams = hc.build_breakdown_query(
+        spec, table="clicks", window_days=30, match={"source": "amazon"},
+        today=date(2026, 9, 24))
+    sql, params = hc.build_breakdown_query(
+        spec, table="clicks", window_days=30, match={"source": "amazon"},
+        today=date(2026, 9, 24), group_col="referer")
+    assert params == pparams                       # no extra placeholders
+    assert "referer AS _grp" in sql
+    assert sql.rstrip().endswith("GROUP BY 1, 2 ORDER BY 3 DESC")
+    assert plain.rstrip().endswith("GROUP BY 1 ORDER BY 2 DESC")
+    # the verdict CASE is identical — one definition of "human"
+    assert plain.split("FROM clicks")[0].replace(", referer AS _grp", "") == \
+        sql.split("FROM clicks")[0].replace(", referer AS _grp", "")
+    with pytest.raises(ValueError):
+        hc.build_breakdown_query(spec, table="clicks", window_days=30,
+                                 group_col="referer; drop table x")
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        self.sql = sql
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def cursor(self):
+        return _FakeCursor(self.rows)
+
+
+def test_human_counts_by_keeps_only_human_rows():
+    spec = hc.resolve_spec({"referer_col": "referer"}, config={})
+    rows = [("human", "/blog/a", 5), ("site-flagged-bot", "/blog/a", 90),
+            ("human", None, 1), ("human", "/k/x", 7), ("velocity", "/k/x", 3)]
+    out = hc.human_counts_by(_FakeConn(rows), spec, table="clicks",
+                             group_col="referer")
+    assert out == {"/k/x": 7, "/blog/a": 5, "": 1}
+    assert list(out) == ["/k/x", "/blog/a", ""]    # largest first
+    dict_rows = [{"verdict": "human", "_grp": "/b", "count": 2},
+                 {"verdict": "ua-bot", "_grp": "/b", "count": 9}]
+    assert hc.human_counts_by(_FakeConn(dict_rows), spec, table="clicks",
+                              group_col="referer") == {"/b": 2}
+    # breakdown() tolerates dict rows too (RealDictCursor connections)
+    bd = hc.breakdown(_FakeConn([{"verdict": "human", "count": 3},
+                                 {"verdict": "ua-bot", "count": 4}]),
+                      spec, table="clicks")
+    assert bd == {"human": 3, "ua-bot": 4, "_total": 7}
+
+
 def test_optional_rules_drop_out():
     spec = hc.resolve_spec({"referer_col": None, "country_col": None,
                             "bot_flag_col": None, "max_clicks_per_ip_day": 0,
