@@ -727,18 +727,27 @@ def main() -> None:
             # A 200 is not "working": the 99.8%-noindex release and the
             # shop-sitemap 500 both passed the URL smoke above.
             if gate_cfg:
-                post = deploy_gate.measure(sc["base_url"], gate_cfg,
-                                           sample_urls=(gate_pre or {}).get("sample_urls"))
-                failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                try:
+                    post = deploy_gate.measure(sc["base_url"], gate_cfg,
+                                               sample_urls=(gate_pre or {}).get("sample_urls"))
+                    failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                except Exception as e:
+                    # A broken gate must not fail (or roll back) a good deploy.
+                    print(f"[deployer] gate errored ({e}); not gating this deploy", file=sys.stderr)
+                    post, failures, warnings = {}, [], [f"gate errored: {e}"]
                 if failures:
                     # Re-measure once: a cold revision and a transient 5xx
                     # must fail twice before we act.
                     print(f"[deployer] gate failed first pass ({len(failures)}): "
                           f"{failures[:5]}; re-measuring in 45s", file=sys.stderr)
                     time.sleep(45)
-                    post = deploy_gate.measure(sc["base_url"], gate_cfg,
-                                               sample_urls=(gate_pre or {}).get("sample_urls"))
-                    failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                    try:
+                        post = deploy_gate.measure(sc["base_url"], gate_cfg,
+                                                   sample_urls=(gate_pre or {}).get("sample_urls"))
+                        failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                    except Exception as e:
+                        print(f"[deployer] gate re-measure errored ({e}); keeping first-pass result",
+                              file=sys.stderr)
                 deploy_meta.setdefault("gate", {})
                 deploy_meta["gate"].update({"post": _gate_summary(post), "failures": failures,
                                             "warnings": warnings, "ok": not failures})
