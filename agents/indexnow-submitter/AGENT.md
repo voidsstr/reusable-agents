@@ -148,6 +148,7 @@ Per-site knobs in `site-indexnow.json` (all optional; defaults in `submit.ts` `D
 | `policy.sitemapIntervalHours` | 6 | Incremental sitemap-snapshot refresh interval (specpicks 4) |
 | `policy.rejectRecheckDays` | 3 | Re-verify a rejected URL after this |
 | `policy.queryTimeoutMs` | 120,000 | Per-query `statement_timeout` |
+| `policy.ignoreLastmodPrefixes` | `[]` | Path prefixes whose sitemap `<lastmod>` is not a content change (specpicks `/vs/`, `/compare/`: lastmod = last time the pair trended) — only new locs count; `--bulk` re-confirms them on the slow rotation |
 | `verify.sources` | `["force","sitemap","static"]` | Sources that must pass a live fetch |
 | `verify.maxPerRun` / `concurrency` / `budgetSeconds` / `timeoutMs` | 300 / 4 / 300 / 20,000 | Fetch bounds |
 | `verify.sampleTrusted` / `sampleTrustedBulk` | 5 / 50 | Drift-canary sample of trusted DB URLs |

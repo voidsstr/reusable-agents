@@ -90,6 +90,9 @@ export type Policy = {
   ledgerRetentionDays: number;
   /** Per-query statement timeout. */
   queryTimeoutMs: number;
+  /** Path prefixes whose sitemap <lastmod> is not a content change (e.g. a
+   *  "last seen trending" stamp): only NEW locs under them count. */
+  ignoreLastmodPrefixes: string[];
 };
 
 export type VerifyCfg = {
@@ -143,6 +146,7 @@ export const DEFAULT_POLICY: Policy = {
   rejectRecheckDays: 3,
   ledgerRetentionDays: 120,
   queryTimeoutMs: 120_000,
+  ignoreLastmodPrefixes: [],
 };
 
 export const DEFAULT_VERIFY: VerifyCfg = {
@@ -422,7 +426,15 @@ export type SitemapCandidate = { loc: string; token: string; reason: string };
  *  failed this time are carried over (never read as "all URLs deleted" or,
  *  when they recover, "all URLs new"). With no previous snapshot the run is a
  *  baseline and yields no diffs. */
-export function diffSnapshots(prev: Snapshot | null, fetched: Record<string, SnapshotChild>): SitemapCandidate[] {
+export function lastmodIgnored(loc: string, prefixes: string[]): boolean {
+  if (!prefixes.length) return false;
+  let p = loc;
+  try { p = new URL(loc).pathname; } catch { /* keep raw */ }
+  return prefixes.some((x) => p.startsWith(x));
+}
+
+export function diffSnapshots(prev: Snapshot | null, fetched: Record<string, SnapshotChild>,
+                              ignoreLastmodPrefixes: string[] = []): SitemapCandidate[] {
   if (!prev || !Object.keys(prev.children).length) return [];
   const prevAll = new Map<string, { lastmod: string; synthetic: boolean }>();
   for (const child of Object.values(prev.children)) {
@@ -432,9 +444,10 @@ export function diffSnapshots(prev: Snapshot | null, fetched: Record<string, Sna
   for (const child of Object.values(fetched)) {
     for (const [loc, lastmod] of Object.entries(child.entries)) {
       const p = prevAll.get(loc);
-      const token = child.synthetic ? '' : normalizeToken(lastmod);
+      const ignored = child.synthetic || lastmodIgnored(loc, ignoreLastmodPrefixes);
+      const token = ignored ? '' : normalizeToken(lastmod);
       if (!p) { out.push({ loc, token, reason: 'sitemap-new' }); continue; }
-      if (!child.synthetic && !p.synthetic && token && token !== normalizeToken(p.lastmod)) {
+      if (!ignored && !p.synthetic && token && token !== normalizeToken(p.lastmod)) {
         out.push({ loc, token, reason: 'sitemap-lastmod' });
       }
     }
@@ -784,10 +797,15 @@ export async function processSite(site: SiteConfig): Promise<{ name: string; sub
     newSnapshot = mergeSnapshot(prevSnapshot, tree, startedAt);
     if (BULK) {
       for (const c of Object.values(tree.fetched)) {
-        for (const [loc, lm] of Object.entries(c.entries)) add(loc, 'sitemap', c.synthetic ? '' : normalizeToken(lm), false);
+        for (const [loc, lm] of Object.entries(c.entries)) {
+          const ignored = c.synthetic || lastmodIgnored(loc, policy.ignoreLastmodPrefixes);
+          add(loc, 'sitemap', ignored ? '' : normalizeToken(lm), false);
+        }
       }
     } else {
-      for (const d of diffSnapshots(prevSnapshot, tree.fetched)) add(d.loc, 'sitemap', d.token, verifySource('sitemap'));
+      for (const d of diffSnapshots(prevSnapshot, tree.fetched, policy.ignoreLastmodPrefixes)) {
+        add(d.loc, 'sitemap', d.token, verifySource('sitemap'));
+      }
     }
     const nUrls = Object.values(tree.fetched).reduce((a, c) => a + Object.keys(c.entries).length, 0);
     stats.sitemap = `${Object.keys(tree.fetched).length} ok / ${tree.failed.size} failed / ${nUrls} urls${prevSnapshot ? '' : ' (baseline)'}`;

@@ -95,6 +95,12 @@ async function unit() {
     });
     assert.deepEqual(got.map((d) => `${d.loc}:${d.reason}`).sort(), ['a:sitemap-lastmod', 'c:sitemap-new']);
   });
+  await test('ignoreLastmodPrefixes: a trend "last seen" lastmod is not a change; new locs still are', () => {
+    const child = (entries: Record<string, string>) => ({ fetchedAt: 'x', synthetic: false, entries });
+    const prev: Snapshot = { version: 1, fetchedAt: 'x', children: { s: child({ 'https://x.test/vs/a/b': '2026-09-01', 'https://x.test/p/1': '2026-09-01' }) } };
+    const got = diffSnapshots(prev, { s: child({ 'https://x.test/vs/a/b': '2026-09-24', 'https://x.test/vs/c/d': '2026-09-24', 'https://x.test/p/1': '2026-09-24' }) }, ['/vs/']);
+    assert.deepEqual(got.map((d) => `${d.loc.slice(14)}:${d.reason}`).sort(), ['/p/1:sitemap-lastmod', '/vs/c/d:sitemap-new']);
+  });
   await test('snapshot merge carries failed children, drops unlisted ones', () => {
     const c = (n: string) => ({ fetchedAt: 'x', synthetic: false, entries: { [n]: '' } });
     const prev: Snapshot = { version: 1, fetchedAt: 'x', children: { s1: c('a'), s2: c('b'), gone: c('g') } };
