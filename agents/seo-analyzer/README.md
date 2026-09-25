@@ -27,6 +27,7 @@
 |---|---|
 | `llm_audit.py` | Byte-identical to `lib/analyzer/llm_audit.py`. |
 | `analyzer.py` | Identical except one docstring. The engine copy's `_add_amazon_tag_recs` carries the 2026-08-29 note (commit `c2de01e`) explaining that the rule is dead as written: nothing produces `amazon_outbound_*` counters, so it never emits a rec. |
+| `analyzer.py` (2026-09-25) | Diverged on purpose: the engine copy's LLM audit now picks pages through `lib/analyzer/audit_pages.py` (AI-landed seeds, per-URL cooldown, latency rec) and lists run history with `list_child_prefixes()`. This copy was not updated; nothing runs it. |
 
 The two `analyzer.py` files can live at different depths because
 `_find_repo_root()` walks up to the directory that holds both `framework/` and

@@ -189,6 +189,11 @@ Optional blocks and whether each is used today:
 | `articles` | Only `articles.url_template` is read, by the implementer (`agents/implementer/run.sh`). The inventory pull that fed the `article-*` rules is **not** in the reconstructed collector. |
 | `page_inventory` | **Not read.** The sitemap sample crawl (`pages-by-type.jsonl`) is not implemented in the reconstructed collector. |
 | `data_sources.google_ads` | **Not collected** (no `ads-*.json`), so `paid-organic-gap` and `ad-copy-headline-winner` cannot fire. |
+| `data_sources.ai_traffic` | **Used** (2026-09-25). The collector reads the site's `ai_traffic_log` through `framework/core/ai_traffic.py` and merges `ai_landed_pages` (pages AI assistants sent people to or fetched at answer time, spoof-filtered, best first) and `ai_referrals_30d` (`{last_7d, last_30d}`) into `db-stats.json`. |
+| `data_sources.db.human_clicks[].pages` | **Used** (2026-09-25). Also writes `<name>_pages` = `[{path, clicks}]`, the verified-human clicks split by a column (e.g. ASIN → `/product/{value}`). |
+| `analyzer.audit_seed_queries` | **Used** (2026-09-25). `db-stats.json` blocks whose rows carry `path`. Without a page inventory, the LLM audit fetches these pages first (depth 0) and only fills leftover slots with the homepage/GSC BFS; with one, it moves them to the front. Each audited page carries its AI referrals, live fetches and TTFB into the prompt. |
+| `analyzer.audit_url_cooldown` | **Used** (2026-09-25). Skips a URL that already got `max_recs_per_url` LLM-audit recs in `window_days` (`max_recs_per_exempt_url` for URLs in `exempt_queries`). Before this, one specpicks PDP drew 261 LLM recs in 30 days. |
+| `analyzer.ai_landed_ttfb_budget_ms` | **Used** (2026-09-25). One live-state `cwv-ttfb-slow` rec when an audited AI-landed page is slower than the budget (default 3000 when seeds are configured). |
 | `geo` (top-level) | In the schema, but **no code reads it** (there is no `_add_geo_recs`). |
 | `deployer` | Read by the implementer → deployer chain. See `../deployer/README.md`. |
 
@@ -451,7 +456,20 @@ dedup are skipped by design.
 ### Log full of `BlobArchived` errors / "no prior snapshot"
 
 See AGENT.md → Failure modes. The prior-run mirror lists run dirs with the
-10,000-key-capped `list_prefix()` and gets the oldest (archived) runs.
+10,000-key-capped `list_prefix()` and gets the oldest (archived) runs. The
+handled-rec dedupe and the audit cooldown history switched to
+`list_child_prefixes()` (a delimiter walk, not capped) on 2026-09-25 and only
+read `<YYYYMMDD>T<HHMMSS>Z` run dirs.
+
+### The LLM audit keeps re-tuning the same few pages
+
+Check `analyzer.audit_seed_queries` is set and the named block is non-empty
+in the run's `data/db-stats.json` (`ai_landed_pages` needs
+`data_sources.ai_traffic`). Without seeds the audit falls back to the
+homepage + top-10 GSC pages by clicks, which on a low-traffic site is a
+fixed list of 1-click pages. Set `analyzer.audit_url_cooldown` so a URL that
+already had its recs is skipped; the analyzer log prints
+`cooldown: skipped N page(s)`.
 
 ## Reuse
 

@@ -169,6 +169,31 @@ AP_REV_GOALS='{"goals":[
 ]}'
 put_goals "aisleprompt-seo-opportunity-agent" "$AP_REV_GOALS"
 
+# ── seo-opportunity-agent — specpicks outcome goals (2026-09-25) ────────────
+# SpecPicks has ~0 Google clicks; its measured demand is AI assistants.
+# Bind goals to what the site actually measures — AI referral landings
+# (data_sources.ai_traffic → db-stats ai_referrals_30d) and verified-human
+# Amazon clicks (data_sources.db.human_clicks → amazon_human_clicks_30d) —
+# and retire the goals that rewarded emitting recs or read a GA4 event this
+# site never sends. Status-only entries retire an existing goal and keep its
+# history (framework/core/goals.py init_goals).
+SP_SEO_GOALS='{"goals":[
+  {"id":"goal-ai-referral-landings-30d","title":"AI-assistant referral landings / 30d",
+   "description":"People who reached the site from a link in ChatGPT, Perplexity, Claude, Copilot or Gemini (ai_traffic_log kind=referral, status 200), rolling 30 days. The LLM audit starts from the pages these land on (analyzer.audit_seed_queries).",
+   "metric":{"name":"ai_referral_landings_30d","current":121,"target":250,"direction":"increase","unit":"landings","horizon_weeks":12},
+   "target_metric":"db.ai_referrals_30d.last_30d",
+   "directives":["audit the pages in ai_landed_pages first: make each answer its query in the first screen, load fast, and link the right product","never trade honesty (prices, availability, authorship, testing claims) for visibility"]},
+  {"id":"goal-human-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d",
+   "description":"Amazon affiliate click-outs framework/core/human_clicks.py classifies as a person; outbound_clicks is ~99% crawlers, so the raw row count is not the metric. 0 on 2026-09-25.",
+   "metric":{"name":"human_amazon_clicks_30d","current":0,"target":30,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "target_metric":"db.amazon_human_clicks_30d.last_30d",
+   "directives":["on AI-landed pages make the tagged Amazon link (eBay for pre-2012 hardware) the obvious next step, showing a price only when it is under 24h old"]},
+  {"id":"goal-recs-emitted-per-run","status":"abandoned"},
+  {"id":"goal-recs-shipped-30d","status":"abandoned"},
+  {"id":"goal-amazon-clicks-30d","status":"abandoned"}
+]}'
+put_goals "specpicks-seo-opportunity-agent" "$SP_SEO_GOALS"
+
 # ── responder-agent ─────────────────────────────────────────────────────────
 RESP_GOALS='{"goals":[
   {"id":"goal-zero-stuck-replies","title":"Zero unrouted user replies",

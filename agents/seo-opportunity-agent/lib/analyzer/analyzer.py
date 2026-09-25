@@ -49,6 +49,14 @@ if str(_REPO_ROOT) not in sys.path:
 from shared.site_config import load_config_from_env  # noqa: E402
 from shared import run_files  # noqa: E402
 
+# Sibling module (same dir). Loaded by path so both invocation forms
+# (script, and import from tests) resolve it.
+import importlib.util as _ilu  # noqa: E402
+_ap_spec = _ilu.spec_from_file_location(
+    "_seo_audit_pages", Path(__file__).resolve().parent / "audit_pages.py")
+_audit_pages = _ilu.module_from_spec(_ap_spec)
+_ap_spec.loader.exec_module(_audit_pages)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -293,19 +301,23 @@ def _load_handled_rec_keys(cfg, current_run_ts: str,
         f"{site_id}-seo-opportunity-agent",
     ]
     for agent_id in candidate_agents:
+        # list_child_prefixes, not list_prefix: list_prefix caps at 10,000
+        # keys in lexicographic order, and this agent has far more blobs
+        # under runs/, so the walk silently got the OLDEST runs (May, by
+        # 2026-09 archived blobs that fail to read) and the dedupe saw none
+        # of the recent shipped/skipped recs.
         try:
-            keys = list(s.list_prefix(f"agents/{agent_id}/runs/"))
+            children = list(s.list_child_prefixes(f"agents/{agent_id}/runs/"))
         except Exception:
             continue
         # Build set of run_ts (excluding the rundir-... dispatch dirs)
-        run_tss: set[str] = set()
-        for k in keys:
-            tail = k.split(f"agents/{agent_id}/runs/", 1)[1] if "agents/" in k else ""
-            if not tail or "rundir-" in tail:
-                continue
-            run_ts = tail.split("/", 1)[0]
-            if run_ts and run_ts != current_run_ts:
-                run_tss.add(run_ts)
+        # Only real run dirs (<YYYYMMDD>T<HHMMSS>Z): ad-hoc dirs such as
+        # "test-debug-fix-check" sort after every date and are archived.
+        run_tss: set[str] = {
+            c for c in children
+            if c and "rundir-" not in c and c != current_run_ts
+            and _audit_pages.run_ts_datetime(c) is not None
+        }
         # Walk newest N runs
         for run_ts in sorted(run_tss, reverse=True)[:scan_runs]:
             try:
@@ -4106,12 +4118,40 @@ def build_recommendations(cfg, run_dir: Path, snap: dict,
 # Main
 # ---------------------------------------------------------------------------
 
-def _crawl_for_audit(cfg, run_dir):
-    """On-demand crawl of the site's homepage + top GSC pages + sitemap entries.
+def _page_record(page) -> dict:
+    """The fields of a crawler Page the LLM audit and the latency rule read."""
+    rec = {
+        "url": page.url, "title": page.title,
+        "h1": page.h1, "description": page.description,
+        "canonical": page.canonical, "body_text": page.body_text,
+        "status": page.status_code,
+        "fetch_ms": getattr(page, "fetch_ms", 0) or 0,
+        "ttfb_ms": getattr(page, "ttfb_ms", 0) or 0,
+    }
+    # What the page already carries, so the audit does not "find" a
+    # missing schema/robots directive it simply was not shown.
+    if getattr(page, "jsonld_types", None):
+        rec["jsonld_types"] = list(page.jsonld_types)
+    if getattr(page, "robots_meta", ""):
+        rec["robots_meta"] = page.robots_meta
+    if getattr(page, "redirected_from", ""):
+        rec["redirected_from"] = page.redirected_from
+    return rec
 
-    Used by the LLM audit when the collector didn't already produce a
-    pages.jsonl. Returns a list of page records (url, title, h1,
-    description, canonical, body_text). Capped at 20 pages.
+
+def _crawl_for_audit(cfg, run_dir, seeds: Optional[list] = None,
+                     max_pages: int = 20):
+    """On-demand crawl for the LLM audit when the collector didn't already
+    produce a page inventory. Returns page records (url, title, h1,
+    description, canonical, body_text, status, fetch_ms, ttfb_ms, ...).
+
+    Two stages, `max_pages` in total:
+      1. `seeds` (analyzer.audit_seed_queries rows — e.g. the pages AI
+         assistants landed people on) are fetched as-is: depth 0, no
+         sitemap, no link-following, so every slot goes to a page that
+         matters rather than to /about or /privacy.
+      2. Only if slots remain: the legacy BFS from the homepage + top-10
+         GSC pages + sitemap roots (depth 1).
     """
     try:
         # Reuse the BFS crawler from progressive-improvement-agent
@@ -4125,36 +4165,96 @@ def _crawl_for_audit(cfg, run_dir):
     if not domain:
         return []
     base_url = f"https://{domain}"
+    common = dict(
+        path_excludes=["/admin/*", "/api/*", "/auth/*"],
+        request_timeout_s=20,
+        user_agent="reusable-agents-seo-audit/1.0",
+        throttle_ms=400,
+    )
+    pages: list[dict] = []
+    have: set[str] = set()
 
-    # Seed URLs: homepage + top GSC pages + sitemap roots
-    seeds: list[str] = ["/"]
+    def _keep(page) -> None:
+        if 200 <= page.status_code < 300 and page.body_text:
+            rec = _page_record(page)
+            key = _audit_pages.norm_url(rec["url"])
+            if key and key not in have:
+                have.add(key)
+                pages.append(rec)
+
+    seed_urls = [s["url"] for s in (seeds or []) if s.get("url")][:max_pages]
+    if seed_urls:
+        print(f"  [llm-audit] seed crawl: {len(seed_urls)} page(s) from "
+              f"analyzer.audit_seed_queries", file=sys.stderr)
+        for page in _crawl(base_url=base_url, seed_urls=seed_urls,
+                           use_sitemap=False, max_depth=0,
+                           max_pages=len(seed_urls), **common):
+            _keep(page)
+
+    remaining = max_pages - len(pages)
+    if remaining <= 0:
+        return pages
+
+    # Fill: homepage + top GSC pages + sitemap roots
+    fill_seeds: list[str] = ["/"]
     gsc_pages = _load(run_dir / "data" / "gsc-pages-90d.json")
     for r in (gsc_pages.get("rows") or [])[:10]:
         url = r.get("keys", [None])[0]
         if url and url.startswith(base_url):
-            seeds.append(url)
-
-    print(f"  [llm-audit] on-demand crawl: {base_url} ({len(seeds)} seeds)",
-          file=sys.stderr)
-    pages = []
+            fill_seeds.append(url)
+    print(f"  [llm-audit] on-demand crawl: {base_url} ({len(fill_seeds)} seeds, "
+          f"{remaining} slot(s))", file=sys.stderr)
     for page in _crawl(
         base_url=base_url,
-        seed_urls=seeds,
+        seed_urls=fill_seeds,
         use_sitemap=True,
         max_depth=1,
-        max_pages=20,
-        path_excludes=["/admin/*", "/api/*", "/auth/*"],
-        request_timeout_s=15,
-        user_agent="reusable-agents-seo-audit/1.0",
-        throttle_ms=400,
+        # Over-fetch by what stage 1 already holds: those URLs are skipped.
+        max_pages=remaining + len(pages),
+        **common,
     ):
-        if 200 <= page.status_code < 300 and page.body_text:
-            pages.append({
-                "url": page.url, "title": page.title,
-                "h1": page.h1, "description": page.description,
-                "canonical": page.canonical, "body_text": page.body_text,
-            })
+        if len(pages) >= max_pages:
+            break
+        _keep(page)
     return pages
+
+
+def _prior_llm_rec_counts(cfg, current_run_ts: str, window_days: int,
+                          scan_runs: int = 300) -> dict:
+    """LLM-audit recs per URL over this site's prior runs in the window
+    (audit_pages.url_rec_counts over the stored recommendations.json)."""
+    try:
+        from framework.core.storage import get_storage
+        s = get_storage()
+    except Exception:
+        return {}
+    site_id = cfg.site_id if hasattr(cfg, "site_id") else cfg.get("site", {}).get("id", "")
+    agent_id = ((cfg.get("reporter", {}) or {}).get("dashboard", {}) or {}).get(
+        "agent_id") or f"{site_id}-seo-opportunity-agent"
+    prefix = f"agents/{agent_id}/runs/"
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max(1, int(window_days)))
+    try:
+        # Delimiter walk: not subject to list_prefix's 10k-key cap.
+        children = list(s.list_child_prefixes(prefix))
+    except Exception:
+        return {}
+    run_tss: set[str] = set()
+    for run_ts in children:
+        if not run_ts or "rundir-" in run_ts or run_ts == current_run_ts:
+            continue
+        dt = _audit_pages.run_ts_datetime(run_ts)
+        if dt is not None and dt >= cutoff:
+            run_tss.add(run_ts)
+    docs = []
+    for run_ts in sorted(run_tss, reverse=True)[:scan_runs]:
+        try:
+            d = s.read_json(f"{prefix}{run_ts}/recommendations.json")
+        except Exception:
+            continue
+        if isinstance(d, dict):
+            docs.append((run_ts, d))
+    return _audit_pages.url_rec_counts(docs, now=now, window_days=window_days)
 
 
 def _build_ai_chat_callable(cfg):
@@ -4436,9 +4536,44 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                 #
                 # The cap is `analyzer.max_llm_audit_pages` (default 30) to
                 # bound LLM cost.
+                #
+                # Which pages fill the cap (audit_pages.py): rows named by
+                # `analyzer.audit_seed_queries` (e.g. the collector's
+                # ai_landed_pages — pages AI assistants actually used) go
+                # first; a URL that already had its share of LLM recs in
+                # the `analyzer.audit_url_cooldown` window is skipped.
+                analyzer_cfg = cfg.get("analyzer", {}) or {}
                 max_audit_pages = int(
-                    cfg.get("analyzer", {}).get("max_llm_audit_pages", 30)
+                    analyzer_cfg.get("max_llm_audit_pages", 30)
                 )
+                site_base_url = f"https://{cfg.get('site', {}).get('domain', '')}"
+                db_stats_for_audit = _load(run_dir / "data" / "db-stats.json") or {}
+                audit_seeds = _audit_pages.seed_rows(
+                    db_stats_for_audit,
+                    analyzer_cfg.get("audit_seed_queries") or [],
+                    site_base_url,
+                )
+                cooldown_cfg = _audit_pages.cooldown_config(analyzer_cfg)
+                cooldown_exempt: set = set()
+                prior_url_counts: dict = {}
+                if analyzer_cfg.get("audit_url_cooldown"):
+                    cooldown_exempt = _audit_pages.exempt_urls(
+                        db_stats_for_audit, cooldown_cfg.get("exempt_queries") or [],
+                        site_base_url)
+                    try:
+                        prior_url_counts = _prior_llm_rec_counts(
+                            cfg, run_ts, int(cooldown_cfg.get("window_days") or 30))
+                    except Exception as e:
+                        print(f"  [llm-audit] cooldown history unavailable: {e}",
+                              file=sys.stderr)
+                    audit_seeds, _cooled = _audit_pages.cooldown_filter_pages(
+                        audit_seeds, prior_url_counts, cooldown_cfg, cooldown_exempt)
+                    if _cooled:
+                        print(f"  [llm-audit] cooldown: skipped {len(_cooled)} seed "
+                              f"page(s) already at their rec cap", file=sys.stderr)
+                if audit_seeds:
+                    print(f"  → audit seeds: {len(audit_seeds)} page(s) from "
+                          f"{analyzer_cfg.get('audit_seed_queries')}", file=sys.stderr)
                 pages_by_type_path = run_dir / "data" / "pages-by-type.jsonl"
                 pages_path = run_dir / "data" / "pages.jsonl"
                 pages: list[dict] = []
@@ -4465,13 +4600,35 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                         except Exception:
                             pass
                 if not pages:
-                    pages = _crawl_for_audit(cfg, run_dir)
+                    pages = _crawl_for_audit(cfg, run_dir, seeds=audit_seeds,
+                                             max_pages=min(20, max_audit_pages))
                     if pages:
                         with pages_path.open("w") as f:
                             for p in pages:
                                 f.write(json.dumps(p) + "\n")
+                # Seed pages first (and annotated with their AI-landing
+                # counts), then the per-URL cooldown, then the cap.
+                pages = _audit_pages.prioritize(pages, audit_seeds)
+                if analyzer_cfg.get("audit_url_cooldown"):
+                    pages, _cooled = _audit_pages.cooldown_filter_pages(
+                        pages, prior_url_counts, cooldown_cfg, cooldown_exempt)
+                    if _cooled:
+                        print(f"  [llm-audit] cooldown: skipped {len(_cooled)} page(s) "
+                              f"with >= their rec cap in {cooldown_cfg.get('window_days')}d: "
+                              + ", ".join(_cooled[:5]), file=sys.stderr)
                 # Cap to bound cost (default 30, configurable per-site)
                 pages = pages[:max_audit_pages]
+                # Latency on AI-landed pages — measured by this crawl, so it
+                # needs no LLM. One live-state rec (cwv-ttfb-slow).
+                ttfb_budget = int(analyzer_cfg.get(
+                    "ai_landed_ttfb_budget_ms",
+                    _audit_pages.DEFAULT_TTFB_BUDGET_MS if audit_seeds else 0) or 0)
+                if pages and ttfb_budget > 0 and len(recs) < max_recs:
+                    slow_rec = _audit_pages.slow_ai_landed_rec(
+                        pages, budget_ms=ttfb_budget, rec_id=next_id())
+                    if slow_rec:
+                        recs.append(slow_rec)
+                        print(f"  → {slow_rec['title']}", file=sys.stderr)
                 if pages:
                     print(f"  → LLM audit: {len(pages)} pages", file=sys.stderr)
                     # Adaptive context: load past goal-changes for this site
@@ -4513,6 +4670,12 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                     # rule-pass ids whenever any rec was filtered out
                     # (e.g. by the already-handled dedupe).
                     llm_recs = issues_to_recommendations(issues, next_id)
+                    if analyzer_cfg.get("audit_url_cooldown"):
+                        llm_recs, _n_cool = _audit_pages.cooldown_filter_recs(
+                            llm_recs, prior_url_counts, cooldown_cfg, cooldown_exempt)
+                        if _n_cool:
+                            print(f"  → cooldown: dropped {_n_cool} LLM rec(s) over "
+                                  f"their URL's rec cap", file=sys.stderr)
                     # Wire repo-routes into implementation_outline.files so
                     # the implementer + the human reading the email get a
                     # concrete file:line target instead of guessing.

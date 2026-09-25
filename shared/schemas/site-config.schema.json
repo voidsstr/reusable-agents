@@ -77,10 +77,35 @@
                   "table": { "type": "string", "description": "Click table to classify (e.g. the site's outbound/affiliate click log)." },
                   "spec": { "type": "object", "description": "human_clicks column spec: time_col, ua_col, ip_col, referer_col, country_col, bot_flag_col, plus any rule override." },
                   "match": { "type": "object", "description": "Column filters for the counted rows, e.g. {\"source\": \"amazon\"}; a list value means IN." },
-                  "profile": { "type": "string", "description": "Operator-override profile in storage config/human-click-filter-config.json (by_profile). Defaults to the agent id." }
+                  "profile": { "type": "string", "description": "Operator-override profile in storage config/human-click-filter-config.json (by_profile). Defaults to the agent id." },
+                  "pages": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Optional: also write db-stats <name>_pages = [{path, clicks}] — the verified-human clicks split by a column (human_clicks.human_counts_by) and rendered as site paths. Name that block in analyzer.audit_url_cooldown.exempt_queries so pages people click from keep getting audited.",
+                    "properties": {
+                      "group_col": { "type": "string", "description": "Column to split by, e.g. the product id column (asin)." },
+                      "path_template": { "type": "string", "description": "Path for one value, '{value}' substituted (e.g. '/product/{value}'). Default '{value}' (the column already holds a path)." },
+                      "window_days": { "type": "integer", "minimum": 1, "default": 30 },
+                      "limit": { "type": "integer", "minimum": 1, "default": 200 }
+                    }
+                  }
                 }
               }
             }
+          }
+        },
+        "ai_traffic": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "description": "Optional: AI-assistant landings from the site's ai_traffic_log table (framework/core/ai_traffic.py — human referrals from ChatGPT/Perplexity/Claude/Copilot/Gemini plus answer-time fetches by ChatGPT-User/OAI-SearchBot/Perplexity-User/Claude-User, spoofed crawler IPs dropped). The collector merges two blocks into db-stats.json: <landed_pages_key> (default ai_landed_pages) = [{path, referrals, fetches, score}] best first, and <referrals_key> (default ai_referrals_30d) = {last_7d, last_30d} (goal metric db.ai_referrals_30d.last_30d). Omit or enabled:false = off. A failure warns and leaves the run unchanged.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "dsn_env": { "type": "string", "description": "Env var holding the postgres DSN (default DATABASE_URL)." },
+            "prefixes": { "type": "array", "items": { "type": "string" }, "description": "Only count paths starting with one of these (e.g. /product/, /reviews/). Empty = every path, including / and /robots.txt." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 60, "description": "Max rows in the landed-pages block." },
+            "landed_pages_key": { "type": "string", "pattern": "^[a-z0-9_]+$", "default": "ai_landed_pages" },
+            "referrals_key": { "type": "string", "pattern": "^[a-z0-9_]+$", "default": "ai_referrals_30d" },
+            "config": { "type": "object", "description": "Overrides merged over framework.core.ai_traffic.DEFAULTS: table/column names (ip/status columns auto-detect), referral_sources, live_fetch_sources, referral_days, fetch_days, referral_weight, fetch_weight, spoof_min_vendors, exclude_ips, statement_timeout_ms." }
           }
         },
         "google_ads": {
@@ -227,8 +252,9 @@
       "properties": {
         "primary_objective": {
           "type": "string",
-          "enum": ["top5-rank", "revenue-conversion", "hybrid"],
-          "default": "top5-rank"
+          "enum": ["top5-rank", "revenue-conversion", "hybrid", "ai-visibility"],
+          "default": "top5-rank",
+          "description": "What the LLM audit optimises for; each value is expanded into a one-sentence brief in the prompt (llm_audit.OBJECTIVE_BRIEFS). ai-visibility = get pages fetched/cited by AI assistants and turn those visits into verified-human affiliate clicks, without trading away honesty."
         },
         "max_recs_per_run": { "type": "integer", "minimum": 1, "maximum": 50, "default": 12 },
         "us_traffic_weight": { "type": "number", "default": 1.5 },
@@ -237,6 +263,28 @@
         "pre_traffic_impr_threshold": { "type": "integer", "minimum": 0, "default": 100, "description": "When the site's GSC 90d total_impressions is below this, the analyzer flips into pre-traffic mode and biases toward new-page (content-engine) recs over rank-target recs." },
         "ai_provider": { "type": "string", "description": "Optional override for the LLM provider used by the analyzer's audit pass." },
         "ai_model": { "type": "string", "description": "Optional override for the LLM model used by the analyzer's audit pass." },
+        "audit_seed_queries": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "db-stats.json block names whose rows carry `path` (or a same-site `url`) — e.g. ai_landed_pages from data_sources.ai_traffic. When the run has no page inventory, the LLM audit fetches these pages first (depth 0, no link-following) and only fills leftover slots with the legacy homepage/GSC BFS; with an inventory, these pages are moved to the front before the max_llm_audit_pages cap. Rows are annotated so the prompt shows each page's AI referrals and live fetches. Empty = legacy behavior (homepage + top-10 GSC pages by clicks)."
+        },
+        "audit_url_cooldown": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Stop re-auditing the same URLs. A URL that already got max_recs_per_url LLM-audit recs across this agent's runs in the last window_days is skipped before the audit (and this run's recs for it are trimmed to the remainder); URLs in the exempt_queries blocks get max_recs_per_exempt_url instead. 0 = unlimited. Omit the block to disable.",
+          "properties": {
+            "window_days": { "type": "integer", "minimum": 1, "default": 30 },
+            "max_recs_per_url": { "type": "integer", "minimum": 0, "default": 2 },
+            "max_recs_per_exempt_url": { "type": "integer", "minimum": 0, "default": 6 },
+            "exempt_queries": { "type": "array", "items": { "type": "string" }, "description": "db-stats.json block names whose `path` rows are exempt (e.g. ai_landed_pages, <human_clicks name>_pages)." }
+          }
+        },
+        "ai_landed_ttfb_budget_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3000,
+          "description": "Emit one live-state cwv-ttfb-slow rec when an audited page that AI assistants landed on (from audit_seed_queries) took longer than this to first byte in the audit crawl. Default 3000 when audit_seed_queries is set, else off; 0 disables."
+        },
         "coverage_target_files": {
           "type": "object",
           "description": "Repo-relative target files for the gsc-coverage-* recs the analyzer emits from the GSC URL Inspection coverage file. Keys are rec types (gsc-coverage-not-indexed, gsc-coverage-discovered, gsc-coverage-redirect, gsc-coverage-unknown, gsc-coverage-issues, gsc-coverage-noindex, gsc-coverage-canonical-mismatch, gsc-coverage-soft-404) plus an optional 'default' key used when a rec type has no entry. Every path must fall inside implementer.allowed_paths — the analyzer drops out-of-scope paths with a stderr warning so the implementer's pre-LLM scope gate never defers the rec as 'out-of-scope per site policy'. Without this block coverage recs ship with no target_files and stall at the implementer.",

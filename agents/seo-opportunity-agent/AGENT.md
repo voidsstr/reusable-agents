@@ -197,9 +197,9 @@ On 2026-09-23 the log shows `claude-cli` with `claude-sonnet-4-6`.
 
 **`site.yaml` knobs read by the engine code:**
 - `site.{id,domain,mode}`
-- `data_sources.{gsc.site_url, gsc.default_country_filter, ga4.property_id, db.{dsn_env,queries_file}}`
+- `data_sources.{gsc.site_url, gsc.default_country_filter, ga4.property_id, db.{dsn_env,queries_file,human_clicks}, ai_traffic}`
 - `coverage_targets.*`
-- `analyzer.{max_recs_per_run, max_llm_audit_pages, pre_traffic_impr_threshold, primary_objective, coverage_target_files, ai_provider, ai_model}`
+- `analyzer.{max_recs_per_run, max_llm_audit_pages, pre_traffic_impr_threshold, primary_objective, coverage_target_files, ai_provider, ai_model, audit_seed_queries, audit_url_cooldown, ai_landed_ttfb_budget_ms}` (the last three added 2026-09-25 — see README → Configuration)
 - `revenue_kpis`, `revenue_focus`
 - `handoff_routes`, `site_handler_overrides`
 - `reporter.{email,dashboard}`
@@ -216,7 +216,9 @@ all three repos on 2026-09-23:
 - `analyzer.geo_signals_checklist`, `analyzer.geo_priority_pages`
 - `analyzer.indexation_stall`, `analyzer.conversion_stall`
 - `analyzer.archived_redirect_check`, `analyzer.llms_txt_check`
-- `analyzer.ranking_recovery`, `analyzer.competitor_feature_gaps`
+- `analyzer.ranking_recovery` (removed from specpicks 2026-09-25; one of its
+  priorities told agents to propose invented author personas),
+  `analyzer.competitor_feature_gaps`
 - the top-level `geo` block (there is no `_add_geo_recs` in the analyzer)
 - `page_inventory`
 - `articles`, except `articles.url_template`, which `agents/implementer/run.sh`
@@ -237,9 +239,11 @@ change nothing. Any **new top-level** key must be added to the schema first
   by `SEO_DISABLE_UNCHANGED_SHORTCIRCUIT=1`. Even with it on, it could not
   fire, because the prior snapshot is not found.
 - **Idempotency relies on dedup:**
-  - the analyzer's handled-rec filter. It is weakened by the listing cap (see
-    Failure modes) and covers only a few rec types; no run in the 2026-09-23
-    logs loaded any handled-rec keys,
+  - the analyzer's handled-rec filter. It covers only a few rec types; no
+    run in the 2026-09-23 logs loaded any handled-rec keys (until
+    2026-09-25 it also listed only the oldest, archived runs — see Failure
+    modes),
+  - the per-URL LLM-audit cooldown (`analyzer.audit_url_cooldown`, 2026-09-25),
   - AgentBase `post_run` title dedup, which marks repeated titles
     `duplicate: true` (on 2026-09-23: 4 of 12 specpicks recs and 8 of 12
     aisleprompt recs),

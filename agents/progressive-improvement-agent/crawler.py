@@ -59,6 +59,11 @@ class Page:
     # URL with a non-self canonical" — a false indexing-fix finding the SEO
     # audit re-emitted every run for weeks after the redirect shipped.
     redirected_from: str = ""
+    # 2026-09-25: server time to first byte (requests' Response.elapsed:
+    # request sent -> response headers parsed) of the final response, in ms.
+    # fetch_ms also includes retries and the body download; this is the
+    # number an AI assistant fetching the page live waits on. 0 = unknown.
+    ttfb_ms: int = 0
 
     def to_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -359,10 +364,15 @@ def crawl(
             seen.add(final_url)
             redirected_from, url = url, final_url
 
+        try:
+            ttfb_ms = int(r.elapsed.total_seconds() * 1000)
+        except Exception:
+            ttfb_ms = 0
         page = Page(
             url=url, status_code=r.status_code, fetch_ms=ms, depth=depth,
             attempts=attempts, redirected_from=redirected_from,
             content_type=(r.headers.get("Content-Type") or "").split(";")[0].strip(),
+            ttfb_ms=ttfb_ms,
         )
         # A server can noindex a page by header alone (no meta tag);
         # consumers that skip noindexed pages must see both.

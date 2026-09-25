@@ -569,7 +569,13 @@ def _parse_llm_json(raw: str) -> list[dict]:
 # on-demand crawl records (url/title/h1/description/canonical/body_text).
 _PAGE_FIELDS: tuple[tuple[str, str], ...] = (
     ("type", "page_type"),
+    # Why this page is in the batch: AI assistants sent people to it
+    # (referrals) or fetched it at answer time (audit_pages.annotate).
+    ("ai_referrals", "ai_assistant_referrals"),
+    ("ai_live_fetches", "ai_assistant_live_fetches"),
+    ("ttfb_ms", "server_ttfb_ms"),
     ("status", "http_status"),
+    ("robots_meta", "robots_meta"),
     ("title", "title"),
     ("description", "meta_description"),
     ("h1", "h1"),
@@ -652,6 +658,32 @@ def format_pages_for_audit(pages: Iterable[dict], cap_chars: int = 2500) -> str:
     return "\n".join(out)
 
 
+_LIVE_GOAL_STATUSES = frozenset({"active"})
+
+# What each `analyzer.primary_objective` value means, spelled out for the
+# model. A bare "top5-rank" told it to optimise Google position even on a
+# site whose measured demand arrives through AI assistants.
+OBJECTIVE_BRIEFS: dict[str, str] = {
+    "top5-rank": "move pages into Google's top 5 for queries they already rank for",
+    "revenue-conversion": "turn existing visits into affiliate/conversion clicks",
+    "hybrid": "rank gains and conversion gains, weighted equally",
+    "ai-visibility": (
+        "get the site's pages fetched, quoted and cited by AI assistants "
+        "(ChatGPT, Perplexity, Copilot, Claude) and turn those visits into "
+        "verified-human affiliate clicks. Prefer fixes on pages AI assistants "
+        "already fetch: fast server response, a direct answer up top, honest "
+        "structured data, and a clear, correctly tagged product link. Never "
+        "trade honesty (prices, availability, authorship, testing claims) "
+        "for visibility"
+    ),
+}
+
+
+def _objective_line(primary_objective: str) -> str:
+    brief = OBJECTIVE_BRIEFS.get((primary_objective or "").strip())
+    return f"{primary_objective} — {brief}" if brief else str(primary_objective)
+
+
 def _format_goals(active_goals: list[dict] | None) -> str:
     """Render the agent's active goals so the audit biases toward them."""
     if not active_goals:
@@ -659,6 +691,11 @@ def _format_goals(active_goals: list[dict] | None) -> str:
     lines = ["ACTIVE GOALS — prefer issues that move these metrics:"]
     for g in active_goals:
         if not isinstance(g, dict):
+            continue
+        # read_active_goals returns every goal, including accomplished and
+        # abandoned ones. Showing those told the model a finished (or
+        # retired) rec-count goal was still the thing to optimise.
+        if (g.get("status") or "active") not in _LIVE_GOAL_STATUSES:
             continue
         title = g.get("title") or g.get("id") or ""
         if not title:
@@ -714,7 +751,7 @@ def _build_messages(
     """Assemble the (system, user) message pair for one batch."""
     parts = [
         f"SITE: {site_label}",
-        f"PRIMARY OBJECTIVE: {primary_objective}",
+        f"PRIMARY OBJECTIVE: {_objective_line(primary_objective)}",
         "",
         SEO_AUDIT_CHECKLIST,
     ]

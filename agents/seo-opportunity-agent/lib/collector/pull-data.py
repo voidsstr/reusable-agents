@@ -24,6 +24,8 @@ CONTRACT — analyzer.build_snapshot() loads these from <run_dir>/data/:
     ga4-geo-28d.json            ga4-traffic-sources-28d.json
     db-stats.json               site-signals.json
     sitemap-urls.json           (coverage-gap inventory: per-pattern counts)
+    db-stats.json also carries ai_landed_pages / ai_referrals_30d when
+    data_sources.ai_traffic is configured (collect_ai_traffic).
     ads-*.json                  (optional — not produced here)
 Each GSC/GA4 file is the raw API response, because the analyzer reads
 `.get("rows", [])` straight off it. `_load()` returns {} for a missing
@@ -313,6 +315,20 @@ def collect_human_clicks(conn, entries: list) -> dict[str, Any]:
             }
             warn(f"  ✓ human_clicks {name}: {bd30[human_clicks.VERDICT_HUMAN]} human "
                  f"of {bd30['_total']} rows (30d)")
+            # Optional: which pages those human clicks belong to, as
+            # db-stats["<name>_pages"] = [{path, clicks}] (e.g. an ASIN
+            # column rendered through "/product/{value}"). The SEO audit's
+            # per-URL cooldown exempts these pages (audit_url_cooldown).
+            pages_cfg = ent.get("pages") or {}
+            if pages_cfg.get("group_col"):
+                by = human_clicks.human_counts_by(
+                    conn, spec, group_col=str(pages_cfg["group_col"]),
+                    window_days=int(pages_cfg.get("window_days") or 30), **kw)
+                tmpl = str(pages_cfg.get("path_template") or "{value}")
+                limit = int(pages_cfg.get("limit") or 200)
+                out[f"{name}_pages"] = [
+                    {"path": tmpl.replace("{value}", v), "clicks": n}
+                    for v, n in list(by.items())[:limit] if v and n > 0]
         except Exception as e:
             try:
                 conn.rollback()
@@ -320,6 +336,94 @@ def collect_human_clicks(conn, entries: list) -> dict[str, Any]:
                 pass
             warn(f"  ! human_clicks {name} failed: {str(e)[:160]}")
     return out
+
+
+# ---------------------------------------------------------------------------
+# AI-assistant landings (framework.core.ai_traffic) — optional
+# ---------------------------------------------------------------------------
+
+AI_LANDED_DEFAULT_KEY = "ai_landed_pages"
+AI_REFERRALS_DEFAULT_KEY = "ai_referrals_30d"
+
+
+def collect_ai_traffic(cfg, data: Path) -> None:
+    """Merge the site's AI-assistant landings into db-stats.json.
+
+    Enabled by site.yaml `data_sources.ai_traffic` (schema:
+    shared/schemas/site-config.schema.json). Writes two keys next to the
+    `@@QUERY` blocks, so every db-stats consumer can read them:
+
+      <landed_pages_key>  (default ai_landed_pages) — [{path, referrals,
+                          fetches, score}] best first: pages a human reached
+                          from an assistant, or an assistant fetched at
+                          answer time (spoof-filtered). Feeds
+                          analyzer.audit_seed_queries.
+      <referrals_key>     (default ai_referrals_30d) — {last_7d, last_30d}
+                          human referral landings. The finalizer exposes it
+                          as metric db.ai_referrals_30d.last_30d for goals.
+
+    Optional input: any failure warns and leaves db-stats.json as it was.
+    Runs after collect_db(), which (re)writes db-stats.json.
+    """
+    block = (cfg.get("data_sources") or {}).get("ai_traffic") or {}
+    if not block or block.get("enabled") is False:
+        return
+    dsn_env = block.get("dsn_env") or "DATABASE_URL"
+    dsn = os.environ.get(dsn_env, "")
+    if not dsn:
+        warn(f"  AI traffic skipped — ${dsn_env} not set")
+        return
+    try:
+        import psycopg2
+        from framework.core import ai_traffic
+    except Exception as e:
+        warn(f"  AI traffic skipped — {e}")
+        return
+    at_cfg = ai_traffic.config(block.get("config") or {})
+    prefixes = [p for p in (block.get("prefixes") or []) if p]
+    limit = int(block.get("limit") or 60)
+    landed_key = block.get("landed_pages_key") or AI_LANDED_DEFAULT_KEY
+    referrals_key = block.get("referrals_key") or AI_REFERRALS_DEFAULT_KEY
+    added: dict[str, Any] = {}
+    conn = None
+    try:
+        conn = psycopg2.connect(dsn)
+        try:
+            added[landed_key] = ai_traffic.landed_paths(
+                conn, cfg=at_cfg, prefixes=prefixes, limit=limit)
+            conn.rollback()
+        except Exception as e:
+            conn.rollback()
+            warn(f"  ! AI landed pages failed: {str(e)[:160]}")
+        try:
+            added[referrals_key] = ai_traffic.referral_counts(conn, cfg=at_cfg)
+            conn.rollback()
+        except Exception as e:
+            conn.rollback()
+            warn(f"  ! AI referral counts failed: {str(e)[:160]}")
+    except Exception as e:
+        warn(f"  AI traffic skipped — {str(e)[:160]}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    if not added:
+        return
+    path = data / "db-stats.json"
+    try:
+        stats = json.loads(path.read_text()) if path.is_file() else {}
+        if not isinstance(stats, dict):
+            stats = {}
+    except Exception:
+        stats = {}
+    stats.update(added)
+    path.write_text(json.dumps(stats, indent=1, default=str))
+    landed = added.get(landed_key) or []
+    refs = added.get(referrals_key) or {}
+    warn(f"  ✓ AI traffic: {len(landed)} landed page(s), "
+         f"{refs.get('last_30d', '?')} referral landing(s) in 30d")
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +592,7 @@ def run_into(data: Path, cfg) -> None:
         warn("  GSC returned 0 rows across all dimensions (new/quiet property?)")
     collect_ga4(token, cfg, data)
     collect_db(cfg, data)
+    collect_ai_traffic(cfg, data)
     collect_site_signals(cfg, data)
     collect_sitemap_inventory(cfg, data)
 
