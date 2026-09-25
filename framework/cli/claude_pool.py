@@ -113,6 +113,27 @@ def _is_authenticated(home: str) -> bool:
     return (Path(home) / ".claude" / ".credentials.json").exists()
 
 
+def _is_usable(p: dict) -> bool:
+    """Credentials on disk AND no auth failure recorded since they were
+    last written. A profile whose OAuth refresh died keeps its credentials
+    file, so file-existence alone kept re-picking it: every call that landed
+    on it burned a failover, and `status` flipped `authenticated` back to
+    True (2026-09-25, profile-4). Re-running `claude /login` rewrites the
+    file, which is what clears the dead mark here."""
+    home = p.get("home", "")
+    if not _is_authenticated(home):
+        return False
+    err_at = p.get("auth_error_at")
+    if not err_at:
+        return True
+    try:
+        err_ts = datetime.fromisoformat(str(err_at).replace("Z", "+00:00")).timestamp()
+        creds_ts = (Path(home) / ".claude" / ".credentials.json").stat().st_mtime
+    except Exception:
+        return True
+    return creds_ts > err_ts
+
+
 def _ensure_profile_dir(idx: int, label: str = "") -> Path:
     pdir = ROOT / f"profile-{idx}"
     pdir.mkdir(parents=True, exist_ok=True)
@@ -198,7 +219,7 @@ def cmd_status(args) -> None:
         for k, p in state.items():
             if k.startswith("__") or "id" not in p:
                 continue
-            p["authenticated"] = _is_authenticated(p.get("home", ""))
+            p["authenticated"] = _is_usable(p)
         _write_state(fd, state)
     finally:
         _close_state(fd)
@@ -310,7 +331,7 @@ def _pick_profile(state: dict, exclude_ids: set | None = None,
         p for k, p in state.items()
         if not k.startswith("__")
         and "id" in p
-        and _is_authenticated(p.get("home", ""))
+        and _is_usable(p)
         and not _is_rate_limited_now(p, model=model)
         and p.get("id") not in excl
     ]
@@ -722,7 +743,7 @@ def _all_rate_limited(state: dict, model: str = "") -> tuple[bool, list[str]]:
     authed = [p for k, p in state.items()
               if not k.startswith("__")
               and "id" in p
-              and _is_authenticated(p.get("home", ""))]
+              and _is_usable(p)]
     if not authed:
         return False, []
     if not all(_is_rate_limited_now(p, model=model) for p in authed):
@@ -769,7 +790,7 @@ def _emit_outage_event(state: dict, resets: list[str]) -> None:
         if k.startswith("__"):
             continue
         p = state[k]
-        if "id" not in p or not _is_authenticated(p.get("home", "")):
+        if "id" not in p or not _is_usable(p):
             continue
         rs_raw = p.get("limit_resets_at", "—")
         # Per-family dict (since 2026-05-10) or legacy plain string.
@@ -953,7 +974,7 @@ def cmd_exec(args) -> None:
         try:
             state = _read_state(fd)
             authed_count = sum(1 for p in state.values()
-                                if isinstance(p, dict) and _is_authenticated(p.get("home", "")))
+                                if isinstance(p, dict) and "id" in p and _is_usable(p))
             limited, resets = _all_rate_limited(state, model=requested_model)
         finally:
             _close_state(fd)
