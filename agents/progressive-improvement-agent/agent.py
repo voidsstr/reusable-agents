@@ -446,11 +446,18 @@ class ProgressiveImprovementAgent(AgentBase):
                     current_action=f"BFS from {cfg.base_url}")
         pages: list[Page] = []
         pages_jsonl = self.run_dir / "pages.jsonl"
+        # The pages AI assistants use and the pages verified-human affiliate
+        # clicks come from go first (crawler.seed_from_traffic), so the
+        # max_pages budget is spent where the site's outcomes are made.
+        seed_urls = list(crawler_cfg.get("seed_urls") or ["/"])
+        traffic_seeds = self._traffic_seed_paths(crawler_cfg.get("seed_from_traffic") or {})
+        if traffic_seeds:
+            seed_urls = traffic_seeds + [u for u in seed_urls if u not in traffic_seeds]
         with pages_jsonl.open("w") as f:
             for page in crawl(  # noqa: B020 — using both `f` and outer `page`
 
                 base_url=cfg.base_url,
-                seed_urls=crawler_cfg.get("seed_urls") or ["/"],
+                seed_urls=seed_urls,
                 use_sitemap=crawler_cfg.get("use_sitemap", True),
                 max_depth=int(crawler_cfg.get("max_depth", 2)),
                 max_pages=int(crawler_cfg.get("max_pages", 30)),
@@ -1115,6 +1122,82 @@ class ProgressiveImprovementAgent(AgentBase):
             text = str(content)
             disk.write_text(text)
             self.storage.write_text(storage_key, text)
+
+    def _traffic_seed_paths(self, block: dict) -> list[str]:
+        """`crawler.seed_from_traffic` → site paths to crawl first.
+
+            seed_from_traffic:
+              dsn_env: DATABASE_URL_<SITE>
+              ai_top_n: 15           # framework/core/ai_traffic.landed_paths
+              ai_prefixes: []        # optional path prefixes
+              ai_config: {}          # ai_traffic.DEFAULTS overrides
+              human_clicks:          # framework/core/human_clicks.py
+                table: <click table>
+                spec: {...}          # human_clicks column spec
+                match: {...}         # e.g. {source: amazon}
+                group_col: referer   # or an id column + path_template
+                path_template: "{value}"
+                top_n: 10
+
+        Optional input: any failure is logged and the configured seed_urls
+        are used unchanged.
+        """
+        if not block or block.get("enabled") is False:
+            return []
+        dsn = os.environ.get(block.get("dsn_env") or "DATABASE_URL", "")
+        if not dsn:
+            self.decide("observation", "seed_from_traffic skipped: "
+                        f"${block.get('dsn_env') or 'DATABASE_URL'} not set")
+            return []
+        paths: list[str] = []
+        conn = None
+        try:
+            import psycopg2
+            from framework.core import ai_traffic, human_clicks
+            conn = psycopg2.connect(dsn, connect_timeout=15)
+            top_n = int(block.get("ai_top_n", 15) or 0)
+            if top_n > 0:
+                try:
+                    rows = ai_traffic.landed_paths(
+                        conn, cfg=ai_traffic.config(block.get("ai_config") or {}),
+                        prefixes=block.get("ai_prefixes") or (), limit=top_n)
+                    paths += [r["path"] for r in rows if r.get("path")]
+                except Exception as e:
+                    self.decide("observation", f"AI-landed seeds unavailable: {e}"[:300])
+                conn.rollback()
+            hc = block.get("human_clicks") or {}
+            if hc.get("table") and hc.get("group_col") and int(hc.get("top_n", 10) or 0) > 0:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SET statement_timeout = 30000")
+                    spec = human_clicks.resolve_spec(hc.get("spec") or {},
+                                                     profile=self.agent_id)
+                    rows = human_clicks.human_click_paths(
+                        conn, spec, table=hc["table"], group_col=hc["group_col"],
+                        path_template=hc.get("path_template") or "{value}",
+                        window_days=int(hc.get("window_days", 30) or 30),
+                        match=hc.get("match") or None,
+                        limit=int(hc.get("top_n", 10)))
+                    paths += [r["path"] for r in rows]
+                except Exception as e:
+                    self.decide("observation", f"human-click seeds unavailable: {e}"[:300])
+                conn.rollback()
+        except Exception as e:
+            self.decide("observation", f"seed_from_traffic unavailable: {e}"[:300])
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        seen: set[str] = set()
+        out = [p for p in paths
+               if isinstance(p, str) and p.startswith("/") and not (p in seen or seen.add(p))]
+        if out:
+            self.decide("observation",
+                        f"crawl seeded with {len(out)} AI-landed / human-click page(s)",
+                        evidence={"paths": out[:30]})
+        return out
 
     def _most_recent_recs_path(self) -> Path | None:
         """Find the most recent prior run's recommendations.json for this site."""

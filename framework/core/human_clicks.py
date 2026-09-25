@@ -474,3 +474,31 @@ def human_counts_by(conn, spec: Mapping, *, table: str, group_col: str,
                 key = "" if grp is None else str(grp)
                 out[key] = out.get(key, 0) + int(n)
     return dict(sorted(out.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def human_click_paths(conn, spec: Mapping, *, table: str, group_col: str,
+                      path_template: str = "{value}", window_days: int = 30,
+                      match: Optional[Mapping[str, Any]] = None,
+                      limit: int = 50) -> list[dict]:
+    """The site pages verified-human clicks came from, best first:
+    ``[{"path", "clicks"}]``.
+
+    Each `group_col` value is rendered through `path_template` ('{value}'
+    substituted — e.g. "/product/{value}" for an id column). A value that is
+    a full URL (a referer column) contributes its path; query strings and
+    fragments are dropped and equal paths merged.
+    """
+    from urllib.parse import urlparse
+    merged: dict[str, int] = {}
+    for value, n in human_counts_by(conn, spec, table=table, group_col=group_col,
+                                    window_days=window_days, match=match).items():
+        if not value or n <= 0:
+            continue
+        raw = path_template.replace("{value}", value)
+        parsed = urlparse(raw)
+        path = parsed.path if parsed.scheme else raw.split("?", 1)[0].split("#", 1)[0]
+        if not path.startswith("/"):
+            continue
+        merged[path] = merged.get(path, 0) + n
+    rows = sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))[:max(0, int(limit))]
+    return [{"path": p, "clicks": n} for p, n in rows]

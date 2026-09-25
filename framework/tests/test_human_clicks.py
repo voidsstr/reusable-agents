@@ -169,3 +169,20 @@ def test_no_site_literals_in_module():
     src = inspect.getsource(hc).lower()
     for site in ("aisleprompt", "specpicks"):
         assert site not in src
+
+
+def test_human_click_paths_renders_and_merges_paths():
+    spec = hc.resolve_spec({"referer_col": "referer"}, config={})
+    rows = [("human", "https://site.test/blog/a?utm_source=chatgpt.com", 3),
+            ("human", "https://site.test/blog/a", 2),
+            ("human", "https://site.test/k/x#top", 4),
+            ("human", "", 9), ("human", "not a path", 1),
+            ("ua-bot", "https://site.test/blog/z", 50)]
+    out = hc.human_click_paths(_FakeConn(rows), spec, table="clicks",
+                               group_col="referer")
+    assert out == [{"path": "/blog/a", "clicks": 5}, {"path": "/k/x", "clicks": 4}]
+    ids = [("human", "B0AAA", 2), ("human", "B0BBB", 7)]
+    out = hc.human_click_paths(_FakeConn(ids), spec, table="clicks",
+                               group_col="asin", path_template="/product/{value}",
+                               limit=1)
+    assert out == [{"path": "/product/B0BBB", "clicks": 7}]

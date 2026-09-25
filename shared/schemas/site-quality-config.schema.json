@@ -46,6 +46,34 @@
           "type": "boolean",
           "default": false,
           "description": "If true, use a headless browser. Required for SPAs. Adds Playwright dependency."
+        },
+        "retry_on_error": { "type": "integer", "minimum": 0, "default": 1, "description": "Re-fetches of a URL after a transport error or 5xx." },
+        "retry_backoff_s": { "type": "number", "minimum": 0, "default": 1.5 },
+        "seed_from_traffic": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Crawl the pages AI assistants use (framework/core/ai_traffic.py landed_paths) and the pages verified-human affiliate clicks come from (framework/core/human_clicks.py) before seed_urls, so the max_pages budget goes where the site's outcomes are made. Optional input: a failure leaves seed_urls unchanged.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "dsn_env": { "type": "string", "description": "Env var holding the site's postgres DSN (default DATABASE_URL)." },
+            "ai_top_n": { "type": "integer", "minimum": 0, "default": 15, "description": "AI-landed pages to seed (0 = none)." },
+            "ai_prefixes": { "type": "array", "items": { "type": "string" }, "description": "Only AI-landed paths starting with one of these." },
+            "ai_config": { "type": "object", "description": "Overrides merged over framework.core.ai_traffic.DEFAULTS (table/column names, sources, windows, spoof filter)." },
+            "human_clicks": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Pages that produced verified-human clicks, via human_clicks.human_click_paths.",
+              "properties": {
+                "table": { "type": "string" },
+                "spec": { "type": "object", "description": "human_clicks column spec (time_col, referer_col, bot_flag_col, ...)." },
+                "match": { "type": "object", "description": "Column filters, e.g. {\"source\": \"amazon\"}." },
+                "group_col": { "type": "string", "description": "Column naming the page: a referer URL column, or an id column with path_template." },
+                "path_template": { "type": "string", "default": "{value}" },
+                "window_days": { "type": "integer", "minimum": 1, "default": 30 },
+                "top_n": { "type": "integer", "minimum": 0, "default": 10 }
+              }
+            }
+          }
         }
       }
     },
