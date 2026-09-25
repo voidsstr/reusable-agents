@@ -71,3 +71,17 @@ def test_directives_text_drops_retired_goals(storage):
                  storage=storage)
     txt = g.goals_directives_text("a", storage=storage)
     assert "goal-keep" in txt and "goal-drop" not in txt
+
+
+def test_metric_helper_never_reaccomplishes_a_retired_goal(storage):
+    from framework.core import metric_helper as mh
+    g.init_goals("a", [_goal("goal-implemented", target=10),
+                       _goal("goal-live", target=10)], storage=storage)
+    g.init_goals("a", [{"id": "goal-implemented", "status": "abandoned"}],
+                 storage=storage)
+    mh.record_many("a", {"goal-implemented": 198, "goal-live": 11}, storage=storage)
+    mh.record("a", "goal-implemented", 250, storage=storage)
+    by = {x["id"]: x for x in g.read_active_goals("a", storage=storage)}
+    assert by["goal-implemented"]["status"] == "abandoned"
+    assert by["goal-implemented"]["metric"]["current"] == 250
+    assert by["goal-live"]["status"] == "accomplished"   # live goals unchanged

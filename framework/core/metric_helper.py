@@ -97,8 +97,9 @@ def record(
             m = g.setdefault("metric", {})
             m["current"] = float(value)
             m["updated_at"] = now
-            # Auto-detect accomplishment by direction + target
-            if "target" in m:
+            # Auto-detect accomplishment by direction + target. A retired
+            # (abandoned) goal keeps its measurements but never flips status.
+            if "target" in m and g.get("status") != "abandoned":
                 tgt = m.get("target")
                 direction = m.get("direction", "increase")
                 if tgt is not None:
@@ -169,7 +170,7 @@ def record_many(
             m = g.setdefault("metric", {})
             m["current"] = value
             m["updated_at"] = now
-            if "target" in m:
+            if "target" in m and g.get("status") != "abandoned":
                 tgt = m.get("target")
                 direction = m.get("direction", "increase")
                 if tgt is not None:
