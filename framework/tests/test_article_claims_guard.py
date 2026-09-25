@@ -84,3 +84,28 @@ def test_warn_mode_never_rejects():
     audit = G.check("We ran every blender for 30 seconds. 4.8 stars across 9,000 reviews.", policy=pol)
     assert audit.passes
     assert len(audit.warnings()) == 2
+
+
+def test_storage_copy_of_the_policy_overrides_the_repo_default():
+    """The storage copy is the no-commit knob the operator uses to flip a
+    site between warn and reject; run.sh and the sweep CLI must read it."""
+    class _Store:
+        def read_json(self, key):
+            assert key == "config/article-claims-guard-config.json"
+            return {"default": {"first_hand_claims": "reject", "star_ratings": "reject",
+                                "point_prices": "off"},
+                    "sites": {"specpicks": {"first_hand_claims": "reject"}}}
+
+    body = "We ran every GPU through the same benchmark suite for a week."
+    # Repo default: specpicks is warn-only.
+    assert G.check(body, site_hint="specpicks-article-proposal-agent", bucket="buying-guide").passes
+    # Storage override: reject.
+    assert not G.check(body, site_hint="specpicks-article-proposal-agent", bucket="buying-guide",
+                       storage=_Store()).passes
+    cfg = G.load_config(_Store())
+    assert G.resolve_policy("specpicks-x", "buying-guide", config=cfg)["first_hand_claims"] == "reject"
+
+    class _Empty:
+        def read_json(self, key):
+            return None
+    assert G.load_config(_Empty())["sites"]["specpicks"]["first_hand_claims"] == "warn"

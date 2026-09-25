@@ -29,7 +29,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from framework.core.article_claims_guard import check, resolve_policy  # noqa: E402
+from framework.core.article_claims_guard import check, load_config, resolve_policy  # noqa: E402
 from framework.cli.article_heading_repair import resolve_settings  # noqa: E402
 
 
@@ -72,13 +72,22 @@ def main(argv=None) -> int:
     finally:
         conn.close()
 
+    # The storage copy of config/article-claims-guard-config.json overrides
+    # the repo default (no commit needed to change a site's policy). Loaded
+    # once; without a reachable storage backend the repo default applies.
+    try:
+        from framework.core.storage import get_storage
+        cfg = load_config(get_storage())
+    except Exception:
+        cfg = load_config(None)
+
     rejected = 0
     for row in rows:
         rec = dict(zip([slug_c, body] + extra, row))
         bucket = rec.get("bucket") or rec.get("category") or ""
         audit = check(rec.get(body) or "", subtitle=rec.get("subtitle") or "",
                       excerpt=rec.get("excerpt") or "", bucket=bucket,
-                      policy=resolve_policy(args.site, bucket))
+                      policy=resolve_policy(args.site, bucket, config=cfg))
         if audit.passes:
             continue
         rejected += 1

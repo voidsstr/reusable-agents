@@ -2285,10 +2285,18 @@ for rid, body_p, meta_p in pairs:
             from framework.core.article_claims_guard import check as _claims_check
             _rec_c = recs_doc.get(rid) or {}
             _prop_c = (_rec_c.get("proposal") or _rec_c.get("article_proposal") or {})
+            # The storage copy of the policy overrides the repo default, so an
+            # operator can flip a site to reject/warn without a commit.
+            try:
+                from framework.core.storage import get_storage as _claims_gs
+                _claims_store = _claims_gs()
+            except Exception:
+                _claims_store = None
             _claims = _claims_check(
                 body_md,
                 bucket=str(_prop_c.get("bucket") or _prop_c.get("category") or ""),
                 site_hint=str(_rec_c.get("agent_id") or _prop_c.get("site") or ""),
+                storage=_claims_store,
             )
             for _w in _claims.warnings():
                 print(f"[article-insert] {rid}: CLAIMS-GUARD warn: {_w}", file=sys.stderr)

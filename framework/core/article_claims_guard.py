@@ -215,21 +215,29 @@ class ClaimsAudit:
         return w
 
 
-def resolve_policy(site_hint: str = "", bucket: str = "", storage=None) -> dict:
-    """The site's policy with `point_prices` forced to "off" unless `bucket` is
-    one of the site's `price_buckets`."""
-    cfg = None
+def load_config(storage=None) -> dict:
+    """The guard's config: the storage copy at `config/article-claims-guard-
+    config.json` when a storage backend is given and holds one, else the repo
+    default. Callers that check many rows load it once and pass `config=`."""
     if storage is not None:
         try:
             cfg = storage.read_json(_CONFIG_KEY) or None
         except Exception:
             cfg = None
-    if cfg is None:
-        try:
-            cfg = _json.loads(_REPO_CONFIG.read_text())
-        except Exception as e:  # pragma: no cover - config shipped with the repo
-            _sys.stderr.write(f"[claims-guard] config unreadable ({e}); guard in warn mode\n")
-            cfg = {"default": {"first_hand_claims": "warn", "star_ratings": "warn", "point_prices": "off"}}
+        if cfg:
+            return cfg
+    try:
+        return _json.loads(_REPO_CONFIG.read_text())
+    except Exception as e:  # pragma: no cover - config shipped with the repo
+        _sys.stderr.write(f"[claims-guard] config unreadable ({e}); guard in warn mode\n")
+        return {"default": {"first_hand_claims": "warn", "star_ratings": "warn", "point_prices": "off"}}
+
+
+def resolve_policy(site_hint: str = "", bucket: str = "", storage=None, config: dict | None = None) -> dict:
+    """The site's policy with `point_prices` forced to "off" unless `bucket` is
+    one of the site's `price_buckets`. `config` (from load_config) wins over
+    `storage`; with neither, the repo default applies."""
+    cfg = config if config is not None else load_config(storage)
     vals = dict(cfg.get("default") or {})
     hint = (site_hint or "").lower()
     for key, over in (cfg.get("sites") or {}).items():
