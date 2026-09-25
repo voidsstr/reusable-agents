@@ -55,7 +55,7 @@ def _amazon_lookup(asins: list[str], batch: int = 10, log=print) -> tuple[dict, 
     surfaced for deactivation, not silently dropped.
     """
     import time
-    client = AmazonCreatorsClient(CreatorsConfig.from_env())
+    client = AmazonCreatorsClient(CreatorsConfig.from_env(), consumer="shelf-audit")
     items: dict[str, dict] = {}
     errors: dict[str, str] = {}
     for i in range(0, len(asins), batch):

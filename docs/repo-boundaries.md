@@ -340,7 +340,12 @@ hook (`FEATURED_SELECT_SCRIPT`). The hydration engine doesn't know about
 SpecPicks. It shells out to whatever script the env var points at, if
 any. The Creators API client is a framework primitive
 (`framework/core/amazon_creators.py`), shared with `kitchen-scraper`
-and `shelf-audit-agent`.
+and `shelf-audit-agent`. It covers `getItems` (refresh known ASINs) and
+`searchItems` (`search_items()`, discover new ones), and keeps one shared
+per-UTC-day call budget for every agent on the credential: the split is the
+storage config `config/amazon-creators-budget.json` (per-consumer shares
+such as `price-refresh`, `discovery`, `hydration`, `shelf-audit`), and agents
+check `client.budget_ok()` / `client.remaining_budget()` before large loops.
 
 ## Migration: when an agent crosses the boundary
 

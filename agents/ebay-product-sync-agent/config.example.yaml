@@ -48,3 +48,30 @@ seeds:
     queries:
       - "mechanical keyboard"
       - "compact keyboard"
+
+# eBay Browse quota — per app per day, shared by searches, item lookups and
+# every other caller of the same app keys. Each run reads eBay's own count
+# (Developer Analytics getRateLimits; resets 07:00 UTC) and paces what is
+# left over the runs before the reset; the local ledger is only a fallback.
+ebay_api:
+  daily_call_limit: 5000   # basic Browse plan (a lower value still caps)
+  runs_per_day: 24         # hourly cron
+  headroom_pct: 0.1        # held back for manual/on-demand runs + other callers
+
+# Rolling re-price of existing listings (replaces the old audit pass).
+reprice:
+  enabled: true
+  # max_calls_per_run: 150   # default: usable_daily // runs_per_day - max_queries_per_run
+  min_age_hours: 12          # re-check an active listing at most this often
+  revive_window_days: 90     # re-check inactive, never-confirmed-ended listings this far back
+  max_not_found_ratio: 0.9   # ≥ this share of ≥20 lookups not-found → suspect the lookup, switch nothing off
+  # Roll live listing prices onto eBay-sourced PRODUCT rows. Off by default:
+  # enable only if the site renders a stored eBay-derived products.price with
+  # an eBay source label (not an Amazon "price sourced from" claim).
+  update_product_prices: false
+  product_key_column: asin   # eBay-sourced product rows are those whose key...
+  product_key_prefix: EBAY_  # ...starts with this (mapping transform ebay_id_prefix)
+  clear_price_when_unlisted: true
+
+# Public product URL for the completion email's "view" links.
+# catalog_url_template: "https://example.com/product/{asin}"

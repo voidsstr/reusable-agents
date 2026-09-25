@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -623,125 +624,500 @@ def _ensure_item_end_date_column(adapter: DbAdapter, table: str) -> None:
         log.warning("ensure item_end_date column on %s failed: %s", table, e)
 
 
-def _audit_active_listings(adapter: DbAdapter, table: str, ebay,
-                            *, max_audit: int, fk_col: str) -> dict:
-    """Verify a slice of currently-active listings are still live on eBay
-    by hitting Browse API getItem. Mark any 404'd ones inactive so the
-    same run's backfill phase finds fresh replacements for the affected
-    products.
+# ───────────────────────────────────────────────────────────────────
+# Rolling re-price — keep existing listings' price + liveness current
+# ───────────────────────────────────────────────────────────────────
 
-    Why limit per run: getItem is ~1 request per listing. Default daily
-    quota is generous (5000/day on the basic Browse plan), but every
-    audit call competes with the search() calls used to discover new
-    listings. Default `max_audit=200/run × 24 runs/day = 4800` leaves
-    headroom. Tune via `audit_max_per_run` in site.yaml.
+DEFAULT_EBAY_API = {
+    # eBay Browse quota is per app per day (basic plan: 5,000 calls/day).
+    # Searches and item lookups share it.
+    "daily_call_limit": 5000,
+    # How many runs the cron fires per day (hourly = 24). Used to split
+    # the daily quota into a per-run allowance.
+    "runs_per_day": 24,
+    # Fraction of the daily quota held back for on-demand/manual runs.
+    "headroom_pct": 0.10,
+}
 
-    Selection: oldest `updated_at` first among `is_active=true` rows.
-    Listings that were just refreshed by the search phase get pushed
-    to the back of the line — no point re-verifying something we just
-    saw in a fresh search response.
+DEFAULT_REPRICE = {
+    "enabled": True,
+    # Hard cap on item-lookup calls per run. None → derived from the daily
+    # quota: usable_daily // runs_per_day − planned search calls.
+    "max_calls_per_run": None,
+    # Active listings re-checked at most once per this many hours; anything
+    # fresher (just seen in search, or just re-priced) is skipped.
+    "min_age_hours": 12,
+    # Inactive listings with no recorded end date (deactivated by the time
+    # reaper, not confirmed ended) are re-checked newest-first within this
+    # window and revived when still live.
+    "revive_window_days": 90,
+    # Roll live listing prices up onto eBay-sourced PRODUCT rows. OFF by
+    # default: a destination may keep products.price NULL for eBay stock on
+    # purpose (the live price lives in the listings table) and render any
+    # fresh products.price with a marketplace-specific sourcing claim, so a
+    # derived price there is a new, possibly false, claim. Opt in per site
+    # only once the site renders eBay-sourced product prices as such.
+    "update_product_prices": False,
+    # Products whose key column starts with this prefix are eBay-sourced
+    # (mapping transform `ebay_id_prefix`); their price is the lowest live
+    # USD listing price. Other products (e.g. Amazon rows that also carry
+    # eBay listings) keep their own price. "" disables product updates.
+    "product_key_column": "asin",
+    "product_key_prefix": "EBAY_",
+    # When an eBay-sourced product has no live listing left, NULL its price
+    # so pricing-integrity filters (price IS NOT NULL) stop promoting it.
+    # The product row itself is never deactivated.
+    "clear_price_when_unlisted": True,
+    # Circuit breaker: when at least this share of a run's lookups (min 20)
+    # come back not-found, the lookup itself is presumed broken (the
+    # 2026-09 /item/<legacy id> bug 404'd every live listing) and no row is
+    # switched off for being not-found that run.
+    "max_not_found_ratio": 0.9,
+}
 
-    Returns {checked, ended, errors}.
-    """
-    if max_audit <= 0:
-        return {"checked": 0, "ended": 0, "errors": 0}
+_LIVE_STATUSES = {"IN_STOCK", "LIMITED_STOCK"}
+
+
+def _reprice_config(cfg: dict) -> dict:
+    out = dict(DEFAULT_REPRICE)
+    out.update({k: v for k, v in ((cfg or {}).get("reprice") or {}).items()})
+    # Legacy knob from the old audit pass.
+    if out.get("max_calls_per_run") is None and (cfg or {}).get("audit_max_per_run") is not None:
+        out["max_calls_per_run"] = int(cfg["audit_max_per_run"])
+    return out
+
+
+def _ebay_call_budget(cfg: dict, *, used_today: int,
+                      planned_search_calls: int,
+                      live: Optional[dict] = None,
+                      now: Optional[datetime] = None) -> dict:
+    """Split eBay's per-app daily call quota into this run's re-price cap.
+
+    reprice_cap = min(per-run allowance, what is left of today's usable
+    quota after this run's searches).
+
+    `live` is eBay's own count (EbayClient.browse_rate_limit): it covers
+    every caller sharing the app keys, not just this engine's ledger, so
+    it wins over `used_today` when present. With its `reset` time the
+    usable remainder is also PACED over the runs left before the reset, so
+    other callers' consumption slows this run down instead of this engine
+    draining the quota and 429-ing them. Pure — unit-tested."""
+    api = dict(DEFAULT_EBAY_API)
+    api.update((cfg or {}).get("ebay_api") or {})
+    daily = max(0, int(api["daily_call_limit"]))
+    runs = max(1, int(api["runs_per_day"]))
+    headroom = min(0.9, max(0.0, float(api["headroom_pct"])))
+    searches = max(0, planned_search_calls)
+    used = max(0, used_today)
+    runs_left = None
+    if live and live.get("limit"):
+        # eBay's count is authoritative; a lower configured limit still caps.
+        daily = min(daily, int(live["limit"]))
+        used = max(used, int(live["limit"]) - int(live.get("remaining") or 0))
+        reset = _parse_iso(live.get("reset"))
+        if reset is not None:
+            now = now or datetime.now(timezone.utc)
+            hours_left = max(0.0, (reset - now).total_seconds() / 3600.0)
+            runs_left = max(1, math.ceil(hours_left * runs / 24.0))
+    usable = int(daily * (1.0 - headroom))
+    rp = _reprice_config(cfg)
+    if rp.get("max_calls_per_run") is not None:
+        per_run = max(0, int(rp["max_calls_per_run"]))
+    else:
+        per_run = max(0, usable // runs - searches)
+    left_today = max(0, usable - used - searches)
+    cap = min(per_run, left_today)
+    if runs_left is not None:
+        cap = min(cap, max(0, (usable - used) // runs_left - searches))
+    if not rp.get("enabled", True):
+        cap = 0
+    return {"daily_call_limit": daily, "usable_today": usable,
+            "used_today": used, "per_run_cap": per_run,
+            "runs_left_before_reset": runs_left,
+            "reprice_cap": cap}
+
+
+def _usage_prefix(client_id: str, day: str) -> str:
+    import hashlib
+    app = hashlib.sha1((client_id or "").encode()).hexdigest()[:12]
+    return f"agents/{AGENT_ID}/api-usage/{day}/{app}/"
+
+
+def _read_api_usage_today(storage, client_id: str, day: str) -> int:
+    """Calls already made today by every instance sharing this eBay app
+    (one ledger file per instance). Unreadable storage → 0 (eBay's 429
+    stays the hard limit)."""
+    total = 0
+    try:
+        for key in storage.list_prefix(_usage_prefix(client_id, day)) or []:
+            d = storage.read_json(key) or {}
+            total += int(d.get("calls") or 0)
+    except Exception as e:
+        log.warning("eBay usage ledger read failed (treating as 0): %s", e)
+    return total
+
+
+def _record_api_usage(storage, client_id: str, day: str, instance_id: str,
+                      calls_by_op: dict) -> None:
+    n = sum(int(v) for v in (calls_by_op or {}).values())
+    if n <= 0:
+        return
+    key = _usage_prefix(client_id, day) + f"{instance_id}.json"
+    try:
+        d = storage.read_json(key) or {}
+        d["calls"] = int(d.get("calls") or 0) + n
+        by_op = d.get("by_operation") or {}
+        for op, c in calls_by_op.items():
+            by_op[op] = int(by_op.get(op) or 0) + int(c)
+        d["by_operation"] = by_op
+        d["updated_at"] = _now()
+        storage.write_json(key, d)
+    except Exception as e:
+        log.warning("eBay usage ledger write failed: %s", e)
+
+
+def _parse_iso(v: Any) -> Optional[datetime]:
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _item_state(item: dict, *, now: datetime) -> dict:
+    """Interpret one Browse getItem payload → {live, price, currency,
+    item_end_date, status}. A listing is live unless eBay reports it
+    OUT_OF_STOCK or its end date has passed."""
+    price_obj = item.get("price") or item.get("currentBidPrice") or {}
+    try:
+        price = float(price_obj.get("value")) if price_obj.get("value") is not None else None
+    except (TypeError, ValueError):
+        price = None
+    avail = item.get("estimatedAvailabilities") or []
+    status = ((avail[0] or {}).get("estimatedAvailabilityStatus") if avail else None) or ""
+    end = _parse_iso(item.get("itemEndDate"))
+    ended = end is not None and end <= now
+    live = not ended and (not status or status in _LIVE_STATUSES)
+    return {"live": live, "price": price,
+            "currency": price_obj.get("currency") or None,
+            "item_end_date": end.isoformat() if end else None,
+            "status": "ENDED" if ended else (status or "UNKNOWN")}
+
+
+def _group_state(items: list[dict], *, now: datetime) -> dict:
+    """A multi-variation listing is live while any variation is; its price
+    is the cheapest live variation (USD preferred)."""
+    states = [_item_state(it, now=now) for it in (items or [])]
+    live = [s for s in states if s["live"] and s["price"] is not None]
+    if not live:
+        return {"live": False, "price": None, "currency": None,
+                "item_end_date": None, "status": "OUT_OF_STOCK"}
+    usd = [s for s in live if (s["currency"] or "USD") == "USD"] or live
+    best = min(usd, key=lambda s: s["price"])
+    return dict(best, status="GROUP")
+
+
+def _select_reprice_candidates(adapter: DbAdapter, table: str, fk_col: str, *,
+                                limit: int, min_age_hours: int,
+                                revive_window_days: int) -> list[tuple]:
+    """(ebay_item_id, product_id, price, is_active) rows to re-check:
+    stale ACTIVE listings oldest-first, then — with whatever budget is
+    left — INACTIVE listings with no confirmed end, newest-first (most
+    likely still live).
+
+    "Confirmed end" = item_end_date <= updated_at: the re-price pass stamps
+    both when eBay says ended/out of stock. A NULL end date, or one that was
+    still in the future when the row was last seen (a GTC renewal date the
+    time reaper outlived), is unconfirmed and worth a re-check."""
+    if limit <= 0:
+        return []
     if hasattr(adapter, "ensure_open"):
         try: adapter.ensure_open()
         except Exception: pass
-
-    # Pick which listings to verify: active, not just-refreshed.
     rows: list[tuple] = []
     try:
+        cur = adapter.conn.cursor()
         if adapter.kind == "postgres":
-            cur = adapter.conn.cursor()
             cur.execute(f"""
-                SELECT ebay_item_id, {fk_col}, updated_at
+                SELECT ebay_item_id, {fk_col}, price, is_active
                   FROM {table}
                  WHERE is_active = true
-                   AND ebay_item_id IS NOT NULL
-                   AND ebay_item_id <> ''
+                   AND ebay_item_id IS NOT NULL AND ebay_item_id <> ''
+                   AND updated_at < NOW() - make_interval(hours => %s)
                  ORDER BY updated_at ASC
                  LIMIT %s
-            """, (int(max_audit),))
-            rows = cur.fetchall()
-            cur.close()
+            """, (int(min_age_hours), int(limit)))
+            rows = list(cur.fetchall())
+            if len(rows) < limit and revive_window_days > 0:
+                cur.execute(f"""
+                    SELECT ebay_item_id, {fk_col}, price, is_active
+                      FROM {table}
+                     WHERE is_active = false
+                       AND (item_end_date IS NULL OR item_end_date > updated_at)
+                       AND ebay_item_id IS NOT NULL AND ebay_item_id <> ''
+                       AND updated_at > NOW() - make_interval(days => %s)
+                     ORDER BY updated_at DESC
+                     LIMIT %s
+                """, (int(revive_window_days), int(limit - len(rows))))
+                rows += list(cur.fetchall())
         elif adapter.kind == "azure-sql":
-            cur = adapter.conn.cursor()
             cur.execute(f"""
-                SELECT TOP (?) ebay_item_id, {fk_col}, updated_at
+                SELECT TOP (?) ebay_item_id, {fk_col}, price, is_active
                   FROM {table}
                  WHERE is_active = 1
-                   AND ebay_item_id IS NOT NULL
-                   AND ebay_item_id <> ''
+                   AND ebay_item_id IS NOT NULL AND ebay_item_id <> ''
+                   AND updated_at < DATEADD(hour, -?, SYSUTCDATETIME())
                  ORDER BY updated_at ASC
-            """, (int(max_audit),))
-            rows = cur.fetchall()
-            cur.close()
+            """, (int(limit), int(min_age_hours)))
+            rows = list(cur.fetchall())
+            if len(rows) < limit and revive_window_days > 0:
+                cur.execute(f"""
+                    SELECT TOP (?) ebay_item_id, {fk_col}, price, is_active
+                      FROM {table}
+                     WHERE is_active = 0
+                       AND (item_end_date IS NULL OR item_end_date > updated_at)
+                       AND ebay_item_id IS NOT NULL AND ebay_item_id <> ''
+                       AND updated_at > DATEADD(day, -?, SYSUTCDATETIME())
+                     ORDER BY updated_at DESC
+                """, (int(limit - len(rows)), int(revive_window_days)))
+                rows += list(cur.fetchall())
+        cur.close()
     except Exception as e:
-        log.warning("audit: select query failed: %s", e)
+        log.warning("reprice: candidate query failed: %s", e)
         if adapter.kind == "postgres":
             try: adapter.conn.rollback()
             except Exception: pass
-        return {"checked": 0, "ended": 0, "errors": 0}
+        return []
+    return rows
 
+
+def _reprice_listings(adapter: DbAdapter, table: str, ebay, *, fk_col: str,
+                      max_calls: int, min_age_hours: int = 12,
+                      revive_window_days: int = 90, dry_run: bool = False,
+                      max_not_found_ratio: float = 0.9,
+                      now: Optional[datetime] = None) -> dict:
+    """Rolling re-price: look each candidate up via Browse
+    get_item_by_legacy_id (getItems batch is a restricted API), then
+      • live   → write price/currency/end date, is_active=true, bump
+                 updated_at (+ verified_active_at when the column exists)
+      • ended / out of stock → is_active=false and item_end_date=NOW()
+                 (row kept — never deleted; a later search sighting
+                 rewrites item_end_date and re-activates it)
+    Stops at `max_calls` Browse calls or on the first 429. When
+    ≥ `max_not_found_ratio` of ≥ 20 lookups are not-found, those rows are
+    left untouched (suspected broken lookup, not real ends).
+
+    Returns stats incl. `product_ids` touched (for the product price
+    roll-up) and up to 10 `samples`."""
+    from ebay_client import EbayItemGroup, EbayRateLimited  # noqa: E402
+    now = now or datetime.now(timezone.utc)
+    stats: dict = {"checked": 0, "repriced": 0, "price_changed": 0,
+                   "revived": 0, "ended": 0, "unavailable": 0, "errors": 0,
+                   "rate_limited": False, "api_calls": 0,
+                   "product_ids": set(), "samples": []}
+    if max_calls <= 0:
+        return stats
+    rows = _select_reprice_candidates(
+        adapter, table, fk_col, limit=max_calls,
+        min_age_hours=min_age_hours, revive_window_days=revive_window_days)
     if not rows:
-        return {"checked": 0, "ended": 0, "errors": 0}
-
-    log.info("audit: verifying %d active listings against eBay getItem", len(rows))
-    ended_ids: list[str] = []
-    errors = 0
-    for r in rows:
-        item_id = r[0]
+        return stats
+    calls_at_start = ebay.total_calls
+    live_updates: list[tuple] = []   # (item_id, price, currency, end_iso)
+    dead_ids: list[str] = []
+    not_found_ids: set = set()
+    for item_id, product_id, old_price, was_active in rows:
+        if ebay.total_calls - calls_at_start >= max_calls:
+            break
+        item_id = str(item_id)
         try:
-            result = ebay.get_item(item_id)
-            if result is None:  # 404 = ended/removed
-                ended_ids.append(item_id)
+            try:
+                item = ebay.get_item(item_id)
+                state = _item_state(item, now=now) if item is not None else None
+            except EbayItemGroup:
+                variants = ebay.get_items_by_item_group(item_id)
+                state = _group_state(variants, now=now) if variants else None
+        except EbayRateLimited as e:
+            stats["rate_limited"] = True
+            log.warning("reprice: eBay rate limit hit after %d checks — stopping (%s)",
+                        stats["checked"], str(e)[:160])
+            break
         except Exception as e:
-            # Don't let one failed call abort the whole audit — the
-            # next run will retry these items. Log so we can spot a
-            # systemic issue (auth, rate-limit) in dashboard log tails.
-            errors += 1
-            if errors <= 5:
-                log.warning("audit: get_item(%s) error: %s", item_id, str(e)[:200])
+            stats["errors"] += 1
+            if stats["errors"] <= 5:
+                log.warning("reprice: lookup %s failed: %s", item_id, str(e)[:200])
+            continue
+        stats["checked"] += 1
+        if product_id is not None:
+            stats["product_ids"].add(product_id)
+        if state is None:
+            outcome = "ended"
+            stats["ended"] += 1
+            dead_ids.append(item_id)
+            not_found_ids.add(item_id)
+        elif not state["live"]:
+            outcome = "unavailable"
+            stats["unavailable"] += 1
+            dead_ids.append(item_id)
+        else:
+            outcome = "live"
+            stats["repriced"] += 1
+            if not was_active:
+                stats["revived"] += 1
+            if (state["price"] is not None and old_price is not None
+                    and abs(float(old_price) - state["price"]) >= 0.005):
+                stats["price_changed"] += 1
+            live_updates.append((item_id, state["price"], state["currency"],
+                                 state["item_end_date"]))
+        if len(stats["samples"]) < 10:
+            stats["samples"].append({
+                "ebay_item_id": item_id, "outcome": outcome,
+                "was_active": bool(was_active),
+                "old_price": float(old_price) if old_price is not None else None,
+                "new_price": state["price"] if state else None,
+                "status": state["status"] if state else "NOT_FOUND",
+            })
+    stats["api_calls"] = ebay.total_calls - calls_at_start
+    if (stats["ended"] >= 20
+            and stats["ended"] >= max_not_found_ratio * stats["checked"]):
+        stats["not_found_suspect"] = True
+        log.warning("reprice: %d/%d lookups not-found — treating as a broken "
+                    "lookup, not real ends; those rows are left as they are",
+                    stats["ended"], stats["checked"])
+        dead_ids = [i for i in dead_ids if i not in not_found_ids]
 
-    # Apply the inactive marks. Use a single batched UPDATE — much faster
-    # than N round-trips, and it commits atomically so the backfill phase
-    # later in this run sees a coherent view of "what's still live".
-    if ended_ids:
-        try:
-            if adapter.kind == "postgres":
-                cur = adapter.conn.cursor()
+    if dry_run or not (live_updates or dead_ids):
+        return stats
+    has_verified = False
+    try:
+        has_verified = any(c.name == "verified_active_at"
+                           for c in adapter.introspect_table(table))
+    except Exception:
+        pass
+    if hasattr(adapter, "ensure_open"):
+        try: adapter.ensure_open()
+        except Exception: pass
+    try:
+        cur = adapter.conn.cursor()
+        if adapter.kind == "postgres":
+            from psycopg2.extras import execute_values
+            verified = ", verified_active_at = NOW()" if has_verified else ""
+            if live_updates:
+                execute_values(cur, f"""
+                    UPDATE {table} AS t
+                       SET price = COALESCE(v.price, t.price),
+                           currency = COALESCE(v.currency, t.currency),
+                           item_end_date = v.end_date,
+                           is_active = true,
+                           updated_at = NOW(){verified}
+                      FROM (VALUES %s) AS v(ebay_item_id, price, currency, end_date)
+                     WHERE t.ebay_item_id = v.ebay_item_id
+                """, live_updates,
+                    template="(%s, %s::numeric, %s::varchar, %s::timestamptz)")
+            if dead_ids:
                 cur.execute(f"""
                     UPDATE {table}
                        SET is_active = false,
+                           item_end_date = CASE WHEN item_end_date IS NULL
+                                                  OR item_end_date > NOW()
+                                                THEN NOW() ELSE item_end_date END,
                            updated_at = NOW()
-                     WHERE is_active = true
-                       AND ebay_item_id = ANY(%s)
-                """, (ended_ids,))
-                adapter.conn.commit()
-                cur.close()
-            elif adapter.kind == "azure-sql":
-                # azure-sql doesn't support ARRAY params; chunk into IN-lists.
-                CHUNK = 200
-                cur = adapter.conn.cursor()
-                for i in range(0, len(ended_ids), CHUNK):
-                    chunk = ended_ids[i:i + CHUNK]
-                    placeholders = ",".join("?" * len(chunk))
-                    cur.execute(f"""
-                        UPDATE {table}
-                           SET is_active = 0,
-                               updated_at = SYSUTCDATETIME()
-                         WHERE is_active = 1
-                           AND ebay_item_id IN ({placeholders})
-                    """, tuple(chunk))
-                adapter.conn.commit()
-                cur.close()
-        except Exception as e:
-            log.warning("audit: bulk inactive update failed: %s", e)
+                     WHERE ebay_item_id = ANY(%s)
+                """, (dead_ids,))
+        elif adapter.kind == "azure-sql":
+            verified = ", verified_active_at = SYSUTCDATETIME()" if has_verified else ""
+            for iid, price, currency, end_iso in live_updates:
+                cur.execute(f"""
+                    UPDATE {table}
+                       SET price = COALESCE(?, price), currency = COALESCE(?, currency),
+                           item_end_date = ?, is_active = 1,
+                           updated_at = SYSUTCDATETIME(){verified}
+                     WHERE ebay_item_id = ?
+                """, (price, currency, end_iso, iid))
+            for iid in dead_ids:
+                cur.execute(f"""
+                    UPDATE {table}
+                       SET is_active = 0,
+                           item_end_date = CASE WHEN item_end_date IS NULL
+                                                  OR item_end_date > SYSUTCDATETIME()
+                                                THEN SYSUTCDATETIME() ELSE item_end_date END,
+                           updated_at = SYSUTCDATETIME()
+                     WHERE ebay_item_id = ?
+                """, (iid,))
+        adapter.conn.commit()
+        cur.close()
+    except Exception as e:
+        stats["errors"] += 1
+        log.warning("reprice: listing update failed: %s", e)
+        try: adapter.conn.rollback()
+        except Exception: pass
+    return stats
 
-    log.info("audit: %d/%d listings ended (%d errors)",
-             len(ended_ids), len(rows), errors)
-    return {"checked": len(rows), "ended": len(ended_ids), "errors": errors}
+
+def _refresh_product_prices(adapter: DbAdapter, products_table: str,
+                            listings_table: str, fk_col: str,
+                            product_ids, *, key_column: str, key_prefix: str,
+                            clear_when_unlisted: bool = True) -> dict:
+    """Roll live listing prices up to eBay-sourced product rows: price =
+    cheapest live USD listing ≥ $1, price_updated_at = NOW(). A stale
+    original_price below the new price is cleared (no negative discount).
+    Only rows whose `key_column` starts with `key_prefix` are touched —
+    marketplace-owned prices (Amazon) are never overwritten."""
+    ids = sorted({int(i) for i in (product_ids or []) if i is not None})
+    out = {"priced": 0, "cleared": 0}
+    if not ids or not key_prefix or adapter.kind != "postgres":
+        return out
+    if hasattr(adapter, "ensure_open"):
+        try: adapter.ensure_open()
+        except Exception: pass
+    like = key_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    try:
+        cur = adapter.conn.cursor()
+        cur.execute(f"""
+            WITH s AS (
+                SELECT l.{fk_col} AS pid,
+                       MIN(l.price) FILTER (
+                           WHERE l.is_active AND l.price >= 1.0
+                             AND (l.currency IS NULL OR l.currency = 'USD')
+                       ) AS min_price
+                  FROM {listings_table} l
+                 WHERE l.{fk_col} = ANY(%s)
+                 GROUP BY l.{fk_col}
+            )
+            UPDATE {products_table} p
+               SET price = s.min_price,
+                   currency = 'USD',
+                   original_price = CASE WHEN p.original_price < s.min_price
+                                         THEN NULL ELSE p.original_price END,
+                   price_updated_at = NOW()
+              FROM s
+             WHERE p.id = s.pid
+               AND s.min_price IS NOT NULL
+               AND p.{key_column} LIKE %s
+        """, (ids, like))
+        out["priced"] = cur.rowcount or 0
+        if clear_when_unlisted:
+            cur.execute(f"""
+                UPDATE {products_table} p
+                   SET price = NULL, price_updated_at = NOW()
+                 WHERE p.id = ANY(%s)
+                   AND p.price IS NOT NULL
+                   AND p.{key_column} LIKE %s
+                   AND NOT EXISTS (
+                       SELECT 1 FROM {listings_table} l
+                        WHERE l.{fk_col} = p.id AND l.is_active
+                          AND l.price >= 1.0
+                          AND (l.currency IS NULL OR l.currency = 'USD'))
+            """, (ids, like))
+            out["cleared"] = cur.rowcount or 0
+        adapter.conn.commit()
+        cur.close()
+    except Exception as e:
+        log.warning("product price roll-up failed: %s", e)
+        try: adapter.conn.rollback()
+        except Exception: pass
+    return out
 
 
 def _mark_stale_inactive(adapter: DbAdapter, table: str, hours: int) -> int:
@@ -881,6 +1257,11 @@ class EbayProductSyncAgent(AgentBase):
         ebay_health = ebay.healthcheck()
         log.info("eBay OK: %s", ebay_health)
 
+        if kwargs.get("reprice_only"):
+            return self._reprice_only(adapter, products_table, listings_table,
+                                      site_id, ebay, storage, dry_run,
+                                      kwargs.get("reprice_limit"))
+
         # ─── PHASE 1 — load existing mapping or propose a new one ──
         mapping = None
         if not force_remap:
@@ -911,6 +1292,104 @@ class EbayProductSyncAgent(AgentBase):
         return self._ingest_v2(
             adapter, mapping, site_id, site_constants, ebay, ebay_filter,
             seeds, per_query_limit, max_queries_per_run, stale_hours, dry_run,
+        )
+
+    # ───────────────────────────────────────────────────────────────
+    def _reprice_phase(self, adapter: DbAdapter, products_table: str,
+                       listings_table: str, fk_col: str, ebay: EbayClient, *,
+                       planned_search_calls: int, dry_run: bool,
+                       limit_override: Optional[int] = None) -> dict:
+        """Budget → re-price listings → roll prices up to products.
+        Returns flat metrics (repriced, ended, reprice_* …)."""
+        cfg = self._cfg or {}
+        rp = _reprice_config(cfg)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        used = _read_api_usage_today(self.storage, ebay.client_id, day)
+        live = ebay.browse_rate_limit()  # None → ledger-only fallback
+        budget = _ebay_call_budget(cfg, used_today=used,
+                                   planned_search_calls=planned_search_calls,
+                                   live=live)
+        cap = budget["reprice_cap"]
+        if limit_override is not None:
+            cap = min(cap, max(0, int(limit_override)))
+        log.info("reprice: budget %s (eBay live: %s) → %d calls this run",
+                 budget, live, cap)
+        out = {"reprice_cap": cap, "ebay_calls_used_today": budget["used_today"]}
+        if live:
+            out["ebay_quota_remaining"] = live["remaining"]
+        try:
+            r = _reprice_listings(
+                adapter, listings_table, ebay, fk_col=fk_col, max_calls=cap,
+                min_age_hours=int(rp["min_age_hours"]),
+                revive_window_days=int(rp["revive_window_days"]),
+                max_not_found_ratio=float(rp["max_not_found_ratio"]),
+                dry_run=dry_run)
+        except Exception as e:
+            log.warning("reprice phase failed (non-fatal): %s", e)
+            if adapter.kind == "postgres":
+                try: adapter.conn.rollback()
+                except Exception: pass
+            return out
+        log.info("reprice: checked=%d repriced=%d revived=%d price_changed=%d "
+                 "ended=%d unavailable=%d errors=%d calls=%d%s",
+                 r["checked"], r["repriced"], r["revived"], r["price_changed"],
+                 r["ended"], r["unavailable"], r["errors"], r["api_calls"],
+                 " (rate-limited)" if r["rate_limited"] else "")
+        out.update({
+            "repriced": r["repriced"],
+            # ended = no longer buyable (404 + out of stock), both marked inactive
+            "ended": r["ended"] + r["unavailable"],
+            "reprice_checked": r["checked"],
+            "reprice_revived": r["revived"],
+            "reprice_price_changed": r["price_changed"],
+            "reprice_not_found": r["ended"],
+            "reprice_out_of_stock": r["unavailable"],
+            "reprice_errors": r["errors"],
+            "reprice_rate_limited": r["rate_limited"],
+            "reprice_not_found_suspect": bool(r.get("not_found_suspect")),
+            "reprice_api_calls": r["api_calls"],
+            "reprice_samples": r["samples"],
+        })
+        if not dry_run and r["product_ids"] and rp.get("update_product_prices"):
+            roll = _refresh_product_prices(
+                adapter, products_table, listings_table, fk_col, r["product_ids"],
+                key_column=rp["product_key_column"],
+                key_prefix=rp["product_key_prefix"],
+                clear_when_unlisted=bool(rp["clear_price_when_unlisted"]))
+            out["products_repriced"] = roll["priced"]
+            out["products_price_cleared"] = roll["cleared"]
+        return out
+
+    def _record_ebay_usage(self, ebay: EbayClient) -> None:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _record_api_usage(self.storage, ebay.client_id, day, self.agent_id,
+                          ebay.calls)
+        ebay.calls = {}  # recorded — never double-count on a second call
+
+    def _reprice_only(self, adapter: DbAdapter, products_table: str,
+                      listings_table: str, site_id: str, ebay: EbayClient,
+                      storage, dry_run: bool,
+                      limit: Optional[int]) -> RunResult:
+        """`--reprice-only`: skip discovery (and the mapping flow); just
+        run the re-price pass. Used for manual catch-up and dry-run checks."""
+        mapping = storage.read_json(mapping_storage_key(self.agent_id, site_id)) or {}
+        lt = mapping.get("listings_table") or {}
+        fk_col = lt.get("fk_to_product_column") or "product_id"
+        stats = self._reprice_phase(
+            adapter, products_table, lt.get("name") or listings_table, fk_col,
+            ebay, planned_search_calls=0, dry_run=dry_run,
+            limit_override=limit)
+        stats["api_calls"] = ebay.total_calls
+        self._record_ebay_usage(ebay)
+        return RunResult(
+            status="success",
+            summary=(f"reprice-only{' (dry-run)' if dry_run else ''}: "
+                     f"checked={stats.get('reprice_checked', 0)} "
+                     f"repriced={stats.get('repriced', 0)} "
+                     f"revived={stats.get('reprice_revived', 0)} "
+                     f"ended={stats.get('ended', 0)} "
+                     f"api_calls={stats['api_calls']}"),
+            metrics=stats,
         )
 
     # ───────────────────────────────────────────────────────────────
@@ -1559,29 +2038,19 @@ class EbayProductSyncAgent(AgentBase):
         listings_keys = lt.get("key_columns") or ["ebay_item_id"]
         fk_col = lt.get("fk_to_product_column") or "product_id"
 
-        # ── Audit pass — verify a slice of active listings are still live
-        # on eBay, mark any 404'd ones inactive. Runs BEFORE the coverage
-        # probe so products whose only active listing just sold (BIN sold
-        # in <72h time-staleness window) become eligible for backfill in
-        # this same run. Bounded by audit_max_per_run (default 200) to
-        # stay well under the eBay Browse API daily quota — see
-        # _audit_active_listings docstring.
-        if not dry_run:
-            audit_max = int((self._cfg or {}).get("audit_max_per_run", 200))
-            try:
-                audit_stats = _audit_active_listings(
-                    adapter, lt["name"], ebay,
-                    max_audit=audit_max, fk_col=fk_col,
-                )
-                stats["audit_checked"] = audit_stats["checked"]
-                stats["audit_ended"] = audit_stats["ended"]
-                stats["audit_errors"] = audit_stats["errors"]
-            except Exception as e:
-                log.warning("audit phase failed (non-fatal): %s", e)
-                if adapter.kind == "postgres":
-                    try: adapter.conn.rollback()
-                    except Exception: pass
+        # ── Re-price pass — refresh existing listings (price + liveness)
+        # oldest-first via Browse get_item_by_legacy_id, revive listings the
+        # time reaper deactivated while they were still live, and mark
+        # ended/out-of-stock ones inactive (never deleted). Runs BEFORE the
+        # coverage probe so products whose last listing just ended get
+        # backfilled in this same run. Capped by the eBay daily call budget
+        # (see _ebay_call_budget). Dry-run still looks items up (read-only
+        # API calls) but writes nothing.
+        stats.update(self._reprice_phase(
+            adapter, pt["name"], lt["name"], fk_col, ebay,
+            planned_search_calls=max_queries_per_run, dry_run=dry_run))
 
+        search_product_ids: set = set()
         plan: list[tuple[Optional[str], str]] = []
         # Build coverage queue + seed queue separately, then INTERLEAVE
         # them so seeds (the curated retro-PC / retro-console keyword
@@ -1699,7 +2168,11 @@ class EbayProductSyncAgent(AgentBase):
                                    if plan else 0)
         stats["coverage_in_plan"] = len(coverage_pick)
         if not plan:
-            return RunResult(status="success", summary="no seeds configured")
+            stats["api_calls"] = ebay.total_calls
+            self._record_ebay_usage(ebay)
+            return RunResult(status="success", summary="no seeds configured",
+                             metrics={k: v for k, v in stats.items()
+                                      if isinstance(v, (int, float, bool))})
 
         for cat, q in plan:
             stats["queries_run"] += 1
@@ -1760,9 +2233,13 @@ class EbayProductSyncAgent(AgentBase):
                     # → 301 to /product/<asin> (the React shell mounts the
                     # ProductDetailPage which calls /api/products/<asin>/ebay-listings).
                     asin_for_url = self._row_asin_for_product(mapping, item, hyd)
+                    # URL shape comes from site.yaml `catalog_url_template`
+                    # (e.g. "https://<site>/product/{asin}") — no site
+                    # literal in the engine.
+                    url_tpl = (self._cfg or {}).get("catalog_url_template") or ""
                     catalog_url = (
-                        f"https://specpicks.com/product/{asin_for_url}"
-                        if asin_for_url else ""
+                        url_tpl.replace("{asin}", asin_for_url)
+                        if (asin_for_url and url_tpl) else ""
                     )
                     stats["product_samples"].append({
                         "name": hyd.get("name") or "",
@@ -1778,6 +2255,13 @@ class EbayProductSyncAgent(AgentBase):
                 # Build the listings row, with fk to the product.
                 lrow = self._build_row_from_section(lt, item, hyd, site_constants={})
                 lrow[fk_col] = product_pk
+                # A search sighting proves the listing is live: bump
+                # updated_at so the stale reaper (updated_at < stale_hours)
+                # and the re-price min-age both see it. upsert_rows only
+                # SETs mapped columns and the table has no touch trigger, so
+                # without this a re-sighted listing kept its insert time and
+                # was reaped again in the same run.
+                lrow["updated_at"] = _now()  # ISO-8601 UTC, like item_end_date
                 # Always track listing end-date so the site can hide expired
                 # listings without waiting on the freshness reaper. Browse
                 # API field is `itemEndDate` (ISO 8601); absent for
@@ -1787,6 +2271,7 @@ class EbayProductSyncAgent(AgentBase):
                 if end_iso and "item_end_date" not in lrow:
                     lrow["item_end_date"] = end_iso
                 listings_rows.append(lrow)
+                search_product_ids.add(product_pk)
                 if len(stats["listing_samples"]) < 30:
                     stats["listing_samples"].append({
                         "ebay_item_id": item.get("legacyItemId") or "",
@@ -1814,6 +2299,21 @@ class EbayProductSyncAgent(AgentBase):
             _ensure_item_end_date_column(adapter, lt["name"])
             stale = _mark_stale_inactive(adapter, lt["name"], stale_hours)
             stats["stale_listings_inactive"] = stale
+            # Listings just upserted from search carry fresh prices — roll
+            # them up to their eBay-sourced product rows too (opt-in).
+            rp = _reprice_config(self._cfg or {})
+            if rp.get("update_product_prices"):
+                roll = _refresh_product_prices(
+                    adapter, pt["name"], lt["name"], fk_col, search_product_ids,
+                    key_column=rp["product_key_column"],
+                    key_prefix=rp["product_key_prefix"],
+                    clear_when_unlisted=bool(rp["clear_price_when_unlisted"]))
+                stats["products_repriced"] = (stats.get("products_repriced", 0)
+                                              + roll["priced"])
+                stats["products_price_cleared"] = (
+                    stats.get("products_price_cleared", 0) + roll["cleared"])
+        stats["api_calls"] = ebay.total_calls
+        self._record_ebay_usage(ebay)
 
         log.info("v2 ingestion complete: %s", json.dumps(stats, default=str))
 
@@ -1845,6 +2345,8 @@ class EbayProductSyncAgent(AgentBase):
         return RunResult(
             status="success",
             summary=(f"queries={stats['queries_run']} items={stats['items_seen']} "
+                     f"repriced={stats.get('repriced', 0)} ended={stats.get('ended', 0)} "
+                     f"api_calls={stats.get('api_calls', 0)} "
                      f"products={stats['products_upserted']} "
                      f"listings_in={stats['listings_inserted']} "
                      f"listings_up={stats['listings_updated']} "
@@ -2361,6 +2863,10 @@ def main():
                         help="Do everything except write to the destination DB.")
     parser.add_argument("--force-remap", action="store_true",
                         help="Discard the stored mapping and re-propose.")
+    parser.add_argument("--reprice-only", action="store_true",
+                        help="Only run the listing re-price pass (no discovery).")
+    parser.add_argument("--reprice-limit", type=int, default=None,
+                        help="Cap re-price lookups this run (≤ the budget cap).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(
@@ -2375,6 +2881,7 @@ def main():
     try:
         result = agent.run(
             run_kind="manual", dry_run=args.dry_run, force_remap=args.force_remap,
+            reprice_only=args.reprice_only, reprice_limit=args.reprice_limit,
         )
     except ConfirmationPending as e:
         print(json.dumps({

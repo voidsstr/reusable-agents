@@ -114,7 +114,7 @@ A database-side guess at what is "user-visible" cannot find these. Crawling can.
 | Live site HTML | `origin`, crawled to `max_depth` (both sites use 3) with `per_depth` budgets. The User-Agent is `Mozilla/5.0 (compatible; shelf-audit-agent/1.0; +https://specpicks.com)` for both sites. Only `text/html` or JSON responses are read. |
 | JSON shelf endpoints | `api_endpoints`. Required for client-rendered shelves: on aisleprompt, crawling 982 pages found zero ASINs in the HTML when this was built (2026-08-26); the `20260923T125509Z` run found 14 in HTML versus 1,429 products from the API. |
 | Production Postgres | `shelf_query` (per site), using the DSN from the env var named by `dsn_env` |
-| Amazon Creators API | `framework.core.amazon_creators` (`CreatorsConfig.from_env()`) |
+| Amazon Creators API | `framework.core.amazon_creators` (`CreatorsConfig.from_env()`). Calls are charged to the `shelf-audit` line of the shared daily budget (`config/amazon-creators-budget.json`, ledger under `config/amazon-creators-usage/<date>/`) |
 | Host secrets | `~/.reusable-agents/secrets.env`, loaded through the unit's `EnvironmentFile=` |
 
 ## Outputs

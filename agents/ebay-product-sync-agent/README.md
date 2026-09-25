@@ -44,7 +44,15 @@ nothing calls it.
    - if no approved or pending proposal exists, builds a new one. It introspects the products and listings tables, samples 3 rows from each, fetches 1 sample eBay item, lists active `categories.slug` values, and asks the LLM (`MAPPING_SYS` prompt) for a v2 two-table mapping;
    - emails the proposal, writes a pending `ConfirmationRecord` (`map-<site_id>-<epoch>`), and raises `ConfirmationPending`. `main()` then prints `{"status": "awaiting_confirmation", ...}` and exits 0.
 4. **DDL (phase 2, one-time).** If the mapping is not yet `ddl_applied`, the agent runs each section's `create_ddl` and sets `ddl_applied: true`.
-5. **Audit.** Checks up to `audit_max_per_run` (default 200) active listings, oldest `updated_at` first, with Browse `GET /item/{ebay_item_id}`. A 404 marks the listing inactive in one batched `UPDATE`. Skipped on `--dry-run`.
+5. **Re-price (rolling).** Re-checks existing listings with Browse `GET /item/get_item_by_legacy_id` (one call per listing; the batch `getItems` endpoint returns 403 for this app). Candidates: active listings not refreshed in `reprice.min_age_hours`, oldest `updated_at` first; with any budget left, inactive listings from the last `reprice.revive_window_days` whose end is unconfirmed (`item_end_date` NULL, or later than `updated_at`), newest first. Those are listings the time reaper deactivated while they may still be live. Multi-variation listings (errorId 11006) are priced via `get_items_by_item_group` (one extra call; cheapest live variation). Outcomes:
+   - **Live:** writes `price`, `currency`, `item_end_date`, sets `is_active=true`, and bumps `updated_at` and `verified_active_at`.
+   - **Ended (404) or out of stock:** sets `is_active=false` and `item_end_date=NOW()` (so `item_end_date <= updated_at` marks a confirmed end). The row is kept, never deleted. A later search sighting rewrites `item_end_date`, bumps `updated_at` and re-activates it.
+   - **429:** stops the pass. Other errors are counted and left for the next run; they never mark a listing ended.
+   - **Circuit breaker:** when at least `reprice.max_not_found_ratio` (default 0.9) of ≥ 20 lookups come back not-found, the lookup is presumed broken and no row is switched off as not-found that run (`reprice_not_found_suspect: true`).
+
+   Product price roll-up is **opt-in** (`reprice.update_product_prices`, default `false`): a destination may keep `products.price` NULL for eBay stock on purpose and label any fresh product price as another marketplace's. When enabled, the eBay-sourced products touched (key column starts with `reprice.product_key_prefix`, default `EBAY_`) get `price` = cheapest live USD listing ≥ $1 and `price_updated_at = NOW()`; a product with no live listing left has its price set to NULL (`clear_price_when_unlisted`), but the product row stays active. Amazon-keyed products are never touched.
+
+   The call cap comes from `_ebay_call_budget()`: `min(per-run allowance, what is left of today's usable quota, the usable remainder paced over the runs left before eBay's reset)`. The per-run allowance is `daily_call_limit × (1 − headroom_pct) // runs_per_day − max_queries_per_run` (179 with the defaults and 8 queries). "Used today" comes from eBay itself via the Developer Analytics `getRateLimits` call (`EbayClient.browse_rate_limit()`, not a Browse call), which counts every caller sharing the app keys, e.g. `specpicks-ebay-counterpart-matcher`. eBay's Browse day resets at 07:00 UTC (midnight Pacific). When that call fails, the engine falls back to its own ledger: calls are recorded per UTC day in framework storage at `agents/ebay-product-sync-agent/api-usage/<YYYY-MM-DD>/<app-hash>/<instance>.json`, summed across instances sharing one app. Under `--dry-run` the lookups still happen (read-only) but nothing is written to the destination DB.
 6. **Plan the queries.** The plan draws on several queues:
    - **Coverage queue:** up to 40 products with zero active listings, most recently emptied first.
    - **Priority seeds:** seeds whose `category` is in `priority_categories`.
@@ -56,7 +64,7 @@ nothing calls it.
    - **Search.** Calls Browse `item_summary/search` with `ebay_filter`, `limit=per_query_limit` (capped at 200), and `fieldgroups=EXTENDED`.
    - **Hydrate canonical products.** Pass 1 builds the product from eBay `brand` + `mpn` + `title`, with confidence 0.85 when there is an `mpn` and 0.65 without one. Pass 2 sends the remaining items to the LLM in batches of 8 (`HYDRATION_SYS` prompt, via `self.ai_chat`). Items with confidence below 0.5 are skipped and counted in `products_skipped_low_conf`.
    - **Upsert the product.** Looks up an existing product by the mapping's `match_columns`, else upserts on `key_columns`. It then builds the listing row with the product FK plus `item_end_date` from `itemEndDate`, and upserts listings on the listings `key_columns`.
-8. **Reap stale listings.** Runs `ALTER TABLE … ADD COLUMN IF NOT EXISTS item_end_date`, then marks listings inactive where `item_end_date < now` or `updated_at` is older than `stale_hours`.
+8. **Reap stale listings.** Runs `ALTER TABLE … ADD COLUMN IF NOT EXISTS item_end_date`, then marks listings inactive where `item_end_date < now` or `updated_at` is older than `stale_hours`. Every listing upserted from search carries `updated_at = now`, so a search sighting keeps it alive. Next, when `reprice.update_product_prices` is on, the products whose listings were upserted this run get the same price roll-up as in step 5.
 9. **Completion email.** Includes KPIs, catalog totals, a per-category table, samples, and errors grouped by class. It is sent to `owner_email` unless `--dry-run` is set or `owner_email` is empty. It goes through `shared.site_quality.send_via_msmtp`, and under `DIGEST_ONLY=1` (exported by `agent_run_wrapper.sh`) it is queued to `digest-queue/` instead of being sent. Every send attempt is also recorded under `outbound-emails/`.
 10. **Result.** Returns `RunResult(status="success", metrics=stats)`. Scalar goal keys are added to `stats` (see Goals & metrics).
 
@@ -64,7 +72,7 @@ nothing calls it.
 
 | Input | Detail |
 |---|---|
-| Site YAML | Path in `EBAY_PRODUCT_SYNC_CONFIG`. Keys read by code: `site_id`, `owner_email`, `sender_email`, `secrets_file`, `ebay.{client_id,client_secret,campaign_id}[_env]`, `ebay.env`, `ebay.marketplace_id`, `destination.{kind,dsn,products_table,table,listings_table,mode,site_constants}`, `stale_hours`, `ebay_filter`, `per_query_limit`, `max_queries_per_run`, `audit_max_per_run`, `priority_categories`, `priority_seeds_pct`, `seed_reservation_pct`, `seeds[].{category or category_slug, queries[]}` |
+| Site YAML | Path in `EBAY_PRODUCT_SYNC_CONFIG`. Keys read by code: `site_id`, `owner_email`, `sender_email`, `secrets_file`, `ebay.{client_id,client_secret,campaign_id}[_env]`, `ebay.env`, `ebay.marketplace_id`, `destination.{kind,dsn,products_table,table,listings_table,mode,site_constants}`, `stale_hours`, `ebay_filter`, `per_query_limit`, `max_queries_per_run`, `reprice.{enabled,max_calls_per_run,min_age_hours,revive_window_days,max_not_found_ratio,update_product_prices,product_key_column,product_key_prefix,clear_price_when_unlisted}`, `ebay_api.{daily_call_limit,runs_per_day,headroom_pct}`, `audit_max_per_run` (legacy alias for `reprice.max_calls_per_run`), `catalog_url_template`, `priority_categories`, `priority_seeds_pct`, `seed_reservation_pct`, `seeds[].{category or category_slug, queries[]}` |
 | Destination DB | `destination.dsn` goes through `os.path.expandvars`. Reads the products + listings tables and `categories (id, slug, is_active)` |
 | eBay Browse API | `https://api.ebay.com/buy/browse/v1` (sandbox when `env: SANDBOX`). OAuth token URL `…/identity/v1/oauth2/token`. `X-EBAY-C-ENDUSERCTX` carries `affiliateCampaignId` when a campaign id is set |
 | Framework storage | `agents/<agent_id>/mappings/<site_id>.json`, `agents/<agent_id>/responses-queue/`, `agents/<agent_id>/confirmations/` |
@@ -92,10 +100,18 @@ nothing calls it.
 | `products_upserted_count` | Canonical products upserted this run |
 | `errors_count` | `len(stats["errors"])`, counting search failures and per-item product upsert failures |
 | `items_seen_count` | eBay items returned across all queries |
+| `repriced` | Listings the re-price pass confirmed live and refreshed |
+| `ended` | Listings found ended (404) or out of stock and marked inactive |
+| `api_calls` | Browse API calls this run (search + item lookups) |
 
 Other `stats` keys: `queries_run`, `items_seen`, `products_upserted`,
 `products_skipped_low_conf`, `listings_inserted`, `listings_updated`,
-`by_category`, `audit_checked`, `audit_ended`, `audit_errors`,
+`by_category`, `reprice_cap`, `ebay_calls_used_today`, `reprice_checked`,
+`reprice_revived`, `reprice_price_changed`, `reprice_not_found`,
+`reprice_out_of_stock`, `reprice_errors`, `reprice_rate_limited`,
+`reprice_not_found_suspect`, `reprice_api_calls`, `reprice_samples`,
+`ebay_quota_remaining`, `products_repriced` and `products_price_cleared`
+(only with `update_product_prices`),
 `coverage_targets`, `seed_pool_size`, `priority_seed_pool`, `seeds_in_plan`,
 `coverage_in_plan`, `stale_listings_inactive`, `error_class_counts`, plus
 up to 30 product and 30 listing samples.
@@ -107,6 +123,7 @@ Engine goals (`goals.json`; they apply only if the engine id were run directly):
 | `goal-sync-success-rate` | `sync_success_rate_pct` | ≥ 95 % |
 | `goal-products-upserted-flow` | `products_upserted_count` | ≥ 50 products/run |
 | `goal-sync-errors-zero` | `errors_count` | 0 errors/run |
+| `goal-listings-repriced` | `repriced` | ≥ 120 listings/run |
 
 The specpicks instance has its own goal set, listed in the instance README.
 Because `main()` bypasses `post_run()`, **no goal receives Layer-B progress
@@ -126,10 +143,14 @@ from a run** (see Known issues).
 | `DIGEST_ONLY` | `1` (set by the wrapper) | Queues the completion and proposal emails to the digest instead of sending them |
 
 YAML defaults in code: `stale_hours` 72, `per_query_limit` 60,
-`max_queries_per_run` 80, `audit_max_per_run` 200, `priority_seeds_pct` 0.0,
+`max_queries_per_run` 80, `priority_seeds_pct` 0.0,
 `seed_reservation_pct` 0.6, `destination.listings_table` `ebay_listings`,
 `destination.mode` `use-existing-products-new-listings`, `ebay_filter`
-`buyingOptions:{FIXED_PRICE},conditions:{USED|NEW|REFURBISHED|FOR_PARTS_OR_NOT_WORKING},price:[5..5000],priceCurrency:USD`.
+`buyingOptions:{FIXED_PRICE},conditions:{USED|NEW|REFURBISHED|FOR_PARTS_OR_NOT_WORKING},price:[5..5000],priceCurrency:USD`,
+`ebay_api` `{daily_call_limit: 5000, runs_per_day: 24, headroom_pct: 0.1}`,
+`reprice` `{enabled: true, max_calls_per_run: null (derived), min_age_hours: 12, revive_window_days: 90, max_not_found_ratio: 0.9, update_product_prices: false, product_key_column: asin, product_key_prefix: EBAY_, clear_price_when_unlisted: true}`,
+`catalog_url_template` unset (the completion email then shows no "view" links).
+The CLI flags `--reprice-only [--reprice-limit N] [--dry-run]` run only the re-price pass.
 Start a new site from `config.example.yaml`. It shows the v1 single-table
 `table:` form, which is still accepted.
 
@@ -208,8 +229,9 @@ curl -s -H "Authorization: Bearer $FRAMEWORK_API_TOKEN" \
   http://localhost:8090/api/agents/specpicks-ebay-product-sync-agent
 ```
 
-Manual / dry run. `--dry-run` skips DB writes, the audit, the reaper, and
-the completion email, but it still calls eBay and the LLM, and it still
+Manual / dry run. `--dry-run` skips DB writes (including the re-price
+writes), the reaper, and the completion email, but it still calls eBay
+(re-price lookups count against the shared daily quota) and the LLM, and it still
 emails a proposal if no approved mapping exists. Set `AGENT_ID` so the
 instance's mapping is used. Without it, the agent reads
 `agents/ebay-product-sync-agent/mappings/<site_id>.json`. For `specpicks`
@@ -255,11 +277,12 @@ Ingestion then stops until the operator approves it.
 | `products=0 … success_rate=0.0%` with `products_skipped_low_conf == items_seen` while the run still reports success | LLM hydration failed on every batch. From 2026-09-22 23:11 to 2026-09-23 09:30 EDT every run logged `hydration batch failed: ollama unreachable at http://127.0.0.1:11434 (provider=ollama-5090)`. Pass 1 handled 0 items in every one of the 107 batches logged from 2026-09-22 23:11 to 2026-09-23 13:50 EDT (`0/30 items handled by ebay-fields`), so hydration depends entirely on the LLM | Restore the provider, or change the agent's override in `config/ai-defaults.json` |
 | Run takes tens of minutes, with `hydration batch failed: generator didn't stop after throw()` every ~5 min | LLM call hit `timeout=300` (2026-09-23 13:30 run) | Same as above |
 | `value too long for type character varying(500)` in `errors` | Product upsert rejected by a 500-char column (7, 13 and 7 errors in the 10:30, 11:30 and 12:30 EDT runs on 2026-09-23). The mapped `products` columns that are `varchar(500)` are `slug` (from hydration), `thumbnail_url` and `ebay_url`. Which one overflows was not identified | Inspect the failing item in `errors[]` against those three columns |
-| `audit: N/N listings ended (0 errors)` on every run | On 2026-09-23 the audit reported 100 % ended (30/30, 45/45, 41/41). The approved mapping writes `ebay_item_id` from the bare `legacyItemId`, and the stored ids are bare numbers (read-only query, 2026-09-23). `get_item()` calls `/item/{id}`, but Browse `getItem` expects the RESTful `v1\|<id>\|0` form, so each call likely 404s and **every audited listing is deactivated**. *Suspected root cause, not tested against the live API.* At about 14:10 EDT on 2026-09-23, 0 of 34,535 `ebay_listings` rows were active | Verify one id by hand before trusting `audit_ended` |
+| `audit: N/N listings ended (0 errors)` on every run (before 2026-09-24) | **Fixed 2026-09-24.** The old audit called `/item/<legacy id>`, which returns 404 (errorId 11001) for every stored id, so each run deactivated every listing it audited (78/78 at 20:39 EDT on 2026-09-24). That left 86 of 34,688 rows active. Probing `get_item_by_legacy_id` confirmed those listings were live: 5 of 5 in the dry-run, 3 of 5 in an earlier probe (1 was ended, 1 was an item group), and 10 of 10 deactivated listings in the 21:02 EDT review dry-run. Ended listings still answer 200 with `OUT_OF_STOCK` and a past `itemEndDate`; only unknown ids return 404 (errorId 11003). The re-price pass replaces the audit and uses the legacy endpoint | `reprice_not_found_suspect: true` means the circuit breaker held the not-found marks; probe one id with `get_item_by_legacy_id` by hand |
+| `reprice_rate_limited: true` / `reprice_cap: 0` / low `ebay_quota_remaining` | eBay returned 429, or eBay's own count (`getRateLimits`, shared with every caller of the app keys) shows the usable quota is spent | Check the run log's `reprice: budget … (eBay live: …)` line. Lower `max_queries_per_run` or the other callers' volume (e.g. `EBAY_MATCH_PER_RUN` on the counterpart matcher), or raise `ebay_api.daily_call_limit` after eBay grants more quota |
 | `eBay credentials not configured …` / `eBay OAuth failed: <code>` | Missing or invalid `EBAY_CLIENT_ID` / `EBAY_CLIENT_SECRET` | Check `~/.reusable-agents/secrets.env`. The unit's `EnvironmentFile=-` tolerates a missing file silently |
 | `secrets_file … not found — relying on process env` | Harmless when the vars come from `secrets.env`. It logs on every specpicks run because `specpicks/agents/ebay-product-sync-agent/.env` does not exist on whitebeast | none |
 | All upserts fail after one error (`current transaction is aborted`) | Historical (2026-04-29). The code now rolls back per failure | Should not recur. If it does, check the rollback paths |
-| `connection already closed` after long hydration | Azure Postgres idle timeout. The code calls `adapter.ensure_open()` before the audit, the upsert phase, the `item_end_date` ALTER, and the reaper | none |
+| `connection already closed` after long hydration | Azure Postgres idle timeout. The code calls `adapter.ensure_open()` before the re-price pass, the upsert phase, the `item_end_date` ALTER, and the reaper | none |
 | FK violation `products_site_id_fkey` | Historical (2026-04-30). The mapping's `site_id` constant changed from a UUID to `'ebay'` (mapping `change_log`) | Check `destination.site_constants` |
 | Runs burning claude-pool calls despite an ollama override | Historical (2026-05-09 → 2026-05-11, 9,763 calls). Fixed by the resolution order in `ai_providers` (operator override beats manifest) | none |
 

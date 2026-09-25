@@ -45,7 +45,9 @@ instances run it. Overview / "why" doc: [README.md](README.md).
      or `buying_guides.picks[].asin`, 2 = everything else. Within a tier,
      rows are sorted by `review_count DESC`.
    - **Providers**: `creators` (Amazon Creators API via
-     `framework/core/amazon_creators.py`), `paapi` (`paapi_client.py`,
+     `framework/core/amazon_creators.py`; its calls are charged to the
+     `hydration` line of the shared Creators daily budget,
+     `config/amazon-creators-budget.json`), `paapi` (`paapi_client.py`,
      SigV4 PA-API v5) and `brightdata` (`brightdata_client.py`, Bright Data
      Amazon Products dataset, about $0.001 per ASIN estimated).
    - **Automatic fallback**: if the configured provider is `paapi` or

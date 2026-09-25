@@ -17,7 +17,7 @@ from framework.core import amazon_creators as ac
 
 def _client():
     cfg = ac.CreatorsConfig(client_id="id", client_secret="sec", partner_tag="t-20")
-    c = ac.AmazonCreatorsClient(cfg, min_interval_s=0)
+    c = ac.AmazonCreatorsClient(cfg, min_interval_s=0, track_usage=False)
     c._token = ac._Token("tok", 9e12)  # skip the LWA round-trip
     return c
 

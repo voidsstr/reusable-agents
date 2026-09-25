@@ -49,6 +49,23 @@
       "directives": [
         "Classify errors (auth vs rate-limit vs data) in the run summary so the operator can act"
       ]
+    },
+    {
+      "id": "goal-listings-repriced",
+      "title": "Keep existing eBay listings re-priced every run",
+      "description": "Rolling re-price pass (Browse get_item_by_legacy_id) confirms listings are live and refreshes price; stale prices and false 'ended' marks turn product pages into dead ends. Paced against eBay's shared 5,000/day Browse quota (other callers of the same keys, e.g. the counterpart matcher, count too), so ~100-170/run.",
+      "target_metric": "repriced",
+      "metric": {
+        "name": "repriced",
+        "current": 0,
+        "target": 120,
+        "direction": "increase",
+        "unit": "listings/run"
+      },
+      "directives": [
+        "If reprice_not_found_suspect is true (or reprice_not_found is close to reprice_checked), suspect the lookup endpoint before trusting the ended marks",
+        "If reprice_rate_limited is true or reprice_cap is 0, check ebay_quota_remaining and rebalance max_queries_per_run and the other callers of the eBay app keys"
+      ]
     }
   ]
 }

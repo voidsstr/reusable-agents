@@ -852,6 +852,7 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
     creators_client = client_from_env(
         partner_tag=raw_cfg.get("associate_tag", "") or "",
         marketplace=raw_cfg.get("marketplace", "") or "",
+        consumer="hydration",  # shared Creators daily-budget line
     )
     if provider in ("paapi", "brightdata") and creators_client:
         have_configured_creds = (paapi_cfg if provider == "paapi" else bd_cfg)
