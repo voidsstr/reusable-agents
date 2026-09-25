@@ -21,6 +21,9 @@ Conversion goals (the ultimate KPIs):
     converts to cart creates is the whole point of the site.
   SpecPicks   → amazon_clicks_30d + ebay_clicks_30d — affiliate
     monetization on products linked from review/buying-guide pages.
+  Outbound-click goals count VERIFIED HUMAN clicks only (profile
+  `human_clicks` → framework/core/human_clicks.py); the raw first-party row
+  count is kept as the raw-<event>-30d diagnostic metric.
 
 Leading-indicator goals (move first, predict conversion):
   Both → organic_clicks_30d (GSC), organic_impressions_30d (GSC),
@@ -49,7 +52,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO))
 
-from framework.core import metric_helper, goals as goals_mod
+from framework.core import metric_helper, goals as goals_mod, human_clicks
 
 
 # 2026-05-11: the legacy `seo-data-collector` agent was retired in
@@ -85,6 +88,16 @@ SITE_PROFILES: dict[str, dict] = {
                                  "WHERE source = 'instacart' "
                                  "AND created_at > now() - interval '30 days'"),
         },
+        # Verified-human filter (framework/core/human_clicks.py). The goal
+        # value for these events is the HUMAN count; conversion_sql above is
+        # kept only as the raw-* diagnostic. See HUMAN_CLICKS_NOTE.
+        "human_clicks": {
+            "table": "kitchen_click_events",
+            "spec": {"time_col": "created_at", "referer_col": "referer",
+                     "bot_flag_col": "is_bot"},
+            "events": {"amazon-clicks": {"source": "amazon"},
+                       "instacart-clicks": {"source": "instacart"}},
+        },
         "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
         "agent_id": "aisleprompt-site-goals-tracker",
     },
@@ -109,6 +122,13 @@ SITE_PROFILES: dict[str, dict] = {
             "ebay-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
                             "WHERE target = 'ebay' "
                             "AND clicked_at > now() - interval '30 days'"),
+        },
+        "human_clicks": {
+            "table": "outbound_clicks",
+            "spec": {"time_col": "clicked_at", "referer_col": "source_page",
+                     "country_col": "country", "bot_flag_col": "is_bot"},
+            "events": {"amazon-clicks": {"target": "amazon"},
+                       "ebay-clicks": {"target": "ebay"}},
         },
         "page_count_sql": (
             "SELECT (SELECT COUNT(*) FROM products WHERE is_active = true) + "
@@ -285,38 +305,98 @@ def collect_metrics(profile: dict) -> dict[str, float]:
     # AUTHORITATIVE source here; GA4 can only undercount. Take the larger of
     # the two per event, and keep both under distinct metric keys so the gap
     # stays visible rather than silently papered over.
+    # The human-click spec (per-site columns + storage overrides) is resolved
+    # once: the first-party filter below uses all of it, and the GA4 event
+    # count uses its `exclude_countries` so both sides of max(GA4, DB) drop
+    # the same traffic (Singapore headless fleet by default). GA4's countryId
+    # dimension is ISO-3166 alpha-2, the same codes the spec carries.
+    hc_cfg = profile.get("human_clicks") or {}
+    hc_spec = (human_clicks.resolve_spec(hc_cfg.get("spec") or {},
+                                         profile=profile.get("agent_id", ""))
+               if hc_cfg else None)
+    ga_excluded = sorted({str(c).upper() for c in
+                          ((hc_spec or {}).get("exclude_countries") or []) if c})
+
     events: dict[str, int] = {}
     if token:
         try:
-            ga_resp = ga4_run_report(token, profile["ga4_property_id"], {
+            ga_body = {
                 "dateRanges": [{"startDate": start_30d, "endDate": end_today}],
                 "dimensions": [{"name": "eventName"}],
                 "metrics": [{"name": "eventCount"}],
-            })
+            }
+            if ga_excluded:
+                ga_body["dimensionFilter"] = {"notExpression": {"filter": {
+                    "fieldName": "countryId",
+                    "inListFilter": {"values": ga_excluded},
+                }}}
+            ga_resp = ga4_run_report(token, profile["ga4_property_id"], ga_body)
             events = {row["dimensionValues"][0]["value"]: int(row["metricValues"][0]["value"])
                       for row in (ga_resp.get("rows") or [])}
         except Exception as e:
             err(f"  GA4 conversions failed: {e}")
 
+    # HUMAN_CLICKS_NOTE (2026-09-24). The first-party click tables log every
+    # hit on the redirect endpoint, crawlers included. Counting raw rows
+    # reported 21,258 SpecPicks "Amazon clicks" in 30d when the verified
+    # human number was 0 — 99.3% carried the site's own is_bot verdict and
+    # the rest were a stale-UA fleet, Alibaba/Tencent cloud IPs (incl. the
+    # Singapore headless fleet) and one Sogou spider. Goals now count ONLY
+    # rows that pass framework/core/human_clicks.py; the raw count survives
+    # as the `raw-<event>-30d` diagnostic so the bot share stays visible.
+    #
+    # If the human query fails we record NOTHING for that event rather than
+    # fall back to the raw count: a missing day is honest, a bot number
+    # dressed as a goal value is what this replaced.
     first_party: dict[str, int] = {}
+    raw_first_party: dict[str, int] = {}
+    human_failed: set[str] = set()
     conv_sql = profile.get("conversion_sql") or {}
-    if conv_sql:
+    hc_events = hc_cfg.get("events") or {}
+    if conv_sql or hc_events:
         _db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
         if _db_url:
             try:
                 _conn = psycopg2.connect(_db_url)
                 try:
                     for ev, sql in conv_sql.items():
-                        with _conn.cursor() as _cur:
-                            _cur.execute(sql)
-                            first_party[ev] = int(_cur.fetchone()[0])
+                        try:
+                            with _conn.cursor() as _cur:
+                                _cur.execute(sql)
+                                raw_first_party[ev] = int(_cur.fetchone()[0])
+                        except Exception as e:
+                            _conn.rollback()
+                            err(f"  raw first-party query for {ev} failed: {e}")
+                    if hc_events:
+                        for ev, match in hc_events.items():
+                            try:
+                                bd = human_clicks.breakdown(
+                                    _conn, hc_spec, table=hc_cfg["table"],
+                                    window_days=30, match=match)
+                                first_party[ev] = int(bd[human_clicks.VERDICT_HUMAN])
+                                err(f"  {ev}: {first_party[ev]} verified human of "
+                                    f"{bd['_total']} rows — "
+                                    + ", ".join(f"{k}={v}" for k, v in bd.items()
+                                                if k not in ("_total",)))
+                            except Exception as e:
+                                _conn.rollback()
+                                human_failed.add(ev)
+                                err(f"  human-click query for {ev} failed "
+                                    f"(goal not recorded this run): {e}")
+                    # Events with no human spec keep the legacy raw count.
+                    for ev, n in raw_first_party.items():
+                        if ev not in hc_events:
+                            first_party[ev] = n
                 finally:
                     _conn.close()
             except Exception as e:
                 err(f"  first-party conversion query failed: {e}")
+                human_failed.update(hc_events)
 
     total_conv = 0
     for ev in profile.get("conversion_events", []):
+        if ev in human_failed:
+            continue
         ga_n = int(events.get(ev, 0)) + sum(
             int(events.get(alias, 0))
             for alias in (profile.get("ga4_event_aliases") or {}).get(ev, []))
@@ -329,8 +409,11 @@ def collect_metrics(profile: dict) -> dict[str, float]:
             if fp_n > ga_n:
                 err(f"  {ev}: first-party DB {fp_n} > GA4 {ga_n} "
                     f"(server-side redirect not seen by GA4) — using DB")
+        if ev in raw_first_party and ev in hc_events:
+            metrics[f"raw-{_slug(ev)}-30d"] = float(raw_first_party[ev])
         total_conv += n
-    metrics["goal-total-conversions-30d"] = float(total_conv)
+    if not human_failed:
+        metrics["goal-total-conversions-30d"] = float(total_conv)
 
     # --- DB: total active pages ---
     db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
@@ -393,14 +476,19 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
         # Conversion goals (the ultimate KPIs)
         {
             "id": "goal-total-conversions-30d",
-            "title": f"30-day total conversion clicks ({site_label})",
+            "title": f"30-day total conversion clicks — verified human ({site_label})",
             "description": (
-                "Total monetization-event clicks in the last 30 days. "
-                + ("Sum of instacart-cart + instacart-clicks + amazon-clicks GA4 events." if is_aisleprompt
-                   else "Sum of amazon-clicks + ebay-clicks GA4 events.")
+                "Total monetization-event clicks in the last 30 days, bots excluded. "
+                + ("Sum of GA4 instacart-cart + verified human instacart-clicks + amazon-clicks." if is_aisleprompt
+                   else "Sum of verified human amazon-clicks + ebay-clicks.")
+                + " Per event: max(GA4 event count, first-party click rows that pass "
+                  "framework/core/human_clicks.py — no site bot verdict, no headless/"
+                  "automation UA, no stale-browser fingerprint, no datacenter IP, no "
+                  "Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
             ),
-            "metric": {"name": "conversions_30d", "current": 0, "target": 1000 if is_aisleprompt else 500,
-                       "direction": "increase", "unit": "events", "horizon_weeks": 12},
+            "metric": {"name": "human_conversions_30d", "current": 0,
+                       "target": 1000 if is_aisleprompt else 1100,
+                       "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
             "status": "active",
             "is_revenue_goal": True,
         },
@@ -413,29 +501,46 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
                         "direction": "increase", "unit": "events", "horizon_weeks": 12},
              "status": "active", "is_revenue_goal": True},
             {"id": "goal-instacart-clicks-30d",
-             "title": "30-day Instacart button clicks",
-             "description": "GA4 'instacart-clicks' event count last 30 days. Outbound-interest leading indicator.",
-             "metric": {"name": "instacart_clicks", "current": 0, "target": 800,
-                        "direction": "increase", "unit": "events", "horizon_weeks": 12},
+             "title": "30-day Instacart button clicks — verified human",
+             "description": "Verified human Instacart button clicks, last 30 days: kitchen_click_events rows "
+                            "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
+                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
+                            "Outbound-interest leading indicator. Raw row count is the raw-instacart-clicks-30d metric.",
+             "metric": {"name": "human_instacart_clicks_30d", "current": 0, "target": 800,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
              "status": "active"},
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks (AislePrompt kitchen)",
-             "description": "GA4 'amazon-clicks' event count last 30 days. Cross-site affiliate revenue from /kitchen.",
-             "metric": {"name": "amazon_clicks", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "events", "horizon_weeks": 12},
+             "title": "30-day Amazon affiliate clicks — verified human (AislePrompt kitchen)",
+             "description": "Verified human Amazon affiliate clicks, last 30 days: kitchen_click_events rows "
+                            "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
+                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
+                            "Cross-site affiliate revenue from /kitchen. Raw row count is the raw-amazon-clicks-30d metric.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 200,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
              "status": "active"},
         ] if is_aisleprompt else [
+            # Target 900/30d = 30 verified human clicks/day (reset 2026-09-24
+            # from 1000 raw events). The raw count it replaced was 21,258 in
+            # 30d with 0 verified humans — see HUMAN_CLICKS_NOTE.
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks",
-             "description": "GA4 'amazon-clicks' event count last 30 days. Primary revenue source for SpecPicks.",
-             "metric": {"name": "amazon_clicks", "current": 0, "target": 1000,
-                        "direction": "increase", "unit": "events", "horizon_weeks": 12},
+             "title": "30-day Amazon affiliate clicks — verified human (target 30/day)",
+             "description": "Verified human Amazon affiliate clicks, last 30 days. Counts outbound_clicks "
+                            "rows that pass framework/core/human_clicks.py: not flagged is_bot, no headless/"
+                            "automation UA (HeadlessChrome, puppeteer, playwright, selenium, curl, python…), "
+                            "no stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei "
+                            "Singapore ranges), no Singapore traffic, an on-site referer, and <=20 clicks per "
+                            "IP per day — or the GA4 amazon_click count if higher. Primary revenue source for "
+                            "SpecPicks. The raw row count (~99% bots) is the raw-amazon-clicks-30d metric.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 900,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26},
              "status": "active", "is_revenue_goal": True},
             {"id": "goal-ebay-clicks-30d",
-             "title": "30-day eBay affiliate clicks",
-             "description": "GA4 'ebay-clicks' event count last 30 days. Retro-marketplace revenue for SpecPicks.",
-             "metric": {"name": "ebay_clicks", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "events", "horizon_weeks": 16},
+             "title": "30-day eBay affiliate clicks — verified human",
+             "description": "Verified human eBay affiliate clicks, last 30 days (same human_clicks.py filter "
+                            "as the Amazon goal), or the GA4 ebay_click count if higher. Retro-marketplace "
+                            "revenue for SpecPicks. Raw row count is the raw-ebay-clicks-30d metric.",
+             "metric": {"name": "human_ebay_clicks_30d", "current": 0, "target": 200,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 16},
              "status": "active", "is_revenue_goal": True},
         ]),
         # Leading-indicator goals

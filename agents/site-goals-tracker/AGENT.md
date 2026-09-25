@@ -64,6 +64,22 @@ and both wrappers now pass `--site=`.
      the DB held thousands of clicks (commit 70593c5). SpecPicks' GA4 events
      are named `amazon_click` / `ebay_click`. They are summed through
      `ga4_event_aliases` (commit 5abd5ef, 2026-09-16).
+   - **Verified human clicks only (2026-09-24).** The first-party side is
+     no longer a raw row count. The click tables log every hit on the redirect
+     endpoint, so on 2026-09-24 specpicks showed 21,258 Amazon "clicks" in 30d
+     with **0** verified humans. Each profile's `human_clicks` block (table,
+     column names, per-event match) is passed to
+     `framework/core/human_clicks.py`. That module drops rows the site flagged
+     `is_bot`, headless/automation UAs, stale-browser fingerprints (a Chromium
+     or Firefox major more than 16 releases old), datacenter IPs (including
+     Tencent, Alibaba and Huawei Singapore ranges), `exclude_countries`
+     (default `SG`), clicks with no on-site referer, scanner referers and
+     more than 20 clicks per IP per day. The GA4 event query drops the same
+     `exclude_countries` through `countryId`. If the human query fails, that
+     event is not recorded for the run; it never falls back to the raw count.
+     Thresholds are overridable without a deploy via storage
+     `config/human-click-filter-config.json` (`defaults` / `by_profile.<agent-id>`).
+     To see the breakdown by hand, run `python3 -m framework.cli.human_clicks --help`.
    - **Active pages**: one `COUNT(*)` query against the site DB.
    - **Indexing coverage**: reads
      `~/.reusable-agents/gsc-coverage-auditor/<site>-coverage.jsonl` (written
@@ -109,12 +125,13 @@ Metric keys recorded per run (17 for aisleprompt, 16 for specpicks on 2026-09-23
 | `goal-organic-clicks-30d`, `goal-organic-impressions-30d` | GSC totals |
 | `goal-ai-assistant-sessions-30d`, `ga4-ai-assistant-engaged-sessions-30d` | GA4 AI Assistant channel |
 | `goal-<event>-30d` | `max(GA4, first-party)` per conversion event |
-| `ga4-<event>-30d`, `firstparty-<event>-30d` | the two raw sides. Only emitted for events that have first-party SQL, so the gap stays visible |
+| `ga4-<event>-30d`, `firstparty-<event>-30d` | the two sides of the max. `firstparty-*` is the VERIFIED HUMAN count for events with a `human_clicks` spec. Only emitted for events that have first-party data, so the gap stays visible |
+| `raw-<event>-30d` | unfiltered first-party row count (bots included), kept as a diagnostic only |
 | `goal-total-conversions-30d` | sum of the `goal-<event>-30d` values |
 | `goal-active-pages-count` | page-count SQL |
 | `goal-indexed-pages-pct`, `goal-unknown-to-google-count`, `goal-crawled-not-indexed-count`, `goal-inspected-urls-total` | coverage JSONL |
 
-`ga4-*`, `firstparty-*` and `goal-inspected-urls-total` have no goal
+`ga4-*`, `firstparty-*`, `raw-*` and `goal-inspected-urls-total` have no goal
 definition. They appear only in the progress JSONL and the timeseries cache.
 
 ## Goals & metrics
@@ -124,11 +141,11 @@ recorded on 2026-09-23 at 17:00Z.
 
 | Goal id | aisleprompt target | specpicks target | Direction | aisleprompt current | specpicks current |
 |---|---|---|---|---|---|
-| `goal-total-conversions-30d` (revenue) | 1,000 | 500 | increase | 6,261 | 22,840 |
+| `goal-total-conversions-30d` (revenue, verified human) | 1,000 | 1,100 | increase | 150 | 12 |
 | `goal-instacart-cart-30d` (revenue, aisleprompt only) | 200 | — | increase | 0 | — |
-| `goal-instacart-clicks-30d` (aisleprompt only) | 800 | — | increase | 819 | — |
-| `goal-amazon-clicks-30d` | 200 | 1,000 (revenue) | increase | 5,442 | 21,401 |
-| `goal-ebay-clicks-30d` (revenue, specpicks only) | — | 200 | increase | — | 1,439 |
+| `goal-instacart-clicks-30d` (aisleprompt only, verified human) | 800 | — | increase | 15 | — |
+| `goal-amazon-clicks-30d` (verified human) | 200 | 900 = 30/day (revenue) | increase | 135 | 11 |
+| `goal-ebay-clicks-30d` (revenue, specpicks only, verified human) | — | 200 | increase | — | 1 |
 | `goal-organic-clicks-30d` | 5,000 | 3,000 | increase | 0 | 2 |
 | `goal-ai-assistant-sessions-30d` | 50 | 100 | increase | 28 | 141 |
 | `goal-organic-impressions-30d` | 100,000 | 50,000 | increase | 21 | 773 |
@@ -138,6 +155,15 @@ recorded on 2026-09-23 at 17:00Z.
 | `goal-active-pages-count` | 60,000 | 25,000 | increase | 141,191 | 152,398 |
 
 `goal-instacart-cart-30d` has no first-party SQL, so it is GA4-only and reads 0.
+
+The five click goals above were re-based on verified human clicks on
+2026-09-25 (the 2026-09-23 figures were raw rows: 21,401 / 22,840 specpicks,
+5,442 / 6,261 aisleprompt). Their progress series therefore drops sharply at
+that point: the definition changed, not the traffic. They had been marked
+`accomplished` on bot counts and were reopened (`reopened_at` /
+`reopened_reason` on each goal). The specpicks conversion values are the GA4
+side of the max: GA4 saw 11 `amazon_click` events while 0 first-party rows
+passed the filter.
 
 These goal ids are the canonical `target_metric` vocabulary. See
 `framework/core/registry.py` → `AgentManifest.target_metric`. The

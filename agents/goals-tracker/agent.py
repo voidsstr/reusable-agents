@@ -371,7 +371,7 @@ def render_site_kpi_cards(agents: list[dict]) -> str:
     are small + grey, sparklines underneath."""
     SITE_TRACKERS = {
         "aisleprompt-site-goals-tracker": {"label": "AislePrompt", "accent": "#4f46e5", "kpi_goal_id": "goal-instacart-cart-30d", "kpi_label": "Instacart cart creates"},
-        "specpicks-site-goals-tracker":   {"label": "SpecPicks", "accent": "#f59e0b", "kpi_goal_id": "goal-amazon-clicks-30d", "kpi_label": "Amazon clicks"},
+        "specpicks-site-goals-tracker":   {"label": "SpecPicks", "accent": "#f59e0b", "kpi_goal_id": "goal-amazon-clicks-30d", "kpi_label": "Human Amazon clicks"},
     }
     HEADLINE = [
         ("goal-organic-clicks-30d",      "Organic clicks (30d)"),
@@ -568,10 +568,10 @@ def _UNUSED_render_site_kpi_rollup(agents: list[dict]) -> str:
     HEADLINE_GOALS = [
         ("goal-organic-clicks-30d", "Organic clicks (30d)"),
         ("goal-organic-impressions-30d", "Organic impressions (30d)"),
-        ("goal-total-conversions-30d", "Total conversions (30d)"),
+        ("goal-total-conversions-30d", "Human conversions (30d)"),
         ("goal-instacart-cart-30d", "Instacart cart creates (30d)"),
-        ("goal-amazon-clicks-30d", "Amazon clicks (30d)"),
-        ("goal-ebay-clicks-30d", "eBay clicks (30d)"),
+        ("goal-amazon-clicks-30d", "Human Amazon clicks (30d)"),
+        ("goal-ebay-clicks-30d", "Human eBay clicks (30d)"),
         ("goal-indexed-pages-pct", "% indexed by Google"),
     ]
     cards = []
