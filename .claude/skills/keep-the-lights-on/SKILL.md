@@ -732,6 +732,21 @@ healthy agent that is I/O-shaped — one Azure-PG connection timeout
 proposals"` — is a transient: `reset-failed` (or re-probe 2-3×) and note.
 Escalate/investigate only on the **2nd consecutive** occurrence.
 
+**G. Site boot migration runner dead (agent fixes silently never ship).**
+Signature: agents keep committing `db/migrations/*.sql`, the site keeps
+looking unfixed, and `SELECT count(*) FROM _migration_failures` is 0 while
+far fewer rows exist in `_migrations` than files on disk. Container logs show
+`[DB Init] Attempt N/30 failed: current transaction is aborted`. Cause
+(aisleprompt, 2026-07-02 → 09-25, 816 files): a migration that failed inside
+its own `BEGIN` left the connection aborted, so initDB died on every boot and
+nothing after the loop (cache warmers) ran either. Fixed in the runner (COMMIT
+after success, ROLLBACK before recording a failure, 15-min session timeout).
+If it recurs: diff files vs `_migrations`, dry-run the pending set
+cumulatively inside ONE rolled-back transaction, review before letting a
+backlog auto-apply (old agent migrations can undo newer fixes), quarantine
+into `db/migrations/_quarantine/` with a reason, and apply multi-minute
+files by hand so the boot doesn't carry them.
+
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.
 - `.claude/skills/refresh-gsc-token/SKILL.md` — re-mint the shared GSC/GA4 OAuth
