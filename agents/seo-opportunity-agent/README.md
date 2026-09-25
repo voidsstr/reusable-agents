@@ -95,7 +95,10 @@ phase documentation.
      goals (`goal-progress.json`). *Currently these never run; see AGENT.md →
      Failure modes.*
    - Builds recs from the deterministic rule passes, then from the LLM audit
-     (at most `analyzer.max_llm_audit_pages` pages).
+     (at most `analyzer.max_llm_audit_pages` pages). Noindexed pages (robots
+     meta or `X-Robots-Tag` with `noindex`/`none`, `llm_audit.page_is_noindex`)
+     never take an audit slot: the audit crawl skips them and hands the slot
+     to the next seed, and `run_llm_audit` drops any that reach it.
    - Tags each rec with `work_type` / `handoff_target`.
    - Writes `recommendations.json` and `goals.json`. Each rec carries `id`,
      `type`, `priority`, `title`, `rationale`, `expected_impact`,
@@ -103,6 +106,14 @@ phase documentation.
 5. The **finalizer**:
    - Renders the HTML report.
    - Writes `recommendations.json` to storage.
+   - Returns `RunResult.metrics` for goal auto-tracking (AgentBase layer b):
+     `rec_count`, the GSC/GA4 north-star keys, per-category rec counts,
+     `revenue_28d.<key>` (every key of `snapshot.json` `revenue_28d`, e.g.
+     `revenue_28d.amazon-clicks_db_30d`) and `db.<block>.<column>` (every
+     numeric column of a single-row `data/db-stats.json` block, e.g.
+     `db.ai_referrals_30d.last_30d`). A goal binds one by naming it in
+     `target_metric`; no code change. A goal with `status: abandoned`
+     (retired via `install/seed-default-goals.sh`) is not tracked.
    - Calls `agent.queue_for_digest(...)`. The report reaches the inbox through
      `digest-rollup-agent`.
    - Calls `framework.core.dispatch.gated_dispatch_now(cfg=cfg, …)`. Both
@@ -190,6 +201,7 @@ Optional blocks and whether each is used today:
 | `page_inventory` | **Not read.** The sitemap sample crawl (`pages-by-type.jsonl`) is not implemented in the reconstructed collector. |
 | `data_sources.google_ads` | **Not collected** (no `ads-*.json`), so `paid-organic-gap` and `ad-copy-headline-winner` cannot fire. |
 | `data_sources.ai_traffic` | **Used** (2026-09-25). The collector reads the site's `ai_traffic_log` through `framework/core/ai_traffic.py` and merges `ai_landed_pages` (pages AI assistants sent people to or fetched at answer time, spoof-filtered, best first) and `ai_referrals_30d` (`{last_7d, last_30d}`) into `db-stats.json`. |
+| `data_sources.db.human_clicks` | **Used** (2026-09-25). Each `{name, table, spec, match}` entry counts verified-human affiliate clicks with `framework/core/human_clicks.py` into `db-stats.json` `<name>_30d` = `{last_7d, last_30d, raw_30d, verdicts_30d}`, so a `revenue_kpis` entry with `db_table: <name>` reads people, not crawler redirect hits. A failed entry is left out (unmeasured), never written as 0. |
 | `data_sources.db.human_clicks[].pages` | **Used** (2026-09-25). Also writes `<name>_pages` = `[{path, clicks}]`, the verified-human clicks split by a column (e.g. ASIN → `/product/{value}`). |
 | `analyzer.audit_seed_queries` | **Used** (2026-09-25). `db-stats.json` blocks whose rows carry `path`. Without a page inventory, the LLM audit fetches these pages first (depth 0) and only fills leftover slots with the homepage/GSC BFS; with one, it moves them to the front. Each audited page carries its AI referrals, live fetches and TTFB into the prompt. |
 | `analyzer.audit_url_cooldown` | **Used** (2026-09-25). Skips a URL that already got `max_recs_per_url` LLM-audit recs in `window_days` (`max_recs_per_exempt_url` for URLs in `exempt_queries`). Before this, one specpicks PDP drew 261 LLM recs in 30 days. |

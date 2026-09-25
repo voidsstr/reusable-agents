@@ -55,7 +55,9 @@ Per run (`ProgressiveImprovementAgent`):
    choice into the most recent *local* prior `recommendations.json` (the disk
    copy under the run dir, not the blob).
 3. **Crawl** with `crawler.crawl()`:
-   - It is a BFS from `crawler.seed_urls`, plus the first 50 sitemap URLs when
+   - It is a BFS from `crawler.seed_urls` (behind the AI-landed and
+     human-click pages from `crawler.seed_from_traffic`, when set), plus the
+     first 50 sitemap URLs when
      `use_sitemap` is on. `/sitemap.xml` and its sitemap-index children are
      read, capped at 200 URLs.
    - It stays on the same host, where the apex and `www.` count as one host
@@ -267,6 +269,7 @@ with `competitor-research-agent`):
 |---|---|---|
 | `site.id`, `site.domain`, `site.label`, `site.base_url`, `site.what_we_do` | — / — / `id` / `https://<domain>` / "" | Identity. `what_we_do` is fed to the LLM as `SITE PURPOSE` |
 | `crawler.seed_urls` | `["/"]` | BFS roots |
+| `crawler.seed_from_traffic` | off | Crawl first: the top `ai_top_n` pages AI assistants use (`framework/core/ai_traffic.landed_paths`) and the top `human_clicks.top_n` pages verified-human affiliate clicks come from (`framework/core/human_clicks.human_click_paths`), from the DB in `dsn_env`. Then `seed_urls`. Each source degrades on its own; a failure leaves `seed_urls` unchanged |
 | `crawler.use_sitemap` | `true` | Add up to 50 sitemap URLs to the seeds |
 | `crawler.max_depth` / `max_pages` | 2 / 30 | Crawl shape |
 | `crawler.path_excludes` | `[]` | fnmatch globs on the URL path |
