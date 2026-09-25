@@ -84,13 +84,26 @@ LLM.
   refresh token in `auth.oauth_file`).
 - Site DB (optional, read only): `categories`, `products` (to resolve `/vs/`
   ASIN pairs), `editorial_articles` (outcome metric).
+- Site `ai_traffic_log` (optional, read only, `data_sources.ai_traffic`,
+  added 2026-09-25) through `framework/core/ai_traffic.py`: human AI-assistant
+  referrals plus live user fetches (ChatGPT-User, Perplexity-User,
+  Claude-User), spoofed crawler IPs dropped. GSC and GA4 cannot see this
+  demand, and the article proposer had no other input for it.
 - Config: the instance `site.yaml`.
 
 ## Outputs
 
 - **Storage**: `framework/demand-signal/<site_id>.json`, with keys `site`,
   `generated_at`, `template_winners`, `steer_topics`, `zero_coverage`,
-  `strike_distance`, `h2h_hot`. Consumers ignore a signal older than 72h
+  `strike_distance`, `h2h_hot`, and (with `data_sources.ai_traffic`)
+  `ai_assistant_demand` = `{clusters: [{cluster, articles, referrals,
+  fetches, referrals_per_100, fetches_per_100}], top_products: [{key, title,
+  category, referrals, fetches}]}`. `demand_signal.build_prompt_block`
+  renders it as the **AI ASSISTANT DEMAND** block: clusters ranked by
+  referrals per 100 published articles (a yield; clusters under 20 articles
+  listed last as too few to judge), then the product pages assistants land
+  on (single-product lookups: PDP / head-to-head work, not category
+  round-ups). Consumers ignore a signal older than 72h
   (`DEFAULT_MAX_AGE_HOURS`).
 - **Decisions**: `info` "demand signal written to …", plus `warning`s for
   GA4, vocabulary or template-total failures.
@@ -105,7 +118,8 @@ LLM.
 
 `RunResult.metrics`: `gsc_rows`, `ga4_rows`, `topics_emitted`,
 `strike_found`, `zero_coverage_found`, `h2h_hot_found`,
-`steered_published_7d`.
+`steered_published_7d`, and with AI demand `ai_demand_clusters`,
+`ai_referrals_on_articles`, `ai_demand_top_products`.
 
 ## Goals & metrics
 
@@ -135,6 +149,7 @@ Env vars:
 | `auth.oauth_file` | required | Google OAuth refresh-token file |
 | `templates[]` | `[]` | ordered `{name, pattern[, prefix]}`, where the first regex match wins. `prefix` sets the GA4 total filter explicitly |
 | `min_impressions` | 20 | ceiling for the adaptive floor |
+| `data_sources.ai_traffic` | none (off) | AI-assistant demand. Keys: `dsn_env` (default `data_sources.db.dsn_env`), `config` (overrides for `ai_traffic.DEFAULTS`, e.g. `referral_sources`, `live_fetch_sources`), `articles_query` (`slug, title` of published articles), `article_path_template` (`/reviews/{slug}`), `clusters[]` (`{name, pattern}`; regex on "slug title", first match wins), `product_prefix`, `product_key_regex`, `products_query` (`key, title, category` for `%(keys)s`; double any literal `%`), `top_products` (15). Any failure logs a warning and the signal ships without the block. |
 
 ## Short-circuit & idempotency
 

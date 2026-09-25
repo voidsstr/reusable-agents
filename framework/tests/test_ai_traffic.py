@@ -160,3 +160,26 @@ def test_referral_counts_sql_and_parse():
     assert at.referral_counts(conn, windows=(7, 30)) == {"last_7d": 3, "last_30d": 11}
     conn.rows = [{"last_7d": 1, "last_30d": 2}]
     assert at.referral_counts(conn) == {"last_7d": 1, "last_30d": 2}
+
+
+def test_cluster_yield_normalises_by_article_count():
+    articles = [{"slug": f"qwen-{i}", "title": "Run Qwen locally"} for i in range(10)] + \
+               [{"slug": f"best-mouse-{i}", "title": "Best gaming mouse"} for i in range(40)] + \
+               [{"slug": "misc-thing", "title": "Something else"}]
+    landed = [
+        {"path": "/reviews/qwen-1", "referrals": 3, "fetches": 5},
+        {"path": "/reviews/qwen-2/", "referrals": 1, "fetches": 0},
+        {"path": "/reviews/best-mouse-3", "referrals": 4, "fetches": 20},
+        {"path": "/product/B0AAAAAAAA", "referrals": 9, "fetches": 9},   # not an article
+        {"path": "/reviews/unknown-slug", "referrals": 5, "fetches": 5},  # not published
+    ]
+    clusters = [{"name": "llm", "pattern": r"qwen|llama|llm"},
+                {"name": "peripherals", "pattern": r"mouse|keyboard"}]
+    out = at.cluster_yield(landed, articles, clusters, path_template="/reviews/{slug}")
+    by = {c["cluster"]: c for c in out}
+    assert by["llm"]["articles"] == 10 and by["llm"]["referrals"] == 4
+    assert by["llm"]["referrals_per_100"] == 40.0
+    assert by["peripherals"]["referrals"] == 4 and by["peripherals"]["referrals_per_100"] == 10.0
+    assert by["other"]["articles"] == 1 and by["other"]["referrals"] == 0
+    # ranked by yield, not by raw hits (both clusters have 4 referrals)
+    assert [c["cluster"] for c in out][:2] == ["llm", "peripherals"]

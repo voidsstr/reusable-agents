@@ -34,6 +34,33 @@ CONFIG (site.yaml)
     - {name: hardware-compare, pattern: "^/compare/."}
     - {name: article,          pattern: "^/(articles|blog)/"}
   min_impressions: 20
+
+AI-ASSISTANT DEMAND (optional, data_sources.ai_traffic)
+--------------------------------------------------------
+GSC/GA4 cannot see what ChatGPT, Perplexity or Claude send people to. With
+this block the agent also reads the site's ai_traffic_log through
+framework/core/ai_traffic.py (human referrals + live user fetches,
+spoof-filtered) and publishes ``ai_assistant_demand``:
+
+  clusters      article topic clusters with AI referrals / fetches PER 100
+                published articles (a yield, not a raw count — raw counts
+                just reward whichever cluster already has the most articles)
+  top_products  the product pages assistants land on most (specific-product
+                lookups: work for PDP / head-to-head improvement, not for
+                category buying guides)
+
+    data_sources:
+      ai_traffic:
+        dsn_env: DATABASE_URL             # default: data_sources.db.dsn_env
+        config: {referral_sources: [chatgpt, perplexity, copilot, gemini, claude],
+                 live_fetch_sources: [chatgpt-user, perplexity-user, claude-user]}
+        articles_query: "SELECT slug, title FROM editorial_articles WHERE status = 'published'"
+        article_path_template: "/reviews/{slug}"
+        clusters: [{name: "LLM / local AI", pattern: "llm|qwen|llama"}, ...]
+        product_prefix: /product/
+        product_key_regex: "[A-Z0-9]{10}"
+        products_query: "SELECT asin AS key, title, category FROM ... WHERE asin = ANY(%(keys)s)"
+        top_products: 15
 """
 from __future__ import annotations
 
@@ -291,6 +318,92 @@ class SearchDemandAgent(AgentBase):
         except Exception:
             return 0
 
+    def _ai_assistant_demand(self, cfg: dict) -> dict | None:
+        """data_sources.ai_traffic → payload["ai_assistant_demand"] (see the
+        module docstring). Optional: returns None, with a warning decision,
+        on any failure — GSC/GA4 steering still ships."""
+        ds = cfg.get("data_sources") or {}
+        block = ds.get("ai_traffic") or {}
+        if not block or block.get("enabled") is False:
+            return None
+        dsn_env = block.get("dsn_env") or (ds.get("db") or {}).get("dsn_env") or "DATABASE_URL"
+        dsn = os.environ.get(dsn_env, "")
+        if not dsn:
+            self.decide("warning", f"ai_traffic skipped: ${dsn_env} not set")
+            return None
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            from framework.core import ai_traffic
+        except Exception as e:
+            self.decide("warning", f"ai_traffic skipped: {e}")
+            return None
+        at_cfg = ai_traffic.config(block.get("config") or {})
+        art_tmpl = str(block.get("article_path_template") or "/reviews/{slug}")
+        art_prefix = art_tmpl.split("{slug}", 1)[0] or "/"
+        prod_prefix = str(block.get("product_prefix") or "/product/")
+        timeout_ms = int(at_cfg.get("statement_timeout_ms") or 30000)
+        conn = None
+        try:
+            conn = psycopg2.connect(dsn)
+            conn.set_session(readonly=True)
+            landed = ai_traffic.landed_paths(conn, cfg=at_cfg,
+                                             prefixes=[art_prefix, prod_prefix],
+                                             limit=int(block.get("max_paths") or 20000))
+            conn.rollback()
+            articles: list[dict] = []
+            if block.get("articles_query"):
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                    cur.execute(block["articles_query"])
+                    articles = [dict(r) for r in cur.fetchall()]
+                conn.rollback()
+            clusters = ai_traffic.cluster_yield(
+                landed, articles, block.get("clusters") or [],
+                path_template=art_tmpl)
+            prod_rows = [r for r in landed
+                         if ai_traffic.normalize_path(r["path"]).startswith(prod_prefix)]
+            keys = ai_traffic.path_keys(prod_rows, prod_prefix,
+                                        key_regex=block.get("product_key_regex"))
+            n_top = int(block.get("top_products") or 15)
+            by_key = {}
+            for r in prod_rows:
+                k = ai_traffic.normalize_path(r["path"])[len(prod_prefix):].split("/", 1)[0]
+                by_key.setdefault(k, r)
+            top = []
+            meta: dict = {}
+            if block.get("products_query") and keys[:n_top]:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                    cur.execute(block["products_query"], {"keys": keys[:n_top]})
+                    for r in cur.fetchall():
+                        meta.setdefault(str(r.get("key")), dict(r))
+                conn.rollback()
+            for k in keys[:n_top]:
+                r = by_key.get(k) or {}
+                m = meta.get(k) or {}
+                top.append({"key": k, "title": str(m.get("title") or "")[:90],
+                            "category": m.get("category"),
+                            "referrals": int(r.get("referrals") or 0),
+                            "fetches": int(r.get("fetches") or 0)})
+        except Exception as e:
+            self.decide("warning", f"ai_traffic demand failed ({str(e)[:160]}); "
+                                   "steering from GSC/GA4 only")
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        return {
+            "referral_days": int(at_cfg.get("referral_days") or 90),
+            "fetch_days": int(at_cfg.get("fetch_days") or 30),
+            "article_path_template": art_tmpl,
+            "clusters": clusters,
+            "top_products": top,
+        }
+
     # ---- the run ---------------------------------------------------------
     def run(self) -> RunResult:
         cfg = _load_config()
@@ -444,6 +557,10 @@ class SearchDemandAgent(AgentBase):
             "strike_distance": strike[:25],
             "h2h_hot": h2h_hot,
         }
+        self.status("AI-assistant demand", 85)
+        ai_demand = self._ai_assistant_demand(cfg)
+        if ai_demand:
+            payload["ai_assistant_demand"] = ai_demand
         path = demand_signal.write_demand(self.storage, site_id, payload)
         self.decide("info", f"demand signal written to {path}")
 
@@ -456,6 +573,11 @@ class SearchDemandAgent(AgentBase):
             "h2h_hot_found": len(h2h_hot),
             "steered_published_7d": steered_pub,
         }
+        if ai_demand:
+            cl = ai_demand.get("clusters") or []
+            metrics["ai_demand_clusters"] = len(cl)
+            metrics["ai_referrals_on_articles"] = sum(c.get("referrals", 0) for c in cl)
+            metrics["ai_demand_top_products"] = len(ai_demand.get("top_products") or [])
         top = template_winners[0]["template"] if template_winners else "n/a"
         return RunResult(
             status="success",

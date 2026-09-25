@@ -50,7 +50,7 @@ import copy
 import json
 import os
 import re
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 DEFAULTS: dict[str, Any] = {
     "table": "ai_traffic_log",
@@ -343,6 +343,56 @@ def referral_counts(conn, *, cfg: Optional[dict] = None,
         return {f"last_{w}d": int(row.get(f"last_{w}d") or 0) for w in wins}
     row = row or [0] * len(wins)
     return {f"last_{w}d": int(row[i] or 0) for i, w in enumerate(wins)}
+
+
+def cluster_yield(landed: Iterable[dict], articles: Iterable[Mapping],
+                  clusters: Sequence[Mapping], *, path_template: str,
+                  other_label: str = "other") -> list[dict]:
+    """AI-assistant demand per topic cluster, normalised by supply.
+
+    `landed` is :func:`landed_paths` output; `articles` are published
+    articles ``{slug, title}``; `clusters` are ``{name, pattern}`` (regex,
+    case-insensitive, matched against "<slug> <title>"; first match wins,
+    unmatched articles go to `other_label`). `path_template` maps a slug to
+    its URL path, e.g. "/reviews/{slug}".
+
+    Returns ``[{cluster, articles, referrals, fetches, referrals_per_100,
+    fetches_per_100}]`` sorted by referrals_per_100 then fetches_per_100.
+    Raw hit counts favour whichever cluster has the most articles; the
+    per-100 yield says where one more article is most likely to be used.
+    """
+    compiled = [(str(c.get("name")), re.compile(str(c.get("pattern") or "(?!)"), re.I))
+                for c in clusters or [] if c.get("name")]
+    by_path: dict[str, str] = {}
+    counts: dict[str, dict] = {}
+
+    def bucket(name: str) -> dict:
+        return counts.setdefault(name, {"cluster": name, "articles": 0,
+                                        "referrals": 0, "fetches": 0})
+
+    for a in articles or []:
+        slug = str(a.get("slug") or "").strip()
+        if not slug:
+            continue
+        text = f"{slug} {a.get('title') or ''}"
+        name = next((n for n, rx in compiled if rx.search(text)), other_label)
+        by_path[normalize_path(path_template.replace("{slug}", slug))] = name
+        bucket(name)["articles"] += 1
+    for r in landed or []:
+        name = by_path.get(normalize_path(str(r.get("path") or "")))
+        if name is None:
+            continue
+        b = bucket(name)
+        b["referrals"] += int(r.get("referrals") or 0)
+        b["fetches"] += int(r.get("fetches") or 0)
+    out = []
+    for b in counts.values():
+        n = max(1, b["articles"])
+        b["referrals_per_100"] = round(b["referrals"] * 100.0 / n, 1)
+        b["fetches_per_100"] = round(b["fetches"] * 100.0 / n, 1)
+        out.append(b)
+    out.sort(key=lambda b: (-b["referrals_per_100"], -b["fetches_per_100"], b["cluster"]))
+    return out
 
 
 def path_keys(rows: Iterable[dict], prefix: str, *,

@@ -35,6 +35,12 @@ Signal payload shape (all keys optional — consumers must tolerate absence):
     "zero_coverage":    [{"query", "impressions", "position"}],
     "strike_distance":  [{"query", "page", "position", "impressions"}],
     "h2h_hot":          [{"pair", "views" | "impressions", "source"}],
+    "ai_assistant_demand": {            # from ai_traffic_log (ai_traffic.py)
+        "referral_days", "fetch_days", "article_path_template",
+        "clusters":     [{"cluster", "articles", "referrals", "fetches",
+                          "referrals_per_100", "fetches_per_100"}],
+        "top_products": [{"key", "title", "category", "referrals", "fetches"}],
+    },
   }
 """
 from __future__ import annotations
@@ -149,6 +155,50 @@ def build_prompt_block(sig: dict, *, max_topics: int = 10,
             n = h.get("views") or h.get("impressions") or 0
             lines.append(f"  - {h.get('pair')} ({n:,} {'views' if h.get('views') else 'imp'}, {h.get('source')})")
 
+    lines.extend(_ai_demand_lines(sig.get("ai_assistant_demand") or {}))
+
     lines.append("Every proposal that follows a STEER/UNCOVERED row must cite the query it")
     lines.append("targets in its why_now. Do not propose against this data without a reason.")
     return "\n".join(lines)
+
+
+def _ai_demand_lines(ai: dict, *, max_clusters: int = 8, max_products: int = 8,
+                     min_articles: int = 20) -> list[str]:
+    """The AI ASSISTANT DEMAND section: which article clusters AI assistants
+    actually send people to, per 100 articles already published (a yield —
+    raw counts just reward the cluster with the most articles), and which
+    single products they land on. Clusters with fewer than `min_articles`
+    articles are listed after the rest: one referral on 9 articles is not
+    a trend."""
+    all_clusters = [c for c in (ai.get("clusters") or []) if c.get("articles")]
+    judged = [c for c in all_clusters if c.get("articles", 0) >= min_articles]
+    small = [c for c in all_clusters if c.get("articles", 0) < min_articles]
+    clusters = judged + small
+    products = ai.get("top_products") or []
+    if not clusters and not products:
+        return []
+    out = [f"AI ASSISTANT DEMAND (ChatGPT/Perplexity/Claude/Copilot/Gemini referrals "
+           f"{ai.get('referral_days', 90)}d + live user fetches {ai.get('fetch_days', 30)}d, "
+           "from the site's own log):"]
+    if clusters:
+        out.append("Article clusters ranked by referrals per 100 published articles — the "
+                   "lane where one more article is most likely to be used by an assistant:")
+        for c in clusters[:max_clusters]:
+            few = (f"; under {min_articles} articles, too few to judge"
+                   if c.get("articles", 0) < min_articles else "")
+            out.append(f"  - {c.get('cluster')}: {c.get('referrals_per_100', 0):g} referrals/100 "
+                       f"articles ({c.get('referrals', 0)} referrals, {c.get('fetches', 0)} "
+                       f"assistant fetches, {c.get('articles', 0)} articles{few})")
+        lead = clusters[0]
+        out.append(f"A cluster well below {lead.get('cluster')}'s yield "
+                   f"({lead.get('referrals_per_100', 0):g}/100) is not a reason to widen the "
+                   "topic scope; high raw fetches with low yield mean the lane is already covered.")
+    if products:
+        out.append("Product pages assistants land on most (single-product lookups — they call "
+                   "for PDP / head-to-head work on that product, not a category round-up):")
+        for p in products[:max_products]:
+            label = p.get("title") or p.get("key")
+            cat = f" [{p['category']}]" if p.get("category") else ""
+            out.append(f"  - {label}{cat}: {p.get('referrals', 0)} referrals, "
+                       f"{p.get('fetches', 0)} fetches")
+    return out
