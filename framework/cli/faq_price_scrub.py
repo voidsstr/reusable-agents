@@ -9,6 +9,8 @@ backlog cleanup, not an agent.
 
 Per FAQ pair whose answer has a price (or, with --include-ratings-only, a
 rating):
+  0. A price in the question itself is replaced mechanically
+     ("worth $31.99" -> "worth the price").
   1. The question is only about price or reviews ("How much does it cost?")
      -> drop the pair; no price-free answer to it is worth keeping.
   2. Rewrite with the fleet's resident local model (framework/core/local_llm:
@@ -47,6 +49,7 @@ from framework.core.ai_providers import ai_client_for
 from framework.core.llm_json import extract_json_array
 from framework.core.price_strip_guard import (
     SYSTEM_PROMPT, check_rewrite, has_price, has_price_or_rating, is_price_or_review_question,
+    strip_price_from_question,
 )
 
 log = logging.getLogger("faq_price_scrub")
@@ -144,6 +147,11 @@ def main(argv=None) -> int:
             slots = []
             for qa in faq:
                 q, a = (qa or {}).get("question", ""), (qa or {}).get("answer", "")
+                if isinstance(q, str) and has_price(q):
+                    # A price in the QUESTION ("Is it worth $31.99 over X?") is
+                    # a label, not prose: replace it mechanically.
+                    stats["questions_depriced"] = stats.get("questions_depriced", 0) + 1
+                    qa = {**qa, "question": strip_price_from_question(q)}
                 if not isinstance(a, str) or not _needs_work(a, args.include_ratings_only):
                     slots.append(("keep", qa))
                     continue

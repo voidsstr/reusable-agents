@@ -109,6 +109,26 @@ def is_price_or_review_question(question: str) -> bool:
     return bool(PRICE_OR_REVIEW_QUESTION.search(question or ""))
 
 
+_Q_AMOUNT = r"\$\s?\d[\d,]*(?:\.\d+)?(?:\s?[-–]\s?\$?\d[\d,]*(?:\.\d+)?)?"
+_Q_AT_FOR = re.compile(r"\s(at|for)\s+(?:around\s+|about\s+|roughly\s+|just\s+|only\s+|under\s+)?" + _Q_AMOUNT, re.I)
+_Q_WORTH = re.compile(r"\bworth\s+(?:around\s+|about\s+)?" + _Q_AMOUNT, re.I)
+_Q_ANY = re.compile(r"(?:around\s+|about\s+|roughly\s+|just\s+|only\s+|under\s+)?" + _Q_AMOUNT, re.I)
+
+
+def strip_price_from_question(question: str) -> str:
+    """Deterministically replace a quoted price in a FAQ QUESTION with a
+    price-free phrase ("Is it worth $31.99 over X?" -> "Is it worth the price
+    over X?"). Questions are short labels, not editorial prose, so this is a
+    mechanical edit; the answer is rewritten separately."""
+    q = question or ""
+    if not re.search(_Q_AMOUNT, q):
+        return q
+    q = _Q_WORTH.sub("worth the price", q)
+    q = _Q_AT_FOR.sub(lambda m: f" {m.group(1)} {'its' if m.group(1).lower() == 'at' else 'the'} price", q)
+    q = _Q_ANY.sub("the price", q)
+    return re.sub(r"\s{2,}", " ", q).strip()
+
+
 def required_numbers(source: str) -> tuple[set[str], set[str]]:
     """(numbers that must survive, every number in the source)."""
     allnums = numbers(source)

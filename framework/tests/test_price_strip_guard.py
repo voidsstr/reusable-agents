@@ -1,7 +1,22 @@
 """price_strip_guard: cases taken from the 2026-09-26 local-model bake-off."""
 from framework.core.price_strip_guard import (
-    check_rewrite, has_price_or_rating, is_price_or_review_question, required_numbers,
+    check_rewrite, has_price, has_price_or_rating, is_price_or_review_question, required_numbers,
+    strip_price_from_question,
 )
+
+
+def test_strip_price_from_question():
+    cases = {
+        "Is it worth $31.99 compared to a basic flat power strip?": "Is it worth the price compared to a basic flat power strip?",
+        "How much tape do you actually get for $19.99?": "How much tape do you actually get for the price?",
+        "Is the G240 worth it at around $10?": "Is the G240 worth it at its price?",
+        "Is the H6 Flow RGB worth $109.97?": "Is the H6 Flow RGB worth the price?",
+        "Does it support 4K at 120Hz?": "Does it support 4K at 120Hz?",
+    }
+    for q, want in cases.items():
+        got = strip_price_from_question(q)
+        assert got == want, (q, got)
+        assert not has_price(got)
 
 SRC = ("For anyone buying a Raspberry Pi 5 8GB in 2026, the CanaKit Starter Kit PRO is the better buy: "
        "it's the identical 2.4 GHz quad-core silicon (2153 Geekbench 6 multi-core) but bundles a 128GB "
