@@ -102,6 +102,9 @@ PRODUCER_AGENT_IDS = (
     # Catalogue integrity: de-categorising is done in-agent, but the pipeline
     # gap that CAUSES it is a code fix and comes through here.
     "specpicks-category-integrity-agent",
+    # In-place refreshes of pages whose AI-assistant referrals decayed
+    # (article-refresh recs; growth-20260926T144200Z-03).
+    "specpicks-stale-content-watcher",
 )
 
 
