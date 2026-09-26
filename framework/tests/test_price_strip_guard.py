@@ -80,7 +80,9 @@ def test_price_or_review_questions():
               "What do reviews say about the fan noise?",
               "How well reviewed is the Ultimate 2C?",
               "How well is this PSU rated by buyers?",
-              "How well is this part rated by other buyers?"]:
+              "How well is this part rated by other buyers?",
+              "How do buyers rate the GIGABYTE Radeon RX 9060 XT Gaming OC 16G?",
+              "Is the 1UPcard cleaning kit well reviewed?"]:
         assert is_price_or_review_question(q), q
     # value / feature questions: rewritten, not dropped
     for q in ["Does this case work with MagSafe wireless charging?",

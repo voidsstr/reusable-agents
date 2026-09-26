@@ -126,10 +126,14 @@ def main(argv=None) -> int:
     conn.autocommit = False
     cur = conn.cursor()
     col, tbl = args.faq_column, args.table
-    price_filter = r"\$[0-9]"
+    # Coarse SQL prefilter; the Python guard makes the precise per-answer call.
+    row_filter = r"\$[0-9]"
+    if args.include_ratings_only:
+        row_filter += (r"|[0-9](\.[0-9])? ?(/ ?5|out of 5)|[0-9](\.[0-9])?[- ]stars?"
+                       r"|[0-9,]{3,} (reviews|ratings|reviewers|buyers|customers|shoppers)")
     cur.execute(
         f"SELECT id, asin, {col} FROM {tbl} WHERE is_active AND jsonb_typeof({col}) = 'array' "
-        f"AND {col}::text ~ %s ORDER BY id", (price_filter,))
+        f"AND {col}::text ~* %s ORDER BY id", (row_filter,))
     rows = cur.fetchall()
     conn.rollback()
     if args.limit:

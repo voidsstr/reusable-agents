@@ -73,7 +73,7 @@ PRICE_OR_REVIEW_QUESTION = re.compile(
     r"\b(how much|what does (it|this|that|the [\w\s-]{1,60}) cost|what('s| is) the (current )?price"
     r"|current price|price (of|for) (it|this|the)|on sale|discount|coupon"
     r"|how (well|highly) (rated|reviewed)|how (well|highly|good) (is|are|was) ([\w\s-]{1,60} )?(rated|reviewed)|how (is|are) ([\w\s-]{1,40} )?(rated|reviewed)"
-    r"|(rated|reviewed) by|reviews? say|review score|star rating|how many stars|ratings?\b"
+    r"|how (do|does|would) ([\w\s-]{1,40} )?(buyers|owners|customers|reviewers|users|people|shoppers) rate|well[- ](reviewed|rated)|(rated|reviewed) by|reviews? say|review score|star rating|how many stars|ratings?\b"
     r"|what do (people|users|owners|buyers|customers|reviewers) (say|think))",
     re.I)
 
