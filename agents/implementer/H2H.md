@@ -233,6 +233,25 @@ fields: `verdict_winner`, `verdict_reason`, `buy_advice`,
 `content_md`. If parse fails, **store raw text in `content_md`**, set
 the structured fields to NULL, set `_parse_failed=true`, and continue.
 
+**Price/rating backstop (2026-09-26).** Stored verdicts are shown for
+months, so a printed price goes stale (and the 24h price rule then hides
+the verdict from the server-rendered page). Before upserting, check the
+parsed fields:
+
+```bash
+python3 -c "import json,sys; sys.path.insert(0,'/home/voidsstr/development/reusable-agents')
+from framework.core.price_strip_guard import has_price_or_rating
+d=json.load(open(sys.argv[1]))
+bad=[k for k in ('verdict_reason','buy_advice','value_commentary','content_md') if has_price_or_rating(str(d.get(k) or ''))]
+print(','.join(bad)); sys.exit(1 if bad else 0)" parsed.json
+```
+
+If it fails, regenerate the pair ONCE with an added user-prompt line:
+"Your previous draft quoted prices or ratings in: <fields>. Rewrite with no
+dollar amounts, price percentages, star ratings or review counts." If the
+second draft still fails, upsert it anyway (the render layer only shows the
+clean prefix) and note the pair in `applied-recs.json` as `priced_verdict`.
+
 #### 3e. Upsert into `comparison_commentary`
 
 Same INSERT/ON CONFLICT pattern as
