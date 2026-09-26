@@ -59,6 +59,7 @@ PRICE_DERIVED = re.compile(
     r"\d[\d.,]*\s?cents?\b|\d[\d.,]*\s*[a-z/%]*\s+per\s+\$\s?\d[\d,]*"
     r"|\d+(\.\d+)?x\s+the\s+(money|price|cost)", re.I)
 RATING_NEAR = re.compile(r"\b\d\.\d\b")
+PRICE_MULT = re.compile(r"\b\d+(?:\.\d+)?\s?x\s+(?:as much|the (?:price|money|cost)|more expensive|the street price)", re.I)
 NUM = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?")
 # Prompt scaffolding a model echoes back instead of just the answer
 # (gemma4:26b did this on 2 of 50 FAQ items in the bake-off).
@@ -76,6 +77,36 @@ PRICE_OR_REVIEW_QUESTION = re.compile(
     r"|how (do|does|would) ([\w\s-]{1,40} )?(buyers|owners|customers|reviewers|users|people|shoppers) rate|well[- ](reviewed|rated)|(rated|reviewed) by|reviews? say|review score|star rating|how many stars|ratings?\b"
     r"|what do (people|users|owners|buyers|customers|reviewers) (say|think))",
     re.I)
+
+
+PER_DOLLAR = re.compile(r"\bper\s+(?:\$|dollar\b)", re.I)
+PRICE_CLAUSE = re.compile(
+    r"\$\s?\d|\bMSRP\b|\bprices?d?\b|\bcosts?\b|\blistings?\b|\bpay\b|\bas much\b|\bexpensive\b|\bcheaper\b", re.I)
+CLAUSE_BREAK = re.compile(r"(?<=[.!?])\s+|;\s+|,\s+(?:but|while|whereas|which|so)\s+|\s+(?:but|while|whereas)\s+|\s+[—–]\s+")
+UNIT_AFTER = re.compile(
+    r"\s?(?:fps|gb|tb|mb|gib|w|watts?|mhz|ghz|hz|ms|mm|nm|°c|cores?|threads?|tok(?:ens)?/s|points?|pts"
+    r"|geekbench|passmark|cinebench|x\s+(?:faster|slower|quicker|the (?:speed|performance)))\b", re.I)
+
+
+def _clauses(text: str) -> list[tuple[int, int]]:
+    out, start = [], 0
+    for m in CLAUSE_BREAK.finditer(text):
+        out.append((start, m.start()))
+        start = m.end()
+    out.append((start, len(text)))
+    return out
+
+
+def _protected_number(clause: str, m: re.Match, allow_units: bool) -> bool:
+    """A number inside a price clause that is still a fact, not a price figure."""
+    n, before, after = m.group(), clause[: m.start()], clause[m.end():]
+    if re.match(r"[A-Za-wyz]|x[A-Za-z0-9]", after) or re.search(r"[A-Za-z]$", before):
+        return True  # glued to letters: 5600X, 8GB, 1440p, R23
+    if "," not in n and "." not in n and re.search(r"\b[A-Z][A-Za-z]*\s$", before):
+        return True  # model name: "RTX 3060", "Pi 5", "Cyberpunk 2077"
+    if re.fullmatch(r"(?:19|20)\d\d", n):
+        return True
+    return allow_units and bool(UNIT_AFTER.match(after))
 
 
 def _blank(s: str, start: int, end: int) -> str:
@@ -132,12 +163,26 @@ def strip_price_from_question(question: str) -> str:
 def required_numbers(source: str) -> tuple[set[str], set[str]]:
     """(numbers that must survive, every number in the source)."""
     allnums = numbers(source)
-    t = PRICE_DERIVED.sub(lambda m: " " * len(m.group()), source)
+    t = source
+    # Numbers in a clause that talks about price are price-derived ("12,357
+    # PassMark points per $100 against 8,109", "the 2.48x price gap", "46% over
+    # its $329 MSRP") unless they name a model, a year or, outside a per-dollar
+    # clause, carry a unit ("115 fps", "24 GB", "2.3x faster").
+    for c0, c1 in _clauses(source):
+        clause = source[c0:c1]
+        per_dollar = bool(PER_DOLLAR.search(clause))
+        if not (per_dollar or PRICE_CLAUSE.search(clause)):
+            continue
+        for m in NUM.finditer(clause):
+            if not _protected_number(clause, m, allow_units=not per_dollar):
+                t = _blank(t, c0 + m.start(), c0 + m.end())
+    t = PRICE_DERIVED.sub(lambda m: " " * len(m.group()), t)
     t = RATING.sub(lambda m: " " * len(m.group()), t)
     spans = [m.span() for m in DOLLARS.finditer(t)]
     for m in re.finditer(r"\d[\d.]*\s?%", t):
         if any(abs(m.start() - b) < 60 or abs(a - m.end()) < 60 for a, b in spans):
             t = _blank(t, m.start(), m.end())
+    t = PRICE_MULT.sub(lambda m: " " * len(m.group()), t)
     t = PRICE_PCT.sub(lambda m: " " * len(m.group()), t)
     t = DOLLARS.sub(lambda m: " " * len(m.group()), t)
     for m in RATING_NEAR.finditer(t):

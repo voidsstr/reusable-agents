@@ -92,3 +92,30 @@ def test_price_or_review_questions():
               "Is the i5-12600KF worth it at this price?",
               "Is it worth it compared with a higher-end retro scaler?"]:
         assert not is_price_or_review_question(q), q
+
+
+def test_per_dollar_and_price_multiples_are_optional():
+    src = ("Per dollar, the 5600X wins: 12,357 PassMark points per $100 against 8,109, and 15.8 vs 8.8 tok/s per $100. "
+           "It scores 2.6x in Time Spy (22,562 vs 8,682) but costs only 1.77x as much. The Quadro is only worth 2.4x the price with 24 GB.")
+    req, _ = required_numbers(src)
+    for n in ("12357", "8109", "15.8", "8.8", "1.77", "2.4"):
+        assert n not in req, n
+    for n in ("2.6", "22562", "8682", "24", "5600"):
+        assert n in req, n
+
+
+def test_price_clause_numbers_optional_but_benchmarks_kept():
+    # comparison_commentary 9996 (2026-09-26 verdict scrub)
+    src = ("For most 2026 buyers, the GeForce RTX 3060 12 GB is the better purchase: the Radeon RX 6950 XT is "
+           "1.6–2.3x faster in matched public benchmarks (115 fps vs 64 fps in Cyberpunk 2077 at 1080p Ultra), "
+           "but its $1,190 listing is about 2.5x the RTX 3060's $479.99.")
+    good = ("For most 2026 buyers, the GeForce RTX 3060 12 GB is the better purchase: the Radeon RX 6950 XT is "
+            "1.6–2.3x faster in matched public benchmarks (115 fps vs 64 fps in Cyberpunk 2077 at 1080p Ultra), "
+            "but its current listing costs far more than the RTX 3060's.")
+    assert check_rewrite(src, good).ok
+    bad = good.replace("115 fps vs 64 fps", "a big lead")
+    r = check_rewrite(src, bad)
+    assert not r.ok and {"115", "64"} <= set(r.missing_numbers)
+    # every figure in a per-dollar clause is optional
+    req, _ = required_numbers("Per $100: Cyberpunk 2077 is 13.3 fps vs 9.7 fps, and PassMark is 3,535 vs 2,360 points.")
+    assert req == {"2077"}
