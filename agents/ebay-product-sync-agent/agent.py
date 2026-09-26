@@ -1851,10 +1851,14 @@ class EbayProductSyncAgent(AgentBase):
         for r in claude_results:
             if isinstance(r, dict):
                 r.setdefault("_source", "claude")
-        # Splice claude results back into `out` at the original indexes
+        # Splice claude results back into `out` at the original indexes.
+        # Only dicts count: the model sometimes puts a bare string (a note,
+        # "skip") in an array slot, and a str reaching _ingest_v2's
+        # hyd.get() crashed the whole run (2026-09-26).
         for k, idx in enumerate(claude_indexes):
             if k < len(claude_results):
-                out[idx] = claude_results[k]
+                r = claude_results[k]
+                out[idx] = r if isinstance(r, dict) else None
         return out
 
     def _upsert_canonical_product(
