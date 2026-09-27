@@ -119,3 +119,44 @@ def test_price_clause_numbers_optional_but_benchmarks_kept():
     # every figure in a per-dollar clause is optional
     req, _ = required_numbers("Per $100: Cyberpunk 2077 is 13.3 fps vs 9.7 fps, and PassMark is 3,535 vs 2,360 points.")
     assert req == {"2077"}
+
+
+class _FakeJudge:
+    def __init__(self, reply):
+        self.reply, self.calls = reply, 0
+
+    def chat(self, messages, **kw):
+        self.calls += 1
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def test_judgeable_reasons():
+    from framework.core.price_strip_guard import GuardResult, judgeable
+    assert judgeable(GuardResult(False, ["missing_numbers", "rating_left"]))
+    assert not judgeable(GuardResult(False, ["missing_numbers", "price_left"]))  # a "$" left is never overridden
+    assert not judgeable(GuardResult(True, []))
+
+
+def test_judge_verdicts_and_context_filter():
+    from framework.core.price_strip_guard import judge_rewrites
+    reply = ('[{"id": "a", "lost_facts": [], "invented": [], "price_or_rating_left": false},'
+             ' {"id": "b", "lost_facts": ["PassMark 52,045"], "invented": [], "price_or_rating_left": false},'
+             ' {"id": "c", "lost_facts": [], "invented": ["42,423"], "price_or_rating_left": false},'
+             ' {"id": "d", "lost_facts": [], "invented": ["42,423"], "price_or_rating_left": false}]')
+    items = [{"id": "a", "source": "s", "rewrite": "r"},
+             {"id": "b", "source": "s", "rewrite": "r"},
+             {"id": "c", "source": "s", "rewrite": "r 42,423"},
+             {"id": "d", "source": "s", "rewrite": "r 42,423", "context": "the 9950X3D scores 42,423"},
+             {"id": "e", "source": "s", "rewrite": "r"}]
+    v = judge_rewrites(_FakeJudge(reply), items)
+    assert v["a"].ok and not v["b"].ok and not v["c"].ok
+    assert v["d"].ok  # the "invented" number is stated elsewhere in the record
+    assert not v["e"].ok and v["e"].error  # no verdict -> not verified
+
+
+def test_judge_failure_means_not_verified():
+    from framework.core.price_strip_guard import judge_rewrites
+    v = judge_rewrites(_FakeJudge(RuntimeError("pool exhausted")), [{"id": "a", "source": "s", "rewrite": "r"}])
+    assert not v["a"].ok and "pool exhausted" in v["a"].error

@@ -232,3 +232,87 @@ def check_rewrite(source: str, output: str, context: str = "") -> GuardResult:
     if new:
         reasons.append("new_numbers")
     return GuardResult(not reasons, reasons, missing, new)
+
+
+# ---------------------------------------------------------------------------
+# Second opinion for rewrites the number check rejects.
+#
+# Why (2026-09-27): number matching cannot tell "33% better value" (price-
+# derived, fine to drop) from "a 30% lead in Cinebench" (a fact) when both sit
+# in a sentence about price. Labelling all 767 verdict-scrub rejections found
+# 749 false positives. Four rule-based redesigns reached 91-97% on those labels,
+# but adversarial red-teams showed each let MORE dropped benchmarks through
+# than the baseline. So check_rewrite stays the fast first pass, and a rewrite
+# it rejects only on number or rating grounds goes to a model that reads the
+# text. price_left, scaffold_leak and empty are never overridden: a "$" left in
+# the output is unambiguous.
+JUDGEABLE_REASONS = frozenset({"missing_numbers", "new_numbers", "rating_left"})
+
+JUDGE_PROMPT = """You audit edits of product-comparison text for a shopping site. Each REWRITE was supposed to remove every price, price comparison, star rating and review count from its SOURCE and keep every other fact.
+
+For each item, compare SOURCE and REWRITE and report:
+- lost_facts: non-price facts that are in SOURCE but missing or changed in REWRITE. Facts include benchmark scores, fps, test results, specs, capacities, core counts, product and model names, launch or release dates, and percentages or multiples that describe performance. These are NOT facts to keep: prices, per-dollar or per-$100 figures, value percentages or multiples computed from prices ("33% better value", "a 2.6x advantage" per dollar), discounts, MSRP comparisons, ratings, review counts, and dates that only timestamp a price. Dropping part of a product name while the product stays clearly identified is fine.
+- invented: numbers or claims in REWRITE that appear in neither SOURCE nor ALSO_IN_RECORD.
+- price_or_rating_left: true only if REWRITE still states a price amount, a quantified price comparison (a number, percentage or exact multiple or fraction of a price, including in words such as "costs twice as much" or "less than half the price"), a rating value or a review count. Qualitative value language is REQUIRED by the edit and is NOT a leftover price: "the cheaper card", "costs more", "a modest premium", "better value", "for the money", "launch pricing", "check the current listing for today's price", "top-reviewed", "well reviewed".
+
+Be strict: if you are unsure whether a dropped number was a fact, list it in lost_facts.
+
+Return ONLY a JSON array with one object per item, in order:
+{"id": "<id>", "lost_facts": ["..."], "invented": ["..."], "price_or_rating_left": false}"""
+
+
+@dataclass
+class JudgeVerdict:
+    ok: bool
+    lost_facts: list[str] = field(default_factory=list)
+    invented: list[str] = field(default_factory=list)
+    price_or_rating_left: bool = False
+    error: str = ""
+
+
+def judgeable(result: GuardResult) -> bool:
+    """True when every reason check_rewrite gave can be overridden by the judge."""
+    return bool(result.reasons) and set(result.reasons) <= JUDGEABLE_REASONS
+
+
+def judge_rewrites(client, items: list[dict], batch: int = 12, timeout: int = 900) -> dict[str, JudgeVerdict]:
+    """Ask `client` (framework ai client: chat(messages, ...) -> str) whether each
+    rewrite lost a fact, invented one, or kept a price/rating.
+
+    items: [{"id": str, "source": str, "rewrite": str, "context": str (optional)}].
+    A number the judge calls invented but that appears in the item's context is
+    dropped from `invented` (it was moved from elsewhere in the record).
+    An item the judge does not answer comes back ok=False with `error` set.
+    """
+    from .llm_json import extract_json_array
+
+    out: dict[str, JudgeVerdict] = {}
+    for b0 in range(0, len(items), batch):
+        chunk = items[b0: b0 + batch]
+        parts = []
+        for it in chunk:
+            parts.append(f"### id {it['id']}\nSOURCE:\n{it['source']}\n\nREWRITE:\n{it['rewrite']}\n")
+            also = sorted(numbers(it["rewrite"]) & numbers(it.get("context", "")) - numbers(it["source"]))
+            if also:
+                parts.append(f"ALSO_IN_RECORD (numbers stated elsewhere in the same record): {', '.join(also)}\n")
+        try:
+            raw = client.chat([{"role": "system", "content": JUDGE_PROMPT},
+                               {"role": "user", "content": "\n".join(parts)}],
+                              temperature=0.0, max_tokens=8000, timeout=timeout)
+            answers = {str(a.get("id")): a for a in extract_json_array(raw) if isinstance(a, dict)}
+        except Exception as e:  # noqa: BLE001 - any failure means "not verified"
+            answers, err = {}, f"judge call failed: {e}"[:200]
+        else:
+            err = "judge gave no verdict for this item"
+        for it in chunk:
+            a = answers.get(str(it["id"]))
+            if a is None:
+                out[str(it["id"])] = JudgeVerdict(False, error=err)
+                continue
+            ctx_nums = numbers(it.get("context", ""))
+            lost = [str(x) for x in a.get("lost_facts") or [] if str(x).strip()]
+            invented = [str(x) for x in a.get("invented") or []
+                        if str(x).strip() and not (numbers(str(x)) and numbers(str(x)) <= ctx_nums)]
+            left = bool(a.get("price_or_rating_left"))
+            out[str(it["id"])] = JudgeVerdict(not (lost or invented or left), lost, invented, left)
+    return out
