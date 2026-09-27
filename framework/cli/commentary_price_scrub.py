@@ -139,6 +139,21 @@ def _opus_call(client, lines: list[str]) -> dict[int, dict]:
     return out
 
 
+def _wait_for_headroom(min_free: int, poll_s: int = 600) -> None:
+    """Block until at least `min_free` claude-pool profiles can serve Opus.
+    A backfill must never take the pool's last profile from production
+    authoring (Opus-only, no fallback)."""
+    if min_free <= 0:
+        return
+    from framework.cli.claude_pool import ready_profiles
+    waited = 0
+    while len(ready := ready_profiles("claude-opus-5-5")) < min_free:
+        if waited % 3600 == 0:
+            log.info("waiting for pool headroom: %d Opus-ready profile(s) %s, need %d", len(ready), ready, min_free)
+        time.sleep(poll_s)
+        waited += poll_s
+
+
 def _evaluate(state: dict, keys: list, judge, judge_all: bool) -> None:
     """Set state[k]["res"], ["verdict"], ["ok"]. A field the judge reviewed is
     decided by the judge; otherwise by the number check alone."""
@@ -162,7 +177,7 @@ def _judge_pending(judge, pending: list[dict]) -> dict:
     return judge_rewrites(judge, pending)
 
 
-def _recheck_failed(conn, bdir: Path, apply: bool, judge=None) -> int:
+def _recheck_failed(conn, bdir: Path, apply: bool, judge=None, min_free: int = 2) -> int:
     """Apply saved rewrites that the current guard, or the judge, now accepts."""
     failed_path = bdir / "failed.jsonl"
     lines = failed_path.read_text().splitlines()
@@ -196,6 +211,8 @@ def _recheck_failed(conn, bdir: Path, apply: bool, judge=None) -> int:
         else:
             stats["still_failed"] += 1
             keep.append(e)
+    if judge and pending:
+        _wait_for_headroom(min_free)
     verdicts = _judge_pending(judge, [{"id": f"{e['id']}:{e['field']}", "source": e["src"], "rewrite": e["out"],
                                        "context": ctx} for e, _, ctx in pending])
     for e, cur_fields, _ in pending:
@@ -258,6 +275,7 @@ def _audit_applied(conn, bdir: Path, opus, judge, args) -> int:
     bk = open(bdir / "backup.jsonl", "a")
     t0 = time.time()
     for b0 in range(0, len(todo), 12):
+        _wait_for_headroom(args.min_free_profiles)
         chunk = []
         for rid, f, old, new in todo[b0: b0 + 12]:
             fields, context = live.get(rid, ({}, ""))
@@ -331,6 +349,13 @@ def main(argv=None) -> int:
                          "check alone let dropped model names and misleading value wording through)")
     ap.add_argument("--no-retry", action="store_true",
                     help="do not give rejected fields one retry with the problems as feedback")
+    ap.add_argument("--min-free-profiles", type=int, default=2,
+                    help="wait before each batch until at least this many claude-pool profiles can serve "
+                         "Opus, so production authoring keeps headroom (0 disables)")
+    ap.add_argument("--pace", type=float, default=20.0, help="seconds to sleep between batches")
+    ap.add_argument("--priority-sql", default="",
+                    help="SQL returning (id, weight) rows; comparisons are processed by weight desc "
+                         "(e.g. page traffic), then most recently updated")
     ap.add_argument("--shard", default="", help="i/n: only rows with id %% n == i (run n workers in parallel)")
     ap.add_argument("--audit-applied", action="store_true",
                     help="judge rewrites an earlier run applied (applied.jsonl) that are still live; retry "
@@ -362,7 +387,7 @@ def main(argv=None) -> int:
     if args.audit_applied:
         return _audit_applied(psycopg2.connect(dsn), bdir, opus, judge, args)
     if args.recheck_failed:
-        return _recheck_failed(psycopg2.connect(dsn), bdir, args.apply, judge)
+        return _recheck_failed(psycopg2.connect(dsn), bdir, args.apply, judge, args.min_free_profiles)
 
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
@@ -380,6 +405,12 @@ def main(argv=None) -> int:
                          "orig": dict(zip(FIELDS, vals)),
                          "context": " ".join(str(v) for v in ctx_vals if v)})
     conn.rollback()
+    if args.priority_sql:
+        cur.execute(args.priority_sql)
+        weight = {int(r[0]): float(r[1] or 0) for r in cur.fetchall()}
+        conn.rollback()
+        work.sort(key=lambda w: -weight.get(w["id"], 0.0))  # stable: ties keep updated_at order
+        log.info("priority: %d of %d rows have a weight", sum(1 for w in work if w["id"] in weight), len(work))
     if args.shard:
         i, n = (int(x) for x in args.shard.split("/"))
         work = [w for w in work if w["id"] % n == i]
@@ -396,6 +427,7 @@ def main(argv=None) -> int:
 
     for b0 in range(0, len(work), args.batch):
         batch = work[b0: b0 + args.batch]
+        _wait_for_headroom(args.min_free_profiles)
         got = _opus_batch(opus, batch)
         if not got:  # the rewrite call failed (pool outage, timeout): leave the rows for the next run
             stats["batches_skipped"] = stats.get("batches_skipped", 0) + 1
@@ -454,6 +486,8 @@ def main(argv=None) -> int:
         fl.flush(); prop.flush()
         log.info("progress %d/%d rows %s (%.0fs)", min(b0 + args.batch, len(work)), len(work),
                  json.dumps(stats), time.time() - t0)
+        if args.pace:
+            time.sleep(args.pace)
 
     stats["seconds"] = round(time.time() - t0)
     print(json.dumps(stats))

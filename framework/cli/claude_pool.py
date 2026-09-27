@@ -313,6 +313,21 @@ def _is_rate_limited_now(p: dict, model: str = "") -> bool:
         return False
 
 
+def ready_profiles(model: str = "claude-opus-5-5") -> list[str]:
+    """Profile ids that could serve `model` right now: usable credentials and
+    no active rate limit for its family. Read-only (no lock); for callers that
+    want to throttle themselves, e.g. a bulk backfill that must leave Opus
+    headroom for production authoring (2026-09-27: an unthrottled backfill
+    drove every profile to its weekly cap)."""
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except Exception:
+        return []
+    return [pid for pid, p in state.items()
+            if not pid.startswith("__") and isinstance(p, dict)
+            and _is_usable(p) and not _is_rate_limited_now(p, model=model)]
+
+
 def _pick_profile(state: dict, exclude_ids: set | None = None,
                    model: str = "") -> dict | None:
     """Return the next profile to dispatch to, or None if nothing eligible.
