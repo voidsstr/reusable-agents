@@ -56,8 +56,10 @@ CONTEXT_FIELDS = ("performance_commentary", "how_to_choose", "content_md")
 
 BATCH_INSTRUCTIONS = (
     "Below are fields from product head-to-head comparisons on a PC-hardware site. "
-    "Rewrite EACH field following the instructions: remove every price, price comparison, "
-    "star rating and review count. Keep exactly: every benchmark and spec number, every product "
+    "Rewrite EACH field following the instructions: remove every price, price comparison (also in "
+    "words: 'double the cost', 'half the price'), star rating and review count. Keep exactly: every "
+    "benchmark and spec number (a raw score beside per-dollar math stays; only the per-dollar "
+    "figure goes), every product "
     "and model name (including the CPU or GPU inside each system), which product achieved which "
     "result, launch dates, and source attributions. Keep the verdict, winner and recommendation "
     "unchanged. Describe value in words that match the size of the gap in the source ('slightly "
