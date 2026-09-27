@@ -40,6 +40,9 @@ from framework.core.price_strip_guard import SYSTEM_PROMPT, check_rewrite, has_p
 
 log = logging.getLogger("commentary_price_scrub")
 FIELDS = ("verdict_reason", "buy_advice", "value_commentary")
+# Other text of the same comparison. A number the model moves in from here is
+# a fact from this comparison, not an invention.
+CONTEXT_FIELDS = ("performance_commentary", "how_to_choose", "content_md")
 
 BATCH_INSTRUCTIONS = (
     "Below are fields from product head-to-head comparisons on a PC-hardware site. "
@@ -76,6 +79,49 @@ def _opus_batch(client, batch: list[dict]) -> dict[int, dict]:
     return out
 
 
+def _recheck_failed(conn, bdir: Path, apply: bool) -> int:
+    """Apply saved rewrites that the (since improved) guard now accepts."""
+    failed_path = bdir / "failed.jsonl"
+    entries = [json.loads(line) for line in failed_path.read_text().splitlines() if line.strip()]
+    cur = conn.cursor()
+    ids = sorted({e["id"] for e in entries})
+    cur.execute(f"SELECT id, {', '.join(FIELDS + CONTEXT_FIELDS)} FROM comparison_commentary WHERE id = ANY(%s)", (ids,))
+    rows = {r[0]: (dict(zip(FIELDS, r[1:1 + len(FIELDS)])), " ".join(str(v) for v in r[1 + len(FIELDS):] if v))
+            for r in cur.fetchall()}
+    keep, stats = [], {"entries": len(entries), "now_ok": 0, "applied": 0, "changed_underneath": 0, "still_failed": 0}
+    bk = open(bdir / "backup.jsonl", "a")
+    for e in entries:
+        cur_fields, context = rows.get(e["id"], ({}, ""))
+        src, out = e.get("src"), e.get("out")
+        # Only when the live field still holds the source the rewrite was made from.
+        if not src or not out or cur_fields.get(e["field"]) != src:
+            stats["changed_underneath" if src and out else "still_failed"] += 1
+            if not (src and out):
+                keep.append(e)
+            continue
+        ctx = " ".join([context, *(str(v) for k, v in cur_fields.items() if k != e["field"] and v)])
+        res = check_rewrite(src, out, context=ctx)
+        if not res.ok:
+            stats["still_failed"] += 1
+            keep.append({**e, "reasons": res.reasons, "missing": res.missing_numbers, "new": res.new_numbers})
+            continue
+        stats["now_ok"] += 1
+        if not apply:
+            keep.append(e)
+            continue
+        bk.write(json.dumps({"id": e["id"], "original": cur_fields}) + "\n")
+        bk.flush()
+        cur.execute(f"UPDATE comparison_commentary SET {e['field']} = %s, updated_at = now() "
+                    f"WHERE id = %s AND {e['field']} = %s", (out, e["id"], src))
+        stats["applied"] += cur.rowcount
+    if apply:
+        conn.commit()
+        failed_path.write_text("".join(json.dumps(k) + "\n" for k in keep))
+    print(json.dumps(stats))
+    conn.close()
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dsn-env", required=True)
@@ -83,6 +129,9 @@ def main(argv=None) -> int:
     ap.add_argument("--batch", type=int, default=6, help="comparisons per Opus call")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--retry-failed", action="store_true")
+    ap.add_argument("--recheck-failed", action="store_true",
+                    help="re-score the rewrites saved in failed.jsonl with the current guard and apply "
+                         "those that now pass (no model calls); the rest stay in failed.jsonl")
     ap.add_argument("--backup-dir", default=os.path.expanduser("~/.reusable-agents/ktlo-work/commentary-scrub"))
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -104,20 +153,26 @@ def main(argv=None) -> int:
             except (ValueError, KeyError):
                 pass
 
+    if args.recheck_failed:
+        return _recheck_failed(psycopg2.connect(dsn), bdir, args.apply)
+
     opus = ai_client_for("commentary-price-scrub", override_provider="claude-cli",
                          override_model="claude-opus-5-5")
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
-    cur.execute(f"SELECT id, left_ref, right_ref, {', '.join(FIELDS)} FROM comparison_commentary "
-                "ORDER BY updated_at DESC")
+    cur.execute(f"SELECT id, left_ref, right_ref, {', '.join(FIELDS + CONTEXT_FIELDS)} "
+                "FROM comparison_commentary ORDER BY updated_at DESC")
     work = []
     for row in cur.fetchall():
         rid, l, r, *vals = row
+        ctx_vals = vals[len(FIELDS):]
+        vals = vals[: len(FIELDS)]
         fields = {f: v for f, v in zip(FIELDS, vals)
                   if v and has_price_or_rating(v) and (rid, f) not in failed}
         if fields:
             work.append({"id": rid, "left": l, "right": r, "fields": fields,
-                         "orig": dict(zip(FIELDS, vals))})
+                         "orig": dict(zip(FIELDS, vals)),
+                         "context": " ".join(str(v) for v in ctx_vals if v)})
     conn.rollback()
     if args.limit:
         work = work[: args.limit]
@@ -136,7 +191,8 @@ def main(argv=None) -> int:
             new_fields = {}
             for f, src in it["fields"].items():
                 out = (got.get(it["id"]) or {}).get(f, "")
-                res = check_rewrite(src, out)
+                ctx = " ".join([it["context"], *(str(v) for k, v in it["orig"].items() if k != f and v)])
+                res = check_rewrite(src, out, context=ctx)
                 if res.ok:
                     new_fields[f] = out
                     stats["fields_ok"] += 1

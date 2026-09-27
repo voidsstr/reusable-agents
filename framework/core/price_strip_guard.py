@@ -47,7 +47,7 @@ Output only the rewritten text. No preamble, no notes, no labels, no quotation m
 
 PRICE = re.compile(r"\$\s?\d|\b\d[\d,.]*\s?(usd|dollars|bucks|cents?)\b|costs? (only )?\$?\d", re.I)
 RATING = re.compile(
-    r"\b\d(\.\d)?\s?(/\s?5|out of (5|five))\b|\b\d(\.\d)?[- ]stars?\b|★"
+    r"\b\d(\.\d{1,2})?\s?(/\s?5|out of (5|five))\b|\b\d(\.\d{1,2})?[- ]stars?\b|★"
     r"|\b(?!(?:19|20)\d\d\b)[\d,]+\s+(customer\s+|verified\s+)?"
     r"(reviews|ratings|reviewers|shoppers|buyers|owners|customers)\b", re.I)
 DOLLARS = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?(?:\s?[-–]\s?\$?\d[\d,]*(?:\.\d+)?)?[kKmM]?")
@@ -82,6 +82,14 @@ PRICE_OR_REVIEW_QUESTION = re.compile(
 PER_DOLLAR = re.compile(r"\bper\s+(?:\$|dollar\b)", re.I)
 PRICE_CLAUSE = re.compile(
     r"\$\s?\d|\bMSRP\b|\bprices?d?\b|\bcosts?\b|\blistings?\b|\bpay\b|\bas much\b|\bexpensive\b|\bcheaper\b", re.I)
+RATING_CLAUSE = re.compile(
+    r"\brat(?:ing|ings|ed)\b|\bstars?\b|\breviews?\b|\breviewers?\b|/\s?5\b|\bout of (?:5|five)\b", re.I)
+ISO_DATE = re.compile(r"\b(?:19|20)\d\d-\d\d-\d\d\b")
+# Capitalised words that start sentences or clauses, so a number after them is
+# not a model name ("At 2026 street prices", "In 2025 the card...").
+_NOT_A_NAME = frozenset(
+    "a an and as at both but by each for from if in into its it's of on only or over per so than that "
+    "the their these this those to under until when where while with".split())
 CLAUSE_BREAK = re.compile(r"(?<=[.!?])\s+|;\s+|,\s+(?:but|while|whereas|which|so)\s+|\s+(?:but|while|whereas)\s+|\s+[—–]\s+")
 UNIT_AFTER = re.compile(
     r"\s?(?:fps|gb|tb|mb|gib|w|watts?|mhz|ghz|hz|ms|mm|nm|°c|cores?|threads?|tok(?:ens)?/s|points?|pts"
@@ -98,14 +106,15 @@ def _clauses(text: str) -> list[tuple[int, int]]:
 
 
 def _protected_number(clause: str, m: re.Match, allow_units: bool) -> bool:
-    """A number inside a price clause that is still a fact, not a price figure."""
+    """A number inside a price or rating clause that is still a fact, not a
+    price or rating figure. Years are not protected here: in such a clause they
+    date the price snapshot ("At 2026 street prices")."""
     n, before, after = m.group(), clause[: m.start()], clause[m.end():]
     if re.match(r"[A-Za-wyz]|x[A-Za-z0-9]", after) or re.search(r"[A-Za-z]$", before):
         return True  # glued to letters: 5600X, 8GB, 1440p, R23
-    if "," not in n and "." not in n and re.search(r"\b[A-Z][A-Za-z]*\s$", before):
+    w = re.search(r"\b([A-Z][A-Za-z]*)\s$", before)
+    if "," not in n and "." not in n and w and w.group(1).lower() not in _NOT_A_NAME:
         return True  # model name: "RTX 3060", "Pi 5", "Cyberpunk 2077"
-    if re.fullmatch(r"(?:19|20)\d\d", n):
-        return True
     return allow_units and bool(UNIT_AFTER.match(after))
 
 
@@ -163,15 +172,16 @@ def strip_price_from_question(question: str) -> str:
 def required_numbers(source: str) -> tuple[set[str], set[str]]:
     """(numbers that must survive, every number in the source)."""
     allnums = numbers(source)
-    t = source
-    # Numbers in a clause that talks about price are price-derived ("12,357
-    # PassMark points per $100 against 8,109", "the 2.48x price gap", "46% over
-    # its $329 MSRP") unless they name a model, a year or, outside a per-dollar
-    # clause, carry a unit ("115 fps", "24 GB", "2.3x faster").
+    t = ISO_DATE.sub(lambda m: " " * len(m.group()), source)  # scrape timestamps
+    # Numbers in a clause that talks about price or ratings are price- or
+    # rating-derived ("12,357 PassMark points per $100 against 8,109", "the
+    # 2.48x price gap", "46% over its $329 MSRP", "4.30 across 2673 reviews")
+    # unless they name a model or, outside a per-dollar clause, carry a unit
+    # ("115 fps", "24 GB", "2.3x faster").
     for c0, c1 in _clauses(source):
         clause = source[c0:c1]
         per_dollar = bool(PER_DOLLAR.search(clause))
-        if not (per_dollar or PRICE_CLAUSE.search(clause)):
+        if not (per_dollar or PRICE_CLAUSE.search(clause) or RATING_CLAUSE.search(clause)):
             continue
         for m in NUM.finditer(clause):
             if not _protected_number(clause, m, allow_units=not per_dollar):
@@ -200,7 +210,9 @@ class GuardResult:
     new_numbers: list[str] = field(default_factory=list)
 
 
-def check_rewrite(source: str, output: str) -> GuardResult:
+def check_rewrite(source: str, output: str, context: str = "") -> GuardResult:
+    """`context` is other text from the same record (sibling fields the model
+    saw). A number found there was moved, not invented."""
     out = (output or "").strip()
     reasons: list[str] = []
     if not out:
@@ -214,7 +226,7 @@ def check_rewrite(source: str, output: str) -> GuardResult:
     req, allnums = required_numbers(source or "")
     outn = numbers(out)
     missing = sorted(req - outn)
-    new = sorted(outn - allnums)
+    new = sorted(outn - allnums - numbers(context))
     if missing:
         reasons.append("missing_numbers")
     if new:
