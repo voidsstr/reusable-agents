@@ -19,10 +19,11 @@
 #      num_ctx
 #   6. verification summary: ollama ps, :7861/healthz
 #   +  /etc/systemd/system/nvidia-power-cap.service, enabled at boot: caps the
-#      GPU at GPU_POWER_LIMIT_W (default 450 W). Uncapped at 575 W the host
+#      GPU at GPU_POWER_LIMIT_W (default 400 W). Uncapped at 575 W the host
 #      hard-reset twice on 2026-09-24 under full inference load (no clean
 #      shutdown in the journal) and earlier dropped the card off the bus
-#      (Xid 79). 450 W costs little local-model throughput.
+#      (Xid 79), and at 450 W it crashed again on 2026-09-26 (power-off, likely
+#      PSU protection), so the default is now 400 W.
 #
 # Usage:
 #   bash install/configure-local-models.sh             # converge
@@ -55,7 +56,7 @@ STATE_DIR="${STATE_DIR:-$HOME/.reusable-agents}"
 SECRETS_FILE="$STATE_DIR/secrets.env"
 OLLAMA_DROPIN="/etc/systemd/system/ollama.service.d/10-models-dir.conf"
 IMAGE_DROPIN="$HOME/.config/systemd/user/local-image-gen.service.d/10-model.conf"
-GPU_POWER_LIMIT_W="${GPU_POWER_LIMIT_W:-450}"
+GPU_POWER_LIMIT_W="${GPU_POWER_LIMIT_W:-400}"
 POWER_CAP_UNIT="/etc/systemd/system/nvidia-power-cap.service"
 
 bold()   { printf "\033[1m%s\033[0m\n" "$*"; }
