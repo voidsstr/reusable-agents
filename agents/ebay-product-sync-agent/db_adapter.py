@@ -74,9 +74,11 @@ class PostgresAdapter(DbAdapter):
         super().__init__(dsn)
         import psycopg2
         import psycopg2.extras
+        from framework.core import pg_conn
         self._psycopg2 = psycopg2
         self._extras = psycopg2.extras
-        self.conn = psycopg2.connect(dsn)
+        self._pg_conn = pg_conn
+        self.conn = pg_conn.connect(dsn)  # TCP keepalives on
         self.conn.autocommit = False
 
     def ensure_open(self) -> None:
@@ -86,25 +88,12 @@ class PostgresAdapter(DbAdapter):
         timeout (~5min) and the conn dies silently — every subsequent
         statement raises 'connection already closed'.
 
-        Call this before each batch of writes."""
-        try:
-            if getattr(self.conn, "closed", 0):
-                self.conn = self._psycopg2.connect(self.dsn)
-                self.conn.autocommit = False
-                return
-            # Cheap probe — `SELECT 1` round-trips fast on a healthy conn,
-            # raises on a half-closed one (Azure server-side close that
-            # python hasn't noticed yet).
-            cur = self.conn.cursor()
-            cur.execute("SELECT 1")
-            cur.fetchone()
-            cur.close()
-        except Exception:
-            # Force a fresh connection on any probe failure.
-            try: self.conn.close()
-            except Exception: pass
-            self.conn = self._psycopg2.connect(self.dsn)
-            self.conn.autocommit = False
+        Call this before each batch of writes. Delegates to the shared
+        framework.core.pg_conn.ensure_open (probe, reconnect on failure)."""
+        conn = self._pg_conn.ensure_open(self.conn, self.dsn)
+        if conn is not self.conn:  # only a fresh connection; a live one may be mid-transaction
+            conn.autocommit = False
+            self.conn = conn
 
     def introspect_table(self, table: str) -> list[ColumnInfo]:
         # Allow schema-qualified table names ("public.products")

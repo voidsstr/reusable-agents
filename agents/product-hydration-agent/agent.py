@@ -58,6 +58,7 @@ if str(_REPO) not in sys.path:
 from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.guardrails import declare  # noqa: E402
 from framework.core.resilience import with_retry, notify_operator  # noqa: E402
+from framework.core import pg_conn  # noqa: E402
 
 import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
@@ -165,7 +166,15 @@ PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "hydrate_product_sys
 @with_retry(retries=3, backoff=1.5,
             on=(psycopg2.OperationalError, psycopg2.InterfaceError))
 def _connect(dsn: str):
-    return psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+    return pg_conn.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def _reopen(conn, dsn: str):
+    """The connection after a long LLM call: reuse it if alive, else reconnect.
+    Azure Postgres drops idle connections after ~5 min, and a claude-pool
+    wait easily exceeds that (2026-09-27: a whole run of 80 hydrated
+    products failed to persist with "connection already closed")."""
+    return pg_conn.ensure_open(conn, dsn, cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def _select_candidates(conn, *, content_types: list[str],
@@ -1555,6 +1564,7 @@ class ProductHydrationAgent(AgentBase):
 
                 # Persist
                 try:
+                    conn = _reopen(conn, self.dsn)
                     _persist_product(conn, prod["id"], updates,
                                       f"claude-{model}")
                 except Exception as e:
@@ -1647,6 +1657,7 @@ class ProductHydrationAgent(AgentBase):
 
         # Compute final coverage
         try:
+            conn = _reopen(conn, self.dsn)
             coverage = _coverage_stats(
                 conn, content_types=content_types,
                 site_id_filter=self.site_id_filter,
