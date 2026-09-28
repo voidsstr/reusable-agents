@@ -73,6 +73,8 @@ SITE_PROFILES: dict[str, dict] = {
         "host": "aisleprompt.com",
         "gsc_site_url": "sc-domain:aisleprompt.com",
         "ga4_property_id": "529023310",
+        # Bing Webmaster Tools property (the index behind ChatGPT search).
+        "bing_site_url": "https://aisleprompt.com/",
         "db_env": "AISLEPROMPT_DATABASE_URL",
         # GA4 conversion event names — instacart-cart is the money event.
         # The instacart-clicks and amazon-clicks events show outbound
@@ -285,6 +287,28 @@ def collect_metrics(profile: dict) -> dict[str, float]:
             metrics["ga4-google-search-ai-sessions-30d"] = float(google_n)
         except Exception as e:
             err(f"  GA4 search-source split failed: {e}")
+
+    # --- Bing Webmaster Tools: Bing's own view of the site ---
+    #
+    # rec growth-20260928T191200Z-02. The GA4 split above says Bing's index
+    # sends the humans; this records what Bing itself reports (pages held,
+    # 28d clicks/impressions, crawl errors) so those can be read as a daily
+    # series. Opt-in per profile via `bing_site_url`; skipped quietly while
+    # BING_WEBMASTER_API_KEY is unset.
+    if profile.get("bing_site_url"):
+        from framework.core import bing_webmaster
+        if bing_webmaster.api_key():
+            try:
+                bwt = bing_webmaster.collect(profile["bing_site_url"])
+                for k in ("in_index", "clicks_28d", "impressions_28d", "crawl_errors_1d"):
+                    if k in bwt.get("metrics", {}):
+                        metrics[f"bing-{k.replace('_', '-')}"] = float(bwt["metrics"][k])
+                if bwt.get("errors"):
+                    err(f"  Bing Webmaster partial failure: {bwt['errors']}")
+            except Exception as e:
+                err(f"  Bing Webmaster failed: {e}")
+        else:
+            err("  Bing Webmaster skipped: BING_WEBMASTER_API_KEY not set")
 
     # --- Conversions (30d): GA4, corrected by first-party click tables ---
     #
