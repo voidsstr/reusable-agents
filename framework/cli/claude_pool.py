@@ -326,9 +326,34 @@ def ready_profiles(model: str = "claude-opus-5-5") -> list[str]:
         state = json.loads(STATE_FILE.read_text())
     except Exception:
         return []
-    return [pid for pid, p in state.items()
-            if not pid.startswith("__") and isinstance(p, dict)
-            and _is_usable(p) and not _is_rate_limited_now(p, model=model)]
+    ready, seen_accounts = [], set()
+    for pid in sorted(state):
+        p = state[pid]
+        if pid.startswith("__") or not isinstance(p, dict):
+            continue
+        if not (_is_usable(p) and not _is_rate_limited_now(p, model=model)):
+            continue
+        # Headroom is per ACCOUNT: two slots logged into the same account share
+        # one quota, so count it once (2026-09-28: profile-3 re-login landed on
+        # profile-2's account and would have doubled the apparent headroom).
+        acct = _account_of(p) or pid
+        if acct in seen_accounts:
+            continue
+        seen_accounts.add(acct)
+        ready.append(pid)
+    return ready
+
+
+def _account_of(p: dict) -> str:
+    """The account email a profile is logged into (.claude.json), else its label."""
+    try:
+        cj = json.loads((Path(p.get("home", "")) / ".claude.json").read_text())
+        email = (cj.get("oauthAccount") or {}).get("emailAddress", "")
+        if email:
+            return email.lower()
+    except Exception:
+        pass
+    return str(p.get("label") or "").lower()
 
 
 def _pick_profile(state: dict, exclude_ids: set | None = None,

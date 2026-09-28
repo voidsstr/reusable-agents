@@ -67,3 +67,14 @@ def test_no_reserve_never_refuses(monkeypatch):
     monkeypatch.delenv("CLAUDE_POOL_RESERVE", raising=False)
     with pytest.raises(_Stop):
         claude_pool.cmd_exec(_exec_args())
+
+
+def test_ready_profiles_counts_each_account_once(tmp_path, monkeypatch):
+    state = {"profile-2": {"home": "h2", "label": "a@x.com"},
+             "profile-3": {"home": "h3", "label": "A@x.com"},
+             "profile-4": {"home": "h4", "label": "b@y.com"}}
+    f = tmp_path / "state.json"
+    f.write_text(json.dumps(state))
+    monkeypatch.setattr(claude_pool, "STATE_FILE", f)
+    monkeypatch.setattr(claude_pool, "_is_usable", lambda p: True)
+    assert claude_pool.ready_profiles("claude-opus-5-5") == ["profile-2", "profile-4"]
