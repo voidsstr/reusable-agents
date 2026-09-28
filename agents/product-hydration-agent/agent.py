@@ -996,6 +996,22 @@ def _build_user_prompt(product: dict, content_types: list[str]) -> str:
 
 @with_retry(retries=2, backoff=2.0, base_delay=2.0,
             on=(subprocess.TimeoutExpired, IOError, OSError))
+def _pool_admits(model: str) -> bool:
+    """False when CLAUDE_POOL_RESERVE is set and no more than that many
+    claude-pool profiles can serve `model`: this agent is a background Opus
+    consumer and must not take the profile authoring needs. Checked before
+    each product (cheap state.json read) so a run stops as soon as headroom
+    goes, instead of burning a failover per product."""
+    reserve = int(os.environ.get("CLAUDE_POOL_RESERVE", "0") or 0)
+    if reserve <= 0:
+        return True
+    try:
+        from framework.cli.claude_pool import ready_profiles
+        return len(ready_profiles(model)) > reserve
+    except Exception:  # noqa: BLE001 - never block hydration on a read error
+        return True
+
+
 def _claude_call(*, system_prompt: str, user_prompt: str, model: str,
                   max_turns: int, timeout_s: int) -> tuple[str, dict]:
     """Run claude --print with separate system/user prompts. Returns
@@ -1379,6 +1395,7 @@ class ProductHydrationAgent(AgentBase):
             "skipped_already_fresh": 0,
             "claude_calls": 0,
             "claude_total_seconds": 0.0,
+            "deferred_pool_reserve": 0,
             "prices_refreshed": paapi_summary["refreshed"],
             "prices_failed": paapi_summary["failed"],
             "compliance_pass": paapi_summary["compliance_pass"],
@@ -1456,6 +1473,13 @@ class ProductHydrationAgent(AgentBase):
                 )
 
             for i, prod in enumerate(queue):
+                if not _pool_admits(model):
+                    # Leave the pool's last profiles to authoring; the rest of
+                    # the queue waits for the next run (not a failure).
+                    totals["deferred_pool_reserve"] = len(queue) - i
+                    self.decide("observation",
+                                f"claude-pool reserve reached - deferring {len(queue) - i} products")
+                    break
                 if time.time() > deadline:
                     self.decide(
                         "observation",
@@ -1709,7 +1733,9 @@ class ProductHydrationAgent(AgentBase):
 
         summary = (
             f"Hydrated {totals['hydrated']} (+{totals['partial']} partial), "
-            f"{totals['failed']} failed, {totals['skipped_already_fresh']} fresh. "
+            f"{totals['failed']} failed, {totals['skipped_already_fresh']} fresh"
+            + (f", {totals['deferred_pool_reserve']} deferred (claude-pool reserve)"
+               if totals["deferred_pool_reserve"] else "") + ". "
             f"Refreshed {totals['prices_refreshed']} Amazon prices via PA-API "
             f"(failed {totals['prices_failed']}). "
             f"Catalog coverage: {coverage.get('fully_hydrated_pct', 0.0)}% fully hydrated."
@@ -1725,6 +1751,7 @@ class ProductHydrationAgent(AgentBase):
                 "skipped_already_fresh": totals["skipped_already_fresh"],
                 "claude_calls": totals["claude_calls"],
                 "claude_total_seconds": round(totals["claude_total_seconds"], 1),
+                "deferred_pool_reserve": totals["deferred_pool_reserve"],
                 "catalog_coverage_pct": coverage.get("fully_hydrated_pct", 0.0),
                 "stale_pct": coverage.get("stale_pct", 0.0),
                 "prices_refreshed": totals["prices_refreshed"],

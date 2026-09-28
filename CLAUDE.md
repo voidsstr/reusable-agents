@@ -963,6 +963,15 @@ cross-sell, article heroes, and future flows use the same endpoint.
 > restores Claude Code access in the Anthropic console (the auth blob stays
 > valid).
 >
+> **Pool reserve — background Opus consumers yield to authoring.** A caller
+> that sets `CLAUDE_POOL_RESERVE=N` (e.g. in its manifest `entry_command`) is
+> refused by the pool shim (exit 75, no wait) unless MORE than N profiles can
+> serve its model right now; `claude_pool.ready_profiles(model)` gives the
+> same answer to agents that want to stop early. Set it on bulk/background
+> consumers (product hydration: 80 Opus calls per run), never on authoring.
+> Why (2026-09-28): a freshly re-logged profile's whole 5-hour window went to
+> hydration before the article proposers ran.
+>
 > **Copilot-opus bridge — fallback when the pool is broken** (rate-limit,
 > weekly-cap, or org-disable). Opt-in via
 > `IMPLEMENTER_COPILOT_OPUS_BRIDGE=1` in `~/.reusable-agents/secrets.env`

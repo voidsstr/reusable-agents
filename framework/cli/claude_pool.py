@@ -313,6 +313,9 @@ def _is_rate_limited_now(p: dict, model: str = "") -> bool:
         return False
 
 
+RESERVE_EXIT = 75  # EX_TEMPFAIL: refused by CLAUDE_POOL_RESERVE, try again later
+
+
 def ready_profiles(model: str = "claude-opus-5-5") -> list[str]:
     """Profile ids that could serve `model` right now: usable credentials and
     no active rate limit for its family. Read-only (no lock); for callers that
@@ -892,6 +895,14 @@ def cmd_exec(args) -> None:
       CLAUDE_POOL_RETRY_INTERVAL_S — sleep between rounds when all limited
       CLAUDE_POOL_MAX_WAIT_S       — max total wait (0 = forever)
       CLAUDE_POOL_OUTAGE_COOLDOWN_S — email debounce window
+      CLAUDE_POOL_RESERVE          — admission control for low-priority callers:
+                                     refuse (exit 75, no wait) unless MORE than
+                                     this many profiles can serve the requested
+                                     model right now. Background Opus consumers
+                                     (hydration, research) set it so authoring
+                                     always finds a profile (2026-09-28: hydration
+                                     spent a freshly re-logged profile's whole
+                                     5-hour window before the article proposers ran).
     """
     started = time.time()
     last_rc = 1
@@ -910,6 +921,17 @@ def cmd_exec(args) -> None:
         if tok.startswith("--model="):
             requested_model = tok.split("=", 1)[1]
             break
+
+    reserve = int(os.environ.get("CLAUDE_POOL_RESERVE", "0") or 0)
+    if reserve > 0:
+        _discover_profiles_from_disk()
+        ready = ready_profiles(requested_model)
+        if len(ready) <= reserve:
+            sys.stderr.write(
+                f"[claude-pool] reserve: {len(ready)} profile(s) can serve "
+                f"{requested_model or 'this request'} and CLAUDE_POOL_RESERVE={reserve} "
+                "keeps them for higher-priority callers; refusing (exit 75)\n")
+            sys.exit(RESERVE_EXIT)
 
     while True:
         # Auto-pickup of any new profile dirs / freshly-authenticated profiles
