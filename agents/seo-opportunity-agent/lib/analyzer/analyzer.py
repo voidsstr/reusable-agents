@@ -4697,6 +4697,16 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                                   file=sys.stderr)
                     except Exception as e:
                         print(f"  → adaptive context unavailable: {e}", file=sys.stderr)
+                    # The site's real people (site.yaml `editorial:` +
+                    # storage override). The audit may credit only them or
+                    # the organization — see framework/core/editorial_people.py.
+                    people_roster = None
+                    try:
+                        from framework.core import editorial_people as _ep
+                        people_roster = _ep.load_people(cfg, site_id=cfg.site_id)
+                    except Exception as e:
+                        print(f"  → editorial people roster unavailable: {e}",
+                              file=sys.stderr)
                     issues = run_llm_audit(
                         pages=pages,
                         site_label=cfg.site_id,
@@ -4706,6 +4716,7 @@ def _run_analyzer(cfg, run_dir, run_ts: str) -> None:
                         batch_size=4,
                         adaptive_context=adaptive_ctx,
                         active_goals=active_goals,
+                        people_roster=people_roster,
                     )
                     print(f"  → LLM audit found {len(issues)} issues", file=sys.stderr)
                     # Reuse the outer next_id() so LLM-audit ids continue

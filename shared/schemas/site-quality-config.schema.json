@@ -236,6 +236,33 @@
         }
       }
     },
+    "editorial": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The site's REAL people and organization (framework/core/editorial_people.py). The SEO/PI audits may credit only these people or the organization; recs asking for any other person, persona, credential or testing claim are dropped, and the implementer reverts edits that add one. Omit = no named people (credit the organization only). Operator override without a commit: storage config/editorial-people-config.json -> by_site.<site.id>.",
+      "properties": {
+        "organization": { "type": "string", "description": "Publisher/organization name used when no person is credited (e.g. 'Example Editorial')." },
+        "people": {
+          "type": "array",
+          "description": "Every real, consenting person the site may credit. A bare string is a name; an object can add the /authors/<slug> slug and ONLY credentials that are verified.",
+          "items": {
+            "anyOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string" },
+                  "slug": { "type": "string", "description": "Author-archive slug (/authors/<slug>). Defaults to the slugified name." },
+                  "credentials": { "type": "array", "items": { "type": "string" }, "description": "Verified credentials only (e.g. 'RD'). Anything not listed is treated as a credential this person does not hold." }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
     "reporter": {
       "type": "object",
       "additionalProperties": false,

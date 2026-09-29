@@ -57,7 +57,12 @@ from __future__ import annotations
 import json
 import re
 import sys
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
+
+try:  # optional: the honesty roster (framework/core/editorial_people.py)
+    from framework.core import editorial_people as _editorial_people
+except Exception:  # pragma: no cover — standalone use without the framework
+    _editorial_people = None
 
 # ---------------------------------------------------------------------------
 # The check-id catalog — the whitelist an SEO expert audits.
@@ -357,8 +362,8 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "body-visible-date-missing": "no human-visible publish/updated date in the body",
     "faq-quality-thin": "FAQ section exists but answers are one-liners with no substance",
     # eeat
-    "eeat-author-missing": "no author attributed on a page that makes claims",
-    "eeat-author-bio": "author named but no credential/bio establishing expertise",
+    "eeat-author-missing": "no author attributed on a page that makes claims (fix: credit a REAL PEOPLE entry or the organization, never a new person)",
+    "eeat-author-bio": "a REAL PEOPLE author is named but the page links no bio/about for them (fix may only use facts already on record; never add credentials)",
     "eeat-about-missing": "no About page linked from the page or footer",
     "eeat-policy-missing": "no editorial/affiliate-disclosure policy linked",
     "eeat-citations-missing": "factual or benchmark claims with zero sources cited",
@@ -424,7 +429,7 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "geo-faq-missing": "no question-shaped section for an obviously question-shaped query",
     "geo-statistics-missing": "no concrete numbers/stats that generative engines can quote",
     "geo-listicle-no-summary": "listicle with no summary table or TL;DR block up top",
-    "geo-author-credentials": "no machine-readable author credentials for AI-search attribution",
+    "geo-author-credentials": "a REAL PEOPLE author's existing, verifiable credentials are not machine-readable (Person/Organization markup); never invent a credential or a credentialed person",
     "geo-llms-txt-missing": "site serves no /llms.txt describing content for LLM crawlers",
     "llm-search-direct-answer-missing": "answer is buried below preamble instead of stated first",
     "llm-search-faq-format": "Q&A not in a parseable question-then-answer structure",
@@ -437,15 +442,15 @@ CHECK_DESCRIPTIONS: dict[str, str] = {
     "conversion-path": "path from this page to the conversion action is broken or indirect",
     "featured-product-pdp-improve": "featured PDP under-built versus the traffic it receives",
     # trust
-    "trust-signals-missing": "no reviews/testimonials/guarantees/security signals present",
-    "trust-signal-density-thin": "trust signals present but too sparse for the page type",
+    "trust-signals-missing": "no real trust signals (about/editorial policy/affiliate disclosure/sources) present; never propose invented reviews, testimonials, ratings or guarantees",
+    "trust-signal-density-thin": "real trust signals present but too sparse for the page type (same no-invention rule)",
     # url hygiene
     "url-deep": "URL nested more levels deep than the site's structure warrants",
     "url-non-descriptive": "URL uses ids/params instead of a readable keyword slug",
     "url-trailing-slash": "trailing-slash handling inconsistent with the site canon",
     "url-uppercase": "URL contains uppercase characters",
     # article
-    "article-author-credentials-missing": "article author has no credentials backing the topic",
+    "article-author-credentials-missing": "article makes expertise claims (tested, reviewed, expert) its credited author cannot back; fix by removing or softening the claim, or noindex/escalate, never by adding a person or credential",
     "article-cited-sources-missing": "article states facts with no cited sources",
     "article-datemodified-missing": "article JSON-LD has no dateModified",
     "article-publish-update-dates": "published/updated dates missing, conflicting, or implausible",
@@ -737,7 +742,16 @@ Return a JSON array (and nothing else) where each element is:
 Return [] if the pages are clean. An empty array is a valid, useful
 answer — do not manufacture issues to fill space. Prefer a handful of
 high-confidence, high-severity findings over an exhaustive list of
-trivia."""
+trivia.
+
+HONESTY — every fix must be something the site can truthfully say. Never
+propose inventing people, personas, author bios, credentials, reviewers,
+testers, testing claims, reviews, ratings, testimonials, prices, stock
+status or dates. The REAL PEOPLE block in the request is the complete list
+of people a fix may credit; anyone else is the site's organization. If a
+page needs a credentialed human the site does not have, the fix is to
+noindex the page or remove the claim, or the issue is an operator
+escalation — never a new person."""
 
 
 def _build_messages(
@@ -747,14 +761,18 @@ def _build_messages(
     primary_objective: str,
     adaptive_context: str,
     active_goals: list[dict] | None,
+    people_roster: Mapping | None = None,
 ) -> list[dict]:
     """Assemble the (system, user) message pair for one batch."""
     parts = [
         f"SITE: {site_label}",
         f"PRIMARY OBJECTIVE: {_objective_line(primary_objective)}",
         "",
-        SEO_AUDIT_CHECKLIST,
     ]
+    if _editorial_people is not None:
+        parts += [_editorial_people.prompt_block(people_roster or {},
+                                                 site_label=site_label), ""]
+    parts += [SEO_AUDIT_CHECKLIST]
     goals_block = _format_goals(active_goals)
     if goals_block:
         parts += ["", goals_block]
@@ -837,6 +855,16 @@ def _normalize_issue(raw: dict, batch_urls: list[str]) -> dict | None:
     }
 
 
+def invented_person_reason(issue: Mapping, people_roster: Mapping | None) -> str:
+    """Why `issue` must not ship because it credits someone who does not
+    exist ("" = fine). Screens the actionable text (title + fix) only — the
+    evidence quotes the page and may legitimately contain the bad claim."""
+    if _editorial_people is None or not isinstance(issue, Mapping):
+        return ""
+    text = f"{issue.get('title') or ''}\n{issue.get('fix') or ''}"
+    return _editorial_people.proposes_invented_person(text, people_roster or {})
+
+
 def run_llm_audit(
     *,
     pages: list[dict],
@@ -850,8 +878,14 @@ def run_llm_audit(
     body_cap_chars: int = 2500,
     max_tokens: int = 4000,
     temperature: float = 0.0,
+    people_roster: Mapping | None = None,
 ) -> list[dict]:
     """Audit `pages` with the LLM, returning validated issue dicts.
+
+    `people_roster` is `editorial_people.load_people(...)` for the site: it
+    goes into the prompt as the REAL PEOPLE list, and any issue whose title
+    or fix still asks for an unlisted person, persona or credential is
+    dropped (logged to stderr) instead of becoming a rec.
 
     Batched: one prompt per `batch_size` pages, never one per page.
 
@@ -891,6 +925,7 @@ def run_llm_audit(
                 primary_objective=primary_objective,
                 adaptive_context=adaptive_context,
                 active_goals=active_goals,
+                people_roster=people_roster,
             )
             raw = ai_chat_callable(
                 messages, temperature=temperature, max_tokens=max_tokens,
@@ -918,6 +953,11 @@ def run_llm_audit(
             if issue is None:
                 continue
             if issue["confidence"] < min_confidence:
+                continue
+            why = invented_person_reason(issue, people_roster)
+            if why:
+                print(f"  [llm-audit] dropped {issue['check_id']} on {issue['url']}: "
+                      f"{why}", file=sys.stderr)
                 continue
             key = (issue["url"], issue["check_id"])
             prior = collected.get(key)

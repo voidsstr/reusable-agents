@@ -39,6 +39,7 @@ from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.email_codes import new_request_id  # noqa: E402
 from framework.core.guardrails import declare  # noqa: E402
 from framework.core.work_types import is_live_state  # noqa: E402
+from framework.core import editorial_people  # noqa: E402
 
 from shared.site_quality import (  # noqa: E402
     apply_user_responses,
@@ -94,6 +95,15 @@ EVIDENCE DISCIPLINE — absence claims (read before flagging anything
   body does not show" in a rationale. Those phrases mean you are inferring an
   absence you cannot see — return nothing for that page instead. A confident
   wrong finding costs more than a missed one.
+
+HONESTY — a fix_suggestion must be something the site can truthfully say.
+Never propose inventing people, personas, author bios, credentials,
+reviewers, testers, a test kitchen or lab, hands-on testing claims, reviews,
+ratings, testimonials, prices, stock status or dates. The REAL PEOPLE block
+below is the complete list of people a fix may credit; anyone else is the
+site's organization. When a page needs a credentialed human the site does
+not have, the fix is noindex or removing the claim, or an operator
+escalation — never a new person.
 """
 
 
@@ -603,11 +613,21 @@ class ProgressiveImprovementAgent(AgentBase):
             else:
                 new_revisit_counter[p.url] = 0  # reset on fresh analysis
 
+        # The site's real people (site.yaml `editorial:` + storage override).
+        # Fixes may credit only them or the organization.
+        try:
+            people_roster = editorial_people.load_people(
+                cfg, site_id=cfg.site_id, storage=self.storage)
+        except Exception as e:
+            self.decide("observation", f"editorial people roster unavailable: {e}")
+            people_roster = {"organization": "", "people": []}
         for i in range(0, len(fresh_pages), batch_size):
             batch = fresh_pages[i:i + batch_size]
             user_prompt = _format_pages_for_prompt(batch, cfg.what_we_do)
             try:
-                system_prompt = ANALYSIS_SYSTEM
+                system_prompt = (ANALYSIS_SYSTEM + "\n"
+                                 + editorial_people.prompt_block(
+                                     people_roster, site_label=cfg.label))
                 # Surface site-specific QA detection rules from
                 # analyzer.qa_detection_rules in site.yaml. Each rule's
                 # summary line becomes a numbered bullet the LLM is
@@ -681,7 +701,18 @@ class ProgressiveImprovementAgent(AgentBase):
 
         recs: list[dict] = []
         skipped_dupe = 0
+        skipped_invented: list[str] = []
         for issue in raw_issues:
+            # Backstop for the HONESTY prompt rule: a rec whose actionable
+            # text still asks for an unlisted person, persona, credential or
+            # testing claim never becomes work. Cached findings replayed from
+            # before the rule existed are screened here too.
+            why = editorial_people.proposes_invented_person(
+                f"{issue.get('title') or ''}\n{issue.get('fix_suggestion') or ''}",
+                people_roster) if isinstance(issue, dict) else ""
+            if why:
+                skipped_invented.append(f"{issue.get('title', '')[:80]} — {why}")
+                continue
             try:
                 conf = float(issue.get("confidence", 0))
             except (TypeError, ValueError):
@@ -741,6 +772,11 @@ class ProgressiveImprovementAgent(AgentBase):
         if skipped_dupe:
             self.decide("observation",
                         f"deduped {skipped_dupe} rec(s) already shipped/skipped in prior runs")
+        if skipped_invented:
+            self.decide("observation",
+                        f"dropped {len(skipped_invented)} rec(s) that credit an unlisted "
+                        f"person or unbacked credential (editorial_people)",
+                        evidence={"dropped": skipped_invented[:20]})
 
         # ── Handoff `incorrect-categorization` recs to catalog-audit ──
         # PI surfaces miscategorized recipes but can't fix them — that's
