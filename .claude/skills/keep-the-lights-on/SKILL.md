@@ -747,6 +747,22 @@ backlog auto-apply (old agent migrations can undo newer fixes), quarantine
 into `db/migrations/_quarantine/` with a reason, and apply multi-minute
 files by hand so the boot doesn't carry them.
 
+**H. Host GPU crash (MCE panic / Xid 79 / instant power-off) and the
+wedged-card boot.** Signature: `uptime` is minutes, `boots_24h` > 1 in the
+sweep, publish volume and catalog freshness dip. The RTX 5090 host crashes under
+agent GPU load even at its 400 W power floor (09-28: Xid 79 at 10:59, MCE panic
+at 15:48). The dangerous follow-on: `kernel.panic=30` auto-reboots WARM, the card
+can come back wedged, and the kernel then logs an IOMMU fault storm
+(`gpu_iommu_faults_this_boot` > 0 in the sweep) while NOTHING above the kernel
+runs: no agents, and not this KTLO loop either, since it runs on the same host.
+09-28 lost 7 h that way. Playbook: if `gpu_iommu_faults_this_boot` > 0, the card
+needs a **COLD power cycle** (power off, wait, power on; a warm reboot does not
+revive it). That is an operator action, so escalate with the fault count. After
+any unexpected reboot, re-arm the loop, read `/var/crash/<ts>/dmesg.*` (sudo) for
+the panic line, and append the event to
+`retro-agent/docs/host-issues-log.md`, whose rules require an entry per host
+event. The history, signatures 1–6 and the open mitigations live in that log.
+
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.
 - `.claude/skills/refresh-gsc-token/SKILL.md` — re-mint the shared GSC/GA4 OAuth
