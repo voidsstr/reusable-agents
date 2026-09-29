@@ -57,6 +57,11 @@ SECRETS_FILE="$STATE_DIR/secrets.env"
 OLLAMA_DROPIN="/etc/systemd/system/ollama.service.d/10-models-dir.conf"
 IMAGE_DROPIN="$HOME/.config/systemd/user/local-image-gen.service.d/10-model.conf"
 GPU_POWER_LIMIT_W="${GPU_POWER_LIMIT_W:-400}"
+# Graphics-clock lock "<min>,<max>" MHz (empty = no lock). 400 W is this card's
+# MINIMUM power limit and the host still crashed under it on 2026-09-28 (MCE
+# panic, then a 7 h wedged-GPU boot). The cap bounds average draw, not the
+# millisecond boost transients; capping the clock bounds those too.
+GPU_CLOCK_LOCK_MHZ="${GPU_CLOCK_LOCK_MHZ-210,2400}"
 POWER_CAP_UNIT="/etc/systemd/system/nvidia-power-cap.service"
 
 bold()   { printf "\033[1m%s\033[0m\n" "$*"; }
@@ -150,9 +155,11 @@ Type=oneshot
 RemainAfterExit=yes
 # persistence keeps the limit applied when no CUDA client is attached
 ExecStart=-/usr/bin/nvidia-smi -pm 1
-ExecStart=/usr/bin/nvidia-smi -pl ${GPU_POWER_LIMIT_W}
+ExecStart=/usr/bin/nvidia-smi -pl ${GPU_POWER_LIMIT_W}${GPU_CLOCK_LOCK_MHZ:+
+ExecStart=/usr/bin/nvidia-smi -lgc ${GPU_CLOCK_LOCK_MHZ}}
 # restore stock on stop/disable
-ExecStop=-/usr/bin/nvidia-smi -pl 575
+ExecStop=-/usr/bin/nvidia-smi -pl 575${GPU_CLOCK_LOCK_MHZ:+
+ExecStop=-/usr/bin/nvidia-smi -rgc}
 
 [Install]
 WantedBy=multi-user.target
