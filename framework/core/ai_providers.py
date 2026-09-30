@@ -781,8 +781,19 @@ class _ClaudeCliClient(AIClient):
             "--model", chosen,
             "--max-turns", str(max_turns),
             "--dangerously-skip-permissions",
-            prompt,
         ]
+        # Linux caps ONE argv string at 128 KiB (MAX_ARG_STRLEN), so a large
+        # prompt in argv fails with E2BIG before claude even starts
+        # (2026-09-30: the growth-strategist memo prompt). Past the limit the
+        # prompt goes on stdin; `--print` reads it from there when no prompt
+        # argument is given, and CLAUDE_POOL_BUFFER_STDIN tells the pool shim
+        # to buffer it so a failover replays it. Small prompts keep argv.
+        stdin_prompt = len(prompt.encode("utf-8")) > 100_000
+        popen_env = None
+        if stdin_prompt:
+            popen_env = dict(os.environ, CLAUDE_POOL_BUFFER_STDIN="1")
+        else:
+            cmd.append(prompt)
         # Stream claude --print output line-by-line through the parent's
         # stdout AND capture into a buffer. Why both:
         #   * The buffer is what we return to the caller (the agent code
@@ -798,13 +809,29 @@ class _ClaudeCliClient(AIClient):
         try:
             proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.PIPE if stdin_prompt else None,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # line-buffered
+                env=popen_env,
             )
         except FileNotFoundError as e:
             raise RuntimeError("claude CLI not on PATH — install Claude Code first") from e
+        if stdin_prompt:
+            import threading as _th
+
+            def _feed_prompt():
+                try:
+                    proc.stdin.write(prompt)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
+            _th.Thread(target=_feed_prompt, daemon=True).start()
 
         out_buf: list[str] = []
         err_buf: list[str] = []

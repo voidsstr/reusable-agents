@@ -602,10 +602,16 @@ def _record_pool_usage(*, agent_id: str, profile_id: str, model: str,
 
 
 def _run_one_dispatch(picked_id: str, picked_home: str,
-                      claude_args: list[str]) -> tuple[int, str]:
+                      claude_args: list[str],
+                      stdin_data: str | None = None) -> tuple[int, str]:
     """Exec claude under HOME=picked_home. Tee its stdout+stderr through
     our parent streams (so users still see live output) AND capture into
     a buffer so we can scan for rate-limit patterns afterwards.
+
+    stdin_data, when given, is written to claude's stdin (the prompt, for
+    callers that pass it there instead of in argv). It is a buffered copy so
+    a failover to another profile replays the same prompt; inherited stdin
+    would already be drained by the first attempt.
 
     Returns (rc, captured_text).
     """
@@ -626,6 +632,7 @@ def _run_one_dispatch(picked_id: str, picked_home: str,
     proc = subprocess.Popen(
         [real] + (claude_args or []),
         env=env,
+        stdin=subprocess.PIPE if stdin_data is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=1,
@@ -633,6 +640,18 @@ def _run_one_dispatch(picked_id: str, picked_home: str,
     )
 
     import threading
+    if stdin_data is not None:
+        def _feed():
+            try:
+                proc.stdin.write(stdin_data)
+            except Exception:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+        threading.Thread(target=_feed, daemon=True).start()
     def _pump(src, dst, label):
         try:
             for line in iter(src.readline, ""):
@@ -928,10 +947,22 @@ def cmd_exec(args) -> None:
                                      always finds a profile (2026-09-28: hydration
                                      spent a freshly re-logged profile's whole
                                      5-hour window before the article proposers ran).
+      CLAUDE_POOL_BUFFER_STDIN     — 1 = read the prompt from stdin once and replay
+                                     it on every failover attempt (set by
+                                     ai_providers for prompts too big for argv).
     """
     started = time.time()
     last_rc = 1
     outage_emailed = False
+
+    # CLAUDE_POOL_BUFFER_STDIN=1: the caller sends the prompt on stdin (a
+    # prompt over the kernel's 128 KiB per-argument limit cannot go in argv:
+    # E2BIG). Read it once so each failover attempt gets the whole prompt.
+    # Opt-in, because a caller whose stdin is an open pipe it never closes
+    # would block here forever.
+    stdin_data: str | None = None
+    if os.environ.get("CLAUDE_POOL_BUFFER_STDIN") == "1":
+        stdin_data = sys.stdin.read()
 
     # Extract --model from the claude args so pick can filter on the
     # specific 7-day family the caller is going to hit. Without this,
@@ -987,7 +1018,8 @@ def cmd_exec(args) -> None:
             )
             _dispatch_t0 = time.time()
             try:
-                rc, captured = _run_one_dispatch(picked_id, picked["home"], claude_args)
+                rc, captured = _run_one_dispatch(picked_id, picked["home"], claude_args,
+                                                 stdin_data=stdin_data)
             finally:
                 _release_profile(picked_id)
             last_rc = rc
