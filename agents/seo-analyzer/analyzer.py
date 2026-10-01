@@ -593,8 +593,8 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
                     "title": f"Tighten <title> length on {len(short) + len(long)} page(s) (target 30-65 chars)",
                     "rationale": (
                         f"{len(short)} title(s) below 30 chars (under-using SERP real estate); "
-                        f"{len(long)} title(s) over 70 (Google truncates). studio-supplies pattern: "
-                        f"\"<Specific Phrase> | Brand\" 30-65 chars. Sample short: "
+                        f"{len(long)} title(s) over 70 (Google truncates titles around 60-65 chars). "
+                        f"Best practice: \"<Specific Phrase> | Brand\", 30-65 chars. Sample short: "
                         f"{', '.join(_samples(short, 3))}. Sample long: {', '.join(_samples(long, 3))}."
                     ),
                     "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 4},
@@ -623,7 +623,7 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
                     "title": f"Fix meta description on {tot} page(s) — missing/short/long",
                     "rationale": (
                         f"missing: {len(missing)}, under 120 chars: {len(short)}, over 165: {len(long)}. "
-                        f"Studio-supplies-style pages run 145-160 chars and lead with the primary keyword. "
+                        f"A description that answers the query in ~145-160 chars is less likely to be truncated or replaced in the SERP. "
                         f"Sample missing: {', '.join(_samples(missing, 3))}."
                     ),
                     "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 4},
@@ -896,19 +896,21 @@ def _add_onpage_recs(data: Path, recs: list, next_id, max_recs: int) -> None:
                     "id": rid, "type": "onpage-faqpage-opportunity", "priority": "medium",
                     "title": f"Add FAQ block + FAQPage JSON-LD to {len(faq_targets)} commerce page(s)",
                     "rationale": (
-                        "Studio-supplies product pages each ship a 10-question FAQ rendered as both "
-                        "an accordion in the body AND FAQPage JSON-LD. This produces rich-snippet "
-                        "expandable Q&A under the SERP listing — measurable CTR lift on commercial "
-                        "queries. The agent can generate Qs from product specs/category."
+                        "Visible, concise Q&A (4-6 real questions, 40-80-word answers) rendered in "
+                        "the body and mirrored in FAQPage JSON-LD gives AI answer engines and "
+                        "People-Also-Ask quotable answers. Do not expect a FAQ rich result: since "
+                        "August 2023 Google shows those only for well-known government and health "
+                        "sites. Generate Qs from real buyer questions about the product/category."
                     ),
-                    "expected_impact": {"metric": "gsc.avg_ctr", "horizon_weeks": 8},
+                    "expected_impact": {"metric": "ai_referral_traffic", "horizon_weeks": 8},
                     "data_refs": ["data/pages-by-type.jsonl"],
                     "implementation_outline": {
                         "approach": (
                             "Add a `faqs: [{question, answer}]` field on each product/category. "
                             "Render in body as <details><summary>Q</summary><p>A</p></details>. Also "
                             "emit FAQPage JSON-LD with mainEntity[*].@type=Question, .name=Q, "
-                            ".acceptedAnswer.@type=Answer, .acceptedAnswer.text=A. Aim for 5-10 Q&As."
+                            ".acceptedAnswer.@type=Answer, .acceptedAnswer.text=A. Aim for 4-6 Q&As "
+                            "with 40-80-word answers."
                         ),
                     },
                     "sample_urls": _samples(faq_targets, 5),
@@ -1144,10 +1146,10 @@ def _add_content_gap_recs(cfg, data: Path, recs: list, next_id, max_recs: int,
                           pre_traffic_mode: bool) -> None:
     """Net-new-page recommendations — the pre-traffic content engine.
 
-    Studio-supplies' rank wins come from sheer published-page surface area:
-    one buying guide per category, one brand metaobject per brand carried,
-    a /vs/ page per high-overlap product pair, plus a constant churn of
-    troubleshooting + use-case landings. The agent's existing top5-target
+    Coverage targets (one buying guide per category, one brand page per
+    brand carried, a /vs/ page per high-overlap product pair, troubleshooting
+    and use-case landings) give a site starting at zero pages that can earn
+    their first impressions. The agent's existing top5-target
     loop only fires when GSC has impressions to mine — useless for sites
     starting at zero.
 
@@ -2557,21 +2559,22 @@ def _add_faq_quality_recs(data: Path, recs: list, next_id, max_recs: int) -> Non
     rid = next_id()
     recs.append({
         "id": rid, "type": "faq-quality-thin", "priority": "medium",
-        "title": f"Improve FAQ depth on {len(thin)} page(s) (target ≥3 Qs, avg ≥20-word answers)",
+        "title": f"Improve FAQ depth on {len(thin)} page(s) (target 4-6 Qs, 40-80-word answers)",
         "rationale": (
-            "FAQPage schema is rich-result eligible AND a primary AI-search "
-            "citation source — but only when the questions are substantive. "
-            "Studio-supplies' product FAQs run 5 questions × ~80 words per "
-            "answer, hitting the LLM-citation sweet spot. Pages with <3 Qs "
-            "or thin answers get the FAQPage schema penalty without the "
-            "ranking lift."
+            "Visible Q&A is a common AI-answer citation source, but only when "
+            "the questions are substantive. These pages have fewer than 3 "
+            "questions or answers averaging under 20 words. Target 4-6 real "
+            "questions with 40-80-word answers. (FAQ rich results are limited "
+            "to well-known government and health sites since August 2023, so "
+            "the payoff is AI-answer and People-Also-Ask extraction, not a "
+            "SERP rich result.)"
         ),
-        "expected_impact": {"metric": "rich_result_ctr", "horizon_weeks": 6},
+        "expected_impact": {"metric": "ai_referral_traffic", "horizon_weeks": 6},
         "data_refs": ["data/pages-by-type.jsonl"],
         "implementation_outline": {
             "approach": (
-                "For each flagged page, expand the FAQ to 5 Qs minimum. "
-                "Each answer should be 50-120 words covering: (1) direct "
+                "For each flagged page, expand the FAQ to 4-6 Qs. "
+                "Each answer should be 40-80 words covering: (1) direct "
                 "answer in first sentence, (2) supporting context, (3) "
                 "actionable next step. Source questions from search "
                 "intent — Google's 'People Also Ask' for the page's "
@@ -2648,8 +2651,8 @@ def _add_footer_trust_links_recs(data: Path, recs: list, next_id, max_recs: int)
         "rationale": (
             "Google E-E-A-T baseline + FTC affiliate-disclosure rules require "
             "site-wide reachability of these pages. The homepage scan didn't "
-            "find footer links to: " + ", ".join(missing) + ". Studio-supplies "
-            "carries all five plus a methodology page on every footer. The "
+            "find footer links to: " + ", ".join(missing) + ". Link all five, "
+            "plus a methodology / editorial-policy page, from every footer. The "
             "affiliate-disclosure link is non-optional under FTC 16 CFR § 255 "
             "for any site that earns commissions on outbound product links."
         ),
@@ -2753,25 +2756,27 @@ def _add_trust_signal_density_recs(data: Path, recs: list, next_id, max_recs: in
     rid = next_id()
     recs.append({
         "id": rid, "type": "trust-signal-density-thin", "priority": "medium",
-        "title": f"Surface trust signals on {len(thin)} conversion page(s)",
+        "title": f"Surface verifiable trust signals on {len(thin)} conversion page(s)",
         "rationale": (
-            "Conversion pages with <3 visible trust-signal phrases convert "
-            "noticeably worse on affiliate-click revenue. Studio-supplies "
-            "product pages always render at least: 'Authorized retailer', "
-            "'Full warranty', '30-day return policy', 'Satisfaction "
-            "guaranteed'. These don't need to be true of YOUR site — they "
-            "describe the merchant the affiliate link points to (Amazon's "
-            "return policy, etc.)."
+            "These conversion pages show fewer than 3 visible trust signals. "
+            "Every signal must be true and attributed: the affiliate "
+            "disclosure near the CTA, 'Price and availability from Amazon "
+            "as of <date>', 'Purchases are handled by Amazon; Amazon's "
+            "return policy applies' (linked), a methodology / editorial-"
+            "policy link and the named author. Never add 'authorized "
+            "retailer', warranty or 'satisfaction guaranteed' claims unless "
+            "they are sourced for that specific product."
         ),
         "expected_impact": {"metric": "amazon_affiliate_revenue", "horizon_weeks": 4},
         "data_refs": ["data/pages-by-type.jsonl"],
         "implementation_outline": {
             "approach": (
-                "Add a 'Why buy through Amazon' / 'Return policy + Warranty' "
-                "callout block beneath the affiliate CTA on every conversion "
-                "page. 4-6 trust phrases visible, each as a separate "
-                "callout chip. Sourced from Amazon's standard ToC — these "
-                "are genuine, not embellished."
+                "Beneath the affiliate CTA on every conversion page, render "
+                "the facts the site can verify: the affiliate disclosure, the "
+                "Amazon price timestamp, 'Purchases are handled by Amazon; "
+                "Amazon's return policy applies' linked to Amazon's returns "
+                "page, and links to the methodology page and the author. Do "
+                "not invent merchant, warranty or guarantee claims."
             ),
         },
         "sample_urls": [t["url"] for t in thin[:5]],
@@ -3235,8 +3240,8 @@ def _add_topical_cluster_orphan_recs(data: Path, recs: list, next_id, max_recs: 
             "subcategory hub exists on the site) but the hub doesn't link to "
             "them. The hub's PageRank can't flow to the spokes, and Google "
             "treats unlinked spokes as orphans regardless of sitemap presence. "
-            "Studio-supplies' cluster pattern is hub → product spoke + hub → "
-            "buying guide → spoke; both directions need real `<a>` tags. "
+            "A healthy cluster links hub → spoke and hub → buying guide → "
+            "spoke; both directions need real `<a>` tags. "
             f"Affected clusters (sample): {', '.join(sample_clusters)}."
         ),
         "expected_impact": {"metric": "indexed_pages", "horizon_weeks": 6},
@@ -3247,8 +3252,7 @@ def _add_topical_cluster_orphan_recs(data: Path, recs: list, next_id, max_recs: 
                 "render an ItemList rail of the cluster's spokes (e.g. on "
                 "/recipes/category/keto, render a `Latest Keto Recipes` rail "
                 "with 12-24 anchors). Anchor text should be each spoke's "
-                "title (descriptive, not generic). Studio-supplies' category "
-                "pages run 26+ ItemList anchors per page."
+                "title (descriptive, not generic)."
             ),
         },
         "orphan_count": len(orphans),
