@@ -188,6 +188,37 @@ def _like_prefix(prefix: str) -> str:
             + "%")
 
 
+def split_exclude_ips(entries: Iterable[str]) -> tuple[list[str], list[str]]:
+    """(exact, LIKE-prefix patterns) from an exclude list. An entry ending in
+    "." or ":" is a prefix (the fleet host's IPv6 rotates inside its /64, so
+    '2600:1702:7930:33f0:' must match every address in it), as in the sites'
+    own isSelfTraffic(). Matching is case-insensitive."""
+    exact, prefixes = [], []
+    for e in entries or ():
+        e = str(e).strip().lower()
+        if not e:
+            continue
+        if e.endswith((".", ":")):
+            prefixes.append(e.replace("\\", "\\\\").replace("%", "\\%")
+                            .replace("_", "\\_") + "%")
+        else:
+            exact.append(e)
+    return exact, prefixes
+
+
+def _exclude_ip_clause(cfg: dict, ip_col: str, params: dict, where: list) -> None:
+    """Drop the exclude list's addresses (exact or prefix) from `where`."""
+    if not ip_col or not cfg.get("exclude_ips"):
+        return
+    exact, prefixes = split_exclude_ips(cfg["exclude_ips"])
+    if exact:
+        params["exclude_ips"] = exact
+        where.append(f"(l.{ip_col} IS NULL OR NOT (lower(l.{ip_col}) = ANY(%(exclude_ips)s)))")
+    if prefixes:
+        params["exclude_ip_prefixes"] = prefixes
+        where.append(f"(l.{ip_col} IS NULL OR NOT (lower(l.{ip_col}) LIKE ANY(%(exclude_ip_prefixes)s)))")
+
+
 def build_landed_paths_sql(cfg: dict, *, prefixes: Sequence[str] = (),
                            ) -> tuple[str, dict]:
     """(sql, params) for :func:`landed_paths`. `cfg` must already have its
@@ -229,9 +260,7 @@ def build_landed_paths_sql(cfg: dict, *, prefixes: Sequence[str] = (),
         where.append(f"l.{path} LIKE ANY(%(prefix_likes)s)")
     if verified:
         where.append(f"(l.{kind} = ANY(%(ref_kinds)s) OR l.{verified} IS NOT FALSE)")
-    if ip and cfg.get("exclude_ips"):
-        params["exclude_ips"] = list(cfg["exclude_ips"])
-        where.append(f"(l.{ip} IS NULL OR NOT (l.{ip} = ANY(%(exclude_ips)s)))")
+    _exclude_ip_clause(cfg, ip, params, where)
 
     ip_sel = f"l.{ip}" if ip else "NULL::text"
     spoof_cte, spoof_filter = "", ""
@@ -339,6 +368,8 @@ def build_referral_counts_sql(cfg: dict, windows: Sequence[int] = (7, 30),
     if status and cfg.get("only_status_200", True):
         where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
     _exclude_path_clause(cfg, _ident(cfg["path_column"]), params, where)
+    _exclude_ip_clause(cfg, _ident(cfg["ip_column"]) if cfg.get("ip_column") else "",
+                       params, where)
     cols = []
     for w in wins:
         params[f"d{w}"] = w

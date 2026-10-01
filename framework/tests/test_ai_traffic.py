@@ -152,7 +152,22 @@ def test_exclude_ips_from_env(monkeypatch):
     cfg = at.resolve_columns(_Conn(SP_COLS), at.config({"exclude_ips": ["9.9.9.9"]}))
     sql, params = at.build_landed_paths_sql(cfg)
     assert params["exclude_ips"] == ["1.2.3.4", "5.6.7.8", "9.9.9.9"]
-    assert "NOT (l.ip_address = ANY(%(exclude_ips)s))" in sql
+    assert "NOT (lower(l.ip_address) = ANY(%(exclude_ips)s))" in sql
+
+
+def test_exclude_ip_prefix_matches_a_rotating_ipv6_64(monkeypatch):
+    # The fleet host's IPv6 rotates inside its /64, so the exclude list
+    # carries the prefix; an exact '= ANY' match never caught it.
+    monkeypatch.setenv("AI_TRAFFIC_EXCLUDE_IPS", "2600:1702:7930:33f0:,108.80.179.176")
+    cfg = at.resolve_columns(_Conn(SP_COLS), at.config())
+    sql, params = at.build_landed_paths_sql(cfg)
+    assert params["exclude_ips"] == ["108.80.179.176"]
+    assert params["exclude_ip_prefixes"] == ["2600:1702:7930:33f0:%"]
+    assert "LIKE ANY(%(exclude_ip_prefixes)s)" in sql
+    # referral counts drop our own addresses too
+    rsql, rparams = at.build_referral_counts_sql(cfg)
+    assert rparams["exclude_ip_prefixes"] == ["2600:1702:7930:33f0:%"]
+    assert "LIKE ANY(%(exclude_ip_prefixes)s)" in rsql
 
 
 def test_landed_paths_normalizes_merges_and_scores():

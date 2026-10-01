@@ -398,20 +398,9 @@ _PRIVATE_IP_RE = (r"^(::ffff:)?(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])
 
 
 def _split_exclude_ips(entries: Iterable[str]) -> tuple[list[str], list[str]]:
-    """(exact, like-prefix patterns). An entry ending in "." or ":" is a
-    prefix (the fleet host's IPv6 rotates inside its /64), as in the sites'
-    own isSelfTraffic()."""
-    exact, prefixes = [], []
-    for e in entries or ():
-        e = str(e).strip().lower()
-        if not e:
-            continue
-        if e.endswith((".", ":")):
-            prefixes.append(e.replace("\\", "\\\\").replace("%", "\\%")
-                            .replace("_", "\\_") + "%")
-        else:
-            exact.append(e)
-    return exact, prefixes
+    """Kept for callers of the old name; the rule lives in ai_traffic."""
+    from . import ai_traffic
+    return ai_traffic.split_exclude_ips(entries)
 
 
 def build_ai_visits_sql(tg: dict, atcfg: dict, *, table: str,
