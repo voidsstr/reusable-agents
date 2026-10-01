@@ -719,3 +719,28 @@ def resolve_citation_policy(site_hint: str, storage=None) -> dict:
     pol = dict(DEFAULT_CITATION_POLICY)
     pol.update((resolve_minima(site_hint, storage) or {}).get("citations") or {})
     return pol
+
+
+def filter_proposal_citations(proposals: list[dict], policy: dict | None,
+                              own_hosts: Iterable[str],
+                              on_note=None, key: str = "outbound_citations") -> int:
+    """Proposer-side use of audit_citations: trim each proposal's citation
+    list to qualifying deep pages, in place (the writer copies the list
+    verbatim and links every entry, so a homepage root here ships as a
+    homepage citation). Returns how many proposals end below the minimum;
+    `on_note(str)` receives what was dropped and which proposals fell short."""
+    short = 0
+    for p in proposals or []:
+        cites = p.get(key) or []
+        if not cites:
+            continue
+        a = audit_citations(cites, policy, own_hosts=own_hosts)
+        if a.rejected and on_note:
+            on_note(f"{p.get('id')}: dropped citation(s) "
+                    + "; ".join(f"{u} ({r})" for u, r in a.rejected[:5]))
+        p[key] = a.kept
+        if not a.passes:
+            short += 1
+            if on_note:
+                on_note(f"{p.get('id')}: citations below minimum — {a.failure_reason()}")
+    return short

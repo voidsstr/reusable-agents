@@ -220,7 +220,7 @@ STOCK_CLAIM = re.compile(r"""(
 # Telling the reader to CHECK stock is honest, as is a renderer note.
 _STOCK_OK = re.compile(
     r"\b(?:check|verify|confirm|whether|varies|vary|live\s+(?:price|button|listing)|"
-    r"at\s+the\s+time\s+of\s+(?:writing|selection))\b", re.I)
+    r"at\s+the\s+time\s+of\s+(?:writing|selection)|if|when|whenever|unless|finds?)\b", re.I)
 
 
 def find_stock_claims(text: str) -> list[str]:
@@ -283,8 +283,11 @@ _DELTA = re.compile(
     r"|\$\s?(?P<b>\d[\d,]*(?:\.\d{1,2})?)\+?\s+(?:cheaper|less\s+than|more\s+than|more\b|"
     r"extra\b|over\s+the|above\s+the|below\s+the|under\s+the|premium\b|gap\b|difference\b|"
     r"step[- ]up\b|savings?\b))", re.I)
+# A single multiplier (not a range like "3-5x", not a product like "2 × 24 GB")
+# asserted to hold everywhere.
 _UNIVERSAL_RATIO = re.compile(
-    r"\b\d+(?:\.\d+)?\s*[×x]\s+(?:the\s+|faster\s+than\s+|as\s+fast\s+as\s+)?[^.!?\n]{0,50}?"
+    r"(?<![\d.][-–])(?<![\d.]\s[-–]\s)\b\d+(?:\.\d+)?\s*[×x](?!\s*\d)\s+"
+    r"(?:the\s+|faster\s+than\s+|as\s+fast\s+as\s+)?[^.!?\n|]{0,50}?"
     r"\b(?:at|across|on|in)\s+(?:every|all|each|any)\b", re.I)
 
 
@@ -323,7 +326,7 @@ def find_numeric_inconsistencies(text: str) -> list[str]:
                 if not any(abs(d - g) <= tol for g in gaps):
                     out.append(f"${d:,.0f} delta matches no gap between the body's prices: {s[:200]}")
                     break
-        if _UNIVERSAL_RATIO.search(s):
+        if not s.startswith("|") and _UNIVERSAL_RATIO.search(s):
             out.append(f"universal ratio claim (check it at each cited figure): {s[:200]}")
     return out
 
@@ -331,13 +334,19 @@ def find_numeric_inconsistencies(text: str) -> list[str]:
 # ── Price-role consistency against live prices ──────────────────────────────
 _LINK_PATH = re.compile(r"\]\((?:https?://[^/)\s]+)?(/[^)\s?#]+)")
 _HEADING = re.compile(r"^(#{2,4})\s+(.*)$")
-_ROLE_BUDGET = re.compile(r"\bbudget(?:\s+pick)?\b", re.I)
+# "Budget Pick" or a role/tier label that is exactly "Budget" (a heading
+# label, a table cell) — not "Budget High-End" or "Best for CUDA on a Budget".
+_ROLE_BUDGET = re.compile(
+    r"\bbudget\s+pick\b|(?:^|\||:|🧪)\s*(?:\*\*)?budget(?:\*\*)?\s*(?:$|\||:)", re.I)
 _ROLE_ANY = re.compile(r"\b(?:best\s+(?:overall|value|premium|performance|for\s+\w+)|"
                        r"budget(?:\s+pick)?|premium\s+pick|runner[- ]up|upgrade\s+pick)\b", re.I)
 _SUPERLATIVE = re.compile(
     r"\b(?P<w>priciest|most\s+expensive|highest[- ]priced|cheapest|least\s+expensive|"
-    r"lowest[- ]priced|most\s+affordable)\b[^.!?\n]{0,40}?\b(?:on|in|of)\s+(?:this|the|our)\s+"
+    r"lowest[- ]priced|most\s+affordable)\s+(?!(?:insurance|step|way|tip|advice|fix|route)\b)"
+    r"(?:[\w-]+\s+){0,2}?(?:on|in|of)\s+(?:this|the|our)\s+"
     r"(?:list|roundup|guide|lineup|picks|shortlist|page)\b", re.I)
+_SUPERLATIVE_NEG = re.compile(r"\bnot\s+(?:the\s+|always\s+the\s+)?(?:priciest|most\s+expensive|"
+                              r"cheapest|least\s+expensive)\b", re.I)
 _MSRP_CLAIM = re.compile(
     r"\b(?P<dir>above|over|higher\s+than|below|under|less\s+than|beneath)\s+(?:its|the|a|their)\s+"
     r"(?:\w+\s+){0,2}?\$\s?(?P<n>\d[\d,]*(?:\.\d{1,2})?)\s+(?:launch\s+)?(?:MSRP|list\s+price|launch\s+price)\b",
@@ -419,7 +428,7 @@ def find_price_conflicts(body_md: str, prices: dict[str, float] | None) -> list[
             sec_hit = _first_priced(head, pm) or _first_priced(text, pm)
             for s in _sentences(text):
                 m = _SUPERLATIVE.search(s)
-                if not m:
+                if not m or _SUPERLATIVE_NEG.search(s):
                     continue
                 hit = _first_priced(s, pm) or sec_hit
                 if not hit:
@@ -578,3 +587,24 @@ def check(body_md: str, *, subtitle: str = "", excerpt: str = "", bucket: str = 
         numeric=find_numeric_inconsistencies(body_md) if _on("numeric_consistency") else [],
         price_conflicts=find_price_conflicts(body_md, prices) if _on("price_consistency") else [],
     )
+
+
+def sweep_rows(rows: Iterable[dict], *, site_hint: str, prices: dict[str, float] | None = None,
+               config: dict | None = None, storage=None, body_key: str = "body_md",
+               slug_key: str = "slug", bucket_keys: tuple = ("bucket", "category")) -> list[dict]:
+    """Report-only pass over already-published rows (a proposer runs it each
+    tick with the site's live price map, which the implementer's insert hook
+    does not have). Returns one dict per row with findings from the newer
+    checks: {"slug", "passes", "stock"?, "stale"?, "numeric"?, "price"?}."""
+    cfg = config if config is not None else load_config(storage)
+    out: list[dict] = []
+    for r in rows or []:
+        bucket = next((str(r.get(k)) for k in bucket_keys if r.get(k)), "")
+        audit = check(r.get(body_key) or "", subtitle=r.get("subtitle") or "",
+                      excerpt=r.get("excerpt") or "",
+                      policy=resolve_policy(site_hint, bucket, config=cfg), prices=prices)
+        found = {k: v for k, v in (("stock", audit.stock_claims), ("stale", audit.stale_claims),
+                                   ("numeric", audit.numeric), ("price", audit.price_conflicts)) if v}
+        if found:
+            out.append({"slug": r.get(slug_key), "passes": audit.passes, **found})
+    return out

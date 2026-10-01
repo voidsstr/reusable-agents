@@ -261,3 +261,15 @@ def test_citation_audit_rejects_roots_hubs_and_storefronts():
                           "https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",
                           "https://en.wikipedia.org/wiki/OLED"])
     assert ok.passes and ok.non_wikipedia == 2
+
+
+def test_filter_proposal_citations_trims_in_place():
+    from framework.core.article_link_guard import filter_proposal_citations
+    props = [{"id": "art-001", "outbound_citations": [
+        "https://www.instantpot.com/", "https://www.seriouseats.com/best-instant-pots",
+        "https://nchfp.uga.edu/how/can/pressure"]}, {"id": "art-002"}]
+    notes = []
+    short = filter_proposal_citations(props, {"min_qualifying": 2}, {"aisleprompt.com"}, on_note=notes.append)
+    assert props[0]["outbound_citations"] == ["https://www.seriouseats.com/best-instant-pots",
+                                              "https://nchfp.uga.edu/how/can/pressure"]
+    assert short == 0 and len(notes) == 1 and "instantpot.com" in notes[0]

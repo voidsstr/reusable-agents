@@ -201,3 +201,16 @@ def test_new_checks_warn_by_default_and_explicit_policy_keeps_them_off():
     old = G.check(MINI + "\nEvery pick is in stock.\n",
                   policy={"first_hand_claims": "warn"}, prices=PRICES)
     assert old.stock_claims == [] and old.price_conflicts == []
+
+
+def test_sweep_rows_reports_only_rows_with_findings():
+    rows = [{"slug": "mini", "category": "buying-guide", "body_md": MINI},
+            {"slug": "clean", "category": "buying-guide", "body_md": "Nothing to see."},
+            {"slug": "stale", "category": "recipe-cluster",
+             "body_md": "Prime Big Deal Days orders can be returned until January 31."}]
+    out = G.sweep_rows(rows, site_hint="specpicks-x", prices=PRICES,
+                       config={"default": {}, "sites": {}})
+    by = {r["slug"]: r for r in out}
+    assert set(by) == {"mini", "stale"}
+    assert by["mini"]["passes"] and by["mini"]["price"]
+    assert not by["stale"]["passes"] and by["stale"]["stale"]
