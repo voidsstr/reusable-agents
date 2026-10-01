@@ -96,3 +96,11 @@ def test_intra_batch_duplicate_primary_keeps_the_first():
     b = {"slug": "b", "title": "Beta roundup", "primary_keyword": "Budget NAS"}
     kept, dropped, _ = _run([a, b])
     assert [k["slug"] for k in kept] == ["a"] and dropped[0][0] == "b"
+
+
+def test_holiday_none_tag_is_not_an_occasion():
+    assert T.holiday_ids(["holiday:none", "holiday:prime-big-deal-days", "keto"]) == {"prime-big-deal-days"}
+    twin = {"slug": "intel-arc-pro-b60-vs-rtx-3060-12gb-local-llm", "primary_keyword": "b60 twin",
+            "title": "Intel Arc Pro B60 vs RTX 3060 12GB for Local LLMs", "tags": ["holiday:none"]}
+    kept, dropped, _ = _run([twin])
+    assert kept == [] and "near-identical" in dropped[0][1]

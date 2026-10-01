@@ -214,7 +214,7 @@ def holiday_ids(tags: Iterable[str] | None, prefix: str = "holiday:") -> set[str
     out: set[str] = set()
     for t in tags or []:
         t = str(t or "").strip().lower()
-        if t.startswith(prefix) and len(t) > len(prefix):
+        if t.startswith(prefix) and t[len(prefix):] not in ("", "none", "null", "n/a"):
             out.add(t[len(prefix):])
     return out
 
