@@ -109,3 +109,95 @@ def test_storage_copy_of_the_policy_overrides_the_repo_default():
         def read_json(self, key):
             return None
     assert G.load_config(_Empty())["sites"]["specpicks"]["first_hand_claims"] == "warn"
+
+
+# ── 2026-10-01 AI-reach audit additions ────────────────────────────────────
+
+def test_dated_and_list_anchor_prices_are_point_prices():
+    body = ("Crock-Pot 7-quart (about $52 as of September 2026) is the pick.\n\n"
+            "The MSI RTX 3060 Ventus 2X (list $629) is fine.\n\n"
+            "It sits below its $629 list price.\n\n"
+            "Expect ~$500 at last check.\n\n"
+            "Anything under $50 is a band, and MSRP $429 is launch context.\n")
+    hits = G.find_point_prices(body)
+    assert len(hits) == 4, hits
+    assert not any("under $50" in h for h in hits)
+
+
+def test_stock_claims_flagged_but_check_stock_advice_passes():
+    hits = G.find_stock_claims(
+        "Every pick below is an in-stock listing. Check stock on the live listing before you buy. "
+        "These can sell through in November.")
+    assert hits == ["Every pick below is an in-stock listing.", "These can sell through in November."]
+
+
+def test_known_stale_return_window_claim_rejects_and_names_the_fix():
+    pol = G.resolve_policy("specpicks-article-proposal-agent", "buying-guide",
+                           config={"default": {}, "sites": {}})
+    assert pol["stale_claims"] == "reject" and pol["stock_claims"] == "warn"
+    bad = G.check("October purchases get January returns, so buy early.", policy=pol)
+    assert not bad.passes and "Nov 1" in bad.failure_reason()
+    good = G.check("Holiday returns cover purchases from Nov 1 through Dec 31, returnable until "
+                   "January 31; October Prime Big Deal Days orders get the standard 30-day window.",
+                   policy=pol)
+    assert good.passes and good.stale_claims == []
+
+
+def test_dollar_delta_must_match_a_gap_between_stated_prices():
+    setup = ("The Shadow 5 anchors at $1,899.99 and the Azure 3 at $1,199.99, so the Azure is $700 "
+             "cheaper than the Shadow 5. On Sept 8 the Shadow 5 listed at $1,499.99. Spend the extra "
+             "$200 on the Shadow 5 now instead of $400+ on a GPU swap later.")
+    hits = G.find_numeric_inconsistencies(setup)
+    assert len(hits) == 1 and "$200" in hits[0]
+    assert G.find_numeric_inconsistencies(
+        "NVIDIA launched it at $429, only $50 above the 8GB version's $379.") == []
+    # Per-serving savings are not product deltas.
+    assert G.find_numeric_inconsistencies("It costs $2.50 per serving, saving $1 over takeout at $9 or $12.") == []
+
+
+def test_universal_ratio_claim_is_flagged():
+    hits = G.find_numeric_inconsistencies(
+        "That's about 3× the 4060 Ti at every context length, for roughly 5× the price.")
+    assert hits and "universal ratio" in hits[0]
+
+
+MINI = """## Quick Answer
+The KAMRUI AM21 is the pick.
+
+### 🏆 Best Overall: [KAMRUI AM21](/product/B0FX3P76CJ?tag=specpicks-articles-20)
+Text.
+
+### 💰 Best Value: [Kron K1](/product/B0CY4ZM18N)
+Text.
+
+### 🧪 Budget Pick: [GMKtec G3 PRO](/product/B0GHDTHM53)
+It is the cheapest mini PC on this list.
+
+## Who should wait
+The [Ryzen 7 9800X3D](/product/B0DKFMSMYK) listing was above its $479 MSRP when last seen.
+"""
+PRICES = {"/product/B0FX3P76CJ": 559.0, "/product/B0CY4ZM18N": 419.98,
+          "/product/B0GHDTHM53": 499.99, "/product/b0dkfmsmyk": 444.0}
+
+
+def test_price_conflicts_against_live_prices():
+    hits = G.find_price_conflicts(MINI, PRICES)
+    assert any(h.startswith("budget pick /product/b0ghdthm53") for h in hits), hits
+    assert any("'cheapest'" in h for h in hits), hits
+    assert any("above the $479 MSRP" in h for h in hits), hits
+    # Consistent prices: nothing to report.
+    ok = dict(PRICES, **{"/product/B0GHDTHM53": 249.0, "/product/b0dkfmsmyk": 519.0})
+    assert G.find_price_conflicts(MINI, ok) == []
+    assert G.find_price_conflicts(MINI, None) == []
+
+
+def test_new_checks_warn_by_default_and_explicit_policy_keeps_them_off():
+    pol = G.resolve_policy("specpicks-article-proposal-agent", "buying-guide")
+    audit = G.check(MINI + "\nEvery pick is in stock.\n", policy=pol, prices=PRICES)
+    assert audit.passes  # warn-only
+    w = " ".join(audit.warnings())
+    assert "stock" in w and "live prices contradict" in w
+    # A caller-built policy without the new keys behaves as before.
+    old = G.check(MINI + "\nEvery pick is in stock.\n",
+                  policy={"first_hand_claims": "warn"}, prices=PRICES)
+    assert old.stock_claims == [] and old.price_conflicts == []
