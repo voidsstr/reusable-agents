@@ -533,6 +533,26 @@ except Exception:
         DISPATCH_KIND="article-author"
     fi
 fi
+# article-refresh: an in-place rewrite of a published article's DB row
+# (event-refresh-agent after a sale ends, stale-content watchers). Detected
+# from the recs themselves (dispatch_kind / type) so any producer can emit
+# it. The runbook stays AGENT.md, whose DB-only evidence rules apply; the
+# deployer chain is skipped below because nothing needs a build. A batch
+# that mixes in any other rec type stays "seo" and deploys as before.
+if [ "$DISPATCH_KIND" = "seo" ] && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+    if python3 -c "
+import json, sys
+try:
+    d = json.load(open('$RESPONDER_RUN_DIR/recommendations.json'))
+    recs = d.get('recommendations', [])
+    kinds = {(r.get('dispatch_kind') or r.get('type') or r.get('rec_type') or '') for r in recs}
+    sys.exit(0 if recs and kinds == {'article-refresh'} else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+        DISPATCH_KIND="article-refresh"
+    fi
+fi
 echo "[implementer] dispatch_kind=$DISPATCH_KIND source_agent_from_recs=$SOURCE_AGENT_ID_FROM_RECS"
 
 # DB access for dispatches that write rows directly (article-author writes
@@ -2751,6 +2771,8 @@ elif [ "$DISPATCH_KIND" = "article-author" ]; then
     echo "[implementer] article-author dispatch — skipping deployer chain (articles ship via DB insert, no build)"
 elif [ "$DISPATCH_KIND" = "catalog-audit" ]; then
     echo "[implementer] catalog-audit dispatch — skipping deployer chain (DB-only fixes, no build)"
+elif [ "$DISPATCH_KIND" = "article-refresh" ]; then
+    echo "[implementer] article-refresh dispatch — skipping deployer chain (DB-only rewrite of a published article, no build)"
 elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
     # Per-batch deploy — fire after every batch, not waiting for chain
     # end. The _is_last_batch_in_chain helper is preserved (still used
@@ -3380,7 +3402,8 @@ for r in sd.get("recommendations", []):
     # "implemented but not shipped" forever.
     if (r.get("implemented") is True
             and not r.get("shipped")
-            and (r.get("type") == "article-author-proposal"
+            and (r.get("type") in ("article-author-proposal", "article-refresh")
+                 or r.get("dispatch_kind") == "article-refresh"
                  or "article-author" in (r.get("implemented_via") or ""))):
         r["shipped"] = True
         r["shipped_at"] = now_iso
