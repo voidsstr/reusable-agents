@@ -6,6 +6,8 @@
   "lookback_days": 7,
   "metric_horizon_days": 60,
   "max_recs_per_site": 25,
+  "retry_after_hours": 24,
+  "max_attempts": 5,
   "next_occasion_horizon_days": 120,
   "default": {
     "dsn_env": "DATABASE_URL",

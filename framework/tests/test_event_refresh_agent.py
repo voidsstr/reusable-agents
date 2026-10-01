@@ -236,3 +236,131 @@ def test_rec_without_next_occasion_goes_evergreen():
                                 event=w, next_event=None)
     assert "evergreen" in rec["rationale"] and rec["next_occasion"] is None
     assert "Remove `holiday:prime-day`" in rec["rationale"]
+
+
+# --- retry gate (review: a deferred refresh must not be lost) ---------------
+
+LEDGER = "agents/event-refresh-agent/state/event-refresh-ledger.json"
+
+
+def _consume_queue(storage):
+    """What the responder does on dispatch: the auto-queue file moves away."""
+    for k in _queue_files(storage):
+        storage.delete(k)
+
+
+def _queued_rec_ids(storage):
+    return sorted(r for k in _queue_files(storage)
+                  for r in storage.read_json(k)["rec_ids"])
+
+
+def test_rec_ids_are_stable_per_ledger_key(storage, agent_env):
+    make, _ = agent_env
+    make().run()
+    ledger = storage.read_json(LEDGER)
+    for lk, entry in ledger.items():
+        assert entry["rec_id"] == era.stable_rec_id(lk)
+        assert entry["attempts"] == 1
+    assert _queued_rec_ids(storage) == sorted(e["rec_id"] for e in ledger.values())
+
+
+def test_still_tagged_article_is_requeued_after_retry_window(storage, agent_env, monkeypatch):
+    make, _ = agent_env
+    first = make().run()
+    ids_day1 = _queued_rec_ids(storage)
+    _consume_queue(storage)
+    # Implementer deferred (Opus unavailable): both pages still carry the tag.
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-09")
+    res = make().run()
+    assert first.metrics["recs_queued"] == 2
+    assert res.metrics["recs_queued"] == 2 and res.metrics["recs_requeued"] == 2
+    assert _queued_rec_ids(storage) == ids_day1  # same ids -> defer_backoff lines up
+    ledger = storage.read_json(LEDGER)
+    assert {e["attempts"] for e in ledger.values()} == {2}
+    assert {e["first_queued_at"][:10] for e in ledger.values()} == {"2026-10-08"}
+    doc = storage.read_json(
+        "agents/event-refresh-agent/runs/20261008T103000Z/recommendations.json")
+    assert {r["attempt"] for r in doc["recommendations"]} == {2}
+
+
+def test_no_requeue_inside_retry_window_or_while_still_pending(storage, agent_env, monkeypatch):
+    make, _ = agent_env
+    make().run()
+    # Same day: inside retry_after_hours.
+    res = make().run()
+    assert res.metrics["recs_queued"] == 0 and res.metrics["already_queued"] == 2
+    # Next day but the responder never drained the first file: don't double-queue.
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-09")
+    before = _queue_files(storage)
+    res = make().run()
+    assert res.metrics["recs_queued"] == 0 and res.metrics["already_queued"] == 2
+    assert _queue_files(storage) == before
+
+
+def test_defer_backoff_cooldown_blocks_requeue(storage, agent_env, monkeypatch):
+    from framework.core import defer_backoff
+    make, _ = agent_env
+    make().run()
+    _consume_queue(storage)
+    ledger = storage.read_json(LEDGER)
+    mixer_key = next(k for k in ledger if k.startswith("site-a|"))
+    # Implementer recorded several defers; the 2 h cooldown runs past day-2 noon.
+    noon = dt.datetime(2026, 10, 9, 11, 0, tzinfo=dt.timezone.utc)
+    for _ in range(4):
+        defer_backoff.record_defer(ledger[mixer_key]["rec_id"], "event-refresh-agent",
+                                   "required-model-unavailable: opus",
+                                   storage=storage, now=noon)
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-09")
+    res = make().run()
+    assert res.metrics["recs_queued"] == 1  # site-b only
+    assert ledger[mixer_key]["rec_id"] not in _queued_rec_ids(storage)
+
+
+def test_requeue_stops_at_max_attempts(storage, agent_env, monkeypatch):
+    make, _ = agent_env
+    cfg = storage.read_json(era.CONFIG_KEY)
+    cfg["max_attempts"] = 2
+    storage.write_json(era.CONFIG_KEY, cfg)
+    make().run()
+    _consume_queue(storage)
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-09")
+    assert make().run().metrics["recs_requeued"] == 2
+    _consume_queue(storage)
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-10")
+    res = make().run()
+    assert res.metrics["recs_queued"] == 0
+    assert res.metrics["refresh_attempts_exhausted"] == 2
+    assert res.metrics["ended_event_articles_live"] == 2
+    assert _queue_files(storage) == []
+
+
+def test_requeue_covers_metric_horizon_not_only_lookback(storage, agent_env, monkeypatch):
+    make, _ = agent_env
+    make().run()
+    _consume_queue(storage)
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-25")  # 18 d after the end
+    res = make().run()
+    assert res.metrics["events_ended"] == 0  # outside the first-queue lookback
+    assert res.metrics["recs_requeued"] == 2
+
+
+def test_refreshed_article_is_not_requeued(storage, monkeypatch, agent_env):
+    make, _ = agent_env
+    make().run()
+    _consume_queue(storage)
+    monkeypatch.setenv("EVENT_REFRESH_TODAY", "2026-10-09")
+    a = make()
+    # The refresh landed: the tag moved to the next sale, SELECT returns nothing.
+    a.fetch_articles = lambda dsn, tags, site_cfg, limit=500: []
+    res = a.run()
+    assert res.metrics["recs_queued"] == 0
+    assert res.metrics["ended_event_articles_live"] == 0
+
+
+def test_legacy_string_ledger_entry_counts_as_one_attempt():
+    now = dt.datetime(2026, 10, 9, 12, tzinfo=dt.timezone.utc)
+    e = era.ledger_entry("2026-10-08T10:30:00+00:00")
+    assert e["attempts"] == 1
+    assert era.retry_state(e, now, retry_after_hours=24, max_attempts=5) == "due"
+    assert era.retry_state(e, now, retry_after_hours=48, max_attempts=5) == "wait"
+    assert era.retry_state(e, now, retry_after_hours=24, max_attempts=1) == "exhausted"

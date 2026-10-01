@@ -26,8 +26,15 @@ in-place, Opus-written refresh:
   - updated_at (dateModified) bumped only in the same write as that
     content change.
 
-Idempotent: a ledger keyed site + occasion + event start + slug means an
-article is queued once per event, however many times the agent runs.
+Ledger, keyed site + occasion + event start + slug, is a retry gate,
+not a one-shot mark. The refresh moves the article's tag off
+holiday:<ended-id>, so an article the SELECT still returns with that tag
+has not been refreshed (the implementer deferred it, e.g. Opus
+unavailable, or the run did nothing). Such an article is re-queued, with
+the same stable rec id, once its last queue is `retry_after_hours` old,
+while attempts < `max_attempts`, no auto-queue file still holds it and
+framework.core.defer_backoff is not cooling it down. Re-queueing covers
+every event in the metric horizon, not only the first-queue lookback.
 
 Per-site values (DSN env var, article URL template, table/columns) live
 in config/event-refresh-config.json: the storage copy replaces the repo
@@ -40,6 +47,7 @@ Env overrides (operator / test):
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -54,6 +62,7 @@ if str(_REPO_ROOT) not in sys.path:
 from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.guardrails import declare  # noqa: E402
 from framework.core import seasonal_calendar as sc  # noqa: E402
+from framework.core import defer_backoff  # noqa: E402
 
 
 CONFIG_KEY = "config/event-refresh-config.json"
@@ -76,6 +85,11 @@ DEFAULTS: dict[str, Any] = {
     # sale that ended within this many days.
     "metric_horizon_days": 60,
     "max_recs_per_site": 25,
+    # Retry gate: an article still tagged with the ended event is
+    # re-queued once its last queue is this old, up to max_attempts queues
+    # in all (first queue included).
+    "retry_after_hours": 24,
+    "max_attempts": 5,
     "ledger_keep_days": 400,
     # Re-angle target: the next occasion of the same kind for the ended
     # event's audience, starting within this many days.
@@ -161,6 +175,38 @@ def ledger_key(site: str, event: sc.OccasionWindow, slug: str) -> str:
     return f"{site}|{event.occasion.id}|{event.start.isoformat()}|{slug}"
 
 
+def stable_rec_id(lk: str) -> str:
+    """Rec id that stays the same for one ledger key across runs, so the
+    implementer's defer_backoff.record_defer(rec_id, source_agent) and this
+    agent's should_skip(...) refer to the same entry."""
+    return "evt-" + hashlib.sha1(lk.encode("utf-8")).hexdigest()[:12]
+
+
+def ledger_entry(v: Any) -> dict:
+    """Normalise a ledger value. Early ledgers stored only the queued-at
+    ISO string; treat that as one attempt."""
+    if isinstance(v, dict):
+        return dict(v)
+    return {"queued_at": str(v or ""), "attempts": 1}
+
+
+def retry_state(entry: dict, now: _dt.datetime, *, retry_after_hours: float,
+                max_attempts: int) -> str:
+    """'exhausted' (attempts used up), 'wait' (queued too recently) or
+    'due' for a ledger entry whose article is still tagged."""
+    if int(entry.get("attempts") or 1) >= int(max_attempts):
+        return "exhausted"
+    try:
+        queued = _dt.datetime.fromisoformat(str(entry.get("queued_at") or ""))
+        if queued.tzinfo is None:
+            queued = queued.replace(tzinfo=_dt.timezone.utc)
+    except ValueError:
+        return "due"
+    if now - queued < _dt.timedelta(hours=float(retry_after_hours)):
+        return "wait"
+    return "due"
+
+
 def _short_label(occ: sc.Occasion) -> str:
     """'Amazon Prime Big Deal Days (October Prime Day, tech deals)' ->
     'Amazon Prime Big Deal Days'. Labels carry an audience qualifier in
@@ -171,7 +217,7 @@ def _short_label(occ: sc.Occasion) -> str:
 def build_refresh_rec(rec_id: str, *, site: str, article: dict,
                       event: sc.OccasionWindow,
                       next_event: Optional[sc.OccasionWindow],
-                      article_url: str = "") -> dict:
+                      article_url: str = "", attempt: int = 1) -> dict:
     """One Opus article-refresh rec for one article tagged with an ended
     event. The instructions are the contract the implementer follows."""
     slug = article["slug"]
@@ -261,6 +307,7 @@ def build_refresh_rec(rec_id: str, *, site: str, article: dict,
         "expected_metric": "ended_event_articles_live",
         "target_files": [],  # body_md/title DB update; commit the apply script
         "audit_issue": "seasonal-no-post-event-state",
+        "attempt": int(attempt),
     }
 
 
@@ -306,6 +353,15 @@ def _today() -> _dt.date:
     if v:
         return _dt.date.fromisoformat(v)
     return _dt.date.today()
+
+
+def _now() -> _dt.datetime:
+    """UTC now; noon of EVENT_REFRESH_TODAY when that override is set, so
+    retry ages follow the simulated date."""
+    if os.environ.get("EVENT_REFRESH_TODAY", "").strip():
+        return _dt.datetime.combine(_today(), _dt.time(12, 0),
+                                    tzinfo=_dt.timezone.utc)
+    return _dt.datetime.now(_dt.timezone.utc)
 
 
 def _truthy(v: str) -> bool:
@@ -357,8 +413,11 @@ class EventRefreshAgent(AgentBase):
         cfg = self._cfg()
         today = _today()
         dry_run = _truthy(os.environ.get("EVENT_REFRESH_DRY_RUN", ""))
+        now = _now()
         metrics = {"events_ended": 0, "articles_tagged": 0, "recs_queued": 0,
-                   "already_queued": 0, "unqueued_ended_event_articles": 0,
+                   "recs_requeued": 0, "already_queued": 0,
+                   "refresh_attempts_exhausted": 0,
+                   "unqueued_ended_event_articles": 0,
                    "ended_event_articles_live": 0, "site_errors": 0}
         if not cfg.get("enabled", True):
             self.decide("skip", "event-refresh disabled in config")
@@ -382,19 +441,25 @@ class EventRefreshAgent(AgentBase):
             + f"; actionable (<= {lookback}d): "
             + (", ".join(w.occasion.id for w in actionable) or "none"))
 
+        # Every horizon event: a re-queue can come after the lookback.
         next_by_event: dict[str, Optional[sc.OccasionWindow]] = {}
-        for w in actionable:
+        for w in horizon:
             next_by_event[w.occasion.id] = sc.next_occasion(
                 w.occasion.audience, today, kind=w.occasion.kind or None,
                 exclude_ids=(w.occasion.id,),
                 horizon_days=int(cfg["next_occasion_horizon_days"]),
                 occasions=occasions)
 
-        ledger: dict[str, str] = {}
+        ledger: dict[str, Any] = {}
         try:
             ledger = dict(self.storage.read_json(self._ledger_key()) or {})
         except Exception:
             ledger = {}
+        retry_after_h = float(cfg["retry_after_hours"])
+        max_attempts = int(cfg["max_attempts"])
+        pending: Optional[set] = None  # rec ids in unconsumed auto-queue files
+        attempts_by_key: dict[str, int] = {}
+        exhausted: list[str] = []
 
         sites = resolve_sites(cfg)
         recs: list[dict] = []
@@ -420,25 +485,57 @@ class EventRefreshAgent(AgentBase):
                     if tag not in tags:
                         continue
                     metrics["ended_event_articles_live"] += 1
-                    if w not in actionable:
-                        continue
-                    metrics["articles_tagged"] += 1
+                    if w in actionable:
+                        metrics["articles_tagged"] += 1
                     lk = ledger_key(site, w, art["slug"])
+                    rid = stable_rec_id(lk)
+                    attempt = 1
                     if lk in ledger:
-                        metrics["already_queued"] += 1
-                        continue
+                        # Still tagged -> the refresh has not landed.
+                        entry = ledger_entry(ledger[lk])
+                        state = retry_state(entry, now,
+                                            retry_after_hours=retry_after_h,
+                                            max_attempts=max_attempts)
+                        if state == "exhausted":
+                            metrics["refresh_attempts_exhausted"] += 1
+                            exhausted.append(f"{site}/{art['slug']}")
+                            continue
+                        if state == "wait":
+                            metrics["already_queued"] += 1
+                            continue
+                        if pending is None:
+                            pending = self._pending_rec_ids()
+                        if rid in pending:
+                            metrics["already_queued"] += 1
+                            continue
+                        skip, why = defer_backoff.should_skip(
+                            rid, self.agent_id,
+                            storage=self.storage, now=now)
+                        if skip:
+                            metrics["already_queued"] += 1
+                            self.decide("skip", f"{site}/{art['slug']}: {why}")
+                            continue
+                        attempt = int(entry.get("attempts") or 1) + 1
+                    elif w not in actionable:
+                        continue  # first queue only within lookback_days
                     if len(rec_ids_by_site.get(site, [])) >= cap:
                         metrics["unqueued_ended_event_articles"] += 1
                         continue
                     tmpl = str(scfg.get("article_url_template") or "")
                     url = tmpl.format(slug=art["slug"]) if tmpl else ""
-                    rid = f"evt-{len(recs) + 1:03d}"
                     recs.append(build_refresh_rec(
                         rid, site=site, article=art, event=w,
                         next_event=next_by_event.get(w.occasion.id),
-                        article_url=url))
+                        article_url=url, attempt=attempt))
                     rec_ids_by_site.setdefault(site, []).append(rid)
                     keys_by_site.setdefault(site, []).append(lk)
+                    attempts_by_key[lk] = attempt
+
+        if exhausted:
+            self.decide("warning", f"{len(exhausted)} article(s) still tagged with "
+                        f"an ended event after {max_attempts} refresh attempt(s); "
+                        f"check implementer deferred.json / claude_pool status: "
+                        + ", ".join(exhausted[:20]))
 
         if not recs:
             summary = (f"{len(actionable)} ended event(s); nothing new to queue "
@@ -466,7 +563,7 @@ class EventRefreshAgent(AgentBase):
                 "run_metadata": {"today": today.isoformat(),
                                  "events": [w.to_dict() for w in actionable]},
             })
-        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        now_iso = now.isoformat(timespec="seconds")
         for site, ids in rec_ids_by_site.items():
             try:
                 request_id = self.queue_recs(site=site, rec_ids=ids,
@@ -478,20 +575,47 @@ class EventRefreshAgent(AgentBase):
                 self.decide("warning", f"{site}: queue_recs failed: {e}")
                 continue
             metrics["recs_queued"] += len(ids)
-            for k in keys_by_site[site]:
-                ledger[k] = now_iso
+            for k, rid in zip(keys_by_site[site], ids):
+                n = attempts_by_key.get(k, 1)
+                if n > 1:
+                    metrics["recs_requeued"] += 1
+                prev = ledger_entry(ledger[k]) if k in ledger else {}
+                ledger[k] = {"queued_at": now_iso, "attempts": n, "rec_id": rid,
+                             "first_queued_at": prev.get("first_queued_at")
+                             or prev.get("queued_at") or now_iso}
             self.decide("result", f"{site}: queued {len(ids)} refresh rec(s) "
                                   f"request_id={request_id}")
             # Persist per site so a crash after one site can't re-queue it.
             self._write_ledger(ledger, today, int(cfg["ledger_keep_days"]))
 
         return self._finish(
-            f"Queued {metrics['recs_queued']} post-event refresh rec(s) for "
-            + ", ".join(w.occasion.id for w in actionable), metrics)
+            f"Queued {metrics['recs_queued']} post-event refresh rec(s) "
+            f"({metrics['recs_requeued']} re-queued) for "
+            + ", ".join(sorted({r['event']['id'] for r in recs})), metrics)
+
+    def _pending_rec_ids(self) -> set:
+        """Rec ids of this agent still waiting in the responder auto-queue
+        (not yet dispatched), so a slow drain is not double-queued."""
+        out: set = set()
+        try:
+            keys = self.storage.list_prefix("agents/responder-agent/auto-queue/") or []
+        except Exception:
+            return out
+        for k in keys:
+            if not str(k).endswith(".json"):
+                continue
+            try:
+                doc = self.storage.read_json(k) or {}
+            except Exception:
+                continue
+            if isinstance(doc, dict) and doc.get("source_agent") == self.agent_id:
+                out.update(str(r) for r in (doc.get("rec_ids") or []))
+        return out
 
     def _write_ledger(self, ledger: dict, today: _dt.date, keep_days: int) -> None:
         cutoff = (today - _dt.timedelta(days=keep_days)).isoformat()
-        kept = {k: v for k, v in ledger.items() if str(v)[:10] >= cutoff}
+        kept = {k: v for k, v in ledger.items()
+                if str(ledger_entry(v).get("queued_at") or "")[:10] >= cutoff}
         self.storage.write_json(self._ledger_key(), kept)
 
     def _finish(self, summary: str, metrics: dict) -> RunResult:

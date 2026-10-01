@@ -34,7 +34,8 @@ collapses they also earn nothing unless they are re-angled to the next sale.
 3. Per configured site (DSN from the env var named by `dsn_env`): one
    read-only SELECT of published rows whose `tags` hold any
    `holiday:<ended-id>`.
-4. For each article not in the ledger, build one `article-refresh` rec
+4. For each article not in the ledger (or due a retry, see below), build
+   one `article-refresh` rec
    (`required_model_tier: opus`, `dispatch_kind: article-refresh`). The
    re-angle target is `seasonal_calendar.next_occasion(audience, today,
    kind=<same kind>)`: Black Friday (Nov 27–30, 2026) for both Prime Big Deal
@@ -60,12 +61,29 @@ In place (same row, slug and URL):
    change.
 7. DB-only evidence: commit the apply script and write `applied-recs.json`.
 
-## Idempotency
+## Idempotency and retries
 
 Ledger at `agents/event-refresh-agent/state/event-refresh-ledger.json`, keyed
-`<site>|<occasion-id>|<event-start>|<slug>`. Written per site right after that
-site's queue write succeeds. An article is queued once per event however often
-the agent runs; next year's event has a new start date and is a new key.
+`<site>|<occasion-id>|<event-start>|<slug>`, value `{queued_at, attempts,
+rec_id, first_queued_at}`. Written per site right after that site's queue
+write succeeds. Next year's event has a new start date and is a new key.
+
+The ledger is a retry gate, not a one-shot mark. The refresh moves the
+article's tag off `holiday:<ended-id>`, so an article the SELECT still returns
+has not been refreshed: the implementer deferred it (Opus unavailable writes
+`deferred.json` and exits 0, and nothing else re-dispatches this agent's recs)
+or the run changed nothing. It is queued again when all of these hold:
+
+- its last queue is at least `retry_after_hours` old;
+- `attempts < max_attempts`;
+- no file in the responder auto-queue still holds its rec id (slow drain);
+- `defer_backoff.should_skip(rec_id, "event-refresh-agent")` is false.
+
+The rec id is stable per ledger key (`evt-<sha1[:12]>`), so the implementer's
+`record_defer(rec_id, source_agent)` and this check refer to the same entry.
+Retries cover every event in the 60-day metric horizon; the first queue stays
+limited to `lookback_days`. Articles out of attempts count in
+`refresh_attempts_exhausted` and are named in a `warning` decision.
 
 ## Config (`config/event-refresh-config.json`)
 
@@ -75,7 +93,9 @@ the agent runs; next year's event has a new start date and is a new key.
 | `kinds` | `["retail-deal"]` | occasion kinds that trigger a refresh. Holiday recipe pages stay framed for next year, so they are off by default |
 | `lookback_days` | 7 | catch-up window after a missed run |
 | `metric_horizon_days` | 60 | window for `ended_event_articles_live` |
-| `max_recs_per_site` | 25 | per-run cap per site |
+| `max_recs_per_site` | 25 | per-run cap per site (first queues and retries) |
+| `retry_after_hours` | 24 | min age of the last queue before a still-tagged article is re-queued |
+| `max_attempts` | 5 | queues per article per event, first one included |
 | `next_occasion_horizon_days` | 120 | how far ahead the re-angle target may be |
 | `default` / `sites.<id>` | | `dsn_env`, `article_url_template` (`{slug}`), table/column names |
 
@@ -95,13 +115,16 @@ EVENT_REFRESH_TODAY=2026-10-08 EVENT_REFRESH_DRY_RUN=1 AGENT_FORCE_RUN=1 \
 
 `ended_event_articles_live`, `unqueued_ended_event_articles`, `site_errors`
 (see `goals.json`), plus `events_ended`, `articles_tagged`, `recs_queued`,
-`already_queued`.
+`recs_requeued`, `already_queued`, `refresh_attempts_exhausted`.
 
 ## When something breaks
 
 - **Recs queued, pages unchanged after a day**: the implementer deferred them
-  (`required-model-unavailable`, Opus pool exhausted). Check
-  `deferred.json` under the implementer runs and `claude_pool status`.
+  (`required-model-unavailable`, Opus pool exhausted). The agent re-queues
+  them daily (`recs_requeued`) until `max_attempts`. If
+  `refresh_attempts_exhausted` > 0, check `deferred.json` under the
+  implementer runs and `claude_pool status`, then raise `max_attempts` in the
+  storage config or delete those ledger keys to start over.
 - **A site shows in `site_errors`**: its DSN env var or table/columns are
   wrong. The next run retries it (the short-circuit hash is not kept after a
   partial run).

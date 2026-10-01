@@ -15,8 +15,8 @@
         "unit": "articles"
       },
       "directives": [
-        "If this stays above 0 for more than 3 days after an event ends, check the implementer for deferred article-refresh recs (required-model-unavailable) and say so in the run summary",
-        "Never re-queue an article the ledger already holds for the same event"
+        "If this stays above 0 for more than 3 days after an event ends, check recs_requeued and refresh_attempts_exhausted; deferred article-refresh recs (required-model-unavailable) are re-queued daily up to max_attempts, so exhausted ones need the claude-pool fixed and say so in the run summary",
+        "Re-queue an article the ledger holds only while it still carries the ended event tag, after retry_after_hours, under max_attempts, with no pending auto-queue file and no defer_backoff cooldown"
       ]
     },
     {
