@@ -73,8 +73,6 @@ SITE_PROFILES: dict[str, dict] = {
         "host": "aisleprompt.com",
         "gsc_site_url": "sc-domain:aisleprompt.com",
         "ga4_property_id": "529023310",
-        # Bing Webmaster Tools property (the index behind ChatGPT search).
-        "bing_site_url": "https://aisleprompt.com/",
         "db_env": "AISLEPROMPT_DATABASE_URL",
         # GA4 conversion event names — instacart-cart is the money event.
         # The instacart-clicks and amazon-clicks events show outbound
@@ -293,13 +291,21 @@ def collect_metrics(profile: dict) -> dict[str, float]:
     # rec growth-20260928T191200Z-02. The GA4 split above says Bing's index
     # sends the humans; this records what Bing itself reports (pages held,
     # 28d clicks/impressions, crawl errors) so those can be read as a daily
-    # series. Opt-in per profile via `bing_site_url`; skipped quietly while
-    # BING_WEBMASTER_API_KEY is unset.
-    if profile.get("bing_site_url"):
+    # series. The property URL comes from the site's own config
+    # (site.yaml `data_sources.bing.site_url`, see bing_site_url()); skipped
+    # quietly while BING_WEBMASTER_API_KEY is unset.
+    #
+    # 2026-10-01 audit (bing-webmaster-not-configured): bingbot crawled
+    # ~3,000 specpicks URLs a day yet fetched none of 11 new articles, and
+    # nothing could say why. With the key set, GetUrlInfo is now asked about
+    # every article published in the last 14 days (bing_recent_url_info()).
+    site_yaml = load_site_yaml(profile)
+    bing_url = bing_site_url(profile, site_yaml)
+    if bing_url:
         from framework.core import bing_webmaster
         if bing_webmaster.api_key():
             try:
-                bwt = bing_webmaster.collect(profile["bing_site_url"])
+                bwt = bing_webmaster.collect(bing_url)
                 for k in ("in_index", "clicks_28d", "impressions_28d", "crawl_errors_1d"):
                     if k in bwt.get("metrics", {}):
                         metrics[f"bing-{k.replace('_', '-')}"] = float(bwt["metrics"][k])
@@ -307,8 +313,14 @@ def collect_metrics(profile: dict) -> dict[str, float]:
                     err(f"  Bing Webmaster partial failure: {bwt['errors']}")
             except Exception as e:
                 err(f"  Bing Webmaster failed: {e}")
+            try:
+                metrics.update(bing_recent_url_info(profile, site_yaml, bing_url))
+            except Exception as e:
+                err(f"  Bing GetUrlInfo for recent articles failed: {e}")
         else:
             err("  Bing Webmaster skipped: BING_WEBMASTER_API_KEY not set")
+    else:
+        err("  Bing Webmaster skipped: no data_sources.bing.site_url in the site's site.yaml")
 
     # --- Conversions (30d): GA4, corrected by first-party click tables ---
     #
@@ -692,6 +704,124 @@ def main() -> None:
         metric_helper.record_many(agent_id, metrics, run_ts=args.run_ts,
                                    note="auto-collected via site-goals-tracker")
         err(f"  ✓ recorded to {agent_id}")
+
+
+# --- per-site config (site.yaml) ---
+
+def site_yaml_path(profile: dict) -> Optional[Path]:
+    """The site's seo-opportunity-agent site.yaml: SITE_GOALS_SITE_YAML, else
+    <repos root>/<site>/agents/seo-opportunity-agent/site.yaml (root from
+    SITE_GOALS_REPOS_ROOT / INDEXNOW_SITE_REPOS_ROOT, default ~/development)."""
+    explicit = os.environ.get("SITE_GOALS_SITE_YAML") or profile.get("site_yaml")
+    if explicit:
+        return Path(os.path.expanduser(explicit))
+    root = (os.environ.get("SITE_GOALS_REPOS_ROOT")
+            or os.environ.get("INDEXNOW_SITE_REPOS_ROOT")
+            or os.path.expanduser("~/development"))
+    return Path(root) / _short_site(profile) / "agents" / "seo-opportunity-agent" / "site.yaml"
+
+
+def load_site_yaml(profile: dict) -> dict:
+    """Parsed site.yaml, or {} when missing/unreadable (never raises)."""
+    path = site_yaml_path(profile)
+    if not path or not path.is_file():
+        return {}
+    try:
+        import yaml
+        doc = yaml.safe_load(path.read_text())
+        return doc if isinstance(doc, dict) else {}
+    except Exception as e:
+        err(f"  site.yaml unreadable ({path}): {e}")
+        return {}
+
+
+def bing_site_url(profile: dict, site_yaml: dict) -> str:
+    """Bing Webmaster property URL: SITE_GOALS_BING_SITE_URL, else site.yaml
+    `data_sources.bing.site_url` (unless `enabled: false`), else a legacy
+    profile `bing_site_url`. "" = not configured."""
+    env = (os.environ.get("SITE_GOALS_BING_SITE_URL") or "").strip()
+    if env:
+        return env
+    bing = ((site_yaml.get("data_sources") or {}).get("bing") or {})
+    if isinstance(bing, dict) and bing.get("site_url") and bing.get("enabled", True) is not False:
+        return str(bing["site_url"]).strip()
+    return str(profile.get("bing_site_url") or "").strip()
+
+
+def _real_date(v) -> bool:
+    """GetUrlInfo reports "never" as /Date(-62135596800000)/ (year 1)."""
+    from framework.core import bing_webmaster
+    d = bing_webmaster.parse_date(v)
+    return bool(d and d.year >= 2000)
+
+
+def recent_article_urls(profile: dict, site_yaml: dict, *, days: int = 14,
+                        limit: int = 30) -> list[str]:
+    """Canonical URLs of articles published in the last `days` days, newest
+    first, built from site.yaml `articles.url_template` ({slug}, {domain})."""
+    arts = site_yaml.get("articles") or {}
+    tmpl = arts.get("url_template") if isinstance(arts, dict) else None
+    if not tmpl:
+        return []
+    db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
+    if not db_url:
+        return []
+    table = str(profile.get("articles_table") or "editorial_articles")
+    if not table.replace("_", "").isalnum():
+        raise ValueError(f"unsafe table name {table!r}")
+    conn = psycopg2.connect(db_url, connect_timeout=15)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT slug FROM {table} WHERE status = 'published' AND slug IS NOT NULL "
+                "   AND published_at >= NOW() - make_interval(days => %s) "
+                "   AND published_at <= NOW() "
+                " ORDER BY published_at DESC LIMIT %s",
+                (int(days), int(limit)))
+            slugs = [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    domain = str(arts.get("domain") or profile.get("host") or "")
+    return [tmpl.replace("{domain}", domain).replace("{slug}", str(s)) for s in slugs]
+
+
+def bing_recent_url_info(profile: dict, site_yaml: dict, site_url: str) -> dict[str, float]:
+    """Ask Bing (GetUrlInfo) about every article published in the last 14
+    days. Returns bing-recent-articles-{checked,unknown,discovered,crawled,
+    errors} and logs each URL's state. IndexNow already handles submission, so this
+    only reads (no legacy URL Submission API)."""
+    from framework.core import bing_webmaster
+    days = int(os.environ.get("SITE_GOALS_BING_RECENT_DAYS", "14"))
+    limit = int(os.environ.get("SITE_GOALS_BING_URL_INFO_MAX", "30"))
+    urls = recent_article_urls(profile, site_yaml, days=days, limit=limit)
+    out = {"bing-recent-articles-checked": 0.0, "bing-recent-articles-unknown": 0.0,
+           "bing-recent-articles-discovered": 0.0, "bing-recent-articles-crawled": 0.0,
+           "bing-recent-articles-errors": 0.0}
+    for url in urls:
+        info = bing_webmaster.url_info(site_url, url, timeout=20)
+        if not isinstance(info, dict) or "error" in info:
+            msg = str(info.get("error") if isinstance(info, dict) else info)
+            if "notfound" in msg.lower().replace(" ", ""):
+                # Bing has no record of the URL at all.
+                out["bing-recent-articles-checked"] += 1
+                out["bing-recent-articles-unknown"] += 1
+                err(f"  bing url-info {url}: unknown to Bing")
+                continue
+            out["bing-recent-articles-errors"] += 1
+            err(f"  bing url-info {url}: {msg[:200]}")
+            if any(t in msg for t in ("HTTP 401", "HTTP 403", "HTTP 429",
+                                      "InvalidApiKey", "ThrottleUser")):
+                err("  bing url-info: auth/quota error, stopping")
+                break
+            continue
+        out["bing-recent-articles-checked"] += 1
+        discovered = _real_date(info.get("DiscoveryDate"))
+        crawled = _real_date(info.get("LastCrawledDate"))
+        out["bing-recent-articles-discovered"] += 1 if discovered else 0
+        out["bing-recent-articles-crawled"] += 1 if crawled else 0
+        err(f"  bing url-info {url}: http={info.get('HttpStatus')} "
+            f"discovered={'yes' if discovered else 'no'} crawled={'yes' if crawled else 'no'}")
+    return out
 
 
 # --- helpers ---

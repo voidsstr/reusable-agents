@@ -187,6 +187,9 @@ flips it back, and `init_goals` does not reset it. On 2026-09-23 the aisleprompt
 | `AISLEPROMPT_DATABASE_URL` / `SPECPICKS_DATABASE_URL` | unset | primary DSN env per site |
 | `DATABASE_URL_<SITE>`, `DATABASE_URL` | unset | fallback DSN envs (see `_db_fallback`) |
 | `RA_REPO`, `SITE_GOALS_LOG` (wrapper `run.sh`) | framework repo path; `/tmp/reusable-agents-site-goals.log` | where the wrapper finds this engine and where it appends output |
+| `BING_WEBMASTER_API_KEY` | unset | enables the Bing Webmaster block; without it Bing is skipped with one log line |
+| site.yaml `data_sources.bing.site_url` | per site | Bing property URL, read from the site's `agents/seo-opportunity-agent/site.yaml` (`SITE_GOALS_SITE_YAML` overrides the path; `SITE_GOALS_REPOS_ROOT` / `INDEXNOW_SITE_REPOS_ROOT`, default `~/development`, is the repos root). `SITE_GOALS_BING_SITE_URL` overrides the value |
+| site.yaml `articles.url_template` | per site | builds the URLs of articles published in the last `SITE_GOALS_BING_RECENT_DAYS` (14) days; up to `SITE_GOALS_BING_URL_INFO_MAX` (30) go to Bing `GetUrlInfo`, recorded as `bing-recent-articles-{checked,unknown,discovered,crawled,errors}` with one log line per URL |
 
 Site values (GSC/GA4 property ids, SQL, targets) are hardcoded in
 `SITE_PROFILES` and `write_goal_definitions`. Onboarding a third site
