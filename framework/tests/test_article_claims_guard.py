@@ -227,3 +227,56 @@ def test_sweep_rows_reports_only_rows_with_findings():
     assert set(by) == {"mini", "stale"}
     assert by["mini"]["passes"] and by["mini"]["price"]
     assert not by["stale"]["passes"] and by["stale"]["stale"]
+
+
+# ── answer_names_pick (2026-10-01 audit, answer-first-omits-pick-names) ──
+_ROUNDUP_PICKS = (
+    "## Best Overall: [Ninja AF141 5-Quart Air Fryer](/kitchen/ninja-af141)\n\nWhy it wins.\n\n"
+    "## Best Value: [Instant Pot Duo 7-in-1, 6-Quart](/kitchen/instant-pot-duo-6qt)\n\n"
+    "[See full details →](/kitchen/instant-pot-duo-6qt)\n")
+
+
+def test_answer_naming_only_product_families_is_flagged():
+    body = ("The kitchen items most worth buying this sale fall into four families: air fryers "
+            "(under $100), multicookers like the Instant Pot, stand mixers and knife sets.\n\n"
+            + _ROUNDUP_PICKS)
+    hits = G.find_answer_without_pick(body)
+    assert hits and "four families" in hits[0]
+
+
+def test_answer_naming_a_pick_passes_by_model_token_or_lead_words():
+    by_model = ("For most kitchens the air fryer to buy is the Ninja AF141, a 5-quart basket "
+                "under $100 that crisps evenly.\n\n" + _ROUNDUP_PICKS)
+    by_name = ("Buy the Instant Pot Duo if you want one pot for beans, rice and stock, "
+               "in the under-$100 tier.\n\n" + _ROUNDUP_PICKS)
+    assert G.find_answer_without_pick(by_model) == []
+    assert G.find_answer_without_pick(by_name) == []
+
+
+def test_quick_answer_section_is_the_answer_and_units_are_not_models():
+    body = ("*As an Amazon Associate, we earn from qualifying purchases.*\n\n"
+            "## Quick Answer\n\nBuy a 16GB card at the 5-quart tier of the market.\n\n"
+            "## Picks\n\n[MSI RTX 5060 Ti 16G](/product/B0A) and [ZOTAC RTX 3060 12GB](/product/B0B)\n")
+    assert G.opening_answer(body).startswith("Buy a 16GB card")
+    assert G.find_answer_without_pick(body)  # "16gb" / "5-quart" are units, not models
+    named = body.replace("Buy a 16GB card", "Buy the RTX 5060 Ti 16GB")
+    assert G.find_answer_without_pick(named) == []
+
+
+def test_answer_check_skips_non_roundups_and_cta_only_links():
+    one = "A rice cooker is a pot with a thermostat.\n\n## Pick\n\n[Zojirushi NS-ZCC10](/kitchen/z)\n"
+    ctas = ("Buy the right size.\n\n## Picks\n\n[See full details →](/product/B1)\n"
+            "[Check current price on Amazon →](/product/B2)\n")
+    assert G.find_answer_without_pick(one) == []
+    assert G.find_answer_without_pick(ctas) == []
+
+
+def test_answer_check_runs_only_for_answer_buckets():
+    cfg = {"default": {"price_buckets": ["kitchen-buying-guide"]}, "sites": {}}
+    assert G.resolve_policy("x", "kitchen-buying-guide", config=cfg)["answer_names_pick"] == "warn"
+    assert G.resolve_policy("x", "recipe-cluster", config=cfg)["answer_names_pick"] == "off"
+    cfg2 = {"default": {"price_buckets": [], "answer_buckets": ["seasonal-occasion"]}, "sites": {}}
+    assert G.resolve_policy("x", "seasonal-occasion", config=cfg2)["answer_names_pick"] == "warn"
+    body = "Deals fall into four families: fryers and mixers.\n\n" + _ROUNDUP_PICKS
+    audit = G.check(body, policy=G.resolve_policy("x", "kitchen-buying-guide", config=cfg))
+    assert audit.passes and any("opening answers" in w for w in audit.warnings())

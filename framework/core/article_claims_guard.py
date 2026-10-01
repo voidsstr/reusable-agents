@@ -58,6 +58,12 @@ price-anchors, false-in-stock-claims, cpu-deal-pick-reseller-asin):
                        and "above/below its $N MSRP" sentences the linked
                        product's current price contradicts (warn)
 
+  answer_names_pick:   (only for `answer_buckets`, default `price_buckets`)
+                       the opening answer (a "Quick Answer" / "Direct answer"
+                       section, else the prose before the first H2) of a body
+                       that links 2+ products names none of them — it names a
+                       chip tier or product families instead (warn)
+
 Keys missing from the config take `NEW_CHECK_DEFAULTS` (so the storage
 config only has to name a key to change it). An explicit `policy=` dict
 passed to `check()` is used as-is: a missing key there means "off".
@@ -495,6 +501,89 @@ def find_price_conflicts(body_md: str, prices: dict[str, float] | None) -> list[
     return out
 
 
+# ── Opening answer names a pick ─────────────────────────────────────────────
+# Answer engines lift the opening answer verbatim. "Buy a prebuilt built on
+# the RTX 5060 Ti 16GB tier" and "deals fall into four families: air fryers,
+# multicookers ..." name no product the page recommends (2026-10-01 audit).
+_PRODUCT_LINK = re.compile(
+    r"(?<!!)\[(?P<text>[^\]]{3,120})\]\((?:https?://[^/)\s]+)?"
+    r"/(?:product|products|p|dp|kitchen|k)/(?!category/|buying-guides|compare)[A-Za-z0-9][\w-]*[^)\s]*\)")
+_ANSWER_HEAD = re.compile(r"\b(?:quick\s+answer|direct\s+answer|short\s+answer|in\s+short|"
+                          r"the\s+answer|bottom\s+line\s+up\s+front|tl;?dr)\b", re.I)
+_UNIT_TOKEN = re.compile(r"^\d+(?:\.\d+)?-?(?:qt|quarts?|in|inch|oz|w|watts?|g|gb|tb|mb|mm|cm|hz|lbs?|"
+                         r"l|ml|mah|k|p|cups?|gal|v|a|core|cores|th|st|nd|rd|x)$"
+                         r"|^\d+-[a-z]+(?:-\d+)?$"  # "3-quart", "64-slot", "7-in-1"
+                         r"|^(?:lp)?g?ddr\d\w*$|^pcie\d.*$|^usb\d.*$|^wi-?fi\d.*$|^hdmi\d.*$|^m\.2$", re.I)
+_STOP = {"the", "a", "an", "and", "with", "for", "of", "in", "by", "new", "best", "&", "-", "+"}
+# Button / CTA anchors name no product ("See full details →").
+_CTA_ANCHOR = re.compile(r"→|^\s*(?:see|check|view|shop|buy|get|read|compare|full|more|details)\b|"
+                         r"\b(?:current\s+price|on\s+amazon|on\s+ebay|product\s+page)\b", re.I)
+
+
+def _norm_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9][a-z0-9.+-]*", (text or "").lower().replace("\u2019", "'"))
+            if w not in _STOP]
+
+
+def _model_tokens(name: str) -> set[str]:
+    """Letter+digit tokens that identify a model ("sm-50", "am21", "b60",
+    "62682", "9800x3d"), not units ("16gb", "3qt", "1500w") or years."""
+    out = set()
+    for w in _norm_words(name):
+        w = w.strip(".-+")
+        if len(w) < 3 or _UNIT_TOKEN.match(w) or re.fullmatch(r"(?:19|20)\d\d", w):
+            continue
+        if re.search(r"\d", w) and (re.search(r"[a-z]", w) or len(w) >= 4):
+            out.add(w)
+    return out
+
+
+def opening_answer(body_md: str) -> str:
+    """The answer a reader (or an AI) meets first: a "Quick Answer"-style
+    section when the body has one, else the prose before the first H2."""
+    secs = _sections(body_md)
+    for head, text in secs:
+        if head and _ANSWER_HEAD.search(head):
+            return text.strip()
+    lead = secs[0][1] if secs and not secs[0][0] else ""
+    lines = [ln for ln in lead.split("\n")
+             if ln.strip() and not ln.lstrip().startswith(("#", "!", "|", "<"))
+             and len(ln.split()) > 6]
+    return "\n".join(lines).strip()
+
+
+def find_answer_without_pick(body_md: str, min_products: int = 2) -> list[str]:
+    """[opening answer] when the body links >= `min_products` distinct
+    products and the opening answer names none of them (a model token of the
+    link text, or its first three words). Empty when there is no opening
+    answer to judge or the body is not a product roundup. Precision first: a
+    chip named in a system's title ("RTX 5060 Ti" in a prebuilt) counts as a
+    name, so the specific-system case is left to the site writer's gate."""
+    names: dict[str, str] = {}
+    for m in _PRODUCT_LINK.finditer(body_md or ""):
+        txt = re.sub(r"[*_`]", "", m.group("text")).strip()
+        if _CTA_ANCHOR.search(txt):
+            continue
+        path = m.group(0).split("](", 1)[1].split(")", 1)[0].split("?", 1)[0].rstrip("/")
+        names.setdefault(path.rsplit("/", 1)[-1].lower(), txt)  # /kitchen/x and /k/x are one pick
+    if len(names) < min_products:
+        return []
+
+    answer = opening_answer(body_md)
+    if not answer:
+        return []
+    ans_words = _norm_words(re.sub(r"\]\([^)]*\)", "]", answer))
+    ans_text = " " + " ".join(ans_words) + " "
+    ans_set = {w.strip(".-+") for w in ans_words}
+    for name in names.values():
+        if _model_tokens(name) & ans_set:
+            return []
+        lead = _norm_words(name)[:3]
+        if len(lead) >= 2 and f" {' '.join(lead)} " in ans_text:
+            return []
+    return [answer[:240]]
+
+
 @dataclasses.dataclass
 class ClaimsAudit:
     first_hand: list[str]
@@ -506,6 +595,7 @@ class ClaimsAudit:
     stale_claims: list[str] = dataclasses.field(default_factory=list)
     numeric: list[str] = dataclasses.field(default_factory=list)
     price_conflicts: list[str] = dataclasses.field(default_factory=list)
+    answer_no_pick: list[str] = dataclasses.field(default_factory=list)
 
     def _findings(self) -> list[tuple[str, str, list[str]]]:
         """(policy key, label, hits) for every check."""
@@ -518,6 +608,8 @@ class ClaimsAudit:
             ("numeric_consistency", "numbers that contradict the body's own figures", self.numeric),
             ("price_consistency", "pick roles / price words the live prices contradict",
              self.price_conflicts),
+            ("answer_names_pick", "opening answers that name none of the linked picks",
+             self.answer_no_pick),
         ]
 
     def _rejecting(self) -> list[tuple[str, list[str]]]:
@@ -559,6 +651,7 @@ NEW_CHECK_DEFAULTS: dict = {
     "stale_claims": "reject",
     "numeric_consistency": "warn",
     "price_consistency": "warn",
+    "answer_names_pick": "warn",
 }
 
 
@@ -597,6 +690,13 @@ def resolve_policy(site_hint: str = "", bucket: str = "", storage=None, config: 
     buckets = [b.lower() for b in (vals.get("price_buckets") or [])]
     if (bucket or "").lower() not in buckets:
         vals["point_prices"] = "off"
+    # Only product roundups must name a pick up front; a recipe cluster that
+    # links an equipment module answers with dishes. `answer_buckets`
+    # defaults to the site's price_buckets (its buying-guide buckets).
+    ans = vals.get("answer_buckets")
+    ans = [b.lower() for b in ans] if isinstance(ans, list) else buckets
+    if (bucket or "").lower() not in ans:
+        vals["answer_names_pick"] = "off"
     return vals
 
 
@@ -626,6 +726,7 @@ def check(body_md: str, *, subtitle: str = "", excerpt: str = "", bucket: str = 
         if _on("stale_claims") else [],
         numeric=find_numeric_inconsistencies(body_md) if _on("numeric_consistency") else [],
         price_conflicts=find_price_conflicts(body_md, prices) if _on("price_consistency") else [],
+        answer_no_pick=find_answer_without_pick(body_md) if _on("answer_names_pick") else [],
     )
 
 
@@ -635,7 +736,7 @@ def sweep_rows(rows: Iterable[dict], *, site_hint: str, prices: dict[str, float]
     """Report-only pass over already-published rows (a proposer runs it each
     tick with the site's live price map, which the implementer's insert hook
     does not have). Returns one dict per row with findings from the newer
-    checks: {"slug", "passes", "stock"?, "stale"?, "numeric"?, "price"?}."""
+    checks: {"slug", "passes", "stock"?, "stale"?, "numeric"?, "price"?, "answer"?}."""
     cfg = config if config is not None else load_config(storage)
     out: list[dict] = []
     for r in rows or []:
@@ -644,7 +745,8 @@ def sweep_rows(rows: Iterable[dict], *, site_hint: str, prices: dict[str, float]
                       excerpt=r.get("excerpt") or "",
                       policy=resolve_policy(site_hint, bucket, config=cfg), prices=prices)
         found = {k: v for k, v in (("stock", audit.stock_claims), ("stale", audit.stale_claims),
-                                   ("numeric", audit.numeric), ("price", audit.price_conflicts)) if v}
+                                   ("numeric", audit.numeric), ("price", audit.price_conflicts),
+                                   ("answer", audit.answer_no_pick)) if v}
         if found:
             out.append({"slug": r.get(slug_key), "passes": audit.passes, **found})
     return out
