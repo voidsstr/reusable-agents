@@ -129,6 +129,11 @@ def test_stock_claims_flagged_but_check_stock_advice_passes():
         "Every pick below is an in-stock listing. Check stock on the live listing before you buy. "
         "These can sell through in November.")
     assert hits == ["Every pick below is an in-stock listing.", "These can sell through in November."]
+    # Cooking stock, dated selection filters and hypotheticals are not claims.
+    assert G.find_stock_claims(
+        "Braise the lamb shoulder in stock for two hours. "
+        "We kept only listings with an in-stock Amazon offer as of late September 2026. "
+        "If the 9800X3D slips out of stock, buy the 7800X3D.") == []
 
 
 def test_known_stale_return_window_claim_rejects_and_names_the_fix():
@@ -151,6 +156,14 @@ def test_dollar_delta_must_match_a_gap_between_stated_prices():
     assert len(hits) == 1 and "$200" in hits[0]
     assert G.find_numeric_inconsistencies(
         "NVIDIA launched it at $429, only $50 above the 8GB version's $379.") == []
+    # A body that states price tiers only cannot anchor a delta: skipped.
+    assert G.find_numeric_inconsistencies(
+        "Tri-ply sits in the $100–$200 band and 5-ply runs $300 and up; if you don't sear, "
+        "save $100 and buy 3-ply.") == []
+    # Range edges and approximate deltas are not checked.
+    assert G.find_numeric_inconsistencies(
+        "The Breville is $2,195.00 and the Stilosa $99.95. Budget another $150 to $300 for a "
+        "grinder. The KF saves ~$20 versus the K.") == []
     # Per-serving savings are not product deltas.
     assert G.find_numeric_inconsistencies("It costs $2.50 per serving, saving $1 over takeout at $9 or $12.") == []
 

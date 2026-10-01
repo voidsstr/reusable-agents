@@ -217,19 +217,37 @@ STOCK_CLAIM = re.compile(r"""(
   | \bonly\s+\d+\s+left\b
   | \bback\s+in\s+stock\b
 )""", re.I | re.X)
-# Telling the reader to CHECK stock is honest, as is a renderer note.
+# Telling the reader to CHECK stock is honest; so is a dated selection
+# filter ("we kept only listings in stock as of late September") and a
+# hypothetical ("if it sells out").
 _STOCK_OK = re.compile(
     r"\b(?:check|verify|confirm|whether|varies|vary|live\s+(?:price|button|listing)|"
-    r"at\s+the\s+time\s+of\s+(?:writing|selection)|if|when|whenever|unless|finds?)\b", re.I)
+    r"at\s+the\s+time\s+of\s+(?:writing|selection)|if|when|whenever|unless|finds?|"
+    r"as\s+of|when\s+we|we\s+(?:kept|shortlisted|started|removed|filtered|picked|selected|chose)|"
+    r"(?:early|mid|late|last\s+(?:two\s+)?weeks?\s+of)\s+" + r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))\b", re.I)
+# A stock claim is a retail claim; "simmered in stock" is a recipe.
+_STOCK_RETAIL = re.compile(
+    r"\b(?:listing|listings|offer|amazon|catalog|pick|picks|model|models|seller|retailer|"
+    r"store(?!-bought)|buy|order|ships?|product|products|deal|deals|sale|unit|units|sku|price|"
+    r"mixer|grinder|gpu|card|pc|monitor|cpu|appliance|thermometer|cooker)s?\b", re.I)
+_STOCK_COOKING = re.compile(
+    r"\b(?:simmer\w*|braise\w*|poach\w*|boil\w*|deglaze\w*|broth|reduce\w*|al\s+dente|"
+    r"chicken\s+stock|beef\s+stock|vegetable\s+stock|stock\s*pot)\b", re.I)
 
 
 def find_stock_claims(text: str) -> list[str]:
     """Sentences asserting current stock / availability or forecasting a
-    sell-out. "Check stock on the live listing" style sentences pass."""
+    sell-out about a product. Check-stock advice, dated selection filters,
+    hypotheticals and cooking stock pass."""
     out = []
     for s in _sentences(text):
-        if STOCK_CLAIM.search(s) and not _STOCK_OK.search(s):
-            out.append(s[:240])
+        m = STOCK_CLAIM.search(s)
+        if not m or _STOCK_OK.search(s):
+            continue
+        sell = re.search(r"\bsell", m.group(0), re.I)
+        if not sell and (not _STOCK_RETAIL.search(s) or _STOCK_COOKING.search(s)):
+            continue  # "simmer in stock" — cooking; "parts are still available" — not a pick
+        out.append(s[:240])
     return out
 
 
@@ -291,6 +309,12 @@ _UNIVERSAL_RATIO = re.compile(
     r"\b(?:at|across|on|in)\s+(?:every|all|each|any)\b", re.I)
 
 
+_BAND_EDGE = re.compile(
+    r"(?:under|below|over|above|up\s+to|less\s+than|more\s+than|around|about)\s+\$\s?\d[\d,]*(?:\.\d{1,2})?"
+    r"|\$\s?\d[\d,]*(?:\.\d{1,2})?\s*(?:[-–]|to)\s*\$?\s?\d[\d,]*(?:\.\d{1,2})?"
+    r"|\$\s?\d[\d,]*(?:\.\d{1,2})?\s*(?:\+|and\s+up|or\s+(?:less|more))", re.I)
+
+
 def _money(v: str) -> float:
     try:
         return float(v.replace(",", ""))
@@ -312,16 +336,23 @@ def find_numeric_inconsistencies(text: str) -> list[str]:
     body = text or ""
     # Anchor prices = every dollar figure that is not itself a stated delta.
     delta_spans = [m.span("a") if m.group("a") else m.span("b") for m in _DELTA.finditer(body)]
+    # Band edges ("under $50", "$50–$100") are not anchors: a body written
+    # with price tiers only cannot support a delta check, so it is skipped.
+    band_spans = [m.span() for m in _BAND_EDGE.finditer(body)]
     prices = sorted({_money(m.group(1)) for m in _MONEY.finditer(body)
-                     if not any(a <= m.start(1) < b for a, b in delta_spans)} - {0.0})
+                     if not any(a <= m.start(1) < b for a, b in delta_spans + band_spans)} - {0.0})
     gaps = {round(abs(a - b), 2) for i, a in enumerate(prices) for b in prices[i + 1:]}
     out: list[str] = []
     for s in _sentences(body):
         if len(prices) >= 2:
+            s_bands = [b.span() for b in _BAND_EDGE.finditer(s)]
             for m in _DELTA.finditer(s):
                 d = _money(m.group("a") or m.group("b") or "")
-                if d < 10:
-                    continue
+                pos = m.start("a") if m.group("a") else m.start("b")
+                if d < 10 or any(a <= pos < b for a, b in s_bands):
+                    continue  # small, or one edge of a range ("another $150 to $300")
+                if re.search(r"(?:~|\babout|\broughly|\baround|\bapprox\w*)\s*\$?\s?$", s[:pos]):
+                    continue  # stated as approximate
                 tol = max(5.0, 0.03 * d)
                 if not any(abs(d - g) <= tol for g in gaps):
                     out.append(f"${d:,.0f} delta matches no gap between the body's prices: {s[:200]}")
@@ -420,22 +451,31 @@ def find_price_conflicts(body_md: str, prices: dict[str, float] | None) -> list[
             o = min(cheaper, key=lambda r: r[2])
             out.append(f"budget pick {bk} (${bp:,.2f}) costs more than {o[0][:50]!r} "
                        f"{o[1]} (${o[2]:,.2f})")
-    linked = {k: pm[k] for k in (_norm_path(m.group(1)) for m in _LINK_PATH.finditer(body_md or ""))
-              if k in pm}
-    if len(linked) >= 2:
-        hi, lo = max(linked.values()), min(linked.values())
+    # "This list" = the product each headed section is about (its first
+    # priced link), not every product the body happens to link.
+    listed: dict[str, float] = {}
+    for head, text in _sections(body_md):
+        if head:
+            hit = _first_priced(head, pm) or _first_priced(text, pm)
+            if hit:
+                listed[hit[0]] = hit[1]
+    if len(listed) >= 2:
+        hi, lo = max(listed.values()), min(listed.values())
         for head, text in _sections(body_md):
             sec_hit = _first_priced(head, pm) or _first_priced(text, pm)
             for s in _sentences(text):
                 m = _SUPERLATIVE.search(s)
                 if not m or _SUPERLATIVE_NEG.search(s):
                     continue
-                hit = _first_priced(s, pm) or sec_hit
-                if not hit:
+                # The priced link nearest the superlative, else the section's.
+                near = [(abs(lm.start() - m.start()), _norm_path(lm.group(1)))
+                        for lm in _LINK_PATH.finditer(s) if _norm_path(lm.group(1)) in pm]
+                hit = ((min(near)[1], pm[min(near)[1]]) if near else sec_hit)
+                if not hit or hit[0] not in listed:
                     continue
                 w = m.group("w").lower()
                 top = w.startswith(("priciest", "most exp", "highest"))
-                if (top and hit[1] < hi * 0.98) or (not top and hit[1] > lo * 1.02):
+                if (top and hit[1] < hi * 0.95) or (not top and hit[1] > lo * 1.05):
                     out.append(f"{w!r} but {hit[0]} is ${hit[1]:,.2f} (range "
                                f"${lo:,.2f}-${hi:,.2f}): {s[:160]}")
     # MSRP claims bind to a product linked in the same sentence or paragraph
