@@ -83,6 +83,10 @@ DEFAULT_REC_ROUTING: dict[str, tuple[str, str]] = {
     "body-link-density-thin":            ("internal_link_addition", ""),
     "outbound-citations-missing":        ("body_md_edit", ""),
     "pros-cons-thin":                    ("body_md_edit", ""),
+    # In-place rewrite of a published article (same slug): post-event
+    # refresh (event-refresh-agent) and stale/decayed pages. The prose is
+    # Opus-required; recs carry required_model_tier=opus.
+    "article-refresh":                   ("body_md_edit", ""),
 
     # Catalog / product-data work belongs to product-hydration.
     "price-stale":                       ("price_refresh", "product-hydration-agent"),

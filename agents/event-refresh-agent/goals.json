@@ -1,0 +1,56 @@
+{
+  "schema_version": "1",
+  "agent_id": "event-refresh-agent",
+  "goals": [
+    {
+      "id": "goal-no-live-pages-for-ended-sales",
+      "title": "No live page still framed around a sale that has ended",
+      "description": "Published articles still tagged holiday:<id> for a retail sale that ended in the last 60 days. Each one tells readers and AI assistants to buy in a sale that is over. The refresh replaces the tag, so this falls to 0 as refreshes ship. Emitted key: ended_event_articles_live.",
+      "target_metric": "ended_event_articles_live",
+      "metric": {
+        "name": "ended_event_articles_live",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "articles"
+      },
+      "directives": [
+        "If this stays above 0 for more than 3 days after an event ends, check the implementer for deferred article-refresh recs (required-model-unavailable) and say so in the run summary",
+        "Never re-queue an article the ledger already holds for the same event"
+      ]
+    },
+    {
+      "id": "goal-refresh-queued-day-after",
+      "title": "Every tagged article queued for refresh the day after its sale ends",
+      "description": "Articles tagged with a sale that ended within the lookback window but not yet queued (cap overflow, dry run, queue failure). Target 0 on the first run after the end date. Emitted key: unqueued_ended_event_articles.",
+      "target_metric": "unqueued_ended_event_articles",
+      "metric": {
+        "name": "unqueued_ended_event_articles",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "articles"
+      },
+      "directives": [
+        "Queue one article-refresh rec per tagged article, Opus required, on the first run after the event's last day",
+        "When the per-site cap overflows, raise max_recs_per_site in config/event-refresh-config.json rather than dropping pages"
+      ]
+    },
+    {
+      "id": "goal-refresh-runs-clean",
+      "title": "Zero site read or queue failures",
+      "description": "A site whose article select or queue write failed gets no refresh that day. Emitted key: site_errors.",
+      "target_metric": "site_errors",
+      "metric": {
+        "name": "site_errors",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "errors/run"
+      },
+      "directives": [
+        "Name the failing site and the error in the decision log; the next run retries it"
+      ]
+    }
+  ]
+}

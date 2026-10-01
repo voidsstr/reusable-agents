@@ -1,0 +1,27 @@
+{
+  "id": "event-refresh-agent",
+  "name": "Event Refresh Agent",
+  "description": "The day after a retail sale in seasonal_calendar ends (Prime Big Deal Days, Black Friday, Prime Day), queues one Opus article-refresh rec per published article tagged holiday:<id> on every configured site: event copy and FAQ in the past tense with absolute dates, re-angled to the next sale, event dropped from the title, slug kept. Idempotent per article and event.",
+  "category": "seo",
+  "task_type": "scheduled-cron",
+  "cron_expr": "30 6 * * *",
+  "timezone": "America/New_York",
+  "enabled": true,
+  "owner": "mperry@northernsoftwareconsulting.com",
+  "runbook": "AGENT.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/event-refresh-agent/agent.py",
+  "priority_tier": 2,
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/event-refresh-agent",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/event-refresh-agent",
+    "created_at": "2026-10-01T16:13:48Z"
+  },
+  "runnable_modes": [
+    "cron",
+    "manual"
+  ]
+}

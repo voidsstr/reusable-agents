@@ -1,0 +1,2 @@
+# Agent-specific Python deps (the framework + storage SDK are installed once).
+psycopg2-binary

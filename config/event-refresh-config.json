@@ -1,0 +1,31 @@
+{
+  "schema_version": "1",
+  "_comment": "Post-event article refresh (agents/event-refresh-agent, framework/core/seasonal_calendar.recently_ended). The day after a seasonal_calendar occasion of one of `kinds` ends, every published article tagged holiday:<occasion-id> on each site below gets one Opus article-refresh rec (past-tense event copy, re-angle to seasonal_calendar.next_occasion, event dropped from the title, slug kept). A storage copy at config/event-refresh-config.json replaces this repo file wholesale. `default` merges under every site; with `sites` empty the agent treats every DATABASE_URL_<SITE> env var as a site. Only VALUES live here; the selection and rec logic stay in the agent.",
+  "enabled": true,
+  "kinds": ["retail-deal"],
+  "lookback_days": 7,
+  "metric_horizon_days": 60,
+  "max_recs_per_site": 25,
+  "next_occasion_horizon_days": 120,
+  "default": {
+    "dsn_env": "DATABASE_URL",
+    "table": "editorial_articles",
+    "slug_column": "slug",
+    "title_column": "title",
+    "tags_column": "tags",
+    "status_column": "status",
+    "status_value": "published",
+    "published_column": "published_at",
+    "article_url_template": ""
+  },
+  "sites": {
+    "aisleprompt": {
+      "dsn_env": "DATABASE_URL_AISLEPROMPT",
+      "article_url_template": "https://aisleprompt.com/blog/{slug}"
+    },
+    "specpicks": {
+      "dsn_env": "DATABASE_URL_SPECPICKS",
+      "article_url_template": "https://specpicks.com/reviews/{slug}"
+    }
+  }
+}
