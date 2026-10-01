@@ -32,8 +32,17 @@ a quiet site would stay blocked forever.
 **Seasonal override.** When a seasonal occasion is NOW or IMMINENT
 (``seasonal_calendar``), a batch the traffic gate would block is still
 allowed, but only for proposals tagged ``holiday:<occasion-id>``. The
-daily cap still applies. Timely deal content is the exception the
-operator asked for. It does not open the gate for evergreen topics.
+daily cap still applies, and so does a per-occasion cap
+(``seasonal_override.max_per_occasion``, default 2 pieces per occasion per
+site): once an occasion has that many tagged articles, the override closes
+for it. Timely deal content is the exception the operator asked for. It
+does not open the gate for evergreen topics, and it is not a daily pass.
+
+**AI-visit evidence** counts distinct visitor IPs per article path and
+drops our own traffic: private / loopback addresses, the
+``framework.core.ai_traffic`` exclude list (``AI_TRAFFIC_EXCLUDE_IPS``),
+rows whose ``ip_verified`` is false, and an optional user-agent regex for
+internal refreshers.
 
 CONFIG (primitive + config + extension point)
 ---------------------------------------------
@@ -64,7 +73,8 @@ Consumer contract::
     kept, dropped = gate.select_for_queue(proposals, decision)
     ... queue `kept` ...
     gate.record_batch(self.storage, self.agent_id,
-                      slugs=[p["slug"] for p in kept], run_ts=self.run_ts)
+                      slugs=[p["slug"] for p in kept], run_ts=self.run_ts,
+                      holiday_ids=gate.holiday_ids_for(kept))
 
 CLI: ``python3 -m framework.cli.article_output_gate --help``.
 """
@@ -116,10 +126,38 @@ DEFAULTS: dict[str, Any] = {
         "gsc_scan_runs": 15,
         "ai_visits_table": "ai_traffic_log",
         "ai_visit_kinds": ["referral"],
+        # Which AI-visit rows count (2026-10 audit: our own probes, the docker
+        # bridge and a cache refresher were logged as "referrals").
+        # `ai_traffic` is merged into framework.core.ai_traffic.config(), so
+        # the exclude list is the one every AI-traffic reader shares:
+        # `exclude_ips` + the AI_TRAFFIC_EXCLUDE_IPS env var (an entry ending
+        # in "." or ":" is a prefix, e.g. an IPv6 /64), plus the ip / status /
+        # ip_verified column auto-detection and `only_status_200`.
+        "ai_traffic": {},
+        # Loopback, RFC 1918, docker bridge, IPv6 ULA / link-local: never a
+        # real visitor.
+        "ai_visit_exclude_private_ips": True,
+        # Case-insensitive POSIX regex on the user-agent column. Site-specific
+        # internal refreshers go in site.yaml, e.g. "micro-cache-refresh".
+        "ai_visit_exclude_user_agent_regex": "",
+        "ai_visit_user_agent_column": "auto",
+        # Count distinct visitor IPs per path, not rows: a refresher hitting
+        # the page right after a real visitor must not turn 1 into 2.
+        "ai_visit_distinct_ips": True,
     },
     "seasonal_override": {
         "enabled": True,
         "windows": ["now", "imminent"],
+        # At most this many holiday:<id>-tagged pieces per occasion per site
+        # (counted over `occasion_count_days`, articles not archived, plus
+        # ledger batches that recorded holiday ids) may ship through the
+        # override while the traffic gate is closed. None / negative =
+        # unlimited. Before 2026-10 the override let one deal piece through
+        # every day: 7 Prime Big Deal Days pieces per site into a domain
+        # earning no impressions.
+        "max_per_occasion": 2,
+        "occasion_count_days": 60,
+        "tags_column": "tags",
     },
 }
 
@@ -195,11 +233,17 @@ def read_ledger(storage, agent_id: str) -> dict:
 
 def record_batch(storage, agent_id: str, *, slugs: Sequence[str],
                  run_ts: str = "", count: Optional[int] = None,
+                 holiday_ids: Optional[Sequence[str]] = None,
                  keep_days: int = DEFAULTS["ledger_keep_days"],
                  now: Optional[_dt.datetime] = None) -> dict:
     """Append one queued batch to the agent's ledger. Call AFTER the recs
     were actually queued/dispatched. A batch that never left the building
-    must not eat tomorrow's slot."""
+    must not eat tomorrow's slot.
+
+    `holiday_ids`: one entry per queued proposal that carries a
+    holiday:<id> tag (see :func:`holiday_ids_for`). It lets the seasonal
+    override's per-occasion cap count pieces that are queued but not yet
+    written to the articles table."""
     n = _now(now)
     doc = read_ledger(storage, agent_id)
     cutoff = n - _dt.timedelta(days=max(1, int(keep_days)))
@@ -211,6 +255,8 @@ def record_batch(storage, agent_id: str, *, slugs: Sequence[str],
         "run_ts": run_ts,
         "count": int(count if count is not None else len(slugs)),
         "slugs": slugs,
+        **({"holiday_ids": [str(h).strip().lower() for h in holiday_ids if h]}
+           if holiday_ids else {}),
     })
     doc["batches"] = batches
     storage.write_json(LEDGER_KEY_TMPL.format(agent_id=agent_id), doc)
@@ -347,21 +393,148 @@ def read_prior_batch(conn, *, table: str, lookback_days: int,
         return out
 
 
+_PRIVATE_IP_RE = (r"^(::ffff:)?(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)"
+                  r"|^(::1$|f[cd][0-9a-f]{2}:|fe80:)")
+
+
+def _split_exclude_ips(entries: Iterable[str]) -> tuple[list[str], list[str]]:
+    """(exact, like-prefix patterns). An entry ending in "." or ":" is a
+    prefix (the fleet host's IPv6 rotates inside its /64), as in the sites'
+    own isSelfTraffic()."""
+    exact, prefixes = [], []
+    for e in entries or ():
+        e = str(e).strip().lower()
+        if not e:
+            continue
+        if e.endswith((".", ":")):
+            prefixes.append(e.replace("\\", "\\\\").replace("%", "\\%")
+                            .replace("_", "\\_") + "%")
+        else:
+            exact.append(e)
+    return exact, prefixes
+
+
+def build_ai_visits_sql(tg: dict, atcfg: dict, *, table: str,
+                        kinds: Sequence[str], days: int,
+                        ua_column: str = "") -> tuple[str, dict]:
+    """(sql, params) for :func:`read_ai_visits`. `atcfg` is an
+    ``ai_traffic.config()`` with its columns resolved. Pure — no DB."""
+    t = _ident(table)
+    ts = _ident(atcfg.get("ts_column") or "ts")
+    kind = _ident(atcfg.get("kind_column") or "kind")
+    path = _ident(atcfg.get("path_column") or "path")
+    ip = _ident(atcfg["ip_column"]) if atcfg.get("ip_column") else ""
+    status = _ident(atcfg["status_column"]) if atcfg.get("status_column") else ""
+    verified = _ident(atcfg["verified_column"]) if atcfg.get("verified_column") else ""
+    ua = _ident(ua_column) if ua_column else ""
+
+    params: dict[str, Any] = {"kinds": list(kinds), "days": int(days)}
+    where = [f"l.{kind} = ANY(%(kinds)s)",
+             f"l.{ts} >= NOW() - make_interval(days => %(days)s)"]
+    if status and atcfg.get("only_status_200", True):
+        where.append(f"(l.{status} IS NULL OR l.{status} = 200)")
+    if verified:
+        # Referral rows are human browsers and are usually never IP-checked
+        # (NULL). Drop only rows the logger proved false.
+        where.append(f"l.{verified} IS NOT FALSE")
+    if ip:
+        if tg.get("ai_visit_exclude_private_ips", True):
+            params["private_ip_re"] = _PRIVATE_IP_RE
+            where.append(f"(l.{ip} IS NULL OR l.{ip} !~* %(private_ip_re)s)")
+        exact, prefixes = _split_exclude_ips(atcfg.get("exclude_ips") or [])
+        if exact:
+            params["exclude_ips"] = exact
+            where.append(f"(l.{ip} IS NULL OR NOT (lower(l.{ip}) = ANY(%(exclude_ips)s)))")
+        if prefixes:
+            params["exclude_ip_prefixes"] = prefixes
+            where.append(f"(l.{ip} IS NULL OR NOT (lower(l.{ip}) LIKE ANY(%(exclude_ip_prefixes)s)))")
+    ua_re = str(tg.get("ai_visit_exclude_user_agent_regex") or "")
+    if ua and ua_re:
+        params["exclude_ua_re"] = ua_re
+        where.append(f"(l.{ua} IS NULL OR l.{ua} !~* %(exclude_ua_re)s)")
+    if ip and tg.get("ai_visit_distinct_ips", True):
+        # A row with no IP still counts once on its own.
+        n = (f"COUNT(DISTINCT l.{ip}) + COUNT(*) FILTER (WHERE l.{ip} IS NULL)")
+    else:
+        n = "COUNT(*)"
+    sql = (f"SELECT l.{path} AS path, {n} AS n FROM {t} l\n WHERE "
+           + "\n   AND ".join(where) + f"\n GROUP BY l.{path}")
+    return sql, params
+
+
 def read_ai_visits(conn, *, table: str, kinds: Sequence[str],
-                   days: int) -> dict[str, int]:
-    """path → visit count for AI-assistant / search referrals."""
+                   days: int, tg: Optional[dict] = None) -> dict[str, int]:
+    """path → AI-assistant / search referral visitors (distinct IPs by
+    default), with our own and private traffic excluded (see the
+    ``traffic_gate.ai_*`` knobs)."""
+    from . import ai_traffic
+    tg = tg if tg is not None else DEFAULTS["traffic_gate"]
+    atcfg = ai_traffic.config({**(tg.get("ai_traffic") or {}), "table": table})
+    atcfg = ai_traffic.resolve_columns(conn, atcfg)
+    ua_column = str(tg.get("ai_visit_user_agent_column") or "")
+    if tg.get("ai_visit_exclude_user_agent_regex") and ua_column == "auto":
+        try:
+            cols = ai_traffic.table_columns(conn, table)
+        except Exception:
+            cols = set()
+        ua_column = next((c for c in ("user_agent", "ua") if c in cols), "")
+    elif ua_column == "auto":
+        ua_column = ""
+    sql, params = build_ai_visits_sql(tg, atcfg, table=table, kinds=kinds,
+                                      days=days, ua_column=ua_column)
     with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT path, COUNT(*) AS n FROM {_ident(table)} "
-            " WHERE kind = ANY(%s) AND ts >= NOW() - make_interval(days => %s) "
-            " GROUP BY path",
-            (list(kinds), int(days)))
+        cur.execute(sql, params)
         out: dict[str, int] = {}
         for r in cur.fetchall():
             path = r["path"] if isinstance(r, dict) else r[0]
             n = r["n"] if isinstance(r, dict) else r[1]
-            out[str(path or "")] = int(n or 0)
+            out[str(path or "")] = out.get(str(path or ""), 0) + int(n or 0)
         return out
+
+
+def read_occasion_counts(conn, *, table: str, tags_column: str,
+                         holiday_ids: Sequence[str], days: int) -> dict[str, int]:
+    """holiday id → articles tagged ``holiday:<id>`` created in the last
+    `days` days (any status but archived, so scheduled pieces count)."""
+    ids = [str(h).strip().lower() for h in holiday_ids if h]
+    if not ids:
+        return {}
+    col = _ident(tags_column)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT lower(t) AS tag, COUNT(DISTINCT a.slug) AS n "
+            f"  FROM {_ident(table)} a, unnest(a.{col}) AS t "
+            " WHERE lower(t) = ANY(%s) "
+            "   AND COALESCE(a.status, '') <> 'archived' "
+            "   AND COALESCE(a.created_at, a.published_at) >= NOW() - make_interval(days => %s) "
+            " GROUP BY 1",
+            ([f"holiday:{h}" for h in ids], int(days)))
+        out = {h: 0 for h in ids}
+        for r in cur.fetchall():
+            tag = r["tag"] if isinstance(r, dict) else r[0]
+            n = r["n"] if isinstance(r, dict) else r[1]
+            h = str(tag).split(":", 1)[-1]
+            if h in out:
+                out[h] = int(n or 0)
+        return out
+
+
+def ledger_occasion_counts(ledger: dict, holiday_ids: Sequence[str], days: int,
+                           now: Optional[_dt.datetime] = None) -> dict[str, int]:
+    """holiday id → proposals the ledger recorded for it in the last `days`."""
+    n = _now(now)
+    cutoff = n - _dt.timedelta(days=max(1, int(days)))
+    ids = [str(h).strip().lower() for h in holiday_ids if h]
+    out = {h: 0 for h in ids}
+    for b in (ledger or {}).get("batches") or []:
+        at = _parse_iso(b.get("at", ""))
+        if not at or at < cutoff:
+            continue
+        for h in b.get("holiday_ids") or []:
+            h = str(h).strip().lower()
+            if h in out:
+                out[h] += 1
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +554,7 @@ class GateDecision:
     sources: dict = field(default_factory=dict)
     require_holiday_ids: list = field(default_factory=list)
     priority_holiday_ids: list = field(default_factory=list)
+    occasion_counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -478,6 +652,10 @@ def evaluate(*, storage, agent_id: str, site_id: str,
 
     sources: dict[str, str] = {}
     prefixes = list(tg.get("article_path_prefixes") or [])
+    occ_cap = so.get("max_per_occasion")
+    occ_cap = int(occ_cap) if occ_cap is not None and int(occ_cap) >= 0 else None
+    occ_days = int(so.get("occasion_count_days") or 60)
+    db_occ: Optional[dict[str, int]] = None
     own_conn = False
     batch: Optional[list[dict]] = None
     ai_by_slug: Optional[dict[str, int]] = None
@@ -500,7 +678,7 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                 visits = read_ai_visits(
                     conn, table=tg.get("ai_visits_table", "ai_traffic_log"),
                     kinds=tg.get("ai_visit_kinds") or ["referral"],
-                    days=int(tg.get("lookback_days", 14)) + 1)
+                    days=int(tg.get("lookback_days", 14)) + 1, tg=tg)
                 ai_by_slug = {}
                 for path, n in visits.items():
                     sl = slug_from_path(path, prefixes)
@@ -511,6 +689,17 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                 sources["ai_visits"] = f"unavailable: {type(e).__name__}: {e}"[:200]
                 try: conn.rollback()
                 except Exception: pass
+            if holiday_ids and occ_cap is not None:
+                try:
+                    db_occ = read_occasion_counts(
+                        conn, table=tg.get("articles_table", "editorial_articles"),
+                        tags_column=str(so.get("tags_column") or "tags"),
+                        holiday_ids=holiday_ids, days=occ_days)
+                    sources["occasion_counts"] = f"ok: {db_occ}"
+                except Exception as e:
+                    sources["occasion_counts"] = f"unavailable: {type(e).__name__}: {e}"[:200]
+                    try: conn.rollback()
+                    except Exception: pass
         else:
             sources["prior_batch"] = "unavailable: no DSN"
             sources["ai_visits"] = "unavailable: no DSN"
@@ -572,12 +761,31 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                             "article(s) earned impressions or AI visits",
                             "cap+traffic", **base)
     if holiday_ids:
-        base["require_holiday_ids"] = list(holiday_ids)
-        return GateDecision(True, slots,
-                            f"traffic gate closed (0/{len(batch)} prior articles "
-                            "earned a signal) — seasonal override for "
-                            f"{', '.join(holiday_ids)} only",
-                            "seasonal-override", **base)
+        open_ids, note = list(holiday_ids), ""
+        if occ_cap is not None:
+            led = ledger_occasion_counts(ledger, holiday_ids, occ_days, now)
+            counts = {h: max((db_occ or {}).get(h, 0), led.get(h, 0))
+                      for h in holiday_ids}
+            base["occasion_counts"] = counts
+            open_ids = [h for h in holiday_ids if counts[h] < occ_cap]
+            full = [f"{h} {counts[h]}/{occ_cap}" for h in holiday_ids
+                    if counts[h] >= occ_cap]
+            if full:
+                note = f"; per-occasion cap reached for {', '.join(full)}"
+            if open_ids:
+                slots = min(slots, sum(occ_cap - counts[h] for h in open_ids))
+        if open_ids:
+            base["require_holiday_ids"] = open_ids
+            return GateDecision(True, slots,
+                                f"traffic gate closed (0/{len(batch)} prior articles "
+                                "earned a signal) — seasonal override for "
+                                f"{', '.join(open_ids)} only{note}",
+                                "seasonal-override", **base)
+        return GateDecision(False, 0,
+                            f"traffic gate closed: 0/{len(batch)} prior articles "
+                            "earned a signal, and the seasonal override is spent"
+                            f"{note} (seasonal_override.max_per_occasion)",
+                            "cap+traffic", **base)
     return GateDecision(False, 0,
                         f"traffic gate closed: 0/{len(batch)} articles published "
                         f"{tg.get('min_age_days')}-{tg.get('lookback_days')}d ago "
@@ -599,6 +807,18 @@ def proposal_holiday_ids(p: dict) -> set[str]:
         v = p.get(k)
         if v:
             out.add(str(v).strip().lower().removeprefix("holiday:"))
+    return out
+
+
+def holiday_ids_for(proposals: Iterable[dict]) -> list[str]:
+    """One holiday id per proposal that carries one (first id when a
+    proposal has several) — the ``holiday_ids`` value for
+    :func:`record_batch`."""
+    out = []
+    for p in proposals or ():
+        ids = sorted(proposal_holiday_ids(p))
+        if ids:
+            out.append(ids[0])
     return out
 
 

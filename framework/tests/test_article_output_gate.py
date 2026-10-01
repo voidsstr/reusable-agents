@@ -22,6 +22,13 @@ class _Cur:
         return False
 
     def execute(self, sql, params=None):
+        if "information_schema" in sql:
+            self.rows = [(c,) for c in self.conn.cols]
+            return
+        if "unnest(" in sql:
+            self.conn.occ_queries.append((sql, params))
+            self.rows = [(f"holiday:{h}", n) for h, n in self.conn.occ.items()]
+            return
         if "editorial_articles" in sql:
             if self.conn.fail_batch:
                 raise RuntimeError("no such table")
@@ -29,6 +36,7 @@ class _Cur:
         elif "ai_traffic_log" in sql:
             if self.conn.fail_ai:
                 raise RuntimeError("no such table")
+            self.conn.ai_queries.append((sql, params))
             self.rows = list(self.conn.ai.items())
         else:
             raise AssertionError(sql)
@@ -38,9 +46,15 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, batch=(), ai=None, fail_batch=False, fail_ai=False):
+    def __init__(self, batch=(), ai=None, fail_batch=False, fail_ai=False,
+                 cols=("ts", "kind", "path", "ip", "user_agent", "status_code"),
+                 occ=None):
         self.batch = list(batch)
         self.ai = dict(ai or {})
+        self.cols = list(cols)
+        self.occ = dict(occ or {})
+        self.ai_queries = []
+        self.occ_queries = []
         self.fail_batch = fail_batch
         self.fail_ai = fail_ai
 
@@ -185,3 +199,84 @@ def test_slug_from_path():
     assert gate.slug_from_path("https://x.com/reviews/Foo-Bar/?q=1") == "foo-bar"
     assert gate.slug_from_path("/blog/a", ["/reviews/"]) == ""
     assert gate.slug_from_path("") == ""
+
+
+# ── AI-visit evidence hygiene + per-occasion seasonal cap (2026-10 audit) ──
+
+def test_ai_visits_sql_excludes_self_and_private_traffic(monkeypatch):
+    from framework.core import ai_traffic
+    monkeypatch.setenv("AI_TRAFFIC_EXCLUDE_IPS", "2600:1702:7930:33f0:,108.80.179.176")
+    tg = gate.resolve_config(None, "a", {"traffic_gate": {
+        "ai_visit_exclude_user_agent_regex": "micro-cache-refresh"}})["traffic_gate"]
+    conn = _Conn(cols=("ts", "kind", "path", "ip", "user_agent", "status_code",
+                       "ip_verified"))
+    gate.read_ai_visits(conn, table="ai_traffic_log", kinds=["referral"], days=15, tg=tg)
+    sql, params = conn.ai_queries[-1]
+    assert "COUNT(DISTINCT l.ip)" in sql
+    assert "l.ip_verified IS NOT FALSE" in sql
+    assert "(l.status_code IS NULL OR l.status_code = 200)" in sql
+    assert params["exclude_ips"] == ["108.80.179.176"]
+    assert params["exclude_ip_prefixes"] == ["2600:1702:7930:33f0:%"]
+    assert params["exclude_ua_re"] == "micro-cache-refresh"
+    import re
+    rx = re.compile(params["private_ip_re"], re.I)
+    for ip in ("127.0.0.1", "172.17.0.1", "10.1.2.3", "192.168.0.5", "::1",
+               "::ffff:127.0.0.1", "fd12:3456::1", "fe80::1"):
+        assert rx.search(ip), ip
+    for ip in ("111.92.133.168", "2605:a601:9b32::1", "172.32.0.1", "8.8.8.8"):
+        assert not rx.search(ip), ip
+    assert ai_traffic.config()["exclude_ips"]  # the shared list is the source
+
+
+def test_ai_visits_sql_without_optional_columns():
+    tg = gate.DEFAULTS["traffic_gate"]
+    conn = _Conn(cols=("ts", "kind", "path"))
+    gate.read_ai_visits(conn, table="ai_traffic_log", kinds=["referral"], days=15, tg=tg)
+    sql, params = conn.ai_queries[-1]
+    assert "COUNT(*) AS n" in sql and "exclude_ips" not in params
+    assert "private_ip_re" not in params and "user_agent" not in sql
+
+
+def test_ai_visits_can_count_rows(storage):
+    tg = gate.resolve_config(None, "a", {"traffic_gate": {"ai_visit_distinct_ips": False}})
+    conn = _Conn()
+    gate.read_ai_visits(conn, table="ai_traffic_log", kinds=["referral"], days=15,
+                        tg=tg["traffic_gate"])
+    assert "COUNT(*) AS n" in conn.ai_queries[-1][0]
+
+
+def test_seasonal_override_per_occasion_cap(storage):
+    # 2 tagged pieces already exist for the occasion: the override is spent.
+    d = _eval(storage, _Conn(batch=["a1"], occ={"prime-big-deal-days": 2}), today=TODAY)
+    assert not d.allowed and d.slots == 0
+    assert "max_per_occasion" in d.reason and "prime-big-deal-days 2/2" in d.reason
+    assert d.occasion_counts == {"prime-big-deal-days": 2}
+
+    # 1 of 2 used: still open, for that occasion only.
+    d = _eval(storage, _Conn(batch=["a1"], occ={"prime-big-deal-days": 1}), today=TODAY)
+    assert d.allowed and d.mode == "seasonal-override" and d.slots == 1
+
+
+def test_seasonal_override_cap_counts_ledger_and_is_configurable(storage):
+    gate.record_batch(storage, "site-a-article-proposal-agent", slugs=["d1", "d2"],
+                      holiday_ids=gate.holiday_ids_for([
+                          {"tags": ["holiday:prime-big-deal-days"]},
+                          {"holiday": "prime-big-deal-days"}]),
+                      now=NOW - dt.timedelta(days=2))
+    d = _eval(storage, _Conn(batch=["a1"]), today=TODAY)
+    assert not d.allowed and d.occasion_counts == {"prime-big-deal-days": 2}
+    # Operator raises the cap without a commit.
+    d = _eval(storage, _Conn(batch=["a1"]), today=TODAY,
+              site_cfg={"seasonal_override": {"max_per_occasion": 5}})
+    assert d.allowed and d.mode == "seasonal-override"
+    # None = unlimited, and no occasion query is made.
+    conn = _Conn(batch=["a1"], occ={"prime-big-deal-days": 50})
+    d = _eval(storage, conn, today=TODAY,
+              site_cfg={"seasonal_override": {"max_per_occasion": None}})
+    assert d.allowed and conn.occ_queries == []
+
+
+def test_occasion_cap_does_not_touch_open_traffic_gate(storage):
+    _seed_gsc(storage, [{"keys": ["https://x/reviews/a1"], "impressions": 3}])
+    d = _eval(storage, _Conn(batch=["a1"], occ={"prime-big-deal-days": 9}), today=TODAY)
+    assert d.allowed and d.mode == "cap+traffic"
