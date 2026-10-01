@@ -19,7 +19,10 @@ def test_black_friday_is_day_after_thanksgiving():
 def test_prime_big_deal_days_year_dates_and_rule():
     pb = _occ("prime-big-deal-days")
     assert sc.resolve_date(pb, 2025) == dt.date(2025, 10, 7)
-    assert sc.resolve_date(pb, 2026) == dt.date(2026, 10, 7)
+    # Announced Oct 6-7 on aboutamazon.com; the 10-07 estimate it replaced
+    # put "October 7-8" into published articles.
+    assert sc.resolve_date(pb, 2026) == dt.date(2026, 10, 6)
+    assert sc.resolve_date(_occ("prime-big-deal-days-kitchen"), 2026) == dt.date(2026, 10, 6)
     # Rule fallback: 2nd Tuesday of October
     assert sc.resolve_date(pb, 2024) == dt.date(2024, 10, 8)
     assert sc.resolve_date(pb, 2027) == dt.date(2027, 10, 12)

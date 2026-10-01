@@ -332,14 +332,16 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
     ),
     # Amazon's October Prime event ("Prime Big Deal Days"). Held the 2nd
     # Tuesday-Wednesday of October in 2023 and 2024, the 1st in 2025
-    # (Oct 7-8). The 2026 date is the operator's estimate until Amazon
-    # announces it -- correct it via `date_overrides` in
-    # config/seasonal-calendar.json, no commit needed.
+    # (Oct 7-8). 2026 is Oct 6-7, from 12:01 a.m. PT Oct 6 for 48 hours,
+    # as announced on aboutamazon.com (confirmed 2026-10-01; the earlier
+    # 10-07 estimate put "October 7-8" into two published articles).
+    # Future years: an unannounced date is an estimate -- correct it via
+    # `date_overrides` in config/seasonal-calendar.json, no commit needed.
     Occasion(
         id="prime-big-deal-days",
         label="Amazon Prime Big Deal Days (October Prime Day, tech deals)",
         month_day="nth-weekday:2:tuesday:10",
-        year_dates=(("2025", "10-07"), ("2026", "10-07")),
+        year_dates=(("2025", "10-07"), ("2026", "10-06")),
         audience="tech",
         recipe_keywords=("prime big deal days", "october prime day",
                          "prime big deal days gpu deals",
@@ -356,7 +358,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
         id="prime-big-deal-days-kitchen",
         label="Amazon Prime Big Deal Days (October Prime Day, kitchen deals)",
         month_day="nth-weekday:2:tuesday:10",
-        year_dates=(("2025", "10-07"), ("2026", "10-07")),
+        year_dates=(("2025", "10-07"), ("2026", "10-06")),
         audience="food",
         recipe_keywords=("prime big deal days kitchen deals",
                          "october prime day kitchen", "air fryer deals",
@@ -487,7 +489,7 @@ def load_occasions(storage=None, *,
 
     config/seasonal-calendar.json (all keys optional):
       {
-        "date_overrides": {"prime-big-deal-days": {"2026": "10-07"}},
+        "date_overrides": {"prime-big-deal-days": {"2027": "10-12"}},
         "occasions": [{"id": "...", "label": "...", "month_day": "...",
                        "audience": "tech", ...}],   # add, or replace by id
         "disabled": ["super-bowl"]
