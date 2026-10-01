@@ -47,6 +47,10 @@ Sites consume two functions:
 - `cycle_featured(articles_by_holiday)` → given a map of holiday-id →
   candidate article slugs, returns the slug to feature this hour. Tracks
   a rotation cursor so multiple articles per holiday cycle.
+- `event_state(occasion, today)` → 'before' | 'during' | 'ended' on the
+  event's strict window (no NOW slack), for pages that must stop saying
+  "buy now" once a sale is over. `recently_ended()` and `next_occasion()`
+  drive the post-event refresh (agents/event-refresh-agent).
 
 Refer to test_seasonal_calendar.py for the calibration cases.
 """
@@ -59,6 +63,9 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable, Optional, Sequence
 
 CONFIG_KEY = "config/seasonal-calendar.json"
+
+# Occasion.kind for retail sales with a hard end date (see Occasion.kind).
+RETAIL_DEAL_KIND = "retail-deal"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +102,12 @@ class Occasion:
     # One-paragraph authoring hint rendered under the occasion in the
     # prompt block (e.g. what a deal page must and must not claim).
     guidance: str = ""
+    # Occasion family. RETAIL_DEAL_KIND marks a sale with a hard end
+    # (Prime Day, Black Friday): once it ends it drops out of the NOW
+    # window, its tagged articles get a post-event refresh (see
+    # recently_ended()), and next_occasion(kind=...) picks the next sale
+    # as the re-angle target. Empty = a holiday or season.
+    kind: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +124,20 @@ _DEAL_GUIDANCE = (
     "foreign-marketplace listings. Say what a good price is (a price-history "
     "or MSRP anchor) and who should wait. Never invent a discount, a coupon "
     "or a deal price. Say prices change during the event and link to the "
-    "live listing. Publish before the event starts, then keep the slug "
-    "evergreen and refresh it next year."
+    "live listing. Write every date as an absolute date with the year "
+    "('October 6-7, 2026'), never a countdown ('nine days to decide', "
+    "'under two weeks', 'in 12 days'): the page outlives the week it was "
+    "written in, and a countdown is wrong the next morning. Keep the "
+    "event-specific copy inside one bounded H2 section plus the FAQ, so "
+    "the page can be rewritten after the sale without touching the "
+    "buying advice. For a recurring event use a year-less slug (e.g. "
+    "prime-big-deal-days-gpu-deals, not ...-2026-...) so the URL can be "
+    "refreshed every year; never rename an existing slug. Publish before "
+    "the event starts. After it ends the framework queues a refresh that "
+    "puts the event in the past tense and re-angles the page to the next "
+    "sale."
 )
+
 
 DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
     Occasion(
@@ -271,6 +295,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
                          "monitors", "gaming-desks", "cpus"),
         length_days=4,
         guidance=_DEAL_GUIDANCE,
+        kind=RETAIL_DEAL_KIND,
     ),
     Occasion(
         id="black-friday-kitchen",
@@ -286,6 +311,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
                          "bakeware", "utensils", "gadgets"),
         length_days=4,
         guidance=_DEAL_GUIDANCE,
+        kind=RETAIL_DEAL_KIND,
     ),
     Occasion(
         id="christmas",
@@ -329,6 +355,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
                          "gaming-desks"),
         length_days=2,
         guidance=_DEAL_GUIDANCE,
+        kind=RETAIL_DEAL_KIND,
     ),
     # Amazon's October Prime event ("Prime Big Deal Days"). Held the 2nd
     # Tuesday-Wednesday of October in 2023 and 2024, the 1st in 2025
@@ -353,6 +380,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
                          "monitors", "gaming-desks", "cpus"),
         length_days=2,
         guidance=_DEAL_GUIDANCE,
+        kind=RETAIL_DEAL_KIND,
     ),
     Occasion(
         id="prime-big-deal-days-kitchen",
@@ -369,6 +397,7 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
                          "bakeware", "utensils", "gadgets"),
         length_days=2,
         guidance=_DEAL_GUIDANCE,
+        kind=RETAIL_DEAL_KIND,
     ),
     Occasion(
         id="back-to-school-tech",
@@ -592,6 +621,11 @@ def active_signal(today: datetime.date | None = None,
                 out.append(ActiveOccasion(
                     occasion=occ, when=start, delta_days=0, window="now"))
                 break
+            # A sale that has ended is not a late entry: proposing or
+            # featuring a "buy now" page the day after it closes is the
+            # stale-advice failure event_state() exists to stop.
+            if occ.kind == RETAIL_DEAL_KIND and end < today:
+                continue
             delta_to_start = (start - today).days
             if -NOW_WINDOW_DAYS <= delta_to_start <= NOW_WINDOW_DAYS:
                 out.append(ActiveOccasion(
@@ -613,6 +647,182 @@ def active_signal(today: datetime.date | None = None,
     order = {"now": 0, "imminent": 1, "upcoming": 2}
     out.sort(key=lambda a: (order[a.window], abs(a.delta_days)))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Event state (before / during / ended) + post-event helpers
+# ---------------------------------------------------------------------------
+#
+# active_signal() answers "what should we write about now". The helpers
+# below answer "is this event over", which a page needs once it is live:
+# an SSR note keyed on an article's holiday:<id> tag, and the
+# event-refresh-agent that rewrites tagged pages the day after a sale.
+# They use the event's own window (start .. start + length_days - 1) with
+# none of the +/-3-day NOW slack.
+
+EVENT_BEFORE = "before"
+EVENT_DURING = "during"
+EVENT_ENDED = "ended"
+
+
+@dataclass
+class OccasionWindow:
+    """One dated occurrence of an occasion (inclusive start..end)."""
+    occasion: Occasion
+    start: datetime.date
+    end: datetime.date
+
+    def date_range_label(self) -> str:
+        return format_date_range(self.start, self.end)
+
+    def to_dict(self) -> dict:
+        return {"id": self.occasion.id, "label": self.occasion.label,
+                "kind": self.occasion.kind,
+                "audience": self.occasion.audience,
+                "start": self.start.isoformat(), "end": self.end.isoformat(),
+                "dates": self.date_range_label()}
+
+
+def format_date_range(start: datetime.date, end: datetime.date) -> str:
+    """Absolute, year-bearing label: 'October 6-7, 2026' (en dash),
+    'November 27, 2026', 'November 27 - December 1, 2026'."""
+    def md(d: datetime.date) -> str:
+        return f"{d.strftime('%B')} {d.day}"
+    if end <= start:
+        return f"{md(start)}, {start.year}"
+    if start.year != end.year:
+        return f"{md(start)}, {start.year} \u2013 {md(end)}, {end.year}"
+    if start.month == end.month:
+        return f"{md(start)}\u2013{end.day}, {start.year}"
+    return f"{md(start)} \u2013 {md(end)}, {start.year}"
+
+
+def event_window(occasion: Occasion, year: int) -> Optional[OccasionWindow]:
+    """The occasion's window in `year`, or None for an unresolvable date
+    (e.g. `season:` occasions)."""
+    start = resolve_date(occasion, year)
+    if start is None:
+        return None
+    end = start + datetime.timedelta(days=max(0, occasion.length_days - 1))
+    return OccasionWindow(occasion=occasion, start=start, end=end)
+
+
+def _coerce_occasion(occasion, occasions: Sequence[Occasion] | None,
+                     storage) -> Optional[Occasion]:
+    if isinstance(occasion, Occasion):
+        return occasion
+    oid = str(occasion or "").strip()
+    if oid.startswith("holiday:"):
+        oid = oid[len("holiday:"):]
+    pool = occasions if occasions is not None else load_occasions(storage)
+    return next((o for o in pool if o.id == oid), None)
+
+
+def current_window(occasion, today: datetime.date | None = None, *,
+                   occasions: Sequence[Occasion] | None = None,
+                   storage=None) -> Optional[OccasionWindow]:
+    """The occurrence `today` is measured against: one in progress (this
+    year's, or last year's spilling into January), else this year's."""
+    today = today or datetime.date.today()
+    occ = _coerce_occasion(occasion, occasions, storage)
+    if occ is None:
+        return None
+    prev = event_window(occ, today.year - 1)
+    if prev is not None and prev.start <= today <= prev.end:
+        return prev
+    return event_window(occ, today.year)
+
+
+def event_state(occasion, today: datetime.date | None = None, *,
+                occasions: Sequence[Occasion] | None = None,
+                storage=None) -> Optional[str]:
+    """'before' | 'during' | 'ended' for this year's occurrence.
+
+    `occasion` is an Occasion, an id, or a `holiday:<id>` tag. Strict
+    window, no NOW slack: Prime Big Deal Days 2026 (Oct 6-7) is 'during'
+    on Oct 7 and 'ended' on Oct 8. Returns None for an unknown id or an
+    unresolvable date. 'ended' holds until the calendar year rolls over,
+    then the next occurrence reads 'before'.
+    """
+    today = today or datetime.date.today()
+    w = current_window(occasion, today, occasions=occasions, storage=storage)
+    if w is None:
+        return None
+    if today < w.start:
+        return EVENT_BEFORE
+    if today <= w.end:
+        return EVENT_DURING
+    return EVENT_ENDED
+
+
+def recently_ended(today: datetime.date | None = None, *,
+                   lookback_days: int = 7,
+                   kinds: Iterable[str] | None = (RETAIL_DEAL_KIND,),
+                   audience: str | None = None,
+                   occasions: Sequence[Occasion] | None = None,
+                   storage=None) -> list[OccasionWindow]:
+    """Occasions whose latest window ended 1..`lookback_days` days before
+    `today` (so the day after the last day is the first hit), newest end
+    first. `kinds=None` means every kind; `audience=None` every audience.
+    The lookback lets a producer catch up after a missed run; callers keep
+    their own ledger so a window is acted on once.
+    """
+    today = today or datetime.date.today()
+    if occasions is None:
+        occasions = load_occasions(storage)
+    kind_set = None if kinds is None else {str(k) for k in kinds}
+    out: list[OccasionWindow] = []
+    for occ in occasions:
+        if kind_set is not None and occ.kind not in kind_set:
+            continue
+        if audience is not None and occ.audience not in ("general", audience):
+            continue
+        for year in (today.year, today.year - 1):
+            w = event_window(occ, year)
+            if w is None or w.end >= today:
+                continue
+            if (today - w.end).days <= max(0, int(lookback_days)):
+                out.append(w)
+            break
+    out.sort(key=lambda w: (w.end, w.occasion.id), reverse=True)
+    return out
+
+
+def next_occasion(audience: str = "general",
+                  today: datetime.date | None = None, *,
+                  kind: str | None = None,
+                  exclude_ids: Iterable[str] = (),
+                  horizon_days: int = 400,
+                  occasions: Sequence[Occasion] | None = None,
+                  storage=None) -> Optional[OccasionWindow]:
+    """The soonest occasion starting after `today` for `audience` (its own
+    audience or 'general', as in active_signal), optionally of one `kind`.
+    A deal page re-angles to the next sale: next_occasion('food',
+    date(2026, 10, 8), kind=RETAIL_DEAL_KIND) is Black Friday kitchen deals
+    on Nov 27, 2026. None when nothing starts within `horizon_days`.
+    """
+    today = today or datetime.date.today()
+    if occasions is None:
+        occasions = load_occasions(storage)
+    skip = set(exclude_ids or ())
+    best: Optional[OccasionWindow] = None
+    for occ in occasions:
+        if occ.id in skip:
+            continue
+        if occ.audience != "general" and occ.audience != audience:
+            continue
+        if kind is not None and occ.kind != kind:
+            continue
+        for year in (today.year, today.year + 1):
+            w = event_window(occ, year)
+            if w is None or w.start <= today:
+                continue
+            if (w.start - today).days > horizon_days:
+                break
+            if best is None or (w.start, w.occasion.id) < (best.start, best.occasion.id):
+                best = w
+            break
+    return best
 
 
 def _detail_lines(a: ActiveOccasion, category_path_prefix: Optional[str]) -> list[str]:
