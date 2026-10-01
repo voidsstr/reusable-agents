@@ -40,7 +40,10 @@ deployer:
     paths:
       - /
       - /sitemap.xml
-      - /sitemap-collections.xml
+      # A child the index really lists. /sitemap-collections.xml never had a
+      # route: it passed only while the SPA catch-all answered 200 for any path,
+      # and once unknown paths 404'd (2026-10-01) every deploy rolled back.
+      - /sitemap-blog.xml
       - /recipes
       - /meal-plan
       - /shoppinglist
