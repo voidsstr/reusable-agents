@@ -181,3 +181,83 @@ def test_repair_only_judges_the_sites_own_links():
     # Without the site's hosts, absolute links are never touched.
     out2, notes2 = g.repair_kitchen_links(body, resolve)
     assert out2 == body and notes2 == []
+
+
+# ── 2026-10-01 audit: soft-404 internal routes + citation quality ─────────
+
+def test_subcategory_link_is_nested_under_its_parent():
+    from framework.core.article_link_guard import kitchen_slug_resolver_from_db, repair_kitchen_links
+
+    class _Cur:
+        def __init__(self): self.q = ""
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, q, params=None): self.q = q
+        def fetchall(self):
+            return [("small-appliances",)] if "kitchen_categories" in self.q else []
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    body = ("See the [pressure cookers shop](/kitchen/category/pressure-cookers) and "
+            "[small appliances](/kitchen/category/small-appliances).")
+    cfg = {"product_table": "kitchen_products", "category_table": "kitchen_categories",
+           "static_slugs": ["pressure-cookers"],
+           "subcategory_parents": {"pressure-cookers": "small-appliances"}}
+    out, notes = repair_kitchen_links(body, kitchen_slug_resolver_from_db(_Conn(), body, cfg),
+                                      own_hosts={"aisleprompt.com"})
+    assert "(/kitchen/category/small-appliances/pressure-cookers)" in out
+    assert "(/kitchen/category/small-appliances)" in out and notes
+
+
+def test_unknown_own_routes_are_rewritten_or_unlinked():
+    from framework.core.article_link_guard import repair_unknown_routes
+    routes = [r"/recipes/cuisine/[a-z0-9-]+", r"/recipes/category/[a-z0-9-]+",
+              r"/recipes/[a-z0-9-]+", r"/blog/[a-z0-9-]+", r"/kitchen(?:/.*)?", r"/k/[a-z0-9-]+"]
+    body = ("Browse the [cuisine hub](/cuisine), the [Thanksgiving hub](/holidays/thanksgiving), "
+            "a [real recipe](/recipes/pie-123), a [cite](https://example.com/holidays/x) "
+            "and ![img](/holidays/x.png).")
+    out, notes = repair_unknown_routes(
+        body, routes, own_hosts={"aisleprompt.com"},
+        route_rewrites={r"/holidays/([a-z0-9-]+)": r"/recipes/category/\1"})
+    assert "[Thanksgiving hub](/recipes/category/thanksgiving)" in out
+    assert "Browse the cuisine hub," in out            # unlinked, anchor kept
+    assert "[real recipe](/recipes/pie-123)" in out
+    assert "https://example.com/holidays/x" in out      # foreign host untouched
+    assert "![img](/holidays/x.png)" in out              # images untouched
+    assert len(notes) == 2
+    assert repair_unknown_routes(body, [], own_hosts=set())[0] == body
+
+
+def test_resolver_carries_route_policy_into_repair_kitchen_links():
+    from framework.core.article_link_guard import kitchen_slug_resolver_from_db, repair_kitchen_links
+
+    class _Conn:
+        def cursor(self):
+            raise AssertionError("no kitchen links -> no query")
+
+    body = "Read the [cuisine hub](/cuisine)."
+    resolve = kitchen_slug_resolver_from_db(_Conn(), body, {"known_routes": [r"/recipes/.*"]})
+    out, notes = repair_kitchen_links(body, resolve, own_hosts={"aisleprompt.com"})
+    assert out == "Read the cuisine hub." and notes == ["unlinked unknown route /cuisine"]
+
+
+def test_citation_audit_rejects_roots_hubs_and_storefronts():
+    from framework.core.article_link_guard import audit_citations
+    a = audit_citations([
+        "https://www.instantpot.com/", "https://nchfp.uga.edu/",
+        "https://thekitchen-supply.myshopify.com/products/x", "https://sca.coffee/research",
+        "https://en.wikipedia.org/wiki/Burr_mill", "https://www.seriouseats.com/best-burr-coffee-grinders",
+        "https://www.seriouseats.com/best-burr-coffee-grinders/", "https://aisleprompt.com/blog/x",
+    ], own_hosts={"aisleprompt.com"})
+    assert a.kept == ["https://en.wikipedia.org/wiki/Burr_mill",
+                      "https://www.seriouseats.com/best-burr-coffee-grinders"]
+    reasons = dict(a.rejected)
+    assert "homepage" in reasons["https://www.instantpot.com/"]
+    assert "storefront" in reasons["https://thekitchen-supply.myshopify.com/products/x"]
+    assert reasons["https://aisleprompt.com/blog/x"] == "own site"
+    assert not a.passes and "min 3" in a.failure_reason()
+    ok = audit_citations(["https://www.rtings.com/monitor/reviews/best/4k",
+                          "https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",
+                          "https://en.wikipedia.org/wiki/OLED"])
+    assert ok.passes and ok.non_wikipedia == 2

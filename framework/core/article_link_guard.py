@@ -292,7 +292,14 @@ def repair_kitchen_links(body_md: str, resolve, own_hosts: Iterable[str] | None 
         notes.append(f"unlinked {root}{slug}")
         return m.group("text")
 
-    return _KITCHEN_LINK_RE.sub(_fix, body_md or ""), notes
+    body = _KITCHEN_LINK_RE.sub(_fix, body_md or "")
+    policy = getattr(resolve, "route_policy", None)
+    if policy:
+        body, route_notes = repair_unknown_routes(
+            body, policy.get("known_routes") or [], own_hosts=hosts,
+            route_rewrites=policy.get("route_rewrites") or {})
+        notes.extend(route_notes)
+    return body, notes
 
 
 def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
@@ -305,7 +312,16 @@ def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
           /kitchen/category/<slug>);
       static_slugs — slugs the site resolves in code (e.g. subcategories);
       reserved_slugs — non-product pages under the product root
-          (/kitchen/buying-guides), always kept.
+          (/kitchen/buying-guides), always kept;
+      subcategory_parents — {sub: parent} for subcategories that only
+          resolve UNDER their parent (/kitchen/category/<parent>/<sub>).
+          A top-level /kitchen/category/<sub> link is rewritten to the
+          nested path (2026-10-01 audit: /kitchen/category/pressure-cookers
+          fell through to the soft-404 shell; the real page is
+          /kitchen/category/small-appliances/pressure-cookers);
+      known_routes / route_rewrites — see repair_unknown_routes(); when set
+          the returned resolver carries them and repair_kitchen_links applies
+          them to every other own-host link in the same pass.
     One query per table for all slugs in the body.
     """
     prod_t = str(check_cfg.get("product_table") or "")
@@ -316,6 +332,8 @@ def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
             raise ValueError(f"kitchen_slug_check: bad identifier {ident!r}")
     static = set(check_cfg.get("static_slugs") or [])
     reserved = set(check_cfg.get("reserved_slugs") or [])
+    parents = {str(k): str(v) for k, v in (check_cfg.get("subcategory_parents") or {}).items()
+               if k and v}
     pairs = kitchen_link_slugs(body_md)
     slugs = {s for _, s in pairs}
     cands = set(slugs)
@@ -337,6 +355,8 @@ def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
         if slug in reserved:
             return "keep"
         if root == "/kitchen/category/":
+            if slug in parents and slug not in cats:
+                return ("rewrite", f"{parents[slug]}/{slug}")
             return "keep" if (slug in cats or slug in static) else "unlink"
         if slug in active or slug in cats or slug in static:
             return "keep"
@@ -345,7 +365,66 @@ def kitchen_slug_resolver_from_db(conn, body_md: str, check_cfg: dict):
                 return ("rewrite", c)
         return "unlink"
 
+    if check_cfg.get("known_routes"):
+        resolve.route_policy = {  # type: ignore[attr-defined]
+            "known_routes": list(check_cfg.get("known_routes") or []),
+            "route_rewrites": dict(check_cfg.get("route_rewrites") or {}),
+        }
     return resolve
+
+
+# ── Unknown own-host routes (2026-10-01 audit) ───────────────────────────
+# Article bodies linked /cuisine, /holidays/thanksgiving and
+# /kitchen/category/pressure-cookers. None is a route: the SPA catch-all
+# answered 200 with the homepage shell (a soft 404 with a canonical to /),
+# so the link guard counted them and they shipped. The site lists its real
+# route shapes in config (`known_routes`, regexes over the path); an
+# own-host link matching none of them is rewritten via `route_rewrites`
+# ({path_regex: replacement}) or unlinked with its anchor text kept.
+_ANY_LINK_RE = re.compile(
+    r"(?<!!)\[(?P<text>[^\]]+)\]\((?P<host>https?://[^/)\s]*)?(?P<path>/[^)\s?#]*)"
+    r"(?P<rest>[?#][^)\s]*)?\)"
+)
+
+
+def repair_unknown_routes(body_md: str, known_routes: Iterable[str],
+                          own_hosts: Iterable[str] | None = None,
+                          route_rewrites: dict | None = None) -> tuple[str, list[str]]:
+    """Rewrite or unlink own-host links whose path matches no known route.
+
+    `known_routes`: regexes matched (fullmatch) against the link path, e.g.
+    r"/recipes/cuisine/[a-z0-9-]+". `route_rewrites`: {regex: replacement}
+    applied (fullmatch, re.sub semantics) before unlinking, so a known-wrong
+    shape becomes the real page. An empty `known_routes` changes nothing.
+    Returns (body, notes)."""
+    pats = [re.compile(p) for p in (known_routes or []) if p]
+    if not pats:
+        return body_md or "", []
+    rewrites = [(re.compile(k), v) for k, v in (route_rewrites or {}).items() if k]
+    hosts = {h.lower() for h in (own_hosts or [])}
+    notes: list[str] = []
+
+    def _known(path: str) -> bool:
+        return any(p.fullmatch(path) for p in pats)
+
+    def _fix(m: "re.Match[str]") -> str:
+        host = re.sub(r"^https?://", "", (m.group("host") or "").lower())
+        if host and host not in hosts:
+            return m.group(0)
+        path = m.group("path")
+        norm = path.rstrip("/") or "/"
+        if _known(norm):
+            return m.group(0)
+        for rx, repl in rewrites:
+            if rx.fullmatch(norm):
+                new = rx.sub(repl, norm)
+                if _known(new):
+                    notes.append(f"{norm} -> {new}")
+                    return f"[{m.group('text')}]({m.group('host') or ''}{new}{m.group('rest') or ''})"
+        notes.append(f"unlinked unknown route {norm}")
+        return m.group("text")
+
+    return _ANY_LINK_RE.sub(_fix, body_md or ""), notes
 
 
 def _strip_id(slug: str) -> str:
@@ -542,3 +621,101 @@ def resolve_minima(site_hint: str, storage=None) -> dict:
             vals.update(over or {})
             break
     return vals
+
+
+# ── Outbound-citation quality (2026-10-01 audit, thin-outbound-citations) ──
+# Proposals cited homepage roots (instantpot.com/, baratza.com/,
+# nchfp.uga.edu/), Shopify storefronts (*.myshopify.com) and mostly
+# Wikipedia. A root or a storefront supports no specific claim, so an answer
+# engine gains nothing from it. The proposer filters its
+# `outbound_citations` through `audit_citations` before the writer copies
+# them; per-site knobs live under `citations` in the guard config.
+DEFAULT_CITATION_POLICY: dict = {
+    "min_qualifying": 3,          # citations that pass every rule
+    "min_non_wikipedia": 2,       # of those, how many must not be Wikipedia
+    # host regexes that never qualify (storefronts, aggregators, social)
+    "reject_hosts": [r"(^|\.)myshopify\.com$", r"(^|\.)amazon\.[a-z.]+$", r"(^|\.)amzn\.to$",
+                     r"(^|\.)ebay\.[a-z.]+$", r"(^|\.)walmart\.com$", r"(^|\.)pinterest\.[a-z.]+$",
+                     r"(^|\.)facebook\.com$", r"(^|\.)instagram\.com$", r"(^|\.)tiktok\.com$"],
+    # path regexes (fullmatch, after stripping a trailing slash) that are
+    # hubs, not pages that state a fact
+    "hub_paths": [r"", r"/(?:blog|news|shop|store|products?|collections?|recipes|reviews|research)",
+                  r"/[a-z]{2}(?:-[a-z]{2})?"],
+}
+
+
+@dataclasses.dataclass
+class CitationAudit:
+    kept: list[str]
+    rejected: list[tuple[str, str]]
+    min_qualifying: int
+    min_non_wikipedia: int
+
+    @property
+    def non_wikipedia(self) -> int:
+        return sum(1 for u in self.kept if "wikipedia.org" not in _host(u))
+
+    @property
+    def passes(self) -> bool:
+        return (len(self.kept) >= self.min_qualifying
+                and self.non_wikipedia >= min(self.min_non_wikipedia, self.min_qualifying))
+
+    def failure_reason(self) -> str:
+        if self.passes:
+            return ""
+        why = "; ".join(f"{u} ({r})" for u, r in self.rejected[:4])
+        return (f"{len(self.kept)} qualifying citation(s) (min {self.min_qualifying}, "
+                f"{self.non_wikipedia} non-Wikipedia, min {self.min_non_wikipedia})"
+                + (f"; rejected: {why}" if why else ""))
+
+
+def _host(url: str) -> str:
+    return re.sub(r"^https?://", "", str(url or "").strip().lower()).split("/")[0].split("?")[0]
+
+
+def audit_citations(urls: Iterable[str], policy: dict | None = None,
+                    own_hosts: Iterable[str] | None = None) -> CitationAudit:
+    """Split outbound citations into qualifying deep pages and rejects
+    (bare roots, hub paths, storefronts, the site's own host, non-http,
+    duplicates). `policy` overrides DEFAULT_CITATION_POLICY keys."""
+    pol = dict(DEFAULT_CITATION_POLICY)
+    pol.update(policy or {})
+    bad_hosts = [re.compile(p) for p in pol.get("reject_hosts") or []]
+    hubs = [re.compile(p, re.I) for p in pol.get("hub_paths") or []]
+    own = {h.lower() for h in (own_hosts or [])}
+    kept: list[str] = []
+    rejected: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for u in urls or []:
+        url = str(u or "").strip()
+        if not re.match(r"^https?://", url, re.I):
+            rejected.append((url, "not an http(s) URL"))
+            continue
+        host = _host(url)
+        bare = host[4:] if host.startswith("www.") else host
+        path = re.sub(r"^https?://[^/]+", "", url, flags=re.I).split("?")[0].split("#")[0]
+        path = path.rstrip("/")
+        key = f"{bare}{path}".lower()
+        if key in seen:
+            rejected.append((url, "duplicate"))
+            continue
+        seen.add(key)
+        if host in own or bare in own:
+            rejected.append((url, "own site"))
+        elif any(rx.search(bare) for rx in bad_hosts):
+            rejected.append((url, "storefront / aggregator host"))
+        elif any(rx.fullmatch(path) for rx in hubs):
+            rejected.append((url, "homepage or hub, not a page that states the fact"))
+        else:
+            kept.append(url)
+    return CitationAudit(kept=kept, rejected=rejected,
+                         min_qualifying=int(pol.get("min_qualifying") or 0),
+                         min_non_wikipedia=int(pol.get("min_non_wikipedia") or 0))
+
+
+def resolve_citation_policy(site_hint: str, storage=None) -> dict:
+    """The site's `citations` block from the guard config (storage copy
+    overrides the repo default), merged over DEFAULT_CITATION_POLICY."""
+    pol = dict(DEFAULT_CITATION_POLICY)
+    pol.update((resolve_minima(site_hint, storage) or {}).get("citations") or {})
+    return pol
