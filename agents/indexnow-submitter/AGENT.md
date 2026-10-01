@@ -61,7 +61,7 @@ run this engine. `aisleprompt-indexnow-bulk` has its own `AGENT.md`;
 5. **Parse counts.** Parses the `done` lines. Only the site's own lines count when a site is set.
 6. **Layer-A metrics.** Records `goal-urls-submitted-30d` and `goal-runs-success-rate-7d` through `metric_helper.record_many`.
 7. **Canonical coverage** (at most every `INDEXNOW_COVERAGE_INTERVAL_H`, default 6 h — it crawls every sitemap child). Runs only when a site is set and the legacy `sites.json` entry has `canonical_urls_endpoint`. Emits `canonical_urls_*` and `sitemap_coverage_pct`. Missing URLs are **appended** to `<site>.force-submit.txt`, de-duplicated against the queue and against URLs the ledger sent (7 d) or rejected (3 d) recently; submit.ts live-verifies them.
-8. **Sitemap checks and GSC submit.** Uses the legacy `sites.json` `sitemapUrls`, and runs for all sites when no site is set. For each sitemap it sends a HEAD request; if that returns 2xx, it PUTs `webmasters/v3/sites/<gsc_property>/sitemaps/<sitemap>`. Finally, one robots.txt check looks for a `Sitemap:` line. With 7 sitemaps, aisleprompt makes 7 + 7 + 1 = 15 checks; specpicks makes 1 + 1 + 1 = 3.
+8. **Sitemap checks and GSC submit.** Uses the legacy `sites.json` `sitemapUrls` plus optional `gscChildSitemaps` (children submitted on their own: aisleprompt `sitemap-blog.xml`, specpicks `sitemap-reviews-fresh.xml`), and runs for all sites when no site is set. Each sitemap is fetched with a GET (truthful `reusable-agents-indexnow/1.0` UA plus the site's optional `probeHeaders`; never a crawler UA). If it returns 2xx, the agent fingerprints its (loc, lastmod) pairs and PUTs `webmasters/v3/sites/<gsc_property>/sitemaps/<sitemap>` only on the first run, when the fingerprint changed (at most once per `gscMinResubmitHours`, default 24), or as a refresh after `gscMaxResubmitHours` (default 168; 0 disables). State: `<site>.gsc-sitemaps.json`; a failed PUT leaves it unchanged so the next tick retries. Until 2026-10-01 it PUT every sitemap on every run (every 15 min on aisleprompt), which kept the index permanently pending in GSC, and fetched robots.txt as "Googlebot/2.1", which polluted the crawler log. Finally, one robots.txt check looks for a `Sitemap:` line.
 9. **Result.** A non-zero `submit.ts` rc gives `RunResult(failure)`, with the metrics kept. Otherwise `success`, with the summary `submitted N URLs (failed=M) to IndexNow across K site(s); sitemap pings ok=X/Y`.
 
 ### URL families (per-site `site-indexnow.json`, 2026-09-25)
@@ -80,7 +80,7 @@ Dry runs on 2026-09-25 (production data): aisleprompt incremental 370 candidates
 | Input | Detail |
 |---|---|
 | Per-site config (worker) | `<site repo>/agents/seo-config/site-indexnow.json`: `name`, `host`, `key`, `databaseUrlEnv` / `databaseUrlFallback`, `siteIds`, `watermarkFile`, `staticPaths`, `querySets[]`, `sitemapUrls`, `gsc_property`. Shared with `gsc-coverage-auditor` |
-| Legacy `sites.json` (this dir) | Read **always** by `agent.py` for the sitemap checks and `canonical_urls_endpoint`, and by `queue-publish.py` to turn a slug into a host. `submit.ts` reads it only as the last-resort fallback |
+| Legacy `sites.json` (this dir) | Read **always** by `agent.py` for the sitemap checks (`sitemapUrls`, `gscChildSitemaps`, `gscMinResubmitHours`, `gscMaxResubmitHours`, `probeHeaders`) and `canonical_urls_endpoint`, and by `queue-publish.py` to turn a slug into a host. `submit.ts` reads it only as the last-resort fallback |
 | DB | The env var named by `databaseUrlEnv` (`AISLEPROMPT_DATABASE_URL` / `SPECPICKS_DATABASE_URL`) is **not set on whitebeast**; `secrets.env` uses `DATABASE_URL_<SITE>`. So the `databaseUrlFallback` DSN in the config connects. That is a credential in a tracked file; never copy it. Tables: aisleprompt `recipe_catalog`, `kitchen_products`, `kitchen_categories`, `editorial_articles`. specpicks `products`, `articles`, `categories`, `brands`, `editorial_articles`, `hardware_specs`, `trending_comparisons` |
 | IndexNow key | 32-hex `key` per site, hosted as `https://<host>/<key>.txt`. The files live in each site repo's `frontend/public/`. IndexNow needs no API key; the hosted file proves ownership |
 | GSC OAuth | `INDEXNOW_GSC_OAUTH_FILE` → `GSC_OAUTH_FILE` → `~/.reusable-agents/seo/.oauth.json`. Needs `client_id`, `client_secret`, and `refresh_token`, and the token needs webmasters **write** scope for the sitemap PUT |
@@ -95,7 +95,7 @@ Dry runs on 2026-09-25 (production data): aisleprompt incremental 370 candidates
 | Force-submit file | `~/.reusable-agents/indexnow-submitter/<site>.force-submit.txt`. Appended by `queue-publish.py` and the coverage gap; **drained by submit.ts** (incremental runs) |
 | Ledger | `<site>.indexnow-ledger.tsv` next to the watermark (url, `sent`/`rej:<reason>`, epoch ms, token). Pruned after 120 days |
 | Sitemap snapshot | `<site>.sitemap-snapshot.json` next to the watermark (per child sitemap: loc → lastmod) |
-| GSC | Sitemap resubmission on every run |
+| GSC | Sitemap submission only when a sitemap's (loc, lastmod) fingerprint changes (≤ 1/day per sitemap), plus a weekly refresh; state in `<site>.gsc-sitemaps.json` |
 | Temp files | `/tmp/tmp*.log`, one per run, holding the `submit.ts` output. This is the only place the per-query-set candidate counts are kept |
 | Recs / emails | No recs. The only email is the AgentBase run summary (framework default), addressed to the manifest `owner`. Under the wrapper's `DIGEST_ONLY=1` both successes and failures end up in the digest queue (failures through the digest gate in `send_via_msmtp`) |
 
@@ -104,7 +104,8 @@ Dry runs on 2026-09-25 (production data): aisleprompt incremental 370 candidates
 `RunResult.metrics`: `urls_submitted_this_run`, `urls_failed_this_run`,
 `success_rate_pct`, `rc`, `urls_submitted_30d_cumulative`,
 `canonical_urls_total`, `canonical_urls_in_sitemap`, `canonical_urls_missing`,
-`sitemap_coverage_pct`, `sitemap_pings_attempted`, `sitemap_pings_ok`.
+`sitemap_coverage_pct`, `sitemap_pings_attempted`, `sitemap_pings_ok`,
+`sitemap_gsc_submitted`, `sitemap_gsc_skipped_unchanged`.
 
 Goals (incremental instances, from `GET /api/agents/<id>/goals` on 2026-09-23):
 
@@ -132,6 +133,7 @@ no goal id. The specpicks manifest sets none.
 | `INDEXNOW_TIMEOUT_S` | `1500` | Timeout for the `submit.ts` subprocess (sitemap intake + up to `verify.budgetSeconds` of page checks fit inside it) |
 | `SITE_CONFIG_PATHS` | unset | Comma-separated config files; overrides discovery in `submit.ts` (and in `gsc-coverage-auditor`) |
 | `INDEXNOW_GSC_OAUTH_FILE` / `GSC_OAUTH_FILE` | `~/.reusable-agents/seo/.oauth.json` | Token for the GSC sitemap PUT |
+| `INDEXNOW_GSC_MIN_RESUBMIT_H` / `INDEXNOW_GSC_MAX_RESUBMIT_H` | `24` / `168` | Defaults for `sites.json` `gscMinResubmitHours` / `gscMaxResubmitHours` (change-only GSC sitemap submission) |
 | `INDEXNOW_QUEUE_ROOT` | derived | Force-queue dir. `queue-publish.py` walks up from a claude-pool `HOME` to the real `.reusable-agents` root; `submit.ts` defaults to the watermark file's dir (the same place) |
 | `INDEXNOW_SITE_REPOS_ROOT` | `~/development` | Parent dir scanned for `*/agents/seo-config/site-indexnow.json` (submit.ts + gsc-coverage-auditor) |
 | `INDEXNOW_ENDPOINT` | `https://api.indexnow.org/indexnow` | Tests point it at a mock |

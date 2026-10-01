@@ -9,6 +9,12 @@
       "sitemapUrls": [
         "https://aisleprompt.com/sitemap.xml"
       ],
+      "gscChildSitemaps": [
+        "https://aisleprompt.com/sitemap-blog.xml"
+      ],
+      "probeHeaders": {
+        "x-aisleprompt-probe": "indexnow-submitter"
+      },
       "staticPaths": [
         "/",
         "/features",
@@ -107,6 +113,9 @@
       ],
       "sitemapUrls": [
         "https://specpicks.com/sitemap.xml"
+      ],
+      "gscChildSitemaps": [
+        "https://specpicks.com/sitemap-reviews-fresh.xml"
       ],
       "staticPaths": [
         "/",

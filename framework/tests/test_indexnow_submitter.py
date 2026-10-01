@@ -95,3 +95,134 @@ def test_coverage_check_is_throttled(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_STATE_DIR", tmp_path)
     assert mod._coverage_due("s", 6) is True
     assert mod._coverage_due("s", 6) is False
+
+
+# ── GSC sitemap submission hygiene (2026-10-01 audit) ────────────────────
+
+_INDEX_XML = """<?xml version="1.0"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://s.test/sitemap-core.xml</loc><lastmod>2026-09-30</lastmod></sitemap>
+  <sitemap><loc>https://s.test/sitemap-blog.xml</loc><lastmod>2026-09-30</lastmod></sitemap>
+</sitemapindex>"""
+_BLOG_XML = """<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://s.test/blog/a</loc><lastmod>2026-09-29</lastmod><priority>0.9</priority></url>
+</urlset>"""
+
+
+def _wire_site(mod, monkeypatch, tmp_path, pages, *, extra_cfg=None):
+    """Point the agent at a fake site `s` and record every GET/PUT."""
+    cfg = {"name": "s", "host": "s.test", "gsc_property": "sc-domain:s.test",
+           "sitemapUrls": ["https://s.test/sitemap.xml"],
+           "gscChildSitemaps": ["https://s.test/sitemap-blog.xml"],
+           "probeHeaders": {"x-site-probe": "indexnow"}}
+    cfg.update(extra_cfg or {})
+    monkeypatch.setattr(mod, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(mod, "_read_sites_config", lambda: [cfg])
+    monkeypatch.setattr(mod, "_get_gsc_access_token", lambda: "tok")
+    calls = {"get": [], "put": []}
+
+    def fake_get(url, *, headers=None, timeout=20):
+        calls["get"].append((url, dict(headers or {})))
+        if url.endswith("/robots.txt"):
+            return 200, "Sitemap: https://s.test/sitemap.xml\n"
+        return (200, pages[url]) if url in pages else (404, "")
+
+    def fake_put(prop, sm_url, token):
+        calls["put"].append(sm_url)
+        return True, "GSC submitted"
+
+    monkeypatch.setattr(mod, "_fetch_status_and_text", fake_get)
+    monkeypatch.setattr(mod, "_gsc_put_sitemap", fake_put)
+    return calls
+
+
+def test_robots_and_sitemap_fetches_use_truthful_ua(tmp_path, monkeypatch):
+    mod = _load_agent_module()
+    pages = {"https://s.test/sitemap.xml": _INDEX_XML,
+             "https://s.test/sitemap-blog.xml": _BLOG_XML}
+    calls = _wire_site(mod, monkeypatch, tmp_path, pages)
+    mod._ping_sitemaps_for_site("s")
+    assert calls["get"], "expected robots.txt + sitemap fetches"
+    for url, headers in calls["get"]:
+        ua = headers.get("User-Agent", "")
+        assert "googlebot" not in ua.lower() and "bingbot" not in ua.lower(), (url, ua)
+        assert ua == mod._FETCH_UA
+        assert headers.get("x-site-probe") == "indexnow"
+    src = (_AGENT_DIR / "agent.py").read_text()
+    assert "Googlebot/2.1 (+http" not in src
+
+
+def test_gsc_submits_index_and_child_only_on_change(tmp_path, monkeypatch):
+    import time
+    mod = _load_agent_module()
+    pages = {"https://s.test/sitemap.xml": _INDEX_XML,
+             "https://s.test/sitemap-blog.xml": _BLOG_XML}
+    calls = _wire_site(mod, monkeypatch, tmp_path, pages)
+
+    # First run: both the index and the configured child are submitted.
+    r = mod._ping_sitemaps_for_site("s")
+    assert calls["put"] == ["https://s.test/sitemap.xml", "https://s.test/sitemap-blog.xml"]
+    assert r["gsc_submitted"] == 2
+
+    # Next tick, nothing changed: no PUT at all.
+    calls["put"].clear()
+    r = mod._ping_sitemaps_for_site("s")
+    assert calls["put"] == [] and r["gsc_skipped"] == 2
+
+    # The blog sitemap gains an article, but the last submit was minutes
+    # ago: still held back (at most one submission per 24h).
+    pages["https://s.test/sitemap-blog.xml"] = _BLOG_XML.replace(
+        "</urlset>", "<url><loc>https://s.test/blog/b</loc><lastmod>2026-10-01</lastmod></url></urlset>")
+    mod._ping_sitemaps_for_site("s")
+    assert calls["put"] == []
+
+    # 25h later only the changed child is re-submitted; the unchanged index is not.
+    state = mod._read_gsc_state("s")
+    for v in state.values():
+        v["submitted_at"] = time.time() - 25 * 3600
+    mod._write_gsc_state("s", state)
+    mod._ping_sitemaps_for_site("s")
+    assert calls["put"] == ["https://s.test/sitemap-blog.xml"]
+
+
+def test_gsc_failed_put_is_retried_next_tick(tmp_path, monkeypatch):
+    mod = _load_agent_module()
+    pages = {"https://s.test/sitemap.xml": _INDEX_XML}
+    calls = _wire_site(mod, monkeypatch, tmp_path, pages,
+                       extra_cfg={"gscChildSitemaps": []})
+    monkeypatch.setattr(mod, "_gsc_put_sitemap",
+                        lambda p, u, t: (calls["put"].append(u) or (False, "GSC HTTP 500")))
+    mod._ping_sitemaps_for_site("s")
+    mod._ping_sitemaps_for_site("s")
+    assert calls["put"] == ["https://s.test/sitemap.xml"] * 2
+    assert mod._read_gsc_state("s") == {}
+
+
+def test_gsc_submit_due_rules():
+    mod = _load_agent_module()
+    now = 1_000_000.0
+    due = lambda prev, fp: mod._gsc_submit_due(prev, fp, now, min_hours=24, max_hours=168)[0]
+    assert due(None, "a")
+    assert not due({"fingerprint": "a", "submitted_at": now - 3600}, "b")        # too soon
+    assert due({"fingerprint": "a", "submitted_at": now - 25 * 3600}, "b")       # changed
+    assert not due({"fingerprint": "a", "submitted_at": now - 25 * 3600}, "a")   # unchanged
+    assert due({"fingerprint": "a", "submitted_at": now - 170 * 3600}, "a")      # weekly refresh
+    assert not mod._gsc_submit_due({"fingerprint": "a", "submitted_at": now - 170 * 3600},
+                                   "a", now, min_hours=24, max_hours=0)[0]
+
+
+def test_sitemap_fingerprint_ignores_noise():
+    mod = _load_agent_module()
+    a = mod._sitemap_fingerprint(_INDEX_XML)
+    reordered = _INDEX_XML.replace("  <sitemap><loc>https://s.test/sitemap-core.xml</loc>"
+                                   "<lastmod>2026-09-30</lastmod></sitemap>\n", "")
+    reordered = reordered.replace("</sitemapindex>",
+                                  "<sitemap>\n <loc>https://s.test/sitemap-core.xml</loc>\n"
+                                  " <lastmod>2026-09-30</lastmod>\n</sitemap></sitemapindex>")
+    assert mod._sitemap_fingerprint(reordered) == a
+    assert mod._sitemap_fingerprint(_INDEX_XML.replace("2026-09-30</lastmod></sitemap>\n</sitemapindex>",
+                                                       "2026-10-01</lastmod></sitemap>\n</sitemapindex>")) != a
+    assert mod._sitemap_fingerprint(_BLOG_XML.replace("<priority>0.9</priority>", "")) == \
+        mod._sitemap_fingerprint(_BLOG_XML)
+    assert mod._sitemap_fingerprint("<html>challenge</html>") is None

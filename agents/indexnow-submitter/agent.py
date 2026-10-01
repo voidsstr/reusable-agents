@@ -42,6 +42,12 @@ _STATS_RE = re.compile(r"\[indexnow:(?P<site>[\w-]+)\]\s+stats\s+(?P<json>\{.*\}
 
 _STATE_DIR = Path(os.path.expanduser("~/.reusable-agents/indexnow-submitter"))
 
+# Truthful User-Agent for every fetch this agent makes against a site
+# (robots.txt, sitemaps, canonical endpoint). Never a crawler UA: until
+# 2026-10 the robots.txt pre-load claimed to be "Googlebot/2.1", and those
+# self-fetches showed up as fake Googlebot rows in the site's crawler log.
+_FETCH_UA = "Mozilla/5.0 (compatible; reusable-agents-indexnow/1.0)"
+
 
 def _ledger_recent(site: str, *, sent_days: float = 7.0, rej_days: float = 3.0) -> set[str]:
     """URLs the worker submitted (or rejected) recently, from its ledger.
@@ -349,6 +355,8 @@ class IndexnowSubmitter(AgentBase):
         sitemap_results = _ping_sitemaps_for_site(site) if site else _ping_sitemaps_all()
         metrics["sitemap_pings_attempted"] = float(sitemap_results["attempted"])
         metrics["sitemap_pings_ok"] = float(sitemap_results["ok"])
+        metrics["sitemap_gsc_submitted"] = float(sitemap_results.get("gsc_submitted", 0))
+        metrics["sitemap_gsc_skipped_unchanged"] = float(sitemap_results.get("gsc_skipped", 0))
         sitemap_summary = sitemap_results.get("summary", "")
         if sitemap_summary:
             self.decide("action", f"sitemap pings: {sitemap_summary}")
@@ -503,11 +511,20 @@ def _get_gsc_access_token() -> str | None:
         return None
 
 
-def _fetch_text(url: str, *, timeout: int = 30) -> str:
+def _request_headers(site: str = "") -> dict:
+    """Truthful UA plus the site's optional `probeHeaders` (sites.json), so a
+    site whose traffic logger honours a probe header never counts these
+    self-fetches as crawler or visitor traffic."""
+    headers = {"User-Agent": _FETCH_UA}
+    extra = _site_config(site).get("probeHeaders") if site else None
+    if isinstance(extra, dict):
+        headers.update({str(k): str(v) for k, v in extra.items() if k and v is not None})
+    return headers
+
+
+def _fetch_text(url: str, *, timeout: int = 30, headers: dict | None = None) -> str:
     import urllib.request
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (compatible; SpecPicksIndexNow/1.0)"},
-    )
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": _FETCH_UA})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
 
@@ -522,7 +539,7 @@ def _parse_sitemap_locs(xml_text: str) -> set[str]:
     return locs
 
 
-def _collect_sitemap_urls(sitemap_urls: list[str]) -> set[str]:
+def _collect_sitemap_urls(sitemap_urls: list[str], headers: dict | None = None) -> set[str]:
     """Recursively collect every <loc> across all sitemaps (including sub-
     sitemaps if the doc is a <sitemapindex>)."""
     seen: set[str] = set()
@@ -534,7 +551,7 @@ def _collect_sitemap_urls(sitemap_urls: list[str]) -> set[str]:
             continue
         visited.add(sm)
         try:
-            xml = _fetch_text(sm, timeout=20)
+            xml = _fetch_text(sm, timeout=20, headers=headers)
         except Exception:
             continue
         # If it's a sitemap-index, queue child sitemaps; else collect locs.
@@ -559,7 +576,7 @@ def _check_canonical_coverage_for_site(site: str) -> dict | None:
         return None
     try:
         import json as _json
-        body = _fetch_text(endpoint, timeout=60)
+        body = _fetch_text(endpoint, timeout=60, headers=_request_headers(site))
         data = _json.loads(body)
     except Exception:
         return None
@@ -572,7 +589,7 @@ def _check_canonical_coverage_for_site(site: str) -> dict | None:
             expected_set.add(entry["loc"])
     if not expected_set:
         return None
-    in_sitemap = _collect_sitemap_urls(sitemap_urls)
+    in_sitemap = _collect_sitemap_urls(sitemap_urls, headers=_request_headers(site))
     missing = sorted(expected_set - in_sitemap)
     return {
         "total": len(expected_set),
@@ -582,24 +599,123 @@ def _check_canonical_coverage_for_site(site: str) -> dict | None:
     }
 
 
-def _http_status(url: str, *, method: str = "HEAD", timeout: int = 12) -> tuple[int, str]:
-    """Return (status_code, detail). Used for sitemap reachability + robots check."""
+def _fetch_status_and_text(url: str, *, headers: dict | None = None,
+                           timeout: int = 20) -> tuple[int, str]:
+    """GET `url` → (status_code, body). Body is "" on any error; status is 0
+    when the request never got an HTTP response."""
     import urllib.request
     try:
-        req = urllib.request.Request(
-            url, method=method,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; SpecPicksIndexNow/1.0)"},
-        )
+        req = urllib.request.Request(url, headers=headers or {"User-Agent": _FETCH_UA})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, "ok"
+            return resp.status, resp.read().decode("utf-8", errors="ignore")
     except Exception as e:
         # urllib raises HTTPError for non-2xx; the status is on the exception.
+        return int(getattr(e, "code", 0) or 0), ""
+
+
+_SM_ENTRY_RE = re.compile(r"<(url|sitemap)\b[^>]*>(.*?)</\1\s*>", re.S | re.I)
+_SM_LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.I)
+_SM_LASTMOD_RE = re.compile(r"<lastmod>\s*([^<\s]+)\s*</lastmod>", re.I)
+
+
+def _sitemap_fingerprint(xml_text: str) -> str | None:
+    """Stable hash of a sitemap's (loc, lastmod) pairs — for an index that is
+    the child list plus each child's lastmod; for a urlset, every URL plus
+    its lastmod. Whitespace, ordering and other tags (changefreq, priority,
+    images) do not change it. None when the document has no <loc> at all."""
+    import hashlib
+    pairs = []
+    for m in _SM_ENTRY_RE.finditer(xml_text or ""):
+        body = m.group(2)
+        loc = _SM_LOC_RE.search(body)
+        if not loc:
+            continue
+        lm = _SM_LASTMOD_RE.search(body)
+        pairs.append(f"{loc.group(1).strip()}\t{lm.group(1).strip() if lm else ''}")
+    if not pairs:
+        return None
+    return hashlib.sha256("\n".join(sorted(set(pairs))).encode()).hexdigest()[:32]
+
+
+def _gsc_state_path(site: str) -> Path:
+    return _STATE_DIR / f"{site}.gsc-sitemaps.json"
+
+
+def _read_gsc_state(site: str) -> dict:
+    import json as _json
+    try:
+        doc = _json.loads(_gsc_state_path(site).read_text())
+        return doc if isinstance(doc, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_gsc_state(site: str, state: dict) -> None:
+    import json as _json
+    try:
+        p = _gsc_state_path(site)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(state, indent=2, sort_keys=True))
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def _gsc_submit_due(prev: dict | None, fingerprint: str | None, now: float, *,
+                    min_hours: float, max_hours: float) -> tuple[bool, str]:
+    """Should this sitemap be (re-)submitted to GSC now?
+
+    Submitting is a hint to fetch, not a ranking signal. Re-PUTting an
+    unchanged sitemap every tick (every 15 min on one site) kept the index
+    permanently "pending" in GSC and never made Google fetch the child that
+    actually changed. So: submit the first time, then only when the
+    (loc, lastmod) fingerprint changed — at most once per `min_hours` —
+    plus a slow refresh every `max_hours` (0 disables the refresh)."""
+    if not prev or not prev.get("submitted_at"):
+        return True, "first submission"
+    age_h = max(0.0, (now - float(prev["submitted_at"])) / 3600.0)
+    if age_h < min_hours:
+        return False, f"submitted {age_h:.1f}h ago (min {min_hours:g}h)"
+    if fingerprint is not None and fingerprint != prev.get("fingerprint"):
+        return True, "content changed"
+    if max_hours and age_h >= max_hours:
+        return True, f"refresh after {age_h:.0f}h"
+    return False, "unchanged" if fingerprint is not None else "content unreadable"
+
+
+def _gsc_put_sitemap(gsc_property: str, sm_url: str, access_token: str) -> tuple[bool, str]:
+    """PUT one sitemap to the Search Console API → (ok, detail)."""
+    try:
+        from urllib.parse import quote
+        import urllib.request
+        api = (
+            f"https://www.googleapis.com/webmasters/v3/sites/"
+            f"{quote(gsc_property, safe='')}/sitemaps/{quote(sm_url, safe='')}"
+        )
+        req = urllib.request.Request(
+            api, method="PUT",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if 200 <= resp.status < 300:
+                return True, "GSC submitted"
+            return False, f"GSC HTTP {resp.status}"
+    except Exception as e:
         code = getattr(e, "code", 0)
-        return int(code or 0), str(e)[:120]
+        return False, f"GSC ERR{(' '+str(code)) if code else ''} ({str(e)[:60]})"
+
+
+def _child_sitemaps_for_site(site: str) -> list[str]:
+    """Child sitemaps (sites.json `gscChildSitemaps`) submitted to GSC on
+    their own when their content changes — e.g. the blog sitemap, which
+    Google skipped for a week while it re-read the index every 15 min."""
+    urls = _site_config(site).get("gscChildSitemaps") or []
+    return [u for u in urls if isinstance(u, str) and u.startswith("http")]
 
 
 def _ping_sitemaps_for_site(site: str) -> dict:
-    """Per-site sitemap verification + GSC submission.
+    """Per-site sitemap verification + change-only GSC submission.
 
     Modern reality (2026): legacy `google.com/ping?sitemap=` and
     `bing.com/ping?sitemap=` ping endpoints are dead (Google: 404 since
@@ -609,47 +725,58 @@ def _ping_sitemaps_for_site(site: str) -> dict:
         - Bing   → IndexNow per-URL submission (already covered above).
 
     What this method does every run:
-        1. Every configured `sitemapUrls[*]` returns HTTP 200.
-        2. robots.txt references each sitemap (Google's documented modern
+        1. Every configured `sitemapUrls[*]` (and `gscChildSitemaps[*]`)
+           returns HTTP 200.
+        2. robots.txt references the sitemap (Google's documented modern
            hint).
-        3. GSC sitemap.submit for each sitemap against the site's
-           `gsc_property` siteUrl (reads OAuth from the same refresh-token
-           the seo-opportunity-agent collector uses).
+        3. GSC sitemap.submit against the site's `gsc_property` siteUrl —
+           ONLY when the sitemap's (loc, lastmod) fingerprint changed since
+           the last successful submission, at most once per
+           `gscMinResubmitHours` (default 24) and at least once per
+           `gscMaxResubmitHours` (default 168; 0 = never refresh). State
+           lives in `<state-dir>/<site>.gsc-sitemaps.json`.
     """
+    import time as _time
     sitemap_urls = _sitemap_urls_for_site(site)
     if not sitemap_urls:
         return {"attempted": 0, "ok": 0,
                 "summary": f"no sitemapUrls configured for site={site} in sites.json"}
 
+    cfg = _site_config(site)
+    headers = _request_headers(site)
+    min_h = float(cfg.get("gscMinResubmitHours",
+                          os.environ.get("INDEXNOW_GSC_MIN_RESUBMIT_H", 24)))
+    max_h = float(cfg.get("gscMaxResubmitHours",
+                          os.environ.get("INDEXNOW_GSC_MAX_RESUBMIT_H", 168)))
+
     attempted = 0
     ok = 0
+    submitted = 0
+    skipped = 0
     parts: list[str] = []
 
     # Pre-load robots.txt once per site (avoid re-fetching for every sitemap URL)
     robots_text = ""
     try:
         from urllib.parse import urlparse
-        first = sitemap_urls[0]
-        root = urlparse(first)
-        robots_url = f"{root.scheme}://{root.netloc}/robots.txt"
-        import urllib.request
-        req = urllib.request.Request(
-            robots_url,
-            headers={"User-Agent": "Googlebot/2.1 (+http://www.google.com/bot.html)"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            robots_text = resp.read().decode("utf-8", errors="ignore")
+        root = urlparse(sitemap_urls[0])
+        _code, robots_text = _fetch_status_and_text(
+            f"{root.scheme}://{root.netloc}/robots.txt", headers=headers, timeout=8)
     except Exception:
         pass
 
     # Per-site GSC token + property
     gsc_property = _gsc_property_for_site(site)
     access_token = _get_gsc_access_token()
+    state = _read_gsc_state(site)
+    state_dirty = False
+    now = _time.time()
 
-    for sm_url in sitemap_urls:
-        # Reachability check
+    targets = list(dict.fromkeys(sitemap_urls + _child_sitemaps_for_site(site)))
+    for sm_url in targets:
+        # Reachability check (GET: the body feeds the change fingerprint)
         attempted += 1
-        code, detail = _http_status(sm_url)
+        code, body = _fetch_status_and_text(sm_url, headers=headers)
         sm_short = sm_url.rsplit('/', 1)[-1]
         if 200 <= code < 300:
             ok += 1
@@ -657,36 +784,35 @@ def _ping_sitemaps_for_site(site: str) -> dict:
             parts.append(f"{sm_short}=HTTP {code}")
             continue  # don't try to submit a broken sitemap to GSC
 
-        # robots.txt reference check (one shared per-site result)
-        # Only emit once per site to keep the summary readable.
-
-        # GSC submit
-        if access_token and gsc_property:
-            attempted += 1
-            try:
-                from urllib.parse import quote
-                import urllib.request
-                api = (
-                    f"https://www.googleapis.com/webmasters/v3/sites/"
-                    f"{quote(gsc_property, safe='')}/sitemaps/{quote(sm_url, safe='')}"
-                )
-                req = urllib.request.Request(
-                    api, method="PUT",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if 200 <= resp.status < 300:
-                        ok += 1
-                        parts.append(f"{sm_short}=GSC submitted")
-                    else:
-                        parts.append(f"{sm_short}=GSC HTTP {resp.status}")
-            except Exception as e:
-                code = getattr(e, "code", 0)
-                parts.append(f"{sm_short}=GSC ERR{(' '+str(code)) if code else ''} ({str(e)[:60]})")
-        elif not access_token:
+        if not access_token:
             parts.append(f"{sm_short}=NO_OAUTH")
-        elif not gsc_property:
+            continue
+        if not gsc_property:
             parts.append(f"{sm_short}=NO_GSC_PROPERTY (set sites.json[].gsc_property)")
+            continue
+
+        fingerprint = _sitemap_fingerprint(body)
+        prev = state.get(sm_url) if isinstance(state.get(sm_url), dict) else None
+        due, why = _gsc_submit_due(prev, fingerprint, now,
+                                   min_hours=min_h, max_hours=max_h)
+        if not due:
+            skipped += 1
+            parts.append(f"{sm_short}=GSC skip ({why})")
+            continue
+
+        attempted += 1
+        put_ok, detail = _gsc_put_sitemap(gsc_property, sm_url, access_token)
+        if put_ok:
+            ok += 1
+            submitted += 1
+            state[sm_url] = {"fingerprint": fingerprint, "submitted_at": now}
+            state_dirty = True
+            parts.append(f"{sm_short}={detail} ({why})")
+        else:
+            parts.append(f"{sm_short}={detail}")
+
+    if state_dirty:
+        _write_gsc_state(site, state)
 
     # One-shot robots.txt status line
     attempted += 1
@@ -699,8 +825,10 @@ def _ping_sitemaps_for_site(site: str) -> dict:
     return {
         "attempted": attempted,
         "ok": ok,
+        "gsc_submitted": submitted,
+        "gsc_skipped": skipped,
         "summary": (f"site={site} property={gsc_property or '?'} "
-                    f"sitemaps={len(sitemap_urls)} :: " + ", ".join(parts)),
+                    f"sitemaps={len(targets)} :: " + ", ".join(parts)),
     }
 
 
@@ -708,6 +836,8 @@ def _ping_sitemaps_all() -> dict:
     """Verify + GSC-submit for every site in sites.json (no INDEXNOW_SITE env set)."""
     attempted = 0
     ok = 0
+    submitted = 0
+    skipped = 0
     summaries = []
     for entry in _read_sites_config():
         site_name = entry.get("name") or entry.get("site")
@@ -716,9 +846,12 @@ def _ping_sitemaps_all() -> dict:
         r = _ping_sitemaps_for_site(site_name)
         attempted += r["attempted"]
         ok += r["ok"]
+        submitted += r.get("gsc_submitted", 0)
+        skipped += r.get("gsc_skipped", 0)
         if r.get("summary"):
             summaries.append(r["summary"])
-    return {"attempted": attempted, "ok": ok, "summary": " | ".join(summaries)}
+    return {"attempted": attempted, "ok": ok, "gsc_submitted": submitted,
+            "gsc_skipped": skipped, "summary": " | ".join(summaries)}
 
 
 def main() -> int:
