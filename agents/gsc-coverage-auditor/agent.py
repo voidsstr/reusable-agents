@@ -49,6 +49,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core import metric_helper  # noqa: E402
+from framework.core import gsc_coverage  # noqa: E402
 
 
 class GscCoverageAuditor(AgentBase):
@@ -70,20 +71,13 @@ class GscCoverageAuditor(AgentBase):
         ))
 
     def signals(self) -> dict | None:
-        """Short-circuit when the coverage file hasn't been touched
-        since the last successful run. Inspect.py only appends when a
-        URL was inspected; if nothing's been inspected (quota exhausted,
-        site list stable), re-recording the same metrics is wasteful."""
-        cov = self._coverage_path()
-        site = os.environ.get("GSC_INSPECT_SITE", "")
-        if not cov.is_file():
-            return None
-        st = cov.stat()
-        return {
-            "site": site,
-            "coverage_mtime": int(st.st_mtime),
-            "coverage_size": st.st_size,
-        }
+        """No short-circuit. This agent's input is Google's index, which
+        changes without anything local changing. The old signal -- the
+        coverage file's mtime and size -- was taken BEFORE run(), and only
+        run() (inspect.py) writes that file, so one successful run that
+        appended nothing (every inspection rate-limited) would have matched
+        its own hash and skipped every run after it, for good."""
+        return None
 
     def run(self) -> RunResult:
         site = os.environ.get("GSC_INSPECT_SITE", "").strip()
@@ -153,28 +147,21 @@ class GscCoverageAuditor(AgentBase):
                 metrics={"urls_inspected_7d": 0, "indexed_pct": 0.0, "unknown_pct": 0.0},
             )
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
-        n_recent = 0
-        latest: dict[str, tuple[str, str]] = {}
         with cov.open() as fh:
-            for raw in fh:
-                try:
-                    r = json.loads(raw)
-                except Exception:
-                    continue
-                url = r.get("url")
-                ts = r.get("inspected_at", "")
-                if not url:
-                    continue
-                if ts >= cutoff:
+            lines = fh.readlines()
+        n_recent = 0
+        for raw in lines:
+            try:
+                if (json.loads(raw).get("inspected_at") or "") >= cutoff:
                     n_recent += 1
-                prev = latest.get(url, ("", ""))
-                if ts > prev[1]:
-                    latest[url] = (r.get("coverageState", ""), ts)
+            except Exception:
+                continue
+        latest = gsc_coverage.latest_by_url(lines)
 
         total = max(len(latest), 1)
-        n_idx = sum(1 for cs, _ in latest.values() if cs == "Submitted and indexed")
-        n_unk = sum(1 for cs, _ in latest.values() if cs == "URL is unknown to Google")
-        n_cni = sum(1 for cs, _ in latest.values() if cs == "Crawled - currently not indexed")
+        n_idx = sum(1 for r in latest.values() if gsc_coverage.is_indexed(r["state"], r["verdict"]))
+        n_unk = sum(1 for r in latest.values() if r["state"] == gsc_coverage.UNKNOWN_STATE)
+        n_cni = sum(1 for r in latest.values() if r["state"] in gsc_coverage.CRAWLED_NOT_INDEXED_STATES)
 
         metrics = {
             "urls_inspected_7d": float(n_recent),
@@ -183,6 +170,15 @@ class GscCoverageAuditor(AgentBase):
             "crawled_not_indexed_count": float(n_cni),
             "urls_in_universe": float(len(latest)),
         }
+        # Indexed % per section. The blended figure above is dominated by
+        # whichever section has been inspected most; these say whether the
+        # pages that matter are getting in. Sections under 20 URLs are noise.
+        sections = gsc_coverage.section_summary(latest)
+        ranked = sorted(sections.items(), key=lambda kv: -kv[1]["inspected"])
+        for name, c in ranked:
+            if c["inspected"] >= 20:
+                metrics[f"indexed_pct__{gsc_coverage.metric_key(name)}"] = round(100.0 * c["indexed"] / c["inspected"], 2)
+        by_section = " · ".join(f"{name} {c['indexed']}/{c['inspected']}" for name, c in ranked[:6])
 
         # Layer-A: also push to metric_helper using the legacy goal_id
         # keys so site-goals-tracker rollups stay consistent.
@@ -205,7 +201,7 @@ class GscCoverageAuditor(AgentBase):
             summary=(
                 f"{site}: inspected {n_recent} URLs in last 7d, "
                 f"indexed={metrics['indexed_pct']}%, unknown={metrics['unknown_pct']}% "
-                f"(universe={int(metrics['urls_in_universe'])})"
+                f"(universe={int(metrics['urls_in_universe'])}); indexed by section: {by_section}"
             ),
             metrics=metrics,
         )

@@ -52,7 +52,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO))
 
-from framework.core import metric_helper, goals as goals_mod, human_clicks
+from framework.core import metric_helper, goals as goals_mod, human_clicks, gsc_coverage
 
 
 # 2026-05-11: the legacy `seo-data-collector` agent was retired in
@@ -486,7 +486,8 @@ def collect_metrics(profile: dict) -> dict[str, float]:
             for cs, _ in latest.values():
                 states[cs] = states.get(cs, 0) + 1
             total = sum(states.values()) or 1
-            indexed = states.get("Submitted and indexed", 0)
+            # Both of Google's indexed states (framework/core/gsc_coverage.py).
+            indexed = sum(n for cs, n in states.items() if cs in gsc_coverage.INDEXED_STATES)
             unknown = states.get("URL is unknown to Google", 0)
             crawled_not_indexed = (
                 states.get("Crawled - currently not indexed", 0)

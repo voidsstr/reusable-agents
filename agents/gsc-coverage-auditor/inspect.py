@@ -78,6 +78,9 @@ from typing import Any, Optional
 import psycopg2
 
 HERE = Path(__file__).resolve().parent
+if str(HERE.parent.parent) not in sys.path:
+    sys.path.insert(0, str(HERE.parent.parent))
+from framework.core import gsc_coverage  # noqa: E402
 # Site-specific configs live in each site's repo at
 # ~/development/<site>/agents/seo-config/site-indexnow.json. Override with
 # SITE_CONFIG_PATHS=<path1>,<path2> to use explicit files. Last-resort
@@ -152,6 +155,9 @@ DEFAULT_LIMIT = int(os.environ.get("GSC_INSPECT_LIMIT", "150"))
 # huge unused capacity on the table.
 DEFAULT_QPS = float(os.environ.get("GSC_INSPECT_QPS", "2.0"))
 DRY_RUN = os.environ.get("GSC_INSPECT_DRY_RUN", "0") == "1"
+# A URL inspected more recently than this sits out the next runs, so small
+# sections do not spend the daily quota on pages that cannot have changed.
+REINSPECT_MIN_AGE_DAYS = float(os.environ.get("GSC_INSPECT_MIN_AGE_DAYS", "14"))
 
 
 def err(*a) -> None:
@@ -193,41 +199,59 @@ def load_site(site_name: str) -> dict:
     raise SystemExit(f"site {site_name!r} not found in any site config")
 
 
-def slugify(s: str) -> str:
-    return ("".join(c if c.isalnum() else "-" for c in (s or "").lower())
-            .strip("-").replace("--", "-").replace("--", "-"))
+def slugify(s) -> str:
+    """Same as submit.ts slugify: strip diacritics, lowercase, runs of
+    anything else to one '-', trim, at most 80 chars."""
+    import re
+    import unicodedata
+    t = unicodedata.normalize("NFD", str(s if s is not None else ""))
+    t = "".join(ch for ch in t if not ("\u0300" <= ch <= "\u036f"))
+    return re.sub(r"[^a-z0-9]+", "-", t.lower()).strip("-")[:80]
 
 
-def render_url(host: str, prefix: str, template: str, row: tuple) -> Optional[str]:
-    """Mirror submit.ts urlTemplate semantics."""
+def render_url(host: str, prefix: str, template: str, row: dict) -> Optional[str]:
+    """Same as submit.ts buildUrl: template parts name COLUMNS of the row.
+
+    This used to read fields by position, taking row[0] as the title and
+    row[1] as the id. A querySet selecting `id, title` (the recipe one) then
+    rendered every URL as /recipes/<id>-<Raw Title With Spaces> -- 141k URLs
+    that do not exist, in the inspection universe since the auditor began.
+      "slug"                      -> row["slug"]
+      "slugify:title|-|id"        -> slugify(title) + "-" + slugify(id)
+      "compose:left|-vs-|right"   -> left + "-vs-" + right (no slugify)
+    A part that is not a column is a literal (`lit:<text>` forces one); an
+    identifier the row lacks is a missing column, so no URL is invented.
+    """
+    import re
     if not row:
         return None
     if template == "slug":
-        return f"https://{host}{prefix}{row[0]}"
-    if template.startswith("slugify:"):
-        # "slugify:title|-|id" → slugify(title) + '-' + id
-        rest = template.split(":", 1)[1]
-        parts = rest.split("|")
-        out = []
-        for i, p in enumerate(parts):
-            if i % 2 == 0:
-                # field name
-                idx = i // 2
-                if idx < len(row):
-                    val = row[idx]
-                    out.append(slugify(str(val)) if i == 0 or template.startswith("slugify:") else str(val))
-            else:
-                out.append(p)
-        # The pattern is field|sep|field — stitch as: slugify(row[0]) + sep + str(row[1])
-        if len(parts) >= 3 and len(row) >= 2:
-            return f"https://{host}{prefix}{slugify(str(row[0]))}{parts[1]}{row[1]}"
-        return f"https://{host}{prefix}{slugify(str(row[0]))}"
-    if template.startswith("compose:"):
-        rest = template.split(":", 1)[1]
-        parts = rest.split("|")
-        if len(parts) == 3 and len(row) >= 2:
-            return f"https://{host}{prefix}{row[0]}{parts[1]}{row[1]}"
-    return None
+        v = row.get("slug")
+        return f"https://{host}{prefix}{v}" if v not in (None, "") else None
+    if not template.startswith(("slugify:", "compose:")):
+        return None
+    do_slug = template.startswith("slugify:")
+    out: list[str] = []
+    for part in template.split(":", 1)[1].split("|"):
+        if not part:
+            continue
+        if part.startswith("lit:"):
+            out.append(part[4:])
+        elif re.fullmatch(r"[-_.\\/]+", part):
+            out.append(part)
+        elif part in row:
+            v = row[part]
+            if v is None or v == "":
+                return None
+            out.append(slugify(v) if do_slug else str(v))
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part):
+            return None
+        else:
+            out.append(part)
+    path = "".join(out)
+    if not re.sub(r"[-_.\\/]", "", path):
+        return None
+    return f"https://{host}{prefix}{path}"
 
 
 def collect_urls_from_db(site: dict) -> set[str]:
@@ -247,9 +271,10 @@ def collect_urls_from_db(site: dict) -> set[str]:
             cur = conn.cursor()
             try:
                 cur.execute(sql)
-                for row in cur.fetchall():
+                cols = [d[0] for d in cur.description]
+                for values in cur.fetchall():
                     url = render_url(site["host"], qs.get("urlPrefix", "/"),
-                                     qs.get("urlTemplate", "slug"), row)
+                                     qs.get("urlTemplate", "slug"), dict(zip(cols, values)))
                     if url:
                         out.add(url)
             except Exception as e:
@@ -284,6 +309,26 @@ def collect_urls_from_db(site: dict) -> set[str]:
                     out.add(u)
         except Exception as e:
             err(f"  sitemap fetch failed for {sitemap_url}: {e}")
+    return out
+
+
+def collect_section_urls(site: dict) -> dict[str, str]:
+    """{url: label} for every URL in the sitemaps the site config labels
+    (`inspectSectionSitemaps: {label: sitemap_url}`), so a curated subset is
+    sampled and reported as its own section. First label wins."""
+    import re
+    out: dict[str, str] = {}
+    headers = {"User-Agent": "GSCCoverageAuditor/1.0", **(site.get("probeHeaders") or {})}
+    for label, sitemap_url in (site.get("inspectSectionSitemaps") or {}).items():
+        try:
+            req = urllib.request.Request(sitemap_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as r:
+                xml = r.read().decode("utf-8", "replace")
+        except Exception as e:
+            err(f"  section sitemap {label!r} fetch failed: {e}")
+            continue
+        for u in re.findall(r"<loc>([^<]+)</loc>", xml):
+            out.setdefault(u.strip(), label)
     return out
 
 
@@ -404,11 +449,20 @@ def main() -> None:
         return
 
     last = load_last_inspected(site_name)
-    # Sort URLs by last-inspected (oldest first), so we cycle round-robin
-    sortable = [(last.get(u, "1970-01-01T00:00:00Z"), u) for u in universe]
-    sortable.sort()
-    targets = [u for (_, u) in sortable[:DEFAULT_LIMIT]]
-    err(f"[gsc-coverage] picking {len(targets)} oldest URLs (or never-inspected)")
+    # Every section of the site gets an equal share of the run (see
+    # framework/core/gsc_coverage.py). Oldest-first over the whole universe
+    # took never-inspected URLs alphabetically, one slug prefix at a time.
+    section_urls = collect_section_urls(site)
+    universe |= set(section_urls)
+    targets = gsc_coverage.pick_targets(universe, last, DEFAULT_LIMIT,
+                                        min_age_days=REINSPECT_MIN_AGE_DAYS,
+                                        section_urls=section_urls)
+    picked: dict[str, int] = {}
+    for u in targets:
+        sec = gsc_coverage.section_of(u, section_urls)
+        picked[sec] = picked.get(sec, 0) + 1
+    err(f"[gsc-coverage] picking {len(targets)} URLs across {len(picked)} sections: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(picked.items(), key=lambda kv: -kv[1])[:12]))
 
     if DRY_RUN:
         for u in targets[:10]:
@@ -433,6 +487,7 @@ def main() -> None:
                     time.sleep(interval)
                 continue
             row = flatten_inspection(target, response)
+            row["section"] = gsc_coverage.section_of(target, section_urls)
             f_out.write(json.dumps(row) + "\n")
             n_ok += 1
             cs = row.get("coverageState") or "(unknown)"
@@ -458,50 +513,22 @@ def main() -> None:
         from framework.core import metric_helper
         agent_id = f"{site_name}-gsc-coverage-auditor"
 
-        # 7d rolling URL count from the jsonl
+        # 7d rolling URL count + newest state per URL from the jsonl
         from datetime import timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+        with out_path.open() as fh:
+            lines = fh.readlines()
         n_recent = 0
-        latest_state: dict[str, str] = {}
-        try:
-            with out_path.open() as fh:
-                for raw in fh:
-                    try:
-                        row = json.loads(raw)
-                    except Exception:
-                        continue
-                    ts = row.get("inspected_at", "")
-                    if ts >= cutoff:
-                        n_recent += 1
-                    cs = row.get("coverageState") or ""
-                    if cs:
-                        url = row.get("url", "")
-                        if url and (url not in latest_state or ts > latest_state.get(url, ("", ""))[1] if False else True):
-                            latest_state[url] = (cs, ts)
-        except Exception:
-            pass
-        # Simpler latest-state pass (the above was over-engineered)
-        latest_state = {}
-        try:
-            with out_path.open() as fh:
-                for raw in fh:
-                    try:
-                        row = json.loads(raw)
-                    except Exception:
-                        continue
-                    url = row.get("url")
-                    if not url:
-                        continue
-                    cs = row.get("coverageState") or ""
-                    ts = row.get("inspected_at", "")
-                    prev = latest_state.get(url, ("", ""))
-                    if ts > prev[1]:
-                        latest_state[url] = (cs, ts)
-        except Exception:
-            pass
-        total_urls = len(latest_state) or 1
-        n_indexed = sum(1 for cs, _ in latest_state.values() if cs == "Submitted and indexed")
-        n_unknown = sum(1 for cs, _ in latest_state.values() if cs == "URL is unknown to Google")
+        for raw in lines:
+            try:
+                if (json.loads(raw).get("inspected_at") or "") >= cutoff:
+                    n_recent += 1
+            except Exception:
+                continue
+        latest = gsc_coverage.latest_by_url(lines)
+        total_urls = len(latest) or 1
+        n_indexed = sum(1 for r in latest.values() if gsc_coverage.is_indexed(r["state"], r["verdict"]))
+        n_unknown = sum(1 for r in latest.values() if r["state"] == gsc_coverage.UNKNOWN_STATE)
         metrics = {
             "goal-urls-inspected-7d": float(n_recent),
             "goal-indexed-pct": round(100.0 * n_indexed / total_urls, 2),

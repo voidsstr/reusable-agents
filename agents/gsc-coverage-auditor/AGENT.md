@@ -46,14 +46,14 @@ not recorded anywhere.
    1. Locates `refresh-token.py`, checking in order: `GSC_REFRESH_SCRIPT`, then `agents/seo-opportunity-agent/lib/collector/refresh-token.py`, then the legacy `agents/seo-data-collector/`, then the nsc-assistant `_legacy-seo-opportunity-agent/`. It exits if none exists.
    2. Loads the site config, checking in order: `SITE_CONFIG_PATHS`, then `~/development/{aisleprompt,specpicks}/agents/seo-config/site-indexnow.json`, then this dir's `sites.json`. `sites.json` is a symlink to `indexnow-submitter/sites.json` and is only the legacy fallback. On whitebeast, the per-site `site-indexnow.json` file wins.
    3. **Step 0, sitemap submit.** Skipped on dry run or when `GSC_INSPECT_SKIP_SITEMAP_SUBMIT=1`. Otherwise it PUTs each `sitemapUrls[]` entry to the Search Console Sitemaps API for `gscSiteUrl` or `sc-domain:<host>`. A 401/403 means the token lacks write scope, and the step is skipped.
-   4. **URL universe.** Runs every querySet's `bulkSql` (psycopg2) and renders the URLs. It also adds every `<loc>` in the sitemaps, following sitemap-index children up to 20 per index.
-   5. **Pick targets.** Sorts URLs by last-inspected time (never inspected sorts first) and takes the oldest `GSC_INSPECT_LIMIT` (150).
-   6. **Inspect.** POSTs `searchconsole.googleapis.com/v1/urlInspection/index:inspect` for each URL at `GSC_INSPECT_QPS` (2.0). A 429 gets one retry after a 60 s sleep. Each success appends a flattened row to `<state>/<site>-coverage.jsonl` and updates `<state>/<site>-last-inspected.json` (saved every 50 URLs and at the end). A failed URL is not marked, so it is retried next run.
+   4. **URL universe.** Runs every querySet's `bulkSql` (psycopg2) and renders the URLs with the same template rules as `indexnow-submitter/submit.ts`: template parts name **columns** of the row (`slugify:title|-|id` → slugify(title)-id). It also adds every `<loc>` in the sitemaps, following sitemap-index children up to 20 per index, plus every URL of the site's `inspectSectionSitemaps`.
+   5. **Pick targets** (`framework/core/gsc_coverage.pick_targets`). URLs are grouped into sections: the label `inspectSectionSitemaps` gives them, else the first path segment (`/recipes/x` → `recipes`). Sections take turns, one URL each per round, until `GSC_INSPECT_LIMIT` (150). Within a section, never-inspected URLs go first in a stable hash order, then the ones unchecked longest. A URL inspected within `GSC_INSPECT_MIN_AGE_DAYS` (14) sits out.
+   6. **Inspect.** POSTs `searchconsole.googleapis.com/v1/urlInspection/index:inspect` for each URL at `GSC_INSPECT_QPS` (2.0). A 429 gets one retry after a 60 s sleep. Each success appends a flattened row, including its `section`, to `<state>/<site>-coverage.jsonl` and updates `<state>/<site>-last-inspected.json` (saved every 50 URLs and at the end). A failed URL is not marked, so it is retried next run.
    7. **Layer-A metrics.** Records `goal-urls-inspected-7d`, `goal-indexed-pct`, and `goal-unknown-pct` for `<site>-gsc-coverage-auditor` via `metric_helper.record_many`.
 4. **Check the worker result.** A non-zero rc → `RunResult(failure)` with the stderr tail. A missing coverage file → failure.
 5. **Compute metrics.** Reads the coverage JSONL and keeps the latest row per URL (see Goals & metrics).
 6. **Record Layer-A again.** Writes the same three goal ids a second time, so each run adds two points per goal.
-7. **Return the result.** `RunResult(success)` with summary `"<site>: inspected N URLs in last 7d, indexed=X%, unknown=Y% (universe=U)"`.
+7. **Return the result.** `RunResult(success)` with summary `"<site>: inspected N URLs in last 7d, indexed=X%, unknown=Y% (universe=U); indexed by section: recipes 3/120 · blog 0/495 …"`. Indexed means either of Google's indexed states (`Submitted and indexed`, `Indexed, not submitted in sitemap`) or verdict `PASS`. `RunResult.metrics` also carries `indexed_pct__<section>` for every section with at least 20 inspected URLs.
 
 ## Inputs
 
@@ -151,6 +151,7 @@ Latest state per URL (coverage JSONL, 2026-09-23):
 | `GSC_INSPECT_QPS` | `2.0` | Request rate cap. Google's per-minute limit is the real ceiling |
 | `GSC_INSPECT_TIMEOUT_S` | `1800` | `agent.py` timeout for the `inspect.py` subprocess |
 | `GSC_INSPECT_STATE_DIR` | `~/.reusable-agents/gsc-coverage-auditor` | Honoured by `inspect.py` and the analyzer. **`agent.py` always reads the default dir** when computing metrics |
+| `GSC_INSPECT_MIN_AGE_DAYS` | `14` | A URL inspected more recently than this is not picked again |
 | `GSC_INSPECT_DRY_RUN` | `0` | `1` prints the first 10 target URLs; no API calls and no sitemap submit |
 | `GSC_INSPECT_SKIP_SITEMAP_SUBMIT` | unset | `1` skips step 0 |
 | `GSC_OAUTH_FILE` | `~/.reusable-agents/seo/.oauth.json` | OAuth refresh-token file |
@@ -158,29 +159,21 @@ Latest state per URL (coverage JSONL, 2026-09-23):
 | `SITE_CONFIG_PATHS` | unset | Comma-separated config files that override discovery |
 | `AGENT_FORCE_RUN` | unset | Framework escape hatch. `1` bypasses the auto short-circuit for one run (no effect today, because the short-circuit never fires; see below) |
 
+Site config (`<site>/agents/seo-config/site-indexnow.json`, shared with the IndexNow submitter):
+
+| Key | Meaning |
+|---|---|
+| `inspectSectionSitemaps` | `{label: sitemap_url}`. URLs in that sitemap are sampled and reported as section `label`, e.g. a curated subset measured apart from the bulk pages of the same path |
+| `probeHeaders` | Headers sent with the section-sitemap fetch, so the site can tell our own requests from visitors |
+
 ## Short-circuit & idempotency
 
-- `signals()` returns `{site, coverage_mtime, coverage_size}` for the
-  coverage JSONL (or `None` if the file is missing), but **the short-circuit
-  never fires**. `run()` returns no `next_state`, so the hash is never
-  persisted: `AgentBase._check_short_circuit()` writes
-  `_auto_signals_hash` into `self.state`, while `post_run()` saves
-  `result.next_state`, which defaults to `{}`. `state/latest.json` holds
-  `"state": {}` for both `aisleprompt-gsc-coverage-auditor` and
-  `specpicks-gsc-coverage-auditor` (checked 2026-09-23). Every tick runs
-  `inspect.py`.
-- **Warning for whoever fixes persistence:** the hash is taken *before*
-  `inspect.py` runs, and only `inspect.py` changes the coverage file. Once
-  the hash is persisted, a successful run that appends nothing (for example,
-  every inspection fails individually, or the universe is empty and
-  `inspect.py` exits early) leaves the file unchanged, so every later run
-  short-circuits indefinitely. Change `signals()` in the same change (for
-  example, hash the URL universe or the last-inspected file).
-  - If an instance does get stuck that way, run it by hand with
-    `AGENT_FORCE_RUN=1` in the process environment (source
-    `~/.reusable-agents/secrets.env`, then
-    `AGENT_FORCE_RUN=1 bash <instance>/run.sh`). Prefixing
-    `systemctl --user start` with the variable does not pass it to the unit.
+- `signals()` returns `None`: no short-circuit (2026-10-02). The input is
+  Google's index, which changes without anything local changing. The old
+  signal (the coverage file's mtime and size) was taken before `run()`,
+  and only `inspect.py` writes that file, so once the hash was persisted a
+  successful run that appended nothing would have matched its own hash and
+  skipped every run after it.
 - Re-running is safe. The round-robin picks different URLs, and the JSONL is
   append-only. Consumers take the latest row per URL.
 
@@ -242,6 +235,7 @@ GSC_INSPECT_SITE=specpicks GSC_INSPECT_LIMIT=10 GSC_INSPECT_DRY_RUN=1 python3 in
 - 2026-05-05: 2 RPS and 429 backoff (`f346d66`).
 - 2026-05-11: converted to AgentBase (`agent.py`), per its docstring. The file was first committed on 2026-05-13 (`ab2fc5e`).
 - 2026-08-14: revived after about 90 zero-output runs (`4cf975f`). Default limit 500 → 150 to fit the 1800 s timeout (`6fbae7a`).
+- 2026-10-02: the sample was not a sample. Never-inspected URLs were taken alphabetically, so 150/day walked `/blog` then `/kitchen`; aisleprompt's `indexed=0.03%` described its product pages, and `/recipes` would not have been reached for years. `render_url` read template fields by position, so all 141k aisleprompt recipe URLs in the universe were `/recipes/<id>-<Raw Title>` (non-existent; universe 291,984 → 160,354 after the fix, 97.8% matching the site's own sitemap URLs). Now: stratified picker, per-section metrics, both indexed states, no short-circuit. Expect the blended `indexed_pct` to move as new sections are sampled: that is the measurement changing, not the site.
 
 ## Related agents
 
