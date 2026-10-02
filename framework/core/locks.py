@@ -248,6 +248,20 @@ def site_dispatch_lock(site: str, *, timeout_s: int = 1800):
         lock.release()
 
 
+def site_deploy_lock(target: str, *, timeout_s: int = 2700) -> FileLock:
+    """At most one build -> deploy -> smoke -> rollback per deploy target.
+
+    site_dispatch_lock does not cover this: the drainer launches implementer
+    scopes without it, and on 2026-10-02 two dispatches deployed the same
+    Container App minutes apart. Each smoke check hit the other's revision
+    swap, both failed and both rolled back, and one rollback can also undo the
+    other's release. Returned un-acquired: the deployer takes it before the
+    build, so a later build starts from a HEAD that already holds the earlier
+    dispatch's commits, and releases it when the run ends.
+    """
+    return FileLock(f"deploy-{_safe(target or '_default')}", timeout_s=timeout_s)
+
+
 @contextmanager
 def ollama_dispatch_lock(
     *,

@@ -26,6 +26,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from shared.site_config import load_config_from_env  # noqa: E402
 from framework.core import deploy_gate  # noqa: E402
+from framework.core.locks import site_deploy_lock  # noqa: E402
 
 
 def _now_iso() -> str:
@@ -494,6 +495,7 @@ def main() -> None:
         deploy_meta["ended_at"] = _now_iso()
         (run_dir / "deploy.json").write_text(json.dumps(deploy_meta, indent=2))
 
+    deploy_lock = None
     try:
         # ---- 1. Test (hard gate) ----
         # Tiered test scope:
@@ -578,6 +580,26 @@ def main() -> None:
         if args.dry_run:
             deploy_meta["status"] = "dry-run"; _save()
             return
+
+        # ---- 1b. One deploy per target at a time ----
+        # Held from the build through smoke/rollback (released in the outer
+        # finally). Two overlapping deploys of one app fail each other's smoke
+        # and roll each other back; see site_deploy_lock.
+        deploy_lock = site_deploy_lock(
+            str(deploy_vars.get("app") or cfg.site_id),
+            timeout_s=int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "2700")))
+        if not deploy_lock.try_acquire():
+            print(f"[deployer] waiting for {deploy_lock.path.name}: another deploy "
+                  f"of this target is in flight", file=sys.stderr)
+            try:
+                deploy_lock.acquire()
+            except TimeoutError as e:
+                deploy_meta["status"] = "failure"
+                deploy_meta["error"] = f"deploy lock: {e}"
+                _save()
+                print(f"[deployer] {e}; not deploying alongside it", file=sys.stderr)
+                sys.exit(1)
+            print("[deployer] deploy lock acquired", file=sys.stderr)
 
         # ---- 2. Build ----
         b = deployer.get("build", {})
@@ -970,6 +992,9 @@ def main() -> None:
         deploy_meta["error"] = str(e)
         _save()
         raise
+    finally:
+        if deploy_lock is not None:
+            deploy_lock.release()
 
 
 if __name__ == "__main__":
