@@ -433,8 +433,8 @@ into the SpecPicks Postgres DB**. Different rules apply:
        `seo_title`, `seo_description`, `last_verified_at=NOW()`,
        `written_at=NOW()`, `written_by='claude-opus-{model}'`,
        `status='published'`, `published_at=COALESCE(published_at,NOW())`.
-   - **DB connection** comes from `DATABASE_URL` (or
-     `DATABASE_URL='postgresql://nscadmin:NscP0stgr3s!2026@nscappsdb.postgres.database.azure.com:5432/specpicks?sslmode=require'`).
+   - **DB connection** comes from `DATABASE_URL` (set from `DATABASE_URL_SPECPICKS` in
+     `~/.reusable-agents/secrets.env`; never write the DSN into a tracked file).
      Prefer a small TypeScript helper in `scripts/_write-next-article.ts` /
      `scripts/_write-next-guide.ts` over ad-hoc psql commands; delete
      after the article is inserted.
