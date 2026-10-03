@@ -58,6 +58,12 @@ def load_config(path: Path) -> dict:
     for k in ("host", "port"):
         if not cfg["imap"].get(k):
             raise SystemExit(f"config.imap.{k} is required")
+    for k in ("host", "username"):
+        if str(cfg["imap"].get(k) or "").lower().endswith("example.com"):
+            raise SystemExit(
+                f"config.imap.{k} is still the config.example.yaml placeholder "
+                f"({cfg['imap'][k]}); set the real mailbox in {path}"
+            )
     auth_method = cfg["imap"].get("auth_method", "password")
     if auth_method == "oauth2":
         # username can be inherited from the oauth file's username_hint
@@ -1692,7 +1698,13 @@ def tick(cfg: dict, state: dict) -> dict:
                 )
             except Exception as ne:
                 print(f"[responder] notify_operator failed: {ne}", file=sys.stderr)
+        # agent.py turns this into a failed run. From the 2026-08-13 host
+        # standup until 2026-10-03 the config still named imap.example.com:
+        # every tick failed here and still reported success, so no monitor
+        # saw seven weeks of unread replies.
+        state["last_tick_error"] = f"IMAP connect failed: {e}"[:300]
         return state
+    state.pop("last_tick_error", None)
 
     try:
         msgs = fetch_unseen(conn)

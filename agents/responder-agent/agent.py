@@ -78,6 +78,12 @@ class ResponderAgent(AgentBase):
                     current_action="tick")
         new_state = _responder.tick(cfg, state)
         _responder.save_state(new_state)
+        if new_state.get("last_tick_error"):
+            return RunResult(
+                status="failure",
+                summary=new_state["last_tick_error"],
+                error_text=new_state["last_tick_error"],
+            )
 
         # Surface per-tick metrics if responder.tick() recorded them
         # (best-effort: the existing tick logs to stderr; we capture the
