@@ -169,6 +169,12 @@ phase_repos() {
         n=$(ls -d "$dir"/agents/*/manifest.json 2>/dev/null | wc -l)
         [ "$n" -gt 0 ] && green "$name: $n agent manifests" || yellow "$name: no agent manifests (ok for a pure site repo)"
     done
+
+    # Refuse commits that add a live secrets.env value (2026-10-03: the DB
+    # password had spread into 203 tracked files, one public).
+    local repo_dirs=("$DEV_ROOT/reusable-agents")
+    for spec in "${REPOS[@]}"; do repo_dirs+=("$DEV_ROOT/${spec%%:*}"); done
+    bash "$DEV_ROOT/reusable-agents/install/install-git-hooks.sh" "${repo_dirs[@]}" | sed 's/^/  /'
 }
 
 # ── phase: deps ─────────────────────────────────────────────────────────────
