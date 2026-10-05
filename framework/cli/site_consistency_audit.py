@@ -133,23 +133,40 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
-def _get(url: str, timeout: int, method: str = "GET", ua: str = UA):
+RETRY_PAUSE_S = 3
+
+
+def _get(url: str, timeout: int, method: str = "GET", ua: str = UA, retries: int = 1):
     """Fetch one URL WITHOUT following redirects.
 
     Returns (status, headers, body_text, elapsed_s). A 3xx carries its
     Location header so the caller can record the hop.
+
+    A failure with no HTTP response at all (connection reset, refused, timed
+    out) is retried `retries` times before it is reported as status 0. The
+    evening crawls of 2026-10-03 and 10-04 each flagged two specpicks
+    benchmark pages "unreachable" on a single URLError while the pages served
+    200 minutes later, and a new kind marks the whole run as a regression. An
+    HTTP error status is a real answer from the server and is never retried.
+    elapsed_s times the attempt that answered, so a retry cannot fake a slow page.
     """
-    t0 = time.time()
-    try:
-        rq = urllib.request.Request(url, headers={"User-Agent": ua}, method=method)
-        with _OPENER.open(rq, timeout=timeout) as r:
-            body = b"" if method == "HEAD" else r.read(800_000)
-            return r.status, dict(r.headers), body.decode("utf-8", "replace"), time.time() - t0
-    except urllib.error.HTTPError as e:
-        hd = dict(getattr(e, "headers", {}) or {})
-        return e.code, hd, "", time.time() - t0
-    except Exception as e:
-        return 0, {"_err": type(e).__name__}, "", time.time() - t0
+    for attempt in range(retries + 1):
+        t0 = time.time()
+        try:
+            rq = urllib.request.Request(url, headers={"User-Agent": ua}, method=method)
+            with _OPENER.open(rq, timeout=timeout) as r:
+                body = b"" if method == "HEAD" else r.read(800_000)
+                return r.status, dict(r.headers), body.decode("utf-8", "replace"), time.time() - t0
+        except urllib.error.HTTPError as e:
+            hd = dict(getattr(e, "headers", {}) or {})
+            return e.code, hd, "", time.time() - t0
+        except Exception as e:
+            err = e
+            if attempt < retries:
+                time.sleep(RETRY_PAUSE_S)
+    reason = getattr(err, "reason", None) or err
+    return 0, {"_err": f"{type(err).__name__}: {reason}"[:160],
+               "_attempts": retries + 1}, "", time.time() - t0
 
 
 def _text_of(html: str) -> str:
@@ -225,7 +242,8 @@ def audit_page(url, html, status, headers, elapsed, cfg) -> dict:
         findings.append(dict(severity=sev, kind=kind, url=url, message=msg, **extra))
 
     if status == 0:
-        add("error", "unreachable", f"request failed ({headers.get('_err', '?')})")
+        add("error", "unreachable", f"request failed after {headers.get('_attempts', 1)} "
+                                    f"attempt(s) ({headers.get('_err', '?')})")
         return rec
     if 300 <= status < 400:
         loc = headers.get("Location") or headers.get("location") or ""
