@@ -78,6 +78,13 @@ SITE_PROFILES: dict[str, dict] = {
         # The instacart-clicks and amazon-clicks events show outbound
         # interest even when GA4 doesn't yet record a confirmed cart.
         "conversion_events": ["instacart-cart", "instacart-clicks", "amazon-clicks"],
+        # Every cart-create path on the site goes through trackInstacartCart
+        # (frontend/src/utils/analytics.ts), which sends `instacart_cart_create`.
+        # GA4 event names cannot contain hyphens, so the goal name never matched
+        # and the money goal read 0 while GA4 held the real cart creates.
+        "ga4_event_aliases": {
+            "instacart-cart": ["instacart_cart_create"],
+        },
         # First-party fallback, authoritative for outbound clicks. See
         # CONVERSION_SQL_NOTE below.
         "conversion_sql": {

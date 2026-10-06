@@ -63,7 +63,11 @@ and both wrappers now pass `--site=`.
      redirects, so GA4 never sees them. On 2026-08-14, GA4 reported 0 while
      the DB held thousands of clicks (commit 70593c5). SpecPicks' GA4 events
      are named `amazon_click` / `ebay_click`. They are summed through
-     `ga4_event_aliases` (commit 5abd5ef, 2026-09-16).
+     `ga4_event_aliases` (commit 5abd5ef, 2026-09-16). AislePrompt's cart
+     creates arrive as `instacart_cart_create`. Without that alias,
+     `goal-instacart-cart-30d` read 0 until 2026-10-06, when GA4 held 2.
+     GA4 event names cannot contain hyphens, so every hyphenated goal event
+     needs an alias to its real GA4 name.
    - **Verified human clicks only (2026-09-24).** The first-party side is
      no longer a raw row count. The click tables log every hit on the redirect
      endpoint, so on 2026-09-24 specpicks showed 21,258 Amazon "clicks" in 30d
