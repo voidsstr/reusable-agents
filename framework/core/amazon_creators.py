@@ -740,6 +740,25 @@ def _pick_listing(listings: list) -> dict:
             or listings[0])
 
 
+# Amazon serves every rendition of a photo from the same image id, and
+# `<id>._AC_SL1500_.jpg` is the largest it will serve. `image_url` from
+# parse_item() is the 500px "large" rendition. A writer that stores it raw
+# disagrees with one that stores the SL1500 form of the same photo, and
+# everything keyed on the URL string (article heroes, stored comparison
+# images) treats each disagreement as a new image. On specpicks (2026-10-07)
+# hydration's raw writes re-orphaned 3-14 article heroes and ~50 comparison
+# images every 2 hours. Persist this form instead. It is the same rule as the
+# shelf-audit apply scripts' hi_res(), so both write identical strings.
+_IMAGE_ID_RE = re.compile(
+    r"(https://m\.media-amazon\.com/images/I/)([A-Za-z0-9+%-]{6,}?)(\._[^/]*)?\.jpg")
+
+
+def hi_res_image_url(url: str | None) -> str | None:
+    """The SL1500 rendition of an Amazon image URL; other URLs pass through."""
+    m = _IMAGE_ID_RE.search(url or "")
+    return f"{m.group(1)}{m.group(2)}._AC_SL1500_.jpg" if m else url
+
+
 def parse_item(raw: dict) -> dict:
     """Flatten a Creators item (getItems OR searchItems) into catalog shape.
 

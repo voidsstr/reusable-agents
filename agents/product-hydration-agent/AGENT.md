@@ -64,6 +64,12 @@ instances run it. Overview / "why" doc: [README.md](README.md).
      price, `original_price` is cleared. Without this, stale list prices
      leave negative "Save -$X" discounts (a Creators run once raised
      catalog-wide negative discounts from 277 to 314).
+     `main_image_url` from Creators is stored as the SL1500 rendition
+     (`amazon_creators.hi_res_image_url`), the same string shelf-audit
+     writes. Until 2026-10-07 it stored the API's raw 500px URL. Every
+     refresh then changed the URL of an unchanged photo, so specpicks
+     re-picked 3-14 article heroes and cleared ~50 stored comparison
+     images every 2 hours.
    - **Misses** (not in response, ItemNotAccessible, no data):
      `_stamp_miss` sets `price_updated_at = NOW()`, increments
      `fetch_attempts` and records `fetch_error`, so the row ages out of the

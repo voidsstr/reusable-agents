@@ -642,7 +642,8 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
     commit, and compliance accounting are identical -- only the fetch
     differs.
     """
-    from framework.core.amazon_creators import CreatorsUnavailable, parse_item
+    from framework.core.amazon_creators import (
+        CreatorsUnavailable, hi_res_image_url, parse_item)
 
     freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
     # The API caps getItems at 10 ASINs; the client chunks internally, but
@@ -705,7 +706,9 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
                 "availability": p.get("availability"),
                 "rating": p.get("rating"),
                 "review_count": p.get("review_count"),
-                "main_image_url": p.get("image_url"),
+                # SL1500 form, the one shelf-audit writes: the raw 500px URL
+                # re-orphaned heroes and comparison images on every refresh.
+                "main_image_url": hi_res_image_url(p.get("image_url")),
                 "amazon_url": p.get("url"),
                 "brand": p.get("brand"),
                 "title": p.get("title"),
