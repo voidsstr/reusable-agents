@@ -188,8 +188,11 @@ def _meta(html: str, name: str) -> str:
          or re.search(rf'<meta[^>]+property\s*=\s*["\']{name}["\'][^>]*>', html, re.I))
     if not m:
         return ""
-    c = re.search(r'content\s*=\s*["\']([^"\']*)["\']', m.group(0), re.I)
-    return c.group(1).strip() if c else ""
+    # Match up to the SAME quote that opened the value. A `[^"']*` class stopped
+    # at the first apostrophe, so "Peshawar's iconic flat kebab..." read as
+    # "Peshawar" and 2026-10-07 reported false short-meta-description findings.
+    c = re.search(r'content\s*=\s*(["\'])(.*?)\1', m.group(0), re.I | re.S)
+    return c.group(2).strip() if c else ""
 
 
 def _jsonld(html: str) -> list:
