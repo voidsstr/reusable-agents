@@ -858,11 +858,17 @@ Why at the dispatcher, not the implementer: skipping is <1ms vs wasting a
 systemd launch + run.sh boot to immediately defer, and it keeps the
 implementer run-history clean. Enforced in
 `agents/backlog-dispatcher-agent/agent.py` (candidate-collection loop,
-after the rec-handler allowlist). Producer→dispatch_kind mapping is inlined
-(seo-opportunity→seo, progressive-improvement→pi, article-author→
-article-author, catalog-audit→catalog-audit, comp-research→comp-research,
-news-author/news-writer→news-author); recs can override via
-`rec.dispatch_kind`.
+after the rec-handler allowlist). Producer→dispatch_kind mapping is
+`_dispatch_kind_for()` there, mirroring the implementer's `run.sh` case
+(seo-opportunity→seo, progressive-improvement→pi, `*-article-proposal-agent`
+or type `article-author-proposal`→article-author, catalog-audit→catalog-audit,
+comp-research→comp-research, news-author/news-writer→news-author,
+head-to-head→h2h); recs can override via `rec.dispatch_kind`.
+
+**Deploy gate down (e.g. the host GPU is gone, so Playwright hangs):** allow
+only the kinds the implementer runs WITHOUT the deployer chain:
+`["article-author", "article-refresh", "catalog-audit", "h2h"]`.
+`news-author` still deploys, so it would hang at the gate too.
 
 ## Image generation — local only
 

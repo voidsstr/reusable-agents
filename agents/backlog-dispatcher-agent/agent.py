@@ -214,6 +214,28 @@ def _list_inflight_scopes() -> list[str]:
         return []
 
 
+def _dispatch_kind_for(producer_id: str, rec: dict) -> str:
+    """The dispatch_kind a rec runs under, for the dispatch-kind allowlist.
+
+    Mirrors the implementer's own mapping (agents/implementer/run.sh, the
+    SOURCE_AGENT_ID_FROM_RECS case): recs from `*-article-proposal-agent`, or
+    of type 'article-author-proposal', run as article-author. Until 2026-10-09
+    only the retired `article-author` producer id matched here, so an allowlist
+    of authoring kinds also held back every blog post. A rec's own
+    `dispatch_kind` wins.
+    """
+    kind = "general"
+    if "seo-opportunity" in producer_id: kind = "seo"
+    elif "progressive-improvement" in producer_id: kind = "pi"
+    elif ("article-author" in producer_id or "article-proposal" in producer_id
+          or rec.get("type") == "article-author-proposal"): kind = "article-author"
+    elif "catalog-audit" in producer_id: kind = "catalog-audit"
+    elif "comp-research" in producer_id or "competitor-research" in producer_id: kind = "comp-research"
+    elif "news-author" in producer_id or "news-writer" in producer_id: kind = "news-author"
+    elif "h2h" in producer_id or "head-to-head" in producer_id: kind = "h2h"
+    return rec.get("dispatch_kind") or kind
+
+
 def _count_inflight_scopes() -> int:
     """Count currently-running implementer scopes. Wrapper for the rest of
     the dispatcher logic; the list form is used to write the heartbeat
@@ -838,19 +860,7 @@ class BacklogDispatcher(AgentBase):
                         dk_cfg = s.read_json("config/implementer-allowed-dispatch-kinds.json") or {}
                         dk_allow = dk_cfg.get("allow")
                         if isinstance(dk_allow, list) and "*" not in dk_allow:
-                            # Derive dispatch_kind from the rec type the
-                            # same way agent_kind() does.
-                            agent_kind = "general"
-                            if "seo-opportunity" in aid: agent_kind = "seo"
-                            elif "progressive-improvement" in aid: agent_kind = "pi"
-                            elif "article-author" in aid: agent_kind = "article-author"
-                            elif "catalog-audit" in aid: agent_kind = "catalog-audit"
-                            elif "comp-research" in aid or "competitor-research" in aid: agent_kind = "comp-research"
-                            elif "news-author" in aid or "news-writer" in aid: agent_kind = "news-author"
-                            elif "h2h" in aid or "head-to-head" in aid: agent_kind = "h2h"
-                            # Also check rec.dispatch_kind override
-                            rec_dk = r.get("dispatch_kind") or agent_kind
-                            if rec_dk not in dk_allow:
+                            if _dispatch_kind_for(aid, r) not in dk_allow:
                                 continue
                     except Exception:
                         pass
