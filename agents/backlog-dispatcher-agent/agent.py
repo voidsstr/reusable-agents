@@ -678,6 +678,10 @@ class BacklogDispatcher(AgentBase):
             )
 
         already = set((self.state or {}).get("queued_ids", []))
+        # Per-producer dispatch-ledger keys, read lazily (after that
+        # producer's run-dir) so a dispatch_now() it made just before
+        # syncing is already recorded.
+        dispatched_by_producer: dict[str, set[str]] = {}
         queued_now: list[str] = []
         per_producer_actions: list[dict] = []
         producers_touched = 0
@@ -921,6 +925,16 @@ class BacklogDispatcher(AgentBase):
                         continue
                     if title_key and title_key in already:
                         # Same logical rec already dispatched (different run_ts)
+                        continue
+                    # Handed to an implementer by its producer's own
+                    # dispatch_now() and not yet marked shipped.
+                    if aid not in dispatched_by_producer:
+                        try:
+                            from framework.core import dispatch as _dispatch
+                            dispatched_by_producer[aid] = _dispatch.recently_dispatched(aid, storage=s)
+                        except Exception:
+                            dispatched_by_producer[aid] = set()
+                    if dedup_key in dispatched_by_producer[aid]:
                         continue
                     # Priority key (lower = higher priority).
                     # Severity: critical=0, high=1, medium=2, low=3, -=4

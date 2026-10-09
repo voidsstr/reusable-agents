@@ -421,11 +421,11 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     # makes log → run mapping trivial.
     env["IMPLEMENTER_RUN_TS"] = ts
 
-    # ── In-flight visibility hook (2026-05-18, deferred) ──────────
-    # Planned: push producer recs to Azure NOW (currently waits for
-    # post-run sync). Stub left here intentionally for the follow-up
-    # commit; full implementation depends on `_publish_inflight_recs_to_azure`
-    # being added with stamp-and-overwrite semantics.
+    # ── In-flight visibility ──────────────────────────────────────
+    # A producer's run-dir only shows a rec shipped after the implementer
+    # finishes, so every successful spawn below goes into the dispatch
+    # ledger (record_dispatched) for the backlog-dispatcher to skip.
+    ledger_run_ts = env["RESPONDER_RUN_TS"]
 
     use_systemd_run = bool(shutil.which("systemd-run"))
     try:
@@ -462,6 +462,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                 f"[dispatch] spawned-via-systemd-run unit={unit_name} "
                 f"pid={proc.pid} action={action} recs={rec_ids} log={log_path}"
             )
+            record_dispatched(agent_id, ledger_run_ts, rec_ids)
             return DispatchHandle(
                 pid=proc.pid, unit=unit_name, log_path=log_path,
                 site=site, agent_id=agent_id, rec_ids=rec_ids,
@@ -479,6 +480,7 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                 f"[dispatch] spawned {script} pid={proc.pid} action={action} "
                 f"recs={rec_ids} log={log_path} (no systemd-run)"
             )
+            record_dispatched(agent_id, ledger_run_ts, rec_ids)
             return DispatchHandle(
                 pid=proc.pid, unit="", log_path=log_path,
                 site=site, agent_id=agent_id, rec_ids=rec_ids,
@@ -530,6 +532,59 @@ def _extract_run_ts(run_dir: str) -> Optional[str]:
     import re
     m = re.search(r"(\d{8}T\d{6}Z)", name)
     return m.group(1) if m else None
+
+
+# ── Dispatch ledger ─────────────────────────────────────────────────
+# Producers that call dispatch_now() themselves sync their run-dir right
+# after, with the rec still unshipped; the backlog-dispatcher scans that
+# run-dir a few seconds later and used to spawn a second implementer for
+# the same rec (2026-10-08/09: each article-author rec ran twice, the
+# second a full Opus draft that deferred as a duplicate). Keys match the
+# dispatcher's own dedup key, "<run_ts>:<rec_id>", one blob per producer.
+LEDGER_PREFIX = "framework/dispatch-ledger/"
+LEDGER_TTL_S = int(os.environ.get("DISPATCH_LEDGER_TTL_S", "7200"))
+
+
+def _ledger_entries(s, agent_id: str, now: datetime) -> dict[str, str]:
+    """Live entries (younger than LEDGER_TTL_S) of one producer's ledger."""
+    try:
+        doc = s.read_json(f"{LEDGER_PREFIX}{agent_id}.json") or {}
+    except Exception:
+        return {}
+    live = {}
+    for key, stamp in (doc.items() if isinstance(doc, dict) else []):
+        try:
+            age = (now - datetime.fromisoformat(stamp)).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if age < LEDGER_TTL_S:
+            live[key] = stamp
+    return live
+
+
+def record_dispatched(agent_id: str, run_ts: str, rec_ids: list[str], *,
+                      storage=None, now: Optional[datetime] = None) -> None:
+    """Note that these recs were just handed to an implementer. Best-effort:
+    a lost write only means the old duplicate dispatch."""
+    if not (agent_id and run_ts and rec_ids):
+        return
+    try:
+        s = storage or get_storage()
+        now = now or datetime.now(timezone.utc)
+        live = _ledger_entries(s, agent_id, now)
+        for rid in rec_ids:
+            live[f"{run_ts}:{rid}"] = now.isoformat(timespec="seconds")
+        s.write_json(f"{LEDGER_PREFIX}{agent_id}.json", live)
+    except Exception as e:
+        _log(f"[dispatch] ledger write failed for {agent_id}: {e}")
+
+
+def recently_dispatched(agent_id: str, *, storage=None,
+                        now: Optional[datetime] = None) -> set[str]:
+    """"<run_ts>:<rec_id>" keys this producer's recs were dispatched under
+    within LEDGER_TTL_S."""
+    s = storage or get_storage()
+    return set(_ledger_entries(s, agent_id, now or datetime.now(timezone.utc)))
 
 
 def _write_auto_queue_fallback(*, agent_id: str, run_dir: str,
