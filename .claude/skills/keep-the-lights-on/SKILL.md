@@ -763,6 +763,22 @@ the panic line, and append the event to
 `retro-agent/docs/host-issues-log.md`, whose rules require an entry per host
 event. The history, signatures 1–6 and the open mitigations live in that log.
 
+**The reboot restarts every timer you stopped, and the dispatch-kind allowlist
+does not hold deploys.** It is enforced only in the backlog-dispatcher. Producers
+that call `dispatch_now` themselves (`*-user-growth-strategist`,
+`*-shelf-audit-agent`, catalog-audit, h2h, article-proposal) bypass it. So if a
+recovery step must happen before the next deploy, stop those producers' timers
+FIRST, the moment the box is back, and restart them only after the step is done.
+2026-10-11: the aisleprompt growth strategist restarted with the boot, dispatched
+a code rec 1 minute later and deployed at 12:47. The new image's boot applied
+pending catalog-audit `recipe-image-present` migrations before the image refiller
+had caught up, deactivating 71 recipes and pushing 5 cuisine hubs back to
+noindex. Also check `REFILL_INCLUDE_INACTIVE`: the refiller's timer does NOT
+fill inactive rows. Repair by pausing the timer, running
+`REFILL_INCLUDE_INACTIVE=1 REFILL_TIME_BUDGET_S=240 bash run.sh` in passes (the
+wrapper kills the script at 280 s), then reactivating only rows that now have an
+image.
+
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.
 - `.claude/skills/refresh-gsc-token/SKILL.md` — re-mint the shared GSC/GA4 OAuth
