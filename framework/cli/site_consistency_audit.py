@@ -72,10 +72,12 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # CALIBRATION: the first version included bare "undefined", which fired on the
 # perfectly good sentence "perf-per-dollar is undefined". On a tech-review site
 # that word is ordinary English. Only code-shaped forms survive here.
+# NaN stays case-sensitive: under re.I it matched the Burmese dish "Nan Gyi
+# Thoke" in an aisleprompt recipe rail (2026-10-12).
 PLACEHOLDER = re.compile(
     r"(lorem ipsum|TODO:|FIXME:|\[object Object\]|"
     r"\bundefined\s*(?:px|%|,|\)|</)|=\s*undefined\b|"
-    r"\bNaN\b|null null|\{\{[a-z_]+\}\}|<no title>|\bUntitled\b)", re.I)
+    r"(?-i:\bNaN\b)|null null|\{\{[a-z_]+\}\}|<no title>|\bUntitled\b)", re.I)
 
 # Generator exhaust that leaks the prompt into user-visible copy.
 # CALIBRATION: bare "prompt" was in this list and matched 52 pages of
