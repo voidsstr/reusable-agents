@@ -106,6 +106,7 @@ def test_classify_available_date_is_priced():
 
 def test_classify_no_listings_and_not_found_and_missing():
     assert classify_item("A", _item("A", listings=False)).status == "no_offer"
+    assert not classify_item("A", _item("A", listings=False)).buyable
     nf = classify_item("A", None, "ItemNotAccessible A")
     assert nf.status == "not_found" and nf.marks_unavailable and nf.error
     assert classify_item("A", None).status == "missing"
@@ -179,3 +180,21 @@ def test_refresh_unreachable_at_start_raises():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_classify_map_hidden_price_is_buyable_but_unpriced():
+    # Live shape for B08F2TGH2M (2026-10-12): in stock, price withheld (MAP).
+    raw = {"asin": "A", "offersV2": {"listings": [{
+        "availability": {"type": "IN_STOCK", "message": "In Stock"},
+        "condition": {"value": "New"}, "isBuyBoxWinner": True, "violatesMAP": True}]}}
+    o = classify_item("A", raw)
+    assert o.status == "no_offer" and o.price is None and o.marks_unavailable
+    assert o.map_hidden and o.buyable
+    # Out of stock with MAP set is still not buyable.
+    raw["offersV2"]["listings"][0]["availability"] = {"type": "OUT_OF_STOCK"}
+    o = classify_item("A", raw)
+    assert o.status == "unavailable" and not o.map_hidden and not o.buyable
+
+
+def test_classify_priced_is_buyable():
+    assert classify_item("A", _item("A", 20.0, avail="AVAILABLE_DATE")).buyable

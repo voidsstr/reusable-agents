@@ -28,6 +28,11 @@ OUTCOMES (``PriceOutcome.status``)
                price, or used-only) → price must be NULL; showing a used or
                stale price as the product price is misleading. Availability
                is cleared too (it describes the listing we are not showing).
+               Exception, flagged ``map_hidden``: a New, in-stock buy-box
+               offer whose price Amazon withholds because it is below the
+               maker's minimum advertised price (``violatesMAP``). The price
+               is still NULL, but the item IS buyable (``buyable``), so a
+               caller that tracks stock should keep it in stock.
   not_found    Amazon answered with a per-ASIN error (ItemNotAccessible /
                invalid ASIN) → price must be NULL. NEVER a reason to
                deactivate: the product page stays live and shows
@@ -92,10 +97,16 @@ class PriceOutcome:
     availability_type: Optional[str] = None
     condition: Optional[str] = None
     error: Optional[str] = None
+    map_hidden: bool = False
 
     @property
     def marks_unavailable(self) -> bool:
         return self.status in UNAVAILABLE_STATUSES
+
+    @property
+    def buyable(self) -> bool:
+        """Orderable on Amazon now, priced or not (see ``map_hidden``)."""
+        return self.status == "priced" or self.map_hidden
 
 
 def _raw_currency(raw: dict) -> Optional[str]:
@@ -135,6 +146,17 @@ def classify_item(asin: str, raw: Optional[dict], error: Optional[str] = None,
         out.status = "unavailable"
     elif not listings or out.price is None or out.price <= 0:
         out.status = "no_offer"
+        # MAP: Amazon drops the price from a live New buy-box offer when it
+        # is under the minimum advertised price ("see price in cart"). The
+        # KitchenAid KHBV53 came back IN_STOCK + violatesMAP with no price
+        # and was filed out of stock, so its guide pick linked a search page
+        # (PI 20261012T224500Z rec-001).
+        best = next((l for l in listings if isinstance(l, dict) and l.get("isBuyBoxWinner")),
+                    listings[0] if listings and isinstance(listings[0], dict) else {})
+        out.map_hidden = bool(
+            best.get("violatesMAP")
+            and out.availability_type in (IN_STOCK_TYPES | ORDERABLE_TYPES)
+            and str(out.condition or "new").lower() == "new")
     elif out.condition and str(out.condition).lower() != "new":
         # parse_item already prefers any New listing, so a non-New pick
         # means there is no New offer at all.
