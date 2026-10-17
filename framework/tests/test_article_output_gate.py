@@ -27,7 +27,10 @@ class _Cur:
             return
         if "unnest(" in sql:
             self.conn.occ_queries.append((sql, params))
-            self.rows = [(f"holiday:{h}", n) for h, n in self.conn.occ.items()]
+            if params and str(params[0][0]).startswith("lane:"):
+                self.rows = [(f"lane:{h}", n) for h, n in self.conn.lanes.items()]
+            else:
+                self.rows = [(f"holiday:{h}", n) for h, n in self.conn.occ.items()]
             return
         if "editorial_articles" in sql:
             if self.conn.fail_batch:
@@ -48,8 +51,9 @@ class _Cur:
 class _Conn:
     def __init__(self, batch=(), ai=None, fail_batch=False, fail_ai=False,
                  cols=("ts", "kind", "path", "ip", "user_agent", "status_code"),
-                 occ=None):
+                 occ=None, lanes=None):
         self.batch = list(batch)
+        self.lanes = dict(lanes or {})
         self.ai = dict(ai or {})
         self.cols = list(cols)
         self.occ = dict(occ or {})
@@ -280,3 +284,63 @@ def test_occasion_cap_does_not_touch_open_traffic_gate(storage):
     _seed_gsc(storage, [{"keys": ["https://x/reviews/a1"], "impressions": 3}])
     d = _eval(storage, _Conn(batch=["a1"], occ={"prime-big-deal-days": 9}), today=TODAY)
     assert d.allowed and d.mode == "cap+traffic"
+
+
+LANES = {"format_lanes": {"x-or-y": {"max_per_window": 2, "window_days": 7},
+                          "cuisine-roundup": {"max_per_window": 1}}}
+
+
+def test_format_lane_opens_closed_gate_for_tagged_only(storage):
+    d = _eval(storage, _Conn(batch=["a1"]), site_cfg=LANES)
+    assert d.allowed and d.mode == "format-lane" and d.slots == 1
+    assert d.lane_ids == ["x-or-y", "cuisine-roundup"]
+    assert "lane:<id>" in d.prompt_block() and "x-or-y" in d.prompt_block()
+    props = [{"slug": "evergreen", "tags": ["gpu"]},
+             {"slug": "pair", "tags": ["lane:x-or-y"]},
+             {"slug": "roundup", "lane": "cuisine-roundup"}]
+    kept, dropped = gate.select_for_queue(props, d)
+    assert [p["slug"] for p in kept] == ["pair"]
+    assert {p["slug"] for p in dropped} == {"evergreen", "roundup"}
+
+
+def test_format_lane_cap_counts_db_and_ledger(storage):
+    # x-or-y spent in the DB, cuisine-roundup spent in the ledger: closed.
+    gate.record_batch(storage, "site-a-article-proposal-agent", slugs=["r1"],
+                      lane_ids=gate.lane_ids_for([{"tags": ["lane:cuisine-roundup"]}]),
+                      now=NOW - dt.timedelta(days=2))
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=LANES)
+    assert not d.allowed
+    # One x-or-y left: open for x-or-y only, one slot.
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 1}), site_cfg=LANES,
+              )
+    assert d.allowed and d.lane_ids == ["x-or-y"] and d.lane_room == {"x-or-y": 1}
+    # A ledger entry older than the lane window no longer counts.
+    storage.write_json(gate.LEDGER_KEY_TMPL.format(
+        agent_id="site-a-article-proposal-agent"), {"batches": []})
+    gate.record_batch(storage, "site-a-article-proposal-agent", slugs=["r0"],
+                      lane_ids=["cuisine-roundup"], now=NOW - dt.timedelta(days=8))
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=LANES)
+    assert d.allowed and d.lane_ids == ["cuisine-roundup"]
+
+
+def test_holiday_ranks_before_lane_under_seasonal_override(storage):
+    d = _eval(storage, _Conn(batch=["a1"]), today=TODAY,
+              site_cfg={**LANES, "max_proposals_per_day": 3})
+    assert d.mode == "seasonal-override"
+    assert d.require_holiday_ids == ["prime-big-deal-days"]
+    assert d.lane_ids == ["x-or-y", "cuisine-roundup"]
+    props = [{"slug": "p1", "tags": ["lane:x-or-y"]},
+             {"slug": "p2", "tags": ["lane:x-or-y"]},
+             {"slug": "p3", "tags": ["lane:x-or-y"]},
+             {"slug": "deal", "tags": ["holiday:prime-big-deal-days"]}]
+    kept, _ = gate.select_for_queue(props, d)
+    # Holiday first, then x-or-y up to its room of 2.
+    assert [p["slug"] for p in kept] == ["deal", "p1", "p2"]
+
+
+def test_lanes_do_not_restrict_open_traffic_gate(storage):
+    _seed_gsc(storage, [{"keys": ["https://x/reviews/a1"], "impressions": 3}])
+    d = _eval(storage, _Conn(batch=["a1"]), site_cfg=LANES)
+    assert d.mode == "cap+traffic" and d.lane_ids == []
+    kept, _ = gate.select_for_queue([{"slug": "evergreen"}], d)
+    assert [p["slug"] for p in kept] == ["evergreen"]

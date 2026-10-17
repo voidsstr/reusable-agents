@@ -38,6 +38,16 @@ site): once an occasion has that many tagged articles, the override closes
 for it. Timely deal content is the exception the operator asked for. It
 does not open the gate for evergreen topics, and it is not a daily pass.
 
+**Format lanes.** ``format_lanes`` names evergreen formats that may also
+ship while the traffic gate is closed, each with its own cap
+(``{"x-or-y": {"max_per_window": 2, "window_days": 7}}``). Only proposals
+tagged ``lane:<id>`` qualify, and they rank after holiday-tagged ones. A
+lane is the operator's way of saying "this format earns citations
+elsewhere on the site, keep a trickle of it going" without opening the
+gate for everything. Counted like occasions: articles tagged ``lane:<id>``
+created in the window (any status but archived) plus ledger batches that
+recorded the lane. The daily cap still applies.
+
 **AI-visit evidence** counts distinct visitor IPs per article path and
 drops our own traffic: private / loopback addresses, the
 ``framework.core.ai_traffic`` exclude list (``AI_TRAFFIC_EXCLUDE_IPS``),
@@ -74,7 +84,8 @@ Consumer contract::
     ... queue `kept` ...
     gate.record_batch(self.storage, self.agent_id,
                       slugs=[p["slug"] for p in kept], run_ts=self.run_ts,
-                      holiday_ids=gate.holiday_ids_for(kept))
+                      holiday_ids=gate.holiday_ids_for(kept),
+                      lane_ids=gate.lane_ids_for(kept))
 
 CLI: ``python3 -m framework.cli.article_output_gate --help``.
 """
@@ -159,6 +170,9 @@ DEFAULTS: dict[str, Any] = {
         "occasion_count_days": 60,
         "tags_column": "tags",
     },
+    # lane id -> {"max_per_window": int, "window_days": int (default 7)}.
+    # Empty = no lanes; see "Format lanes" above.
+    "format_lanes": {},
 }
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$")
@@ -234,6 +248,7 @@ def read_ledger(storage, agent_id: str) -> dict:
 def record_batch(storage, agent_id: str, *, slugs: Sequence[str],
                  run_ts: str = "", count: Optional[int] = None,
                  holiday_ids: Optional[Sequence[str]] = None,
+                 lane_ids: Optional[Sequence[str]] = None,
                  keep_days: int = DEFAULTS["ledger_keep_days"],
                  now: Optional[_dt.datetime] = None) -> dict:
     """Append one queued batch to the agent's ledger. Call AFTER the recs
@@ -243,7 +258,8 @@ def record_batch(storage, agent_id: str, *, slugs: Sequence[str],
     `holiday_ids`: one entry per queued proposal that carries a
     holiday:<id> tag (see :func:`holiday_ids_for`). It lets the seasonal
     override's per-occasion cap count pieces that are queued but not yet
-    written to the articles table."""
+    written to the articles table. `lane_ids` does the same for
+    ``format_lanes`` (see :func:`lane_ids_for`)."""
     n = _now(now)
     doc = read_ledger(storage, agent_id)
     cutoff = n - _dt.timedelta(days=max(1, int(keep_days)))
@@ -257,6 +273,8 @@ def record_batch(storage, agent_id: str, *, slugs: Sequence[str],
         "slugs": slugs,
         **({"holiday_ids": [str(h).strip().lower() for h in holiday_ids if h]}
            if holiday_ids else {}),
+        **({"lane_ids": [str(h).strip().lower() for h in lane_ids if h]}
+           if lane_ids else {}),
     })
     doc["batches"] = batches
     storage.write_json(LEDGER_KEY_TMPL.format(agent_id=agent_id), doc)
@@ -482,9 +500,11 @@ def read_ai_visits(conn, *, table: str, kinds: Sequence[str],
 
 
 def read_occasion_counts(conn, *, table: str, tags_column: str,
-                         holiday_ids: Sequence[str], days: int) -> dict[str, int]:
+                         holiday_ids: Sequence[str], days: int,
+                         prefix: str = "holiday") -> dict[str, int]:
     """holiday id → articles tagged ``holiday:<id>`` created in the last
-    `days` days (any status but archived, so scheduled pieces count)."""
+    `days` days (any status but archived, so scheduled pieces count).
+    ``prefix="lane"`` counts ``lane:<id>`` tags instead."""
     ids = [str(h).strip().lower() for h in holiday_ids if h]
     if not ids:
         return {}
@@ -497,7 +517,7 @@ def read_occasion_counts(conn, *, table: str, tags_column: str,
             "   AND COALESCE(a.status, '') <> 'archived' "
             "   AND COALESCE(a.created_at, a.published_at) >= NOW() - make_interval(days => %s) "
             " GROUP BY 1",
-            ([f"holiday:{h}" for h in ids], int(days)))
+            ([f"{prefix}:{h}" for h in ids], int(days)))
         out = {h: 0 for h in ids}
         for r in cur.fetchall():
             tag = r["tag"] if isinstance(r, dict) else r[0]
@@ -509,8 +529,10 @@ def read_occasion_counts(conn, *, table: str, tags_column: str,
 
 
 def ledger_occasion_counts(ledger: dict, holiday_ids: Sequence[str], days: int,
-                           now: Optional[_dt.datetime] = None) -> dict[str, int]:
-    """holiday id → proposals the ledger recorded for it in the last `days`."""
+                           now: Optional[_dt.datetime] = None,
+                           key: str = "holiday_ids") -> dict[str, int]:
+    """holiday id → proposals the ledger recorded for it in the last `days`.
+    ``key="lane_ids"`` counts format lanes instead."""
     n = _now(now)
     cutoff = n - _dt.timedelta(days=max(1, int(days)))
     ids = [str(h).strip().lower() for h in holiday_ids if h]
@@ -519,7 +541,7 @@ def ledger_occasion_counts(ledger: dict, holiday_ids: Sequence[str], days: int,
         at = _parse_iso(b.get("at", ""))
         if not at or at < cutoff:
             continue
-        for h in b.get("holiday_ids") or []:
+        for h in b.get(key) or []:
             h = str(h).strip().lower()
             if h in out:
                 out[h] += 1
@@ -544,6 +566,9 @@ class GateDecision:
     require_holiday_ids: list = field(default_factory=list)
     priority_holiday_ids: list = field(default_factory=list)
     occasion_counts: dict = field(default_factory=dict)
+    lane_ids: list = field(default_factory=list)       # open format lanes
+    lane_room: dict = field(default_factory=dict)      # lane id -> slots left
+    lane_counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -577,12 +602,18 @@ class GateDecision:
             lines.append(
                 "Recent articles that DID earn impressions or AI visits (build "
                 f"on these topics and formats): {winners}")
-        if self.require_holiday_ids:
+        if self.require_holiday_ids or self.lane_ids:
+            allowed = []
+            if self.require_holiday_ids:
+                allowed.append("a proposal tagged holiday:<id> for one of these "
+                               f"occasions: {', '.join(self.require_holiday_ids)}")
+            if self.lane_ids:
+                allowed.append("a proposal tagged lane:<id> for one of these "
+                               f"formats: {', '.join(self.lane_ids)}")
             lines.append(
-                "The traffic gate is closed for evergreen topics. Only a "
-                "proposal tagged holiday:<id> for one of these occasions will "
-                f"be written: {', '.join(self.require_holiday_ids)}. Put it "
-                "first and carry the tag in `tags`.")
+                "The traffic gate is closed for evergreen topics. Only "
+                + " or ".join(allowed) + " will be written. Holiday-tagged "
+                "proposals go first. Carry the tag in `tags`.")
         elif self.priority_holiday_ids:
             lines.append(
                 "A seasonal deal occasion is NOW/IMMINENT "
@@ -590,6 +621,23 @@ class GateDecision:
                 "RECENTLY PUBLISHED articles already covers it, the first "
                 "proposal must target it and carry `holiday:<id>` in `tags`.")
         return "\n".join(lines) + "\n"
+
+
+def _lane_config(cfg: dict) -> dict[str, dict]:
+    """``format_lanes`` normalised to lane id -> {cap, days}; lanes with a
+    cap below 1 are dropped."""
+    out: dict[str, dict] = {}
+    for lid, lc in (cfg.get("format_lanes") or {}).items():
+        lc = lc if isinstance(lc, dict) else {"max_per_window": lc}
+        try:
+            cap = int(lc.get("max_per_window", 0))
+            days = max(1, int(lc.get("window_days", 7)))
+        except (TypeError, ValueError):
+            continue
+        lid = str(lid).strip().lower().removeprefix("lane:")
+        if lid and cap >= 1:
+            out[lid] = {"cap": cap, "days": days}
+    return out
 
 
 def active_holiday_ids(audience: str, windows: Iterable[str],
@@ -645,6 +693,8 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     occ_cap = int(occ_cap) if occ_cap is not None and int(occ_cap) >= 0 else None
     occ_days = int(so.get("occasion_count_days") or 60)
     db_occ: Optional[dict[str, int]] = None
+    lanes = _lane_config(cfg)
+    db_lanes: Optional[dict[str, int]] = None
     own_conn = False
     batch: Optional[list[dict]] = None
     ai_by_slug: Optional[dict[str, int]] = None
@@ -678,6 +728,20 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                 sources["ai_visits"] = f"unavailable: {type(e).__name__}: {e}"[:200]
                 try: conn.rollback()
                 except Exception: pass
+            if lanes:
+                try:
+                    db_lanes = {}
+                    for lid, lc in lanes.items():
+                        db_lanes.update(read_occasion_counts(
+                            conn, table=tg.get("articles_table", "editorial_articles"),
+                            tags_column=str(so.get("tags_column") or "tags"),
+                            holiday_ids=[lid], days=lc["days"], prefix="lane"))
+                    sources["lane_counts"] = f"ok: {db_lanes}"
+                except Exception as e:
+                    db_lanes = None
+                    sources["lane_counts"] = f"unavailable: {type(e).__name__}: {e}"[:200]
+                    try: conn.rollback()
+                    except Exception: pass
             if holiday_ids and occ_cap is not None:
                 try:
                     db_occ = read_occasion_counts(
@@ -749,9 +813,26 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                             f"traffic gate open: {len(hits)}/{len(batch)} prior "
                             "article(s) earned impressions or AI visits",
                             "cap+traffic", **base)
-    if holiday_ids:
+    open_lanes: list[str] = []
+    lane_room: dict[str, int] = {}
+    if lanes:
+        lane_counts = {}
+        for lid, lc in lanes.items():
+            led = ledger_occasion_counts(ledger, [lid], lc["days"], now,
+                                         key="lane_ids").get(lid, 0)
+            lane_counts[lid] = max((db_lanes or {}).get(lid, 0), led)
+            if lane_counts[lid] < lc["cap"]:
+                lane_room[lid] = lc["cap"] - lane_counts[lid]
+        open_lanes = list(lane_room)
+        base["lane_counts"] = lane_counts
+    lane_slots = sum(lane_room.values())
+    lane_note = (f"; format lane(s) open: "
+                 + ", ".join(f"{l} {lane_counts[l]}/{lanes[l]['cap']}"
+                             for l in open_lanes)) if open_lanes else ""
+    if holiday_ids or open_lanes:
         open_ids, note = list(holiday_ids), ""
-        if occ_cap is not None:
+        holiday_room = UNLIMITED
+        if holiday_ids and occ_cap is not None:
             led = ledger_occasion_counts(ledger, holiday_ids, occ_days, now)
             counts = {h: max((db_occ or {}).get(h, 0), led.get(h, 0))
                       for h in holiday_ids}
@@ -761,15 +842,25 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                     if counts[h] >= occ_cap]
             if full:
                 note = f"; per-occasion cap reached for {', '.join(full)}"
-            if open_ids:
-                slots = min(slots, sum(occ_cap - counts[h] for h in open_ids))
-        if open_ids:
+            holiday_room = sum(occ_cap - counts[h] for h in open_ids)
+        if not open_ids:
+            holiday_room = 0
+        if open_ids or open_lanes:
             base["require_holiday_ids"] = open_ids
+            base["lane_ids"] = open_lanes
+            base["lane_room"] = lane_room
+            slots = min(slots, holiday_room + lane_slots)
+            if open_ids:
+                return GateDecision(True, slots,
+                                    f"traffic gate closed (0/{len(batch)} prior articles "
+                                    "earned a signal) — seasonal override for "
+                                    f"{', '.join(open_ids)} only{note}{lane_note}",
+                                    "seasonal-override", **base)
             return GateDecision(True, slots,
                                 f"traffic gate closed (0/{len(batch)} prior articles "
-                                "earned a signal) — seasonal override for "
-                                f"{', '.join(open_ids)} only{note}",
-                                "seasonal-override", **base)
+                                "earned a signal) — format lanes only"
+                                f"{note}{lane_note}",
+                                "format-lane", **base)
         return GateDecision(False, 0,
                             f"traffic gate closed: 0/{len(batch)} prior articles "
                             "earned a signal, and the seasonal override is spent"
@@ -799,6 +890,29 @@ def proposal_holiday_ids(p: dict) -> set[str]:
     return out
 
 
+def proposal_lane_ids(p: dict) -> set[str]:
+    out: set[str] = set()
+    for t in p.get("tags") or []:
+        t = str(t).strip().lower()
+        if t.startswith("lane:"):
+            out.add(t.split(":", 1)[1])
+    v = p.get("lane")
+    if v:
+        out.add(str(v).strip().lower().removeprefix("lane:"))
+    return out
+
+
+def lane_ids_for(proposals: Iterable[dict]) -> list[str]:
+    """One lane id per proposal that carries one — the ``lane_ids``
+    value for :func:`record_batch`."""
+    out = []
+    for p in proposals or ():
+        ids = sorted(proposal_lane_ids(p))
+        if ids:
+            out.append(ids[0])
+    return out
+
+
 def holiday_ids_for(proposals: Iterable[dict]) -> list[str]:
     """One holiday id per proposal that carries one (first id when a
     proposal has several) — the ``holiday_ids`` value for
@@ -816,16 +930,30 @@ def select_for_queue(proposals: Sequence[dict], decision: GateDecision
     """Order + trim proposals to the gate's slots. Returns (kept, dropped).
 
     Proposals tagged for a NOW/IMMINENT occasion move to the front, keeping
-    LLM order otherwise. Under a seasonal override only tagged proposals
-    are eligible."""
+    LLM order otherwise. Under a seasonal override or format lane only
+    tagged proposals are eligible: holiday-tagged first, then lane-tagged
+    up to each lane's remaining room."""
     if not decision.allowed:
         return [], list(proposals or [])
     props = list(proposals or [])
     want = set(decision.require_holiday_ids or decision.priority_holiday_ids or [])
-    if want:
+    restricted = bool(decision.require_holiday_ids or decision.lane_ids)
+    if restricted:
+        tagged = [p for p in props if proposal_holiday_ids(p) & want]
+        room = dict(decision.lane_room or {})
+        laned = []
+        for p in props:
+            if proposal_holiday_ids(p) & want:
+                continue
+            hit = sorted(l for l in proposal_lane_ids(p) if room.get(l, 0) > 0)
+            if hit:
+                room[hit[0]] -= 1
+                laned.append(p)
+        props = tagged + laned
+    elif want:
         tagged = [p for p in props if proposal_holiday_ids(p) & want]
         rest = [p for p in props if not (proposal_holiday_ids(p) & want)]
-        props = tagged if decision.require_holiday_ids else tagged + rest
+        props = tagged + rest
     kept = props[:decision.slots]
     kept_ids = {id(p) for p in kept}
     dropped = [p for p in proposals or [] if id(p) not in kept_ids]
