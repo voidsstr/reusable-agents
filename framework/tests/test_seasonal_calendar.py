@@ -28,6 +28,22 @@ def test_prime_big_deal_days_year_dates_and_rule():
     assert sc.resolve_date(pb, 2027) == dt.date(2027, 10, 12)
 
 
+def test_diwali_resolves_only_listed_years_and_is_food_only():
+    dw = _occ("diwali")
+    assert sc.resolve_date(dw, 2026) == dt.date(2026, 11, 8)
+    assert sc.resolve_date(dw, 2027) == dt.date(2027, 10, 29)
+    # Lunisolar date: an unlisted year skips the occasion instead of guessing.
+    assert sc.resolve_date(dw, 2031) is None
+    food = {a.occasion.id: a.window
+            for a in sc.active_signal(dt.date(2026, 10, 17), audience="food")}
+    assert food.get("diwali") == "upcoming"
+    late = {a.occasion.id: a.window
+            for a in sc.active_signal(dt.date(2026, 10, 30), audience="food")}
+    assert late.get("diwali") == "imminent"
+    tech = {a.occasion.id for a in sc.active_signal(dt.date(2026, 11, 1), audience="tech")}
+    assert "diwali" not in tech
+
+
 def test_deal_events_imminent_per_audience():
     today = dt.date(2026, 9, 25)
     tech = {a.occasion.id: a.window for a in sc.active_signal(today, audience="tech")}

@@ -266,6 +266,25 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
         link_categories=("cookie-cutters", "cake-decorating"),
     ),
     Occasion(
+        id="diwali",
+        label="Diwali",
+        # Lunisolar (Lakshmi Puja on the Kartika new moon), so no MM-DD or
+        # weekday rule fits: only the listed years resolve, and a year with
+        # no entry skips the occasion rather than guess a date. Add years via
+        # date_overrides in config/seasonal-calendar.json.
+        month_day="lunisolar",
+        year_dates=(("2026", "11-08"), ("2027", "10-29")),
+        audience="food",
+        recipe_keywords=("diwali sweets", "diwali snacks", "mithai",
+                         "gulab jamun", "ladoo", "barfi", "kheer",
+                         "samosa", "chakli", "dal", "chana masala",
+                         "biryani", "festive indian dinner"),
+        bucket_hints=("recipe-cluster", "seasonal-occasion"),
+        link_categories=("pressure-cookers", "rice-cookers",
+                         "spice-grinders"),
+        length_days=5,
+    ),
+    Occasion(
         id="thanksgiving",
         label="Thanksgiving",
         month_day="nth-weekday:4:thursday:11",
