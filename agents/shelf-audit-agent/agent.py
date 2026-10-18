@@ -40,6 +40,7 @@ from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.amazon_creators import (  # noqa: E402
     AmazonCreatorsClient, CreatorsConfig, parse_item, CreatorsThrottled)
 import shelf  # noqa: E402
+import answer_picks  # noqa: E402
 
 SEV = {"price_drift": "high", "image_mismatch": "high",
        "out_of_stock_on_amazon": "medium", "site_no_price": "medium",
@@ -143,8 +144,81 @@ class ShelfAuditAgent(AgentBase):
     def signals(self) -> dict | None:
         return {"ready": True}
 
+    # ---------- answer-pick click-outs (opt-in: `answer_pick_check`) ----------
+    def _answer_pick_check(self, cfg) -> tuple[list[dict], dict]:
+        """Walk the top-click pages' answer picks; see answer_picks.py."""
+        apc = cfg.get("answer_pick_check") or {}
+        if not apc.get("enabled"):
+            return [], {}
+        from datetime import datetime, timezone
+        import urllib.request
+        pages: list[str] = []
+        conn = None
+        try:
+            import psycopg2
+            conn = psycopg2.connect(os.environ[cfg["dsn_env"]], connect_timeout=15)
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 60000")
+            pages = answer_picks.top_click_pages(conn, apc)
+            conn.rollback()
+        except Exception as e:
+            self.decide("observation", "answer-pick pages from clicks failed: %s"
+                        % str(e)[:120])
+        if not pages:
+            pages = [p.rstrip("/") for p in (apc.get("fallback_pages") or [])]
+
+        def fetch_json(url):
+            try:
+                with urllib.request.urlopen(urllib.request.Request(
+                        url, headers=answer_picks.UA), timeout=25) as r:
+                    return json.loads(r.read().decode("utf-8", "replace"))
+            except Exception:
+                return {}
+
+        lookup = None
+        if conn is not None and apc.get("replacement_query"):
+            def lookup(slug):
+                with conn.cursor() as cur:
+                    cur.execute(apc["replacement_query"], {"slug": slug})
+                    cols = [c[0] for c in cur.description]
+                    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                conn.rollback()
+                own = next((r for r in rows if r.get("role") == "self"), None)
+                return own, [r for r in rows if r.get("role") != "self"]
+
+        state_key = f"agents/{self.agent_id}/answer-pick-strikes.json"
+        try:
+            state = self.storage.read_json(state_key) or {}
+        except Exception:
+            state = {}
+        try:
+            res = answer_picks.run_check(
+                apc, origin=cfg["origin"], pages=pages, state=state,
+                now=datetime.now(timezone.utc), fetch_json=fetch_json,
+                lookup=lookup, same_picture=shelf.same_picture)
+        finally:
+            if conn is not None:
+                conn.close()
+        self.storage.write_json(state_key, res["state"])
+        self.decide("observation",
+                    "answer picks: %d checked on %d pages; %d broken now, %d "
+                    "confirmed on a second strike" % (
+                        res["picks_checked"], len(pages), len(res["broken_now"]),
+                        len(res["confirmed"])))
+        summary = {k: res[k] for k in ("pages", "picks_checked", "broken_now",
+                                       "confirmed", "pages_without_picks")}
+        self._save_artifact("answer-picks.json", summary)
+        return answer_picks.to_recs(res, self.run_ts), summary
+
     def run(self) -> RunResult:
         cfg = self._cfg()
+        # Runs first and on its own: it reads the top pages, not the crawl, so
+        # a failed shelf discovery must not skip it.
+        pick_recs, pick_summary = [], {}
+        try:
+            pick_recs, pick_summary = self._answer_pick_check(cfg)
+        except Exception as e:
+            self.decide("observation", "answer-pick check failed: %s" % str(e)[:160])
         self.status("crawling the shelf", progress=0.1, current_action="crawl")
         asins = self._discover(cfg)
         slugs = sorted(self._api_slugs.keys())
@@ -185,7 +259,7 @@ class ShelfAuditAgent(AgentBase):
                                  "title": (by_asin[a].get("title") or "")[:90],
                                  "issues": issues})
 
-        recs = self._to_recs(findings, aerrs, cfg)
+        recs = pick_recs + self._to_recs(findings, aerrs, cfg)
         # NO producer-history dedup here, deliberately. That filter exists so a
         # PROPOSAL agent does not pitch the same article twice; this is a
         # MONITOR, and its rec titles ("N shelf products: image mismatch") have
@@ -199,7 +273,9 @@ class ShelfAuditAgent(AgentBase):
                           % (len(findings), len(targets)),
                "recommendations": recs}
         self._save_artifact("recommendations.json", doc)
-        dispatched, dnote = self._maybe_dispatch(recs, cfg)
+        dispatched, dnote = self._maybe_dispatch(
+            [r for r in recs if r not in pick_recs], cfg)
+        pnote = self._maybe_dispatch_picks(pick_recs, cfg)
         self._save_artifact("shelf-findings.json",
                             {"crawled_pages": len(self._pages),
                              "surfaced_asins": len(asins),
@@ -209,12 +285,19 @@ class ShelfAuditAgent(AgentBase):
         return RunResult(
             status="success",
             summary="shelf: %d pages, %d products verified, %d disagree with "
-                    "Amazon (%d recs; %s)" % (len(self._pages), len(truth),
-                                              len(findings), len(recs), dnote),
+                    "Amazon (%d recs; %s)%s" % (
+                        len(self._pages), len(truth), len(findings), len(recs), dnote,
+                        ("; answer picks: %d checked, %d confirmed dead (%s)" % (
+                            pick_summary.get("picks_checked", 0),
+                            len(pick_summary.get("confirmed") or []), pnote))
+                        if pick_summary else ""),
             metrics={"pages_crawled": len(self._pages),
                      "products_verified": len(truth),
                      "products_with_issues": len(findings),
-                     "amazon_unreachable": len(aerrs)})
+                     "amazon_unreachable": len(aerrs),
+                     "answer_picks_checked": pick_summary.get("picks_checked", 0),
+                     "answer_picks_broken_now": len(pick_summary.get("broken_now") or {}),
+                     "answer_picks_confirmed_dead": len(pick_summary.get("confirmed") or [])})
 
     def _to_recs(self, findings, aerrs, cfg) -> list[dict]:
         recs = []
@@ -287,6 +370,31 @@ class ShelfAuditAgent(AgentBase):
         except Exception as e:
             self.decide("observation", "shelf dispatch failed: %s" % str(e)[:120])
             return 0, "dispatch failed: %s" % str(e)[:60]
+
+    def _maybe_dispatch_picks(self, pick_recs, cfg) -> str:
+        """Dead answer picks go to the implementer only with
+        `answer_pick_check.dispatch: true`, and only the lever rec (relink to a
+        provably-same product, or unlink). The review rec never dispatches.
+        Separate from `dispatch_findings`: this remedy edits a link in an
+        article, it does not rewrite catalog prices."""
+        apc = cfg.get("answer_pick_check") or {}
+        if not pick_recs:
+            return "nothing to dispatch"
+        if not apc.get("dispatch"):
+            return "dispatch off"
+        eligible = [r for r in pick_recs if r.get("tier") == "lever"]
+        if not eligible:
+            return "only person-review picks"
+        try:
+            from framework.core import dispatch as _d
+            handle = _d.gated_dispatch_now(
+                agent=self, agent_id=self.agent_id, run_dir=str(self._rundir),
+                rec_ids=[r["id"] for r in eligible], action="implement",
+                site=cfg.get("site_id", ""), subject_tag="shelf-audit")
+            return "dispatched" if handle is not None else "awaiting approval"
+        except Exception as e:
+            self.decide("observation", "answer-pick dispatch failed: %s" % str(e)[:120])
+            return "dispatch failed"
 
     @property
     def _rundir(self) -> Path:

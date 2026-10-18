@@ -178,6 +178,53 @@ against a schema.
 > `auto_implement: false` in a shelf-audit `site.yaml` has no effect.
 > `dispatch_findings` is the only switch that actually works.
 
+## Answer-pick click-out check (`answer_pick_check`, opt-in)
+
+Added 2026-10-18 (aisleprompt growth rec `growth-20261018T091200Z-03`). This is
+a second, independent check (`answer_picks.py`). It runs **before** shelf
+discovery, so a failed crawl cannot skip it. It looks at the site's money links
+rather than its prices:
+
+1. **Pages.** It takes the top `max_pages` paths by verified-human clicks over
+   `window_days`, using `framework.core.human_clicks`, the same definition as the
+   goals tracker. Only paths under `path_prefix` count. If the click table is
+   unreachable, it uses `fallback_pages`.
+2. **Picks.** It reads each page's JSON (`picks_endpoint`, with `{slug}`
+   substituted) and collects every `picks_key[].href` and
+   `picks_key[].<parts_key>[].href`.
+3. **Probe.** It requests each link without following the off-site redirect, so
+   Amazon is never fetched; same-host 301s are followed for up to 3 hops. A pick
+   is healthy only when the redirect `Location` matches `expect_location`
+   (default `^https://www\.amazon\.com/dp/`). The probe's User-Agent contains
+   "bot", so the site's click logger flags these rows as bots.
+4. **Two strikes.** A broken link is confirmed only if it was also broken at least
+   `strike_gap_hours` (default 8) earlier. The strike state is stored at
+   `agents/<id>/answer-pick-strikes.json`. A link that recovers is forgotten.
+5. **Remedy.** `replacement_query` runs with `%(slug)s` and returns the dead pick's
+   own row (`role='self'`) plus in-stock candidates. Each confirmed pick gets one
+   of three outcomes:
+   - **relink:** a candidate has the same title words, the same title numbers
+     (pack size, quart, inch, piece count), and the same listing photo according
+     to `shelf.same_picture`.
+   - **review:** a near-same candidate exists, but a number or the photo differs.
+     A person decides.
+   - **unlink:** no candidate is this product.
+6. **Recs.**
+   - `shelf-<ts>-answer-pick-dead` (lever) covers the relinks and unlinks. It
+     dispatches to the implementer only when `answer_pick_check.dispatch: true`.
+     This flag is separate from `dispatch_findings`, because the remedy edits a
+     link in an article and does not rewrite catalog prices.
+   - `shelf-<ts>-answer-pick-review` (smaller) covers the review cases and never
+     dispatches.
+
+   Artifact: `answer-picks.json`. Metrics: `answer_picks_checked`,
+   `answer_picks_broken_now` and `answer_picks_confirmed_dead`.
+
+The aisleprompt `site.yaml` holds the reference config. Its first dry run against
+production (2026-10-18) checked 100 picks on 20 pages and found one dead pick: the
+cutting boards guide's Joseph Joseph Index set, which had gone out of stock that
+morning. The remedy was **unlink**.
+
 ## No producer-history dedup, on purpose
 
 This agent is a **monitor**, not a proposer. Its rec titles
