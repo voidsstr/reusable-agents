@@ -152,20 +152,19 @@ class ShelfAuditAgent(AgentBase):
             return [], {}
         from datetime import datetime, timezone
         import urllib.request
-        pages: list[str] = []
         conn = None
         try:
             import psycopg2
             conn = psycopg2.connect(os.environ[cfg["dsn_env"]], connect_timeout=15)
             with conn.cursor() as cur:
                 cur.execute("SET statement_timeout = 60000")
-            pages = answer_picks.top_click_pages(conn, apc)
-            conn.rollback()
         except Exception as e:
-            self.decide("observation", "answer-pick pages from clicks failed: %s"
+            conn = None
+            self.decide("observation", "answer-pick DB connect failed: %s"
                         % str(e)[:120])
-        if not pages:
-            pages = [p.rstrip("/") for p in (apc.get("fallback_pages") or [])]
+        # Click pages, then AI-landed pages, then extra_pages (answer_picks.audit_pages).
+        pages = answer_picks.audit_pages(
+            conn, apc, warn=lambda m: self.decide("observation", m))
 
         def fetch_json(url):
             try:

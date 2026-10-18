@@ -15,7 +15,10 @@ What it does, per run:
   1. Pages: the site's top pages by verified-human clicks (framework
      human_clicks, same definition as the goals tracker), filtered to
      `path_prefix`, capped at `max_pages`; `fallback_pages` when the click
-     table is unreachable.
+     table is unreachable. Optional widening (audit_pages): pages assistants
+     land on or fetch (`ai_landed`, framework ai_traffic) and a hand-kept
+     `extra_pages` list, unioned after the click pages. A page whose picks
+     are dead earns no clicks, so a click-ranked set alone never sees it.
   2. Picks: each page's JSON (`picks_endpoint`, `{slug}` substituted) →
      `picks_key[].href` plus `picks_key[].<parts_key>[].href`.
   3. Probe each href WITHOUT following the external redirect (same-host
@@ -66,6 +69,58 @@ def top_click_pages(conn, cfg: dict) -> list[str]:
     prefix = cfg.get("path_prefix") or "/"
     paths = [r["path"].rstrip("/") for r in rows if r["path"].startswith(prefix)]
     return paths[:int(cfg.get("max_pages", 20))]
+
+
+def ai_landed_pages(conn, cfg: dict) -> list[str]:
+    """Top `ai_landed.limit` paths assistants used (referrals + answer-time
+    fetches, framework ai_traffic), filtered to `path_prefix`, best first."""
+    block = cfg.get("ai_landed") or {}
+    if not block or block.get("enabled") is False:
+        return []
+    from framework.core import ai_traffic
+    prefix = cfg.get("path_prefix") or "/"
+    rows = ai_traffic.landed_paths(conn, cfg=ai_traffic.config(block.get("config") or {}),
+                                   prefixes=[prefix], limit=int(block.get("limit", 30)))
+    return [r["path"].rstrip("/") for r in rows if r["path"].startswith(prefix)]
+
+
+def union_pages(*lists: list[str], cap: int = 0) -> list[str]:
+    """Order-preserving union (first list wins ties), capped when cap > 0."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for lst in lists:
+        for p in lst or []:
+            p = p.rstrip("/")
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out[:cap] if cap > 0 else out
+
+
+def audit_pages(conn, cfg: dict, warn: Callable[[str], None] = lambda m: None) -> list[str]:
+    """Click pages, then AI-landed pages, then `extra_pages`, deduped and
+    capped at `max_pages_total` (0 / absent = no cap). Each source fails on
+    its own; with no click pages the `fallback_pages` stand in for them."""
+    clicks: list[str] = []
+    ai: list[str] = []
+    if conn is not None:
+        try:
+            clicks = top_click_pages(conn, cfg)
+        except Exception as e:
+            warn("answer-pick pages from clicks failed: %s" % str(e)[:120])
+        try:
+            conn.rollback()
+            ai = ai_landed_pages(conn, cfg)
+        except Exception as e:
+            warn("answer-pick pages from AI traffic failed: %s" % str(e)[:120])
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    if not clicks:
+        clicks = list(cfg.get("fallback_pages") or [])
+    return union_pages(clicks, ai, list(cfg.get("extra_pages") or []),
+                       cap=int(cfg.get("max_pages_total") or 0))
 
 
 # ---------- picks ----------
