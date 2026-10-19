@@ -171,7 +171,11 @@ gate lands).
      Problems that already existed are warnings, so a broken page never
      blocks the deploy that fixes it. Cold TTFB ≥ `cold_fail_s` is a warning
      (a new revision starts with empty caches).
-   - A failing gate is re-measured once after 45 s, then rolls back.
+   - A failing gate is re-measured once after 45 s, then rolls back. When
+     every failure is a TTFB budget, it gets three re-measures (45 s, 90 s,
+     180 s) instead: a new revision's cache warmers share its node process
+     (2026-10-19: /buying-guides read 4.3 s and 9.1 s warm a minute after
+     deploy, 0.12 s once warm, and both deploys rolled back).
    - If the baseline was expected but could not be taken, the gate only
      reports (`(no baseline — not gating)` warnings) and never rolls back:
      without a baseline a pre-existing problem looks like a regression.

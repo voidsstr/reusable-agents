@@ -923,18 +923,28 @@ def main() -> None:
                     warnings = [f"(no baseline — not gating) {f}" for f in failures] + warnings
                     failures = []
                 if failures:
-                    # Re-measure once: a cold revision and a transient 5xx
-                    # must fail twice before we act.
-                    print(f"[deployer] gate failed first pass ({len(failures)}): "
-                          f"{failures[:5]}; re-measuring in 45s", file=sys.stderr)
-                    time.sleep(45)
-                    try:
-                        post = deploy_gate.measure(sc["base_url"], gate_cfg,
-                                                   sample_urls=(gate_pre or {}).get("sample_urls"))
-                        failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
-                    except Exception as e:
-                        print(f"[deployer] gate re-measure errored ({e}); keeping first-pass result",
-                              file=sys.stderr)
+                    # Re-measure before acting: a cold revision and a transient
+                    # 5xx must fail again. A latency-only failure gets three
+                    # re-measures over ~5 minutes. A new revision's cache
+                    # warmers share its one node process, and /buying-guides
+                    # read 4.3 s and 9.1 s warm a minute after two 2026-10-19
+                    # deploys (0.12 s once warm), so both rolled back. A page
+                    # still over budget after that is a regression.
+                    latency_only = all(re.search(r"\bTTFB\b", f) for f in failures)
+                    for wait_s in ([45, 90, 180] if latency_only else [45]):
+                        print(f"[deployer] gate failed ({len(failures)}): "
+                              f"{failures[:5]}; re-measuring in {wait_s}s", file=sys.stderr)
+                        time.sleep(wait_s)
+                        try:
+                            post = deploy_gate.measure(sc["base_url"], gate_cfg,
+                                                       sample_urls=(gate_pre or {}).get("sample_urls"))
+                            failures, warnings = deploy_gate.compare(gate_pre, post, gate_cfg)
+                        except Exception as e:
+                            print(f"[deployer] gate re-measure errored ({e}); keeping the previous result",
+                                  file=sys.stderr)
+                        if not failures:
+                            print("[deployer] gate passed on re-measure", file=sys.stderr)
+                            break
                 deploy_meta.setdefault("gate", {})
                 deploy_meta["gate"].update({"post": _gate_summary(post), "failures": failures,
                                             "warnings": warnings, "ok": not failures})
