@@ -59,7 +59,10 @@ gate lands).
    `cwd`s resolve against `implementer.repo_path`.
    - **Lock first.** Takes `site_deploy_lock(<deploy.vars.app>)` before the
      tests and holds it through smoke/rollback. Waiting prints a line a minute
-     (`DEPLOYER_LOCK_WAIT_S`, default 6600).
+     (`DEPLOYER_LOCK_WAIT_S`, default 9000, longer than a holder's worst case).
+     SIGTERM raises SystemExit, so the lock, the worktree and the gate state
+     are always cleaned up. Worktrees left by runs that died anyway are swept
+     on the next run.
    - **Tag.** Stamped after the lock as the UTC time `%Y%m%d-%H%M`. A run that
      waited never reuses its start minute. (On 2026-09-23 two pairs of runs
      shared a tag.)
@@ -80,32 +83,58 @@ gate lands).
      kills the whole process group.
    - **Classifies** the result with `deploy_repair.classify` (exit code + output
      + Playwright JSON report): `pass`, `flaky`, `code`, `infra` or `config`.
-     Before a code failure counts, the failed tests are re-run alone at
-     `--workers=1` (`--last-failed`). Green there → `flaky`, the deploy goes
-     on.
+     Before a code failure counts, the spec FILES that failed are re-run whole
+     at `--workers=1`. It is `flaky` (deploy goes on) only if that run is clean,
+     nothing in it was skipped as "did not run", and every failing test passed.
+     (`--last-failed` would re-run only the failed test, and a failed
+     `beforeAll` or serial neighbour hides tests that never ran.) A build or
+     boot failure with no test report is re-run once before any repair.
    - **infra** → re-run (`repair.infra_retries`, default 2, after
      `infra_retry_wait_s`). Never sent to an LLM.
    - **code** → an Opus repair session (`claude --print` through the
      claude-pool, `--model repair.model`, `--max-turns repair.max_turns`).
+     Only in an isolated worktree: without one (git could not make it, or
+     `build.from_clean_checkout: false`) the gate blocks and nothing touches
+     the shared live tree. Also gated by the signature's backoff and the
+     per-site cap `repair.max_repairs_per_day` (9). The session gets
+     whatever time is left minus a re-test reserve (1.5× the last gate run),
+     so the re-test always fits.
      cwd is the checkout, the prompt is `deploy_repair.build_repair_prompt` +
      `REPAIR.md`, and it holds the failing tests with errors, the server log
      tail, the commits since the last green gate, and a one-test re-run
      command. The session commits in the checkout. `deploy_repair.check_repair`
-     then vets the commits: implementer scope (`scope_by_dispatch_kind:
-     deploy-repair`), protected gate files, and no weakened tests (skip,
-     fixme, only, fail, fewer `expect()` calls, a deleted test, or a test
-     edit without `TEST-CHANGE-JUSTIFICATION:`). A rejected attempt is reset
-     and the next attempt is told why. An accepted one is re-tested. Up to
-     `repair.max_attempts` (default 3) within `repair.max_wall_s` (5400).
+     then vets the commits. They must descend from the commit under test and
+     stay inside the implementer scope (`scope_by_dispatch_kind:
+     deploy-repair`). They must not touch protected paths: the runner,
+     Playwright configs, the all-pages manifest, `site.yaml`, migrations. They
+     must not weaken a test: no skip, fixme, only or fail, no fewer `expect()`
+     calls, no deleted test, no test edit without `TEST-CHANGE-JUSTIFICATION:`.
+     An accepted attempt is re-tested. After a green re-run,
+     `deploy_repair.verify_repaired` checks that every test that failed or
+     did not run is present and passing and nothing stopped running. A repair
+     that makes failing tests disappear is reset like a rejected one. Up to
+     `repair.max_attempts` (default 3) within `repair.max_wall_s` (5400). A
+     claude-pool with no capacity (rc 75) is a deferral, not a spent cycle:
+     the gate retries after `repair.pool_retry_s` (900).
    - **Green after a repair** → `gate_runner.land` fast-forwards the live
      branch to the repair, or cherry-picks it if the branch moved. A
      conflict aborts the pick, blocks the deploy, keeps the repair at
-     `refs/deploy-repair/<site>/<tag>` and emails the operator.
+     `refs/deploy-repair/<site>/<tag>`, keeps the failure's backoff and
+     emails the operator once. The gate state turns green only after the
+     repair landed. If the repair restored files the batch had changed
+     (`DEPLOYER_BATCH_BASE_SHA` from run.sh), the batch's recs are not marked
+     shipped.
    - **Still red** → status `blocked`, exit 1, and
      `<run-dir>/test-failure-context.json` (failures, signature, repairs,
      artifact paths). The gate state backs off on that failure signature
-     (`repair.backoff_s`). Once a full cycle is spent, the operator gets one
-     email per signature (`reporter.email`, re-sent after `repair.realert_s`).
+     (`repair.backoff_s`), tracked per signature: an infra red never resets
+     a code failure's backoff. Email (`reporter.email`, de-duplicated per
+     signature, re-sent after `repair.realert_s`):
+     - a code failure, once a repair cycle is spent;
+     - any other red (infra, config, repair disabled), once the site has been
+       red for `repair.alert_red_for_s` (2 h);
+     - a green repair that cannot land, at once.
+     An alert counts as sent only when it was really delivered.
      `repair.enabled: false`, storage `config/deploy-repair-config.json`
      `{"enabled": false}` or `DEPLOY_REPAIR_DISABLED=1` stops repairs. The gate
      still blocks.
@@ -314,7 +343,9 @@ while keeping the explicit agent-id override.
 | `SEO_AGENT_CONFIG` | none (required) | site config path (the implementer passes it through) |
 | `RESPONDER_RUN_DIR` / `SEO_DEPLOYER_RUN_DIR` | none (required) | run dir to ship; `run.sh --run-dir` sets the former |
 | `DEPLOYER_TEST_SCOPE` | auto (`test.test_scope`, else the tier auto-pick) | `smoke`, `full` or `legacy` |
-| `DEPLOYER_LOCK_WAIT_S` | 6600 | how long to wait for another gate/deploy of the target |
+| `DEPLOYER_LOCK_WAIT_S` | 9000 | how long to wait for another gate/deploy of the target |
+| `DEPLOY_REPAIR_IN_DRY_RUN` / `DEPLOYER_DRY_RUN_LAND` | unset | `1` lets `--dry-run` repair / land a repair (by default a dry run only reports and keeps a repair at `refs/deploy-repair/…`) |
+| `DEPLOYER_BATCH_BASE_SHA` | set by run.sh | HEAD before the batch; detects a repair that reverted the batch |
 | `DEPLOYER_FORCE` | unset | `1` re-deploys a HEAD the gate state says is already live |
 | `DEPLOY_REPAIR_DISABLED` | unset | `1` stops repair sessions (the gate still blocks) |
 | `DEPLOY_REPAIR_CLAUDE_BIN` | `claude` on PATH | the claude executable for repairs |
@@ -328,10 +359,11 @@ Site `deployer:` keys:
 - `test.{cmd,cwd}`, or `test.{smoke,full}.{cmd,cwd}`, `test.test_scope`,
   `test.full_interval_days` and `test.timeout_s`
 - `build.reuse_tested_image` (default true) and `build.from_clean_checkout`
-- `repair.*`: `enabled`, `max_attempts`, `max_wall_s`, `attempt_timeout_s`,
-  `test_timeout_s`, `infra_retries`, `infra_retry_wait_s`, `confirm_failures`,
-  `model`, `max_turns`, `claude_bin`, `allow_test_edits`, `test_globs`,
-  `protected_globs`, `backoff_s`, `alert_after_cycles`, `realert_s`
+- `repair.*`: `enabled`, `max_attempts`, `max_repairs_per_day`, `max_wall_s`,
+  `attempt_timeout_s`, `test_timeout_s`, `infra_retries`, `infra_retry_wait_s`,
+  `confirm_failures`, `model`, `max_turns`, `claude_bin`, `allow_test_edits`,
+  `test_globs`, `protected_globs`, `backoff_s`, `pool_retry_s`,
+  `alert_after_cycles`, `alert_red_for_s`, `realert_s`
   (`framework/core/deploy_repair.py` DEFAULTS; the storage config
   `config/deploy-repair-config.json` overrides, top level then `by_site.<site>`)
 - `implementer.scope_by_dispatch_kind.deploy-repair`: the paths a repair may

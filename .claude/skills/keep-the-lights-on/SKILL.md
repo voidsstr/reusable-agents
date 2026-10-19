@@ -711,13 +711,16 @@ HTTP 400) = renewed → mark resolved.
 2026-10-19 the deployer repairs its own red gate (`agents/deployer/gate_runner.py`,
 `framework/core/deploy_repair.py`). Read it before acting:
 `~/.reusable-agents/deployer/gate-state/<site>.json` holds `status`,
-`signature`, `cycles`, `next_repair_at`, `last_reason` and `last_failures`. The
+`signature` (the newest red), `last_reason`, `last_failures`, `red_since`, and
+`failures.<signature>` with that failure's `kind`, `cycles` and `next_repair_at`
+(backoff is per signature). The
 newest dispatch log shows `[deployer:gate]` / `TEST GATE RED` lines. The run
 dir's `test-failure-context.json` names the artifact dirs
 (`~/.reusable-agents/deployer/gate-artifacts/<site>/…`: `report.json`,
 `output.log`, `container.log`, each repair's `session.log`). Cases:
-- `red`, `code`, and `cycles` is 0 or `next_repair_at` is in the past → the loop
-  will retry on the next deploy. Note it. Do nothing.
+- `red`, `code`, and that signature's `cycles` is 0 or its `next_repair_at` is
+  in the past → the loop will retry on the next deploy. Note it. Do nothing.
+  "deferred, the claude-pool has no capacity" is the same: it retries in 15 min.
 - `red`, `code`, and backing off after a spent cycle → the operator has been
   emailed (once per signature). Look at the failing test and the repair session
   logs. Fix by hand only if the fix is obvious and small (then run

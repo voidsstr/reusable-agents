@@ -10,19 +10,29 @@ decisions that turn a red gate into test -> fix -> retest -> deploy:
   classify()             pass / flaky / code / infra / config, from the test
                          command's exit code, its output and Playwright's JSON
                          report. Only `code` ever reaches an LLM. An infra
-                         failure (a container race, Docker down, a lock
-                         timeout) is retried, never "fixed" in code.
-  parse_report()         the failing tests out of a Playwright JSON report.
-  failure_signature()    a stable id for one set of failures, so backoff and
-                         alerts key on the failure rather than the run.
+                         failure (a container race, Docker down, a registry
+                         blip, a browser that cannot launch) is retried, never
+                         "fixed" in code.
+  parse_report()         the failing tests, and the tests that never ran
+                         because a beforeAll or a serial neighbour failed.
+  failure_signature()    a stable id for one set of failures.
   build_repair_prompt()  the instructions for one repair attempt.
-  check_repair()         what a repair committed may ship: inside the site's
-                         path scope, protected gate files untouched, and no
-                         weakened tests. No added skip/fixme/only, no deleted
-                         test files, no fewer expect() calls, and a written
+  check_repair()         what a repair committed may ship. It must build on the
+                         commit under test, stay inside the site's path scope,
+                         leave the gate machinery alone (runner, Playwright
+                         configs, page manifests, migrations), and not weaken a
+                         test: no added skip/fixme/only/fail, no deleted test
+                         files, no fewer expect() calls, and a written
                          TEST-CHANGE-JUSTIFICATION for any test edit.
-  GateState              per-site memory across runs: red/green, signature,
-                         cycles, backoff, last alert, last deployed commit.
+  verify_repaired()      the semantic check after the re-run. Every test that
+                         failed or never ran before the repair must now be
+                         present and passing, and the suite must not have
+                         shrunk. A green gate that got there by losing tests
+                         is not green.
+  GateState              per-site memory across runs: per-signature cycles and
+                         backoff (an infra red cannot reset a code failure's
+                         backoff), a daily cap on repair sessions, alert times,
+                         last green / deployed commit.
   load_config()          DEFAULTS < site.yaml deployer.repair < storage
                          config/deploy-repair-config.json (top level, then
                          by_site.<site>).
@@ -53,19 +63,22 @@ DEFAULTS: dict[str, Any] = {
     "enabled": True,
     # LLM repair attempts within one deploy run.
     "max_attempts": 3,
+    # Repair sessions per site per rolling 24 h, across every signature. A
+    # failure set that keeps shifting (one test more, one fewer) would
+    # otherwise look new each time and get a fresh budget.
+    "max_repairs_per_day": 9,
     # Wall-clock budget for the whole test -> repair -> retest loop in one
-    # run. The auto-queue drainer waits 7200 s for a dispatch.
+    # run (the deploy-lock wait is not part of it).
     "max_wall_s": 5400,
-    # One LLM repair session.
+    # One LLM repair session (shortened so the re-test always fits).
     "attempt_timeout_s": 2400,
     # One run of the site's gate command.
     "test_timeout_s": 1800,
     # Re-runs of an infrastructure failure before giving up for this run.
     "infra_retries": 2,
     "infra_retry_wait_s": 60,
-    # Re-run only the failed tests at --workers=1 before calling them a code
-    # failure. One node container serves every worker, so load can look like
-    # a bug.
+    # Re-run the spec files that failed, alone at --workers=1, before calling
+    # it a code failure. Green there, with nothing skipped, means flaky.
     "confirm_failures": True,
     "model": "claude-opus-5-5",
     "max_turns": 150,
@@ -75,20 +88,30 @@ DEFAULTS: dict[str, Any] = {
     "test_globs": [
         "tests/**", "**/__tests__/**", "**/*.spec.ts", "**/*.spec.js",
         "**/*.test.ts", "**/*.test.tsx", "**/*.test.js",
-        "playwright.config.*", "pw.config.*", "**/playwright.config.*",
-        "**/pw.config.*",
     ],
-    # The gate's own machinery. A repair that edits these is rejected.
+    # Never edited by a repair: the gate's own machinery (what runs, how),
+    # the all-pages manifest (an "exception" there drops a page from the
+    # gate), and DB migrations (they run against production at boot).
     "protected_globs": [
         "tests/run-local-suite.sh", "docker-compose.test.yml",
         "agents/**/site.yaml",
+        "playwright.config.*", "**/playwright.config.*",
+        "pw.config.*", "**/pw.config.*",
+        "tests/**/*manifest*", "tests/**/global-setup*", "tests/**/global-teardown*",
+        "db/migrations/**", "**/migrations/**",
     ],
-    # Seconds to wait before the next repair cycle of the SAME failure
-    # signature, indexed by exhausted cycles (the last value repeats).
+    # Seconds before the next repair cycle of the SAME failure signature,
+    # indexed by exhausted cycles (the last value repeats).
     "backoff_s": [0, 1800, 7200, 21600, 43200],
-    # Email the operator once a signature has exhausted this many cycles,
-    # then at most every realert_s.
+    # When the claude-pool has no capacity, retry after this long. It is not
+    # a failed repair, so it does not climb the backoff ladder.
+    "pool_retry_s": 900,
+    # Email the operator once a code signature has exhausted this many repair
+    # cycles; any other red (infra, config, repair disabled, cannot land)
+    # emails once the site has been red this long. Then at most every
+    # realert_s per signature.
     "alert_after_cycles": 1,
+    "alert_red_for_s": 7200,
     "realert_s": 86400,
 }
 
@@ -120,7 +143,7 @@ def load_config(site_id: str, site_block: Optional[dict] = None,
 
     A missing or unreadable storage config means defaults (config blobs are
     archived 120 days after their last write; that must never switch repair
-    off or on by accident).
+    off or on by accident). Keys starting with "_" are notes, ignored.
     """
     cfg = dict(DEFAULTS)
     if isinstance(site_block, dict):
@@ -132,10 +155,10 @@ def load_config(site_id: str, site_block: Optional[dict] = None,
         except Exception:
             stored = {}
     if isinstance(stored, dict):
-        cfg.update({k: v for k, v in stored.items() if k != "by_site"})
+        cfg.update({k: v for k, v in stored.items() if k != "by_site" and not k.startswith("_")})
         per_site = (stored.get("by_site") or {}).get(site_id)
         if isinstance(per_site, dict):
-            cfg.update(per_site)
+            cfg.update({k: v for k, v in per_site.items() if not k.startswith("_")})
     if os.environ.get("DEPLOY_REPAIR_DISABLED") == "1":
         cfg["enabled"] = False
     return cfg
@@ -161,30 +184,39 @@ class TestFailure:
     project: str = ""
     error: str = ""                 # first error message, ANSI stripped
     attachments: list = field(default_factory=list)   # screenshot / trace paths
+    did_not_run: bool = False       # skipped because a beforeAll / serial neighbour failed
 
     @property
     def key(self) -> str:
-        return f"{self.file}::{self.title}"
+        return f"{self.file}::{self.project}::{self.title}"
 
 
 @dataclass
 class Report:
-    failures: list = field(default_factory=list)      # list[TestFailure]
+    failures: list = field(default_factory=list)      # list[TestFailure]: failed + did not run
     expected: int = 0
     unexpected: int = 0
     flaky: int = 0
     skipped: int = 0
+    did_not_run: int = 0
     flaky_titles: list = field(default_factory=list)
     global_errors: list = field(default_factory=list)
+    passed_keys: set = field(default_factory=set)     # keys of tests that passed (incl. flaky)
+    all_keys: set = field(default_factory=set)
 
     @property
     def total(self) -> int:
         return self.expected + self.unexpected + self.flaky + self.skipped
 
+    @property
+    def failing_files(self) -> list[str]:
+        return sorted({f.file for f in self.failures if f.file})
+
 
 def parse_report(path: str | Path) -> Optional[Report]:
-    """The failing and flaky tests from a Playwright JSON report, or None when
-    there is no readable report (the suite never reached Playwright)."""
+    """The failing, never-run and flaky tests from a Playwright JSON report, or
+    None when there is no readable report (the suite never reached
+    Playwright)."""
     p = Path(path)
     if not p.is_file():
         return None
@@ -211,20 +243,29 @@ def parse_report(path: str | Path) -> Optional[Report]:
             for t in spec.get("tests") or []:
                 status = t.get("status")
                 full = " › ".join(here + [spec.get("title") or ""])
+                f = TestFailure(title=full, file=spec.get("file") or suite.get("file") or "",
+                                line=int(spec.get("line") or 0), project=t.get("projectName") or "")
+                rep.all_keys.add(f.key)
+                if status in ("expected", "flaky"):
+                    rep.passed_keys.add(f.key)
                 if status == "flaky":
                     rep.flaky_titles.append(full)
-                if status != "unexpected":
+                # A test that was skipped although it was expected to run did
+                # not run: its beforeAll failed, or a test before it in a
+                # serial group did. Nothing proves it passes.
+                dnr = status == "skipped" and (t.get("expectedStatus") or "passed") != "skipped"
+                if dnr:
+                    rep.did_not_run += 1
+                if status != "unexpected" and not dnr:
                     continue
                 results = t.get("results") or []
                 last = results[-1] if results else {}
                 errs = last.get("errors") or ([last["error"]] if last.get("error") else [])
-                msg = "\n".join(_clean((e or {}).get("message") or "", 1200) for e in errs[:2])
-                atts = [a.get("path") for a in last.get("attachments") or [] if a.get("path")]
-                rep.failures.append(TestFailure(
-                    title=full, file=spec.get("file") or suite.get("file") or "",
-                    line=int(spec.get("line") or 0), project=t.get("projectName") or "",
-                    error=msg.strip(), attachments=atts[:4],
-                ))
+                f.error = "\n".join(_clean((e or {}).get("message") or "", 1200)
+                                    for e in errs[:2]).strip() or ("did not run" if dnr else "")
+                f.attachments = [a.get("path") for a in last.get("attachments") or [] if a.get("path")][:4]
+                f.did_not_run = dnr
+                rep.failures.append(f)
         for child in suite.get("suites") or []:
             walk(child, here)
 
@@ -237,7 +278,9 @@ def parse_report(path: str | Path) -> Optional[Report]:
 # Classification
 # ---------------------------------------------------------------------------
 
-# Exit codes of the sites' tests/run-local-suite.sh and the deployer.
+# Exit codes of the sites' tests/run-local-suite.sh and the deployer. Exit 6
+# (never became healthy) is infra the first time; the gate loop re-classifies
+# a repeat as code (the app's own boot is the likelier cause by then).
 INFRA_RC = {
     2: "the fixture DB is not up",
     4: "the test container did not start",
@@ -249,6 +292,7 @@ INFRA_RC = {
     143: "the test step was terminated",
 }
 CONFIG_RC = {78: "no tests matched the gate selection"}
+_NO_TESTS = re.compile(r"No tests found|0 tests found", re.I)
 
 # Output that means the machine, not the code, failed. Checked before an
 # exit code that could be either (3 = image does not build, 5 = container
@@ -260,17 +304,25 @@ INFRA_PATTERNS = [
     r"Conflict\. The container name",
     r"address already in use",
     r"port is already allocated",
-    r"no space left on device",
+    r"no space left on device|ENOSPC",
     r"TLS handshake timeout",
     r"toomanyrequests",
     r"failed to resolve source metadata",
     r"failed to do request: .*(timeout|connection refused)",
     r"net/http: request canceled",
     r"error pulling image configuration",
-    r"Temporary failure in name resolution",
+    r"Temporary failure in name resolution|EAI_AGAIN|Could not resolve host",
+    r"npm (ERR!|error) (network|code E(TIMEDOUT|CONNRESET|CONNREFUSED|AI_AGAIN))",
+    r"\b(ETIMEDOUT|ECONNRESET)\b.*registry",
     r"OOMKilled|out of memory",
 ]
 _INFRA_RE = re.compile("|".join(f"(?:{p})" for p in INFRA_PATTERNS), re.I)
+# Test errors that mean the test runner's browser could not start: every
+# test fails at launch, whatever the code does.
+_BROWSER_INFRA_RE = re.compile(
+    r"Executable doesn't exist at|browserType\.launch: (Failed to launch|Target page)|"
+    r"Host system is missing dependencies|Looks like Playwright Test or Playwright was just installed",
+    re.I)
 
 
 @dataclass
@@ -287,12 +339,13 @@ class Classification:
 
 def classify(rc: int, output: str, report: Optional[Report]) -> Classification:
     text = (output or "")[-400_000:]
-    if rc == 0:
+    dnr = report.did_not_run if report is not None else 0
+    if rc in CONFIG_RC or _NO_TESTS.search(text) and (report is None or report.total == 0):
+        return Classification("config", CONFIG_RC[78], 78)
+    if rc == 0 and not dnr:
         if report is not None and report.flaky:
             return Classification("flaky", f"{report.flaky} test(s) passed only on retry", 0)
         return Classification("pass", "gate passed", 0)
-    if rc in CONFIG_RC:
-        return Classification("config", CONFIG_RC[rc], rc)
     if rc in INFRA_RC:
         return Classification("infra", INFRA_RC[rc], rc)
     m = _INFRA_RE.search(text)
@@ -303,9 +356,14 @@ def classify(rc: int, output: str, report: Optional[Report]) -> Classification:
     if rc == 5:
         return Classification("code", "the container exited before it was healthy (boot crash)", rc)
     if report is not None and report.failures:
-        n = len([f for f in report.failures if f.title != "<global error>"])
-        what = f"{n} test(s) failed" if n else "the test run reported errors"
-        return Classification("code", what, rc, list(report.failures))
+        tests = [f for f in report.failures if f.title != "<global error>"]
+        if tests and all(_BROWSER_INFRA_RE.search(f.error or "") for f in tests):
+            return Classification("infra", "the test browser could not launch", rc)
+        failed = sum(1 for f in tests if not f.did_not_run)
+        what = (f"{failed} test(s) failed" if failed else "the test run reported errors")
+        if dnr:
+            what += f", {dnr} did not run"
+        return Classification("code", what, rc or 1, list(report.failures))
     if m:
         return Classification("infra", f"exit {rc} with infrastructure error: {m.group(0)[:120]}", rc)
     return Classification("infra", f"exit {rc} with no test failure in the report", rc)
@@ -314,7 +372,7 @@ def classify(rc: int, output: str, report: Optional[Report]) -> Classification:
 def failure_signature(c: Classification) -> str:
     """Same failures -> same signature, whatever run or attempt found them."""
     if c.failures:
-        basis = "\n".join(sorted({f.key for f in c.failures}))
+        basis = c.kind + "\n" + "\n".join(sorted({f.key for f in c.failures}))
     else:
         basis = f"{c.kind}:{c.rc}"
     return hashlib.sha1(basis.encode()).hexdigest()[:12]
@@ -324,8 +382,32 @@ def summarize_failures(failures: Iterable[TestFailure], limit: int = 12) -> list
     out = []
     for f in list(failures)[:limit]:
         out.append({"title": f.title, "file": f.file, "line": f.line,
-                    "error": _clean(f.error, 600)})
+                    "did_not_run": f.did_not_run, "error": _clean(f.error, 600)})
     return out
+
+
+def verify_repaired(before: Classification, after: Optional[Report]) -> tuple[bool, list[str]]:
+    """After a repair and a green re-run: did the failing tests really pass?
+
+    Every test that failed or did not run before the repair must be in the new
+    report and have passed (a flaky pass counts). Nothing may have stopped
+    running, and the suite must not have shrunk. A repair that gets green by
+    excluding, renaming or skipping the failing tests is rejected here, whatever
+    the syntax of the change.
+    """
+    if after is None:
+        return False, ["the re-run produced no Playwright report"]
+    problems: list[str] = []
+    if after.unexpected or after.did_not_run:
+        problems.append(f"the re-run still has {after.unexpected} failed and "
+                        f"{after.did_not_run} not-run test(s)")
+    missing = [f for f in before.failures
+               if f.title != "<global error>" and f.key not in after.passed_keys]
+    if missing:
+        names = "; ".join(f.title for f in missing[:5])
+        problems.append(f"{len(missing)} previously failing test(s) did not pass in the re-run "
+                        f"(missing, renamed or skipped): {names}")
+    return (not problems), problems
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +431,9 @@ def build_repair_prompt(*, site: str, worktree: str, runbook: str,
         lines.append("Failing tests (from Playwright's JSON report):")
         for f in classification.failures[:15]:
             loc = f"{f.file}:{f.line}" if f.file else ""
-            lines.append(f"- {f.title}  [{loc}]")
-            if f.error:
+            tag = "  (DID NOT RUN: an earlier test or hook in its group failed)" if f.did_not_run else ""
+            lines.append(f"- {f.title}  [{loc}]{tag}")
+            if f.error and not f.did_not_run:
                 for el in _clean(f.error, 900).splitlines()[:12]:
                     lines.append(f"    {el}")
             for a in f.attachments[:2]:
@@ -374,6 +457,9 @@ def build_repair_prompt(*, site: str, worktree: str, runbook: str,
         "To check your fix against one test (it rebuilds the image from this checkout):",
         f"  {rerun_hint}",
         "",
+        "The deployer re-runs the whole gate after you, and checks that every test listed",
+        "above is present and passes. Making a test disappear does not count as a fix.",
+        "",
         "Test edits are " + ("allowed only under the runbook's rules." if allow_test_edits
                               else "NOT allowed in this run: fix the application."),
         "",
@@ -396,9 +482,9 @@ _EXPECT_RE = re.compile(r"\bexpect(?:\.soft|\.poll)?\s*\(")
 JUSTIFICATION = "TEST-CHANGE-JUSTIFICATION:"
 
 
-def _git(repo: str, *args: str) -> str:
+def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", repo, *args], capture_output=True,
-                          text=True, check=False).stdout
+                          text=True, check=False)
 
 
 def _glob_match(path: str, globs: Iterable[str]) -> bool:
@@ -423,8 +509,13 @@ def check_repair(repo: str, base_sha: str, head_sha: str, *, scope: Any = None,
     problems: list[str] = []
     if not head_sha or head_sha == base_sha:
         return False, ["the repair made no commit"], []
+    # A repair builds on the commit under test. A HEAD that is not a
+    # descendant (reset to an older commit, a rewritten history) would make
+    # the deployer ship something else entirely.
+    if _git(repo, "merge-base", "--is-ancestor", base_sha, head_sha).returncode != 0:
+        return False, ["the repair moved HEAD off the commit under test (it is not a descendant)"], []
     changed = []
-    for row in _git(repo, "diff", "--name-status", "--no-renames", base_sha, head_sha).splitlines():
+    for row in _git(repo, "diff", "--name-status", "--no-renames", base_sha, head_sha).stdout.splitlines():
         parts = row.split("\t")
         if len(parts) >= 2:
             changed.append((parts[0][:1], parts[-1]))
@@ -435,7 +526,7 @@ def check_repair(repo: str, base_sha: str, head_sha: str, *, scope: Any = None,
     tests_changed: list[str] = []
     for status, path in changed:
         if _glob_match(path, protected):
-            problems.append(f"{path}: part of the gate's own machinery, a repair may not edit it")
+            problems.append(f"{path}: the gate's own machinery (or a migration); a repair may not edit it")
         if scope is not None and not scope.is_path_allowed(path):
             problems.append(f"{path}: outside the site's implementer scope")
         if _glob_match(path, test_globs):
@@ -446,15 +537,15 @@ def check_repair(repo: str, base_sha: str, head_sha: str, *, scope: Any = None,
         if not cfg.get("allow_test_edits", True):
             problems.append("test files changed but test edits are not allowed: "
                             + ", ".join(tests_changed[:5]))
-        diff = _git(repo, "diff", "-U0", base_sha, head_sha, "--", *tests_changed)
+        diff = _git(repo, "diff", "-U0", base_sha, head_sha, "--", *tests_changed).stdout
         if _WEAKEN_RE.search(diff) or _ONLY_RE.search(diff):
             problems.append("adds test.skip/fixme/only/fail to a test")
         for path in tests_changed:
-            old = _git(repo, "show", f"{base_sha}:{path}")
-            new = _git(repo, "show", f"{head_sha}:{path}")
+            old = _git(repo, "show", f"{base_sha}:{path}").stdout
+            new = _git(repo, "show", f"{head_sha}:{path}").stdout
             if old and len(_EXPECT_RE.findall(new)) < len(_EXPECT_RE.findall(old)):
                 problems.append(f"{path}: fewer expect() calls than before")
-        messages = _git(repo, "log", "--format=%B", f"{base_sha}..{head_sha}")
+        messages = _git(repo, "log", "--format=%B", f"{base_sha}..{head_sha}").stdout
         if JUSTIFICATION not in messages:
             problems.append(f"test files changed without a '{JUSTIFICATION}' line in the commit message")
     return (not problems), problems, tests_changed
@@ -479,16 +570,17 @@ def _safe(name: str) -> str:
 class GateState:
     site: str
     status: str = "unknown"          # green | red | unknown
-    signature: str = ""
+    signature: str = ""              # the newest red's signature
     red_since: str = ""
-    cycles: int = 0                  # exhausted repair cycles for this signature
-    attempts_total: int = 0
-    last_attempt_at: str = ""
-    next_repair_at: str = ""
     last_reason: str = ""
     last_failures: list = field(default_factory=list)
+    # signature -> {kind, cycles, attempts, next_repair_at, first_seen, last_seen}
+    failures: dict = field(default_factory=dict)
+    repair_times: list = field(default_factory=list)  # iso, last 24 h
+    attempts_total: int = 0
     last_green_sha: str = ""
     last_deployed_sha: str = ""
+    last_deployed_tag: str = ""
     alerts: dict = field(default_factory=dict)        # signature -> iso
     history: list = field(default_factory=list)       # last 30 events
 
@@ -497,14 +589,22 @@ class GateState:
         p = state_dir() / f"{_safe(site)}.json"
         try:
             d = json.loads(p.read_text())
-            known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-            return cls(**{**known, "site": site})
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError):
             return cls(site=site)
+        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        st = cls(**{**known, "site": site})
+        # State written before per-signature tracking (2026-10-19) kept one
+        # signature with top-level cycles / next_repair_at.
+        if d.get("signature") and "failures" not in d:
+            st.failures[d["signature"]] = {
+                "kind": "code", "cycles": int(d.get("cycles") or 0), "attempts": 0,
+                "next_repair_at": d.get("next_repair_at") or "",
+                "first_seen": d.get("red_since") or "", "last_seen": d.get("last_attempt_at") or ""}
+        return st
 
     def save(self) -> None:
         p = state_dir() / f"{_safe(self.site)}.json"
-        tmp = p.with_suffix(".tmp")
+        tmp = p.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2))
         os.replace(tmp, p)
 
@@ -512,54 +612,99 @@ class GateState:
         self.history.append({"at": _iso(_now()), "event": what, **extra})
         self.history = self.history[-30:]
 
-    def may_repair(self, signature: str, now: Optional[datetime] = None) -> tuple[bool, str]:
+    def entry(self, signature: str) -> dict:
+        return self.failures.get(signature) or {}
+
+    def repairs_last_day(self, now: Optional[datetime] = None) -> int:
         now = now or _now()
-        if self.status == "red" and signature == self.signature:
-            nxt = _parse_iso(self.next_repair_at)
-            if nxt and now < nxt:
-                return False, f"repair of failure {signature} backing off until {self.next_repair_at}"
+        keep = [t for t in self.repair_times
+                if (p := _parse_iso(t)) and (now - p).total_seconds() < 86400]
+        self.repair_times = keep
+        return len(keep)
+
+    def may_repair(self, signature: str, cfg: Optional[dict] = None,
+                   now: Optional[datetime] = None) -> tuple[bool, str]:
+        cfg = cfg or DEFAULTS
+        now = now or _now()
+        nxt = _parse_iso(self.entry(signature).get("next_repair_at", ""))
+        if nxt and now < nxt:
+            return False, f"repair of failure {signature} backing off until {_iso(nxt)}"
+        cap = int(cfg.get("max_repairs_per_day", DEFAULTS["max_repairs_per_day"]))
+        if self.repairs_last_day(now) >= cap:
+            return False, f"{cap} repair sessions already ran for this site in the last 24 h"
         return True, ""
+
+    def record_repair_session(self, now: Optional[datetime] = None) -> None:
+        self.repair_times.append(_iso(now or _now()))
+        self.attempts_total += 1
+
+    def _mark_red(self, c: Classification, signature: str, now: datetime) -> dict:
+        if self.status != "red":
+            self.red_since = _iso(now)
+        self.status = "red"
+        self.signature = signature
+        self.last_reason = f"{c.kind}: {c.reason}"
+        self.last_failures = summarize_failures(c.failures, 8)
+        e = self.failures.setdefault(signature, {
+            "kind": c.kind, "cycles": 0, "attempts": 0, "next_repair_at": "",
+            "first_seen": _iso(now), "last_seen": ""})
+        e["kind"] = c.kind
+        e["last_seen"] = _iso(now)
+        return e
 
     def record_red(self, c: Classification, signature: str, *, attempts: int,
                    exhausted: bool, cfg: dict, now: Optional[datetime] = None) -> None:
+        """A red run. Only this signature's entry changes: an infra red can
+        never reset a code failure's cycles or backoff."""
         now = now or _now()
-        if self.status != "red" or signature != self.signature:
-            self.cycles = 0
-            self.red_since = self.red_since if self.status == "red" else _iso(now)
-        self.status = "red"
-        self.signature = signature
-        self.attempts_total += attempts
-        self.last_attempt_at = _iso(now)
-        self.last_reason = f"{c.kind}: {c.reason}"
-        self.last_failures = summarize_failures(c.failures, 8)
+        e = self._mark_red(c, signature, now)
+        e["attempts"] = int(e.get("attempts") or 0) + attempts
         if exhausted:
-            self.cycles += 1
+            e["cycles"] = int(e.get("cycles") or 0) + 1
             backoff = list(cfg.get("backoff_s") or DEFAULTS["backoff_s"])
-            wait = backoff[min(self.cycles, len(backoff) - 1)]
-            self.next_repair_at = _iso(now + timedelta(seconds=int(wait)))
+            wait = backoff[min(e["cycles"], len(backoff) - 1)]
+            e["next_repair_at"] = _iso(now + timedelta(seconds=int(wait)))
         self._event("red", signature=signature, kind=c.kind, attempts=attempts,
                     exhausted=exhausted)
+
+    def record_deferred(self, c: Classification, signature: str, *, wait_s: int, why: str,
+                        now: Optional[datetime] = None) -> None:
+        """Red, and the repair could not even start (the pool had no capacity).
+        Not a failed cycle: retry soon, no backoff climb."""
+        now = now or _now()
+        e = self._mark_red(c, signature, now)
+        e["next_repair_at"] = _iso(now + timedelta(seconds=int(wait_s)))
+        self.last_reason = f"{c.kind}: {c.reason}; {why}"
+        self._event("deferred", signature=signature, why=why[:120])
 
     def record_green(self, sha: str, *, repaired: bool) -> None:
         was_red = self.status == "red"
         self.status = "green"
         self.last_green_sha = sha
         self.signature = ""
-        self.cycles = 0
-        self.next_repair_at = ""
         self.red_since = ""
+        self.failures = {}
         self.last_reason = "repaired" if repaired else "passed"
         self.last_failures = []
         self._event("green", sha=sha[:12], repaired=repaired, was_red=was_red)
 
     def record_deployed(self, sha: str, tag: str) -> None:
         self.last_deployed_sha = sha
+        self.last_deployed_tag = tag
         self._event("deployed", sha=sha[:12], tag=tag)
 
     def should_alert(self, signature: str, cfg: dict, now: Optional[datetime] = None) -> bool:
         now = now or _now()
-        if self.cycles < int(cfg.get("alert_after_cycles", 1)):
-            return False
+        e = self.entry(signature)
+        if e.get("kind") == "code":
+            if int(e.get("cycles") or 0) < int(cfg.get("alert_after_cycles", 1)):
+                return False
+        elif e.get("kind") == "landing":
+            pass                     # a green repair stuck off the branch needs a human now
+        else:
+            since = _parse_iso(self.red_since)
+            if since is None or (now - since).total_seconds() < int(cfg.get("alert_red_for_s", 7200)):
+                return False
         last = _parse_iso(self.alerts.get(signature, ""))
         return last is None or (now - last).total_seconds() >= int(cfg.get("realert_s", 86400))
 

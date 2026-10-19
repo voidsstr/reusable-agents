@@ -104,9 +104,9 @@ implementer:
   # agents/seo-opportunity-agent/site.yaml.
   scope_by_dispatch_kind:
     deploy-repair:
-      allowed_paths: ["src/**", "frontend/**", "db/**", "scripts/**", "tests/**", "data/**",
+      allowed_paths: ["src/**", "frontend/**", "scripts/**", "tests/**", "data/**",
                       "vendor/**", "package.json", "package-lock.json", "tsconfig.json"]
-      excluded_paths: ["mobile/**", "ios-extensions/**", "android/**", "agents/**", "aws/**",
+      excluded_paths: ["mobile/**", "ios-extensions/**", "android/**", "db/**", "agents/**", "aws/**",
                        "azure/**", "Dockerfile*", "docker-compose*.yml", "tests/run-local-suite.sh"]
 deployer:
   test:

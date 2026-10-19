@@ -26,11 +26,18 @@ whole gate after you finish and deploys only if it passes.
    to other tests.
 3. Find the root cause. Start with the commits listed as "since the last
    deploy that passed this gate". The breakage is usually there.
-4. Fix the application code: server, SSR renderers, client code, migrations,
-   data access. Keep the change minimal. Do not refactor, reformat or touch
-   unrelated code.
+4. Fix the application code: server, SSR renderers, client code, data
+   access. Keep the change minimal. Do not refactor, reformat or touch
+   unrelated code. Do **not** write a database migration: migrations run
+   against the production database at boot, and a repair may not add one
+   (it is rejected). If the code needs a schema change, make no commit and
+   say so.
 5. Re-run the failing test(s) until they pass. Then run every spec file that
-   held a failing test.
+   held a failing test. Tests marked "did not run" were skipped because an
+   earlier test or hook in their group failed. They have to pass too.
+   After you finish, the deployer re-runs the whole gate. It checks that every
+   listed test is still there and passes. A test that was skipped, excluded,
+   renamed or deleted counts as not fixed, and the attempt is thrown away.
 6. Commit **only the files you changed**, by path:
    `git add <file> ... && git commit -m "deploy-gate repair: <what was broken> (<test title>)"`.
    The commit body says what was broken, why, and how you verified the fix.
@@ -57,15 +64,19 @@ When that is the case:
 
 ## Never
 
-- Never edit `tests/run-local-suite.sh`, `docker-compose.test.yml`, any
-  `site.yaml`, or the deployer. Those are the gate itself.
+- Never edit `tests/run-local-suite.sh`, `docker-compose.test.yml`, the
+  Playwright config (`playwright.config.*`, `pw.config.*`), the all-pages
+  manifest (`tests/**/*manifest*`), any `site.yaml`, or the deployer. Those
+  are the gate itself, and an edit there is rejected.
 - Never push, create branches, switch branches, rebase, or touch any directory
   outside this checkout.
 - Never deploy or run `azure/deploy.sh`, `aws/deploy.sh` or docker
   push/compose commands yourself (the re-run command is the only Docker use).
 - Never connect to a production database, read secrets, or send requests to
   the production site.
-- Never stop or recreate the fixture database container.
+- Never write to the fixture database (no SQL, no `docker exec … psql`), and
+  never stop or recreate its container. Making the data fit the test hides the
+  bug from every later gate.
 
 ## When you cannot fix it
 

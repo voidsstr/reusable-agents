@@ -46,19 +46,25 @@ whether it runs is decided entirely by the implementer.
   the lock, the run ends `already-live` and marks its recs shipped.
 - **Test must pass — and a red gate gets repaired.** The gate run is
   classified (`framework/core/deploy_repair.classify`):
-  - `pass` / `flaky` → continue. A failed test that passes on a
-    `--last-failed --workers=1` re-run is flaky and does not block.
+  - `pass` / `flaky` → continue. Failures that pass when their spec files
+    run whole at `--workers=1` count as flaky, but only if nothing is skipped
+    as "did not run" and every failing test passes there.
   - `infra` (suite exit 2/4/6/7, 79, timeouts, Docker or registry errors)
     → re-run up to `repair.infra_retries`, never "fixed" in code.
   - `config` (rc 78, no tests matched) → blocked.
-  - `code` (failing tests, rc 3 image does not build, rc 5 boot crash) → up
-    to `repair.max_attempts` **Opus repair sessions** (`REPAIR.md`, claude-pool,
-    cwd = the worktree). Each one is vetted by `deploy_repair.check_repair`:
+  - `code` (failing tests or tests that did not run, rc 3 image does not
+    build, rc 5 boot crash) → up to `repair.max_attempts` **Opus repair
+    sessions** (`REPAIR.md`, claude-pool, cwd = the worktree). They run only
+    in an isolated worktree and are capped per site per day. Each one is vetted
+    by `deploy_repair.check_repair`:
     it must stay in the site's `implementer` scope (`scope_by_dispatch_kind:
     deploy-repair`), must not touch the gate's machinery, and must not weaken
     a test. Weakening means added skip/fixme/only, fewer `expect()` calls, a
     deleted test file, or a test edit without a `TEST-CHANGE-JUSTIFICATION:`
-    line. The gate is then re-run. Green → the repair commits are landed on
+    line. The commits must also descend from the commit under test and leave
+    the Playwright configs, the all-pages manifest and migrations alone. The
+    gate is then re-run, and `verify_repaired` requires every previously
+    failing test to be present and passing. Green → the repair commits are landed on
     the live branch (fast-forward, else cherry-pick; a conflict blocks and
     keeps them at `refs/deploy-repair/<site>/<tag>`), and the deploy continues.
   - Still red → status `blocked`, no build/push/deploy, exit 1. The per-site

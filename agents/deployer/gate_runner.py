@@ -8,6 +8,9 @@ processes:
 - The gate runs from a clean worktree of the exact commit that will ship,
   never the live working tree, where other agents' half-done edits sit. The
   image it builds is the image that ships (see deployer.py, build stage).
+  Repair runs ONLY in such an isolated worktree. Without one (git could not
+  make it, or build.from_clean_checkout is false) the gate still blocks, but
+  nothing resets, cleans or edits the shared live tree.
 - Every subprocess is streamed into a log file with a heartbeat line a
   minute. The backlog-dispatcher kills implementer scopes whose log is silent
   for 30 minutes, and a full suite plus a repair can take longer than that.
@@ -16,12 +19,14 @@ processes:
 - Playwright's JSON report and test-results are kept per run under
   ~/.reusable-agents/deployer/gate-artifacts/, outside the run dir (which is
   synced to blob storage), and pruned.
+- A failed run is confirmed before it counts: the spec files that failed are
+  re-run whole at --workers=1. Re-running only the failed tests would let a
+  failed beforeAll or serial neighbour hide tests that never ran.
 - A repair is an Opus session through the claude-pool (`claude --print`) with
   cwd = the worktree and agents/deployer/REPAIR.md as its runbook. It commits
-  in the worktree. deploy_repair.check_repair() vets the commits; a rejected
-  attempt is reset and the next attempt is told why. Green repairs are
-  landed on the live branch (fast-forward, else cherry-pick) before the
-  deploy continues.
+  in the worktree. deploy_repair.check_repair() vets the commits, and after
+  the re-run deploy_repair.verify_repaired() checks that every failing test now
+  passes. A rejected attempt is reset and the next attempt is told why.
 """
 from __future__ import annotations
 
@@ -48,10 +53,13 @@ RUNBOOK = Path(__file__).resolve().parent / "REPAIR.md"
 
 # Never handed to the test run or the repair session. The gate tests against
 # the local fixture DB; a repair has no business with production data or
-# cloud credentials. ANTHROPIC_API_KEY would also take `claude` off the pool.
+# cloud credentials. ANTHROPIC_* / CLAUDE_CODE_OAUTH_TOKEN would also take
+# `claude` off the pool's per-profile credentials.
 _SECRET_ENV = re.compile(
-    r"^(DATABASE_URL.*|.*_DSN|AZURE_STORAGE_CONNECTION_STRING|.*_SECRET.*|.*PASSWORD.*|"
-    r".*API_KEY|.*ACCESS_KEY.*|.*_TOKEN|GH_TOKEN|GITHUB_TOKEN|ANTHROPIC_.*|EBAY_.*)$")
+    r"^(DATABASE_URL.*|.*_DSN|.*CONNECTION_STRING.*|.*SECRET.*|.*PASSWORD.*|.*PASSWD.*|"
+    r".*_KEY|.*_KEYS|.*ACCESS_KEY.*|.*_TOKEN|.*TOKEN_.*|.*CREDENTIAL.*|.*OAUTH.*|"
+    r"AZURE_.*|AWS_.*|ARM_.*|GOOGLE_.*|GH_.*|GITHUB_.*|ANTHROPIC_.*|OPENAI_.*|EBAY_.*|"
+    r"MSMTP.*|SMTP_.*|GRAPH_.*|FRAMEWORK_API.*|AMAZON_.*)$", re.I)
 
 
 def log(msg: str) -> None:
@@ -60,6 +68,12 @@ def log(msg: str) -> None:
 
 def scrubbed_env(extra: Optional[dict] = None) -> dict:
     env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.match(k)}
+    # The claude-pool shim gives the repair session a per-profile HOME, and
+    # Playwright looks for its browsers under $HOME/.cache: point it at the
+    # real cache so the session's own test re-runs can launch chromium.
+    browsers = os.path.expanduser("~/.cache/ms-playwright")
+    if "PLAYWRIGHT_BROWSERS_PATH" not in env and os.path.isdir(browsers):
+        env["PLAYWRIGHT_BROWSERS_PATH"] = browsers
     env.update(extra or {})
     return env
 
@@ -181,26 +195,48 @@ def rev(repo: str, ref: str = "HEAD") -> str:
     return _git(repo, "rev-parse", ref).stdout.strip()
 
 
+WORKTREE_BASE = Path(os.path.expanduser("~/.reusable-agents/deploy-worktrees"))
+
+
+def sweep_stale_worktrees(repo_root: Optional[str], site_id: str) -> None:
+    """Remove worktrees left by runs that died without their finally (a kill,
+    an OOM, a reboot): `git worktree prune` keeps any directory that still
+    exists, and nothing else ever removes them."""
+    if not repo_root or not WORKTREE_BASE.is_dir():
+        return
+    prefix = re.sub(r"[^A-Za-z0-9_-]", "_", site_id or "site") + "-"
+    for d in WORKTREE_BASE.iterdir():
+        if not d.name.startswith(prefix):
+            continue
+        pid = d.name[len(prefix):]
+        if pid.isdigit() and Path(f"/proc/{pid}").exists():
+            continue
+        log(f"[deployer] removing stale worktree {d} (its run is gone)")
+        _git(repo_root, "worktree", "remove", "--force", str(d))
+        shutil.rmtree(d, ignore_errors=True)
+    _git(repo_root, "worktree", "prune")
+
+
 def checkout(repo_root: Optional[str], site_id: str, *, enabled: bool = True
-             ) -> tuple[Optional[str], str, Any]:
-    """A detached worktree of HEAD: (path, sha, cleanup). It shares the object
-    store and holds exactly what is committed. Falls back to the live tree
-    (path = repo_root, a warning) when git cannot make one."""
+             ) -> tuple[Optional[str], str, Any, bool]:
+    """A detached worktree of HEAD: (path, sha, cleanup, isolated). It shares
+    the object store and holds exactly what is committed. Falls back to the
+    live tree (path = repo_root, isolated = False, a warning) when git cannot
+    make one; the caller must then never repair."""
     noop = lambda: None  # noqa: E731
     if not repo_root or not os.path.isdir(os.path.join(repo_root, ".git")):
-        return repo_root, "", noop
+        return repo_root, "", noop, False
     sha = rev(repo_root)
     if not enabled:
-        return repo_root, sha, noop
-    base = Path(os.path.expanduser("~/.reusable-agents/deploy-worktrees"))
-    base.mkdir(parents=True, exist_ok=True)
-    wt = base / f"{re.sub(r'[^A-Za-z0-9_-]', '_', site_id or 'site')}-{os.getpid()}"
+        return repo_root, sha, noop, False
+    WORKTREE_BASE.mkdir(parents=True, exist_ok=True)
+    wt = WORKTREE_BASE / f"{re.sub(r'[^A-Za-z0-9_-]', '_', site_id or 'site')}-{os.getpid()}"
     _git(repo_root, "worktree", "prune")
     r = _git(repo_root, "worktree", "add", "--detach", "--force", str(wt), sha)
     if r.returncode != 0:
         log(f"[deployer] WARN clean checkout unavailable ({r.stderr.strip()[:200]}); "
-            f"testing and building the live working tree")
-        return repo_root, sha, noop
+            f"testing and building the live working tree, repair disabled")
+        return repo_root, sha, noop, False
     dirty = _git(repo_root, "status", "--porcelain", "--untracked-files=no").stdout.strip()
     if dirty:
         log(f"[deployer] testing and shipping {sha[:12]} from {wt}; NOT including "
@@ -208,8 +244,9 @@ def checkout(repo_root: Optional[str], site_id: str, *, enabled: bool = True
 
     def cleanup() -> None:
         _git(repo_root, "worktree", "remove", "--force", str(wt))
+        shutil.rmtree(wt, ignore_errors=True)
 
-    return str(wt), sha, cleanup
+    return str(wt), sha, cleanup, True
 
 
 def land(repo_root: str, branch: str, base_sha: str, head_sha: str) -> tuple[bool, str]:
@@ -218,6 +255,8 @@ def land(repo_root: str, branch: str, base_sha: str, head_sha: str) -> tuple[boo
     anyone's uncommitted work: a conflict aborts the pick."""
     if head_sha == base_sha:
         return True, "nothing to land"
+    if _git(repo_root, "merge-base", "--is-ancestor", base_sha, head_sha).returncode != 0:
+        return False, f"{head_sha[:12]} does not descend from {base_sha[:12]}"
     cur = _git(repo_root, "symbolic-ref", "--short", "HEAD").stdout.strip()
     if branch and cur != branch:
         return False, f"live repo is on {cur or 'a detached HEAD'}, not {branch}"
@@ -238,6 +277,22 @@ def land(repo_root: str, branch: str, base_sha: str, head_sha: str) -> tuple[boo
             continue
         return False, (r.stderr or r.stdout).strip()[-400:]
     return False, "git index stayed locked by another process"
+
+
+def reverted_batch_files(repo: str, batch_base: str, gate_base: str, head: str) -> list[str]:
+    """Files the batch changed (batch_base..gate_base) that the repair put back
+    exactly as they were before the batch. Their recs did not ship."""
+    if not (batch_base and gate_base and head) or head == gate_base:
+        return []
+    if _git(repo, "cat-file", "-e", batch_base).returncode != 0:
+        return []
+    batch = set(_git(repo, "diff", "--name-only", batch_base, gate_base).stdout.split())
+    repaired = set(_git(repo, "diff", "--name-only", gate_base, head).stdout.split())
+    out = []
+    for f in sorted(batch & repaired):
+        if _git(repo, "diff", "--quiet", batch_base, head, "--", f).returncode == 0:
+            out.append(f)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +340,7 @@ class GateOutcome:
     classification: Optional[dr.Classification] = None
     signature: str = ""
     landed: str = ""
+    deferred: bool = False                            # repair could not start (pool)
 
     def summary(self) -> dict:
         c = self.classification
@@ -294,7 +350,7 @@ class GateOutcome:
             "kind": c.kind if c else "", "rc": c.rc if c else None,
             "failures": dr.summarize_failures(c.failures if c else []),
             "runs": self.runs, "repairs": self.repairs, "flaky": self.flaky,
-            "landed": self.landed, "image_id": self.image_id,
+            "landed": self.landed, "image_id": self.image_id, "deferred": self.deferred,
         }
 
 
@@ -302,7 +358,8 @@ class GateRunner:
     def __init__(self, *, site_id: str, tag: str, test_cmd: str, test_cwd: Optional[str],
                  worktree: str, repo_root: str, branch: str, scope: Any,
                  cfg: dict, state: dr.GateState, run_dir: Path,
-                 test_timeout_s: Optional[int] = None):
+                 test_timeout_s: Optional[int] = None, isolated: bool = True,
+                 allow_repair: bool = True):
         self.site_id = site_id
         self.tag = tag
         self.test_cmd = _REPORTER_ARG.sub("", " " + test_cmd).strip()
@@ -314,6 +371,8 @@ class GateRunner:
         self.cfg = cfg
         self.state = state
         self.run_dir = run_dir
+        self.isolated = isolated
+        self.allow_repair = allow_repair
         self.test_timeout_s = int(test_timeout_s or cfg.get("test_timeout_s") or 1800)
         self.root = artifacts_root(site_id) / f"{tag}-{os.getpid()}"
         self.start = time.monotonic()
@@ -327,7 +386,7 @@ class GateRunner:
     def _left(self) -> float:
         return float(self.cfg.get("max_wall_s", 5400)) - (time.monotonic() - self.start)
 
-    def run_gate(self, label: str, extra: str = "", last_run_from: Optional[Path] = None) -> GateRun:
+    def run_gate(self, label: str, extra: str = "") -> GateRun:
         art = self.root / label
         art.mkdir(parents=True, exist_ok=True)
         env = scrubbed_env({
@@ -337,17 +396,10 @@ class GateRunner:
             "FORCE_COLOR": "0",
             "PLAYWRIGHT_HTML_OPEN": "never",
         })
-        if last_run_from is not None:
-            shutil.copyfile(last_run_from, art / "last-run.json")
-            env["PLAYWRIGHT_LAST_RUN_OUTPUT_FILE"] = str(art / "last-run.json")
         cmd = f"{self.test_cmd} {extra} --reporter=line,json --output {art / 'test-results'}".strip()
         t0 = time.monotonic()
         rc, out = run_streamed(f"test:{label}", cmd, cwd=self._cwd(), env=env,
-                               timeout_s=min(self.test_timeout_s, max(60, int(self._left()))),
-                               log_path=art / "output.log")
-        # "No tests found" exits 0 from some runners: a gate that tests nothing.
-        if rc == 0 and ("No tests found" in out or "0 tests found" in out):
-            rc = 78
+                               timeout_s=self.test_timeout_s, log_path=art / "output.log")
         report = dr.parse_report(art / "report.json")
         c = dr.classify(rc, out, report)
         image = ""
@@ -361,8 +413,28 @@ class GateRunner:
         return {"label": g.label, "rc": g.rc, "kind": g.classification.kind,
                 "reason": g.classification.reason, "seconds": g.seconds,
                 "counts": ({"expected": r.expected, "unexpected": r.unexpected,
-                            "flaky": r.flaky, "skipped": r.skipped} if r else None),
+                            "flaky": r.flaky, "skipped": r.skipped,
+                            "did_not_run": r.did_not_run} if r else None),
                 "artifacts": str(g.art_dir)}
+
+    def _confirm(self, g: GateRun, outcome: GateOutcome) -> GateRun:
+        """Re-run the failing spec files whole, alone, at --workers=1. Flaky
+        only if that run is clean AND every failing / not-run test passed in
+        it; anything else keeps the main run's code classification."""
+        files = g.report.failing_files if g.report else []
+        if not files:
+            return g
+        conf = self.run_gate(f"{g.label}-confirm", " ".join(files) + " --workers=1")
+        outcome.runs.append(self._summ(conf))
+        ok, _ = dr.verify_repaired(g.classification, conf.report)
+        if conf.rc == 0 and conf.classification.ok and ok:
+            outcome.flaky += [f.title for f in g.classification.failures]
+            log(f"[deployer:gate] {len(g.classification.failures)} failing test(s) passed when "
+                f"their files ran alone at --workers=1; treating as flaky")
+            return GateRun(g.label, 0, dr.Classification(
+                "flaky", f"{len(g.classification.failures)} test(s) failed only under parallel load", 0),
+                g.art_dir, g.image_id, g.seconds, g.report)
+        return g
 
     def _context(self, g: GateRun) -> tuple[str, str, str, str]:
         try:
@@ -373,16 +445,20 @@ class GateRunner:
             clog = (g.art_dir / "container.log").read_text(errors="replace")[-6000:]
         except OSError:
             clog = ""
-        since = self.state.last_green_sha or self.state.last_deployed_sha
-        rng = f"{since}..HEAD" if since and _git(self.wt, "cat-file", "-e", since).returncode == 0 else "-15"
-        log_txt = _git(self.wt, "log", "--format=%h %an %ad %s", "--date=short", *rng.split()).stdout
-        diffstat = _git(self.wt, "diff", "--stat", since, "HEAD").stdout if since and rng != "-15" else ""
+        since = self.state.last_deployed_sha or self.state.last_green_sha
+        known = bool(since) and _git(self.wt, "merge-base", "--is-ancestor", since, "HEAD").returncode == 0
+        if known:
+            log_txt = _git(self.wt, "log", "--format=%h %an %ad %s", "--date=short", f"{since}..HEAD").stdout
+            diffstat = _git(self.wt, "diff", "--stat", since, "HEAD").stdout
+        else:
+            log_txt = _git(self.wt, "log", "--format=%h %an %ad %s", "--date=short", "-15").stdout
+            diffstat = ""
         return out_tail, clog, log_txt[-4000:], diffstat[-3000:]
 
-    def repair(self, g: GateRun, attempt: int, previous: list[str]) -> tuple[bool, str]:
-        """One LLM repair session. Returns (made_acceptable_commit, note)."""
+    def repair(self, g: GateRun, attempt: int, previous: list[str], timeout_s: int) -> dict:
+        """One LLM repair session. Returns {made, kind, note, before, after}."""
         out_tail, clog, unshipped, diffstat = self._context(g)
-        first = next((f for f in g.classification.failures if f.file), None)
+        first = next((f for f in g.classification.failures if f.file and not f.did_not_run), None)
         if first:
             title = re.sub(r"[\"$`\\]", ".", first.title.split(" › ")[-1])[:120]
             rerun = (f"cd {self._cwd()} && GATE_SOURCE_REPO={self.repo_root} "
@@ -405,37 +481,48 @@ class GateRunner:
         before = rev(self.wt)
         env = scrubbed_env({"CLAUDE_POOL_FAIL_FAST": "1", "FORCE_COLOR": "0",
                             "DEPLOY_GATE_REPAIR": "1"})
-        timeout = int(min(int(self.cfg.get("attempt_timeout_s", 2400)), max(120, self._left() - 300)))
-        rc, out = run_streamed(f"repair:{attempt}", cmd, cwd=self.wt, env=env, timeout_s=timeout,
+        rc, out = run_streamed(f"repair:{attempt}", cmd, cwd=self.wt, env=env, timeout_s=timeout_s,
                                log_path=rdir / "session.log", stdin_path=rdir / "prompt.md")
+        if rc != 75:                       # a session ran; it counts toward the daily cap
+            self.state.record_repair_session()
+        # Anything the session left uncommitted, ignored files included, is not
+        # part of the repair and must not reach the image this checkout builds.
+        _git(self.wt, "reset", "--hard", "HEAD")
+        _git(self.wt, "clean", "-ffdx")
         after = rev(self.wt)
-        # Anything the session left uncommitted is not part of the repair.
-        if _git(self.wt, "status", "--porcelain").stdout.strip():
-            _git(self.wt, "reset", "--hard", "HEAD")
-            _git(self.wt, "clean", "-fd")
         tail = " ".join(out.strip().splitlines()[-3:])[:300]
         if rc == 75:
-            return False, f"attempt {attempt}: the claude-pool has no capacity (rc 75)"
+            if after != before:
+                _git(self.wt, "reset", "--hard", before)
+            return {"made": False, "kind": "pool", "before": before, "after": before,
+                    "note": f"attempt {attempt}: the claude-pool had no capacity (rc 75); no session ran"}
         ok, problems, tests_changed = dr.check_repair(self.wt, before, after,
                                                      scope=self.scope, cfg=self.cfg)
         if not ok:
             if after != before:
                 _git(self.wt, "reset", "--hard", before)
-            return False, f"attempt {attempt}: rejected ({'; '.join(problems)[:500]}); session said: {tail}"
+            return {"made": False, "kind": "rejected", "before": before, "after": before,
+                    "note": f"attempt {attempt}: rejected ({'; '.join(problems)[:500]}); session said: {tail}"}
         commits = _git(self.wt, "log", "--format=%h %s", f"{before}..{after}").stdout.strip()
         note = f"attempt {attempt}: committed {commits.replace(chr(10), ' | ')[:300]}"
         if tests_changed:
             note += f" (test files changed with justification: {', '.join(tests_changed[:4])})"
-        return True, note
+        return {"made": True, "kind": "commit", "before": before, "after": after, "note": note}
 
     # -- the loop --------------------------------------------------------------
     def run(self) -> GateOutcome:
+        """Run the gate until green, out of budget, or not repairable. Records
+        red states; the caller records green (after landing a repair)."""
         base = rev(self.wt)
         outcome = GateOutcome(ok=False, sha=base)
         previous: list[str] = []
         infra_left = int(self.cfg.get("infra_retries", 2))
+        blip_checked = False
+        rc6_seen = 0
         repairs = 0
         n = 0
+        targets: dict[str, dr.TestFailure] = {}       # every failure seen this run
+        last_commit: Optional[dict] = None            # the newest accepted repair
         g: Optional[GateRun] = None
         rerun_needed = True
         try:
@@ -444,37 +531,53 @@ class GateRunner:
                     n += 1
                     g = self.run_gate(f"run-{n}")
                     outcome.runs.append(self._summ(g))
-                    c = g.classification
-                    if (c.kind == "code" and c.failures and self.cfg.get("confirm_failures", True)
-                            and (g.art_dir / "test-results" / ".last-run.json").is_file()):
-                        conf = self.run_gate(f"run-{n}-confirm", "--last-failed --workers=1",
-                                             last_run_from=g.art_dir / "test-results" / ".last-run.json")
-                        outcome.runs.append(self._summ(conf))
-                        if conf.classification.ok:
-                            outcome.flaky += [f.title for f in c.failures]
-                            log(f"[deployer:gate] {len(c.failures)} failed test(s) passed on a "
-                                f"--workers=1 re-run; treating as flaky")
-                            g = GateRun(g.label, 0, dr.Classification(
-                                "flaky", f"{len(c.failures)} test(s) passed only at --workers=1", 0),
-                                g.art_dir, g.image_id or conf.image_id, g.seconds, g.report)
-                        elif conf.classification.kind == "code":
-                            g = GateRun(g.label, conf.rc, conf.classification, conf.art_dir,
-                                        g.image_id, g.seconds, conf.report)
+                    if (g.classification.kind == "code" and g.classification.failures
+                            and self.cfg.get("confirm_failures", True)):
+                        g = self._confirm(g, outcome)
                 rerun_needed = True
                 c = g.classification
                 outcome.classification = c
                 if g.report and g.report.flaky_titles:
                     outcome.flaky += g.report.flaky_titles
+                for f in c.failures:
+                    if f.title != "<global error>":
+                        targets.setdefault(f.key, f)
                 if c.ok:
+                    # A green run after a repair must prove the failing tests
+                    # pass now, not that they stopped running.
+                    if last_commit is not None:
+                        before = dr.Classification("code", "", 1, list(targets.values()))
+                        ok, problems = dr.verify_repaired(before, g.report)
+                        if not ok:
+                            note = f"{previous[-1] if previous else 'repair'} -> re-run rejected: {'; '.join(problems)[:400]}"
+                            log(f"[deployer:gate] {note}")
+                            previous.append(note)
+                            outcome.repairs.append({"attempt": repairs, "accepted": False, "note": note})
+                            _git(self.wt, "reset", "--hard", last_commit["before"])
+                            last_commit = None
+                            g = GateRun(g.label, 1, dr.Classification(
+                                "code", "the repair made the failing tests disappear", 1,
+                                list(targets.values())), g.art_dir, "", g.seconds, g.report)
+                            rerun_needed = False
+                            continue
                     outcome.ok = True
                     outcome.sha = rev(self.wt)
                     outcome.image_id = g.image_id
-                    outcome.repaired = repairs > 0
+                    outcome.repaired = repairs > 0 and outcome.sha != base
                     outcome.status_reason = c.reason
-                    self.state.record_green(outcome.sha, repaired=outcome.repaired)
                     return outcome
                 sig = dr.failure_signature(c)
                 outcome.signature = sig
+                if c.kind == "infra" and c.rc == 6:
+                    rc6_seen += 1
+                    if rc6_seen > 1:
+                        blip_checked = True        # it already failed twice
+                        c = dr.Classification("code", "the container never became healthy, twice "
+                                              "(the app's own boot is the likely cause)", 6)
+                        g = GateRun(g.label, 6, c, g.art_dir, "", g.seconds, g.report)
+                        outcome.classification = c
+                        sig = dr.failure_signature(c)
+                        outcome.signature = sig
                 if c.kind == "infra" and infra_left > 0 and self._left() > 600:
                     infra_left -= 1
                     wait = int(self.cfg.get("infra_retry_wait_s", 60))
@@ -485,34 +588,53 @@ class GateRunner:
                     outcome.status_reason = f"{c.kind}: {c.reason} (no code repair for this class)"
                     self.state.record_red(c, sig, attempts=0, exhausted=False, cfg=self.cfg)
                     return outcome
-                if not self.cfg.get("enabled", True):
-                    outcome.status_reason = f"code: {c.reason}; repair is disabled"
+                # A build or boot failure has no test report to confirm with:
+                # re-run once before an LLM sees it (a registry or disk blip).
+                if not c.failures and not blip_checked and repairs == 0:
+                    blip_checked = True
+                    log(f"[deployer:gate] {c.reason}; re-running once before repair")
+                    continue
+                if not (self.cfg.get("enabled", True) and self.allow_repair):
+                    why = "repair is disabled" if self.allow_repair else "repair is off for this run"
+                    outcome.status_reason = f"code: {c.reason}; {why}"
                     self.state.record_red(c, sig, attempts=0, exhausted=False, cfg=self.cfg)
                     return outcome
-                may, why = self.state.may_repair(sig)
+                if not self.isolated:
+                    outcome.status_reason = (f"code: {c.reason}; no clean checkout, so no repair "
+                                             f"(it would run in the shared live tree)")
+                    self.state.record_red(c, sig, attempts=0, exhausted=False, cfg=self.cfg)
+                    return outcome
+                may, why = self.state.may_repair(sig, self.cfg)
                 if not may:
                     outcome.status_reason = f"code: {c.reason}; {why}"
                     self.state.record_red(c, sig, attempts=0, exhausted=False, cfg=self.cfg)
                     return outcome
-                budget_ok = self._left() > 600
-                if repairs >= int(self.cfg.get("max_attempts", 3)) or not budget_ok:
+                # The re-test must fit after the session: reserve it first.
+                retest_s = min(self.test_timeout_s, max(300, int(1.5 * max(g.seconds, 60)) + 120))
+                session_s = min(int(self.cfg.get("attempt_timeout_s", 2400)), int(self._left()) - retest_s)
+                if repairs >= int(self.cfg.get("max_attempts", 3)) or session_s < 300:
                     outcome.status_reason = (f"code: {c.reason}; {repairs} repair attempt(s) did not get "
-                                             f"the gate green" + ("" if budget_ok else " (time budget spent)"))
-                    self.state.record_red(c, sig, attempts=repairs, exhausted=True, cfg=self.cfg)
+                                             f"the gate green" + ("" if session_s >= 300 else " (time budget spent)"))
+                    self.state.record_red(c, sig, attempts=repairs, exhausted=repairs > 0, cfg=self.cfg)
                     return outcome
                 repairs += 1
-                log(f"[deployer:gate] {c.reason} (signature {sig}); repair attempt {repairs}")
-                made, note = self.repair(g, repairs, previous)
-                previous.append(note)
-                outcome.repairs.append({"attempt": repairs, "accepted": made, "note": note})
-                log(f"[deployer:gate] {note}")
-                if "no capacity" in note:
-                    outcome.status_reason = f"code: {c.reason}; {note}"
-                    self.state.record_red(c, sig, attempts=repairs, exhausted=True, cfg=self.cfg)
+                log(f"[deployer:gate] {c.reason} (signature {sig}); repair attempt {repairs} "
+                    f"(session budget {session_s}s, re-test reserved {retest_s}s)")
+                res = self.repair(g, repairs, previous, session_s)
+                previous.append(res["note"])
+                outcome.repairs.append({"attempt": repairs, "accepted": res["made"], "note": res["note"]})
+                log(f"[deployer:gate] {res['note']}")
+                if res["kind"] == "pool":
+                    outcome.deferred = True
+                    outcome.status_reason = f"code: {c.reason}; repair deferred, the claude-pool has no capacity"
+                    self.state.record_deferred(c, sig, wait_s=int(self.cfg.get("pool_retry_s", 900)),
+                                               why="claude-pool had no capacity")
                     return outcome
+                if res["made"]:
+                    last_commit = res
                 # A rejected or empty attempt left the code as it was: the next
                 # attempt starts from the same failure without re-testing.
-                rerun_needed = made
+                rerun_needed = res["made"]
         finally:
             self.state.save()
             prune_artifacts(self.site_id)

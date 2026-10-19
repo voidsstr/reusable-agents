@@ -2843,7 +2843,11 @@ MARK_DEFERRED
         # (agents/deployer/gate_runner.py). This used to force
         # DEPLOYER_TEST_SCOPE=smoke, so aisleprompt gated deploys on 15 of
         # ~685 tests. Set DEPLOYER_TEST_SCOPE yourself to pick a tier.
+        # DEPLOYER_BATCH_BASE_SHA: HEAD before this batch. A gate repair that
+        # restores the batch's files to it reverted the batch, and its recs
+        # must not be marked shipped.
         SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
+        DEPLOYER_BATCH_BASE_SHA="${GIT_SHA_BEFORE:-}" \
             bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
                 rc=$?
                 echo "[implementer] deployer failed rc=$rc" >&2

@@ -12,6 +12,7 @@ import json
 import os
 import shlex
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -458,7 +459,8 @@ def _mark_shipped(run_dir: Path, deploy_meta: dict, tag: str, image: str, state)
               file=sys.stderr)
 
 
-def _mail(cfg, subject: str, body_html: str) -> None:
+def _mail(cfg, subject: str, body_html: str) -> bool:
+    """Send an operator alert. True only when the mail actually went out."""
     em = (cfg.get("reporter") or {}).get("email") or {}
     to = em.get("to") or []
     sender = em.get("from") or ""
@@ -466,53 +468,72 @@ def _mail(cfg, subject: str, body_html: str) -> None:
     sender = m.group(1) if m else sender
     if not to or not sender:
         print("[deployer] no reporter.email in the site config; not alerting", file=sys.stderr)
-        return
+        return False
     try:
         from shared.site_quality import send_via_msmtp
         ok, detail = send_via_msmtp(subject=subject, body_html=body_html, to=list(to),
                                     sender=sender, msmtp_account=em.get("msmtp_account") or "automation",
                                     bypass_digest=True)
-        print(f"[deployer] alert {'sent' if ok else 'NOT sent'}: {detail}", file=sys.stderr)
+        delivered = bool(ok) and not str(detail).startswith(("digest disabled", "suppressed:"))
+        print(f"[deployer] alert {'sent' if delivered else 'NOT sent'}: {detail}", file=sys.stderr)
+        return delivered
     except Exception as e:
         print(f"[deployer] alert failed: {e}", file=sys.stderr)
+        return False
 
 
-def _alert_if_due(cfg, state, outcome, repair_cfg: dict, run_dir: Path) -> None:
-    """Email the operator once a failure has outlasted a full repair cycle,
-    then at most every realert_s. De-duplicated per failure signature."""
-    sig = outcome.signature
-    if not sig or not state.should_alert(sig, repair_cfg):
+def _alert_if_due(cfg, state, signature: str, outcome, repair_cfg: dict, run_dir: Path) -> None:
+    """Email the operator about a red gate, de-duplicated per failure
+    signature (deploy_repair.GateState.should_alert): a code failure once a
+    repair cycle is spent, any other red once the site has been red for
+    alert_red_for_s. Recorded only when the mail really went out."""
+    if not signature or not state.should_alert(signature, repair_cfg):
         return
     import html as _html
+    entry = state.entry(signature)
     rows = "".join(
         f"<li><b>{_html.escape(f['title'])}</b> <code>{_html.escape(f.get('file') or '')}"
-        f":{f.get('line') or ''}</code><pre>{_html.escape((f.get('error') or '')[:800])}</pre></li>"
+        f":{f.get('line') or ''}</code>{' (did not run)' if f.get('did_not_run') else ''}"
+        f"<pre>{_html.escape((f.get('error') or '')[:800])}</pre></li>"
         for f in (outcome.summary().get("failures") or [])[:10])
     reps = "".join(f"<li>{_html.escape(r['note'])}</li>" for r in outcome.repairs)
     body = (
         f"<p>The pre-deploy test gate for <b>{_html.escape(cfg.site_id)}</b> is red, and the "
-        f"deployer could not repair it. Nothing deploys for this site until it is green.</p>"
+        f"deployer could not get it green. Nothing deploys for this site until it is.</p>"
         f"<p><b>Why:</b> {_html.escape(outcome.status_reason)}<br>"
-        f"<b>Commit:</b> {_html.escape(outcome.sha[:12])} · <b>signature:</b> {_html.escape(sig)} · "
+        f"<b>Commit:</b> {_html.escape(outcome.sha[:12])} · <b>signature:</b> {_html.escape(signature)} "
+        f"({_html.escape(entry.get('kind') or '')}, {entry.get('cycles') or 0} spent cycle(s)) · "
         f"<b>red since:</b> {_html.escape(state.red_since)} · <b>next repair attempt:</b> "
-        f"{_html.escape(state.next_repair_at or 'next deploy')}</p>"
+        f"{_html.escape(entry.get('next_repair_at') or 'next deploy')}</p>"
         f"<p><b>Failing tests</b></p><ul>{rows or '<li>(no test-level failures)</li>'}</ul>"
         f"<p><b>Repair attempts this run</b></p><ul>{reps or '<li>none</li>'}</ul>"
         f"<p>Context: <code>{_html.escape(str(run_dir))}/test-failure-context.json</code>; gate state: "
         f"<code>{_html.escape(str(deploy_repair.state_dir()))}/{_html.escape(cfg.site_id)}.json</code>. "
         f"Turn repair off with storage <code>{deploy_repair.CONFIG_KEY}</code> "
         f"<code>{{\"enabled\": false}}</code>.</p>")
-    _mail(cfg, f"[deploy-gate:{cfg.site_id}] RED — {outcome.status_reason[:90]}", body)
-    state.record_alert(sig)
+    if _mail(cfg, f"[deploy-gate:{cfg.site_id}] RED — {outcome.status_reason[:90]}", body):
+        state.record_alert(signature)
 
 
-def _alert_landing(cfg, ref: str, detail: str, run_dir: Path) -> None:
+def _alert_landing(cfg, state, signature: str, repair_cfg: dict, ref: str, detail: str,
+                   run_dir: Path) -> None:
+    """A green repair that could not be landed needs a human: alert at once,
+    then at most every realert_s for the same failure."""
     import html as _html
-    _mail(cfg, f"[deploy-gate:{cfg.site_id}] repair green but not landed",
-          f"<p>The deploy gate for <b>{_html.escape(cfg.site_id)}</b> was repaired and is green, "
-          f"but the repair commits could not be put on the live branch, so nothing was deployed.</p>"
-          f"<p>The repair is kept at <code>{_html.escape(ref)}</code>.</p>"
-          f"<pre>{_html.escape(detail[:2000])}</pre><p>Run dir: <code>{_html.escape(str(run_dir))}</code></p>")
+    if not state.should_alert(signature, repair_cfg):
+        return
+    if _mail(cfg, f"[deploy-gate:{cfg.site_id}] repair green but not landed",
+             f"<p>The deploy gate for <b>{_html.escape(cfg.site_id)}</b> was repaired and is green, "
+             f"but the repair commits could not be put on the live branch, so nothing was deployed.</p>"
+             f"<p>The repair is kept at <code>{_html.escape(ref)}</code>; cherry-pick it by hand.</p>"
+             f"<pre>{_html.escape(detail[:2000])}</pre><p>Run dir: <code>{_html.escape(str(run_dir))}</code></p>"):
+        state.record_alert(signature)
+
+
+def _on_sigterm(signum, frame):  # noqa: ARG001
+    # A kill from the dispatcher or systemd must still release the lock, remove
+    # the worktree and save the gate state (the finally blocks).
+    raise SystemExit(143)
 
 
 def main() -> None:
@@ -523,6 +544,7 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true",
                    help="Print commands but don't execute")
     args = p.parse_args()
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     cfg = load_config_from_env()
     deployer = cfg.get("deployer") or {}
@@ -578,9 +600,10 @@ def main() -> None:
         # overlapping deploys of one app fail each other's smoke and roll each
         # other back (site_deploy_lock).
         target = str(deploy_vars.get("app") or cfg.site_id)
-        deploy_lock = site_deploy_lock(target, timeout_s=int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "6600")))
+        lock_wait_s = int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "9000"))
+        deploy_lock = site_deploy_lock(target, timeout_s=lock_wait_s)
         try:
-            gate.acquire_lock(deploy_lock, int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "6600")),
+            gate.acquire_lock(deploy_lock, lock_wait_s,
                               "another gate or deploy of this target is in flight")
         except TimeoutError as e:
             deploy_meta["status"] = "failure"
@@ -601,10 +624,11 @@ def main() -> None:
         head_now = gate.rev(repo_root) if repo_root else ""
         if (head_now and head_now == state.last_deployed_sha and not args.dry_run
                 and not args.skip_test and os.environ.get("DEPLOYER_FORCE") != "1"):
-            deploy_meta.update({"status": "already-live", "sha": head_now})
-            print(f"[deployer] {head_now[:12]} is already live (deployed by an earlier run); "
-                  f"nothing to build", file=sys.stderr)
-            _mark_shipped(run_dir, deploy_meta, tag, image, state)
+            live_tag = state.last_deployed_tag or tag
+            deploy_meta.update({"status": "already-live", "sha": head_now, "tag": live_tag})
+            print(f"[deployer] {head_now[:12]} is already live ({image}:{live_tag}, deployed by an "
+                  f"earlier run); nothing to build", file=sys.stderr)
+            _mark_shipped(run_dir, deploy_meta, live_tag, image, state)
             _save()
             return
 
@@ -613,9 +637,12 @@ def main() -> None:
         # tested is exactly what ships: never another agent's uncommitted edit
         # in the live tree (2026-09-25 shipped one), never a commit that landed
         # after the tests passed.
-        wt, ship_sha, wt_cleanup = gate.checkout(
+        gate.sweep_stale_worktrees(repo_root, cfg.site_id)
+        wt, ship_sha, wt_cleanup, isolated = gate.checkout(
             repo_root, cfg.site_id, enabled=b.get("from_clean_checkout", True))
         wt = wt or repo_root or os.getcwd()
+        gate_base = ship_sha
+        reverted: list = []
         deploy_meta["sha"] = ship_sha
         tested_image = ""
 
@@ -660,7 +687,9 @@ def main() -> None:
                     scope=ScopePolicy.from_site_config({"implementer": implementer_block},
                                                        dispatch_kind="deploy-repair"),
                     cfg=repair_cfg, state=state, run_dir=run_dir,
-                    test_timeout_s=t.get("timeout_s"))
+                    test_timeout_s=t.get("timeout_s"), isolated=isolated,
+                    # A dry run only reports, unless asked to repair too.
+                    allow_repair=(not args.dry_run) or os.environ.get("DEPLOY_REPAIR_IN_DRY_RUN") == "1")
                 outcome = runner.run()
                 summary = outcome.summary()
                 (run_dir / "gate.json").write_text(json.dumps(summary, indent=2))
@@ -678,7 +707,7 @@ def main() -> None:
                         "repairs": outcome.repairs, "captured_at": _now_iso(),
                     }
                     (run_dir / "test-failure-context.json").write_text(json.dumps(fail_ctx, indent=2))
-                    _alert_if_due(cfg, state, outcome, repair_cfg, run_dir)
+                    _alert_if_due(cfg, state, outcome.signature, outcome, repair_cfg, run_dir)
                     state.save()
                     _save()
                     print(f"[deployer] TEST GATE RED scope={scope}: {outcome.status_reason}; "
@@ -688,9 +717,18 @@ def main() -> None:
                 if outcome.flaky:
                     print(f"[deployer] gate green with {len(outcome.flaky)} flaky test(s): "
                           f"{outcome.flaky[:5]}", file=sys.stderr)
-                if outcome.repaired:
+                if not outcome.repaired:
+                    state.record_green(outcome.sha, repaired=False)
+                elif args.dry_run and os.environ.get("DEPLOYER_DRY_RUN_LAND") != "1":
+                    # A dry run never moves the live branch.
+                    ref = f"refs/deploy-repair/{cfg.site_id}/{tag}"
+                    subprocess.run(["git", "-C", repo_root or wt, "update-ref", ref, outcome.sha],
+                                   capture_output=True)
+                    deploy_meta["test"]["gate"]["landed"] = f"dry run: kept at {ref}, not landed"
+                    print(f"[deployer] dry run: repair kept at {ref}, not landed", file=sys.stderr)
+                else:
                     landed_ok, landed = gate.land(repo_root or wt, implementer_block.get("branch") or "",
-                                                  ship_sha, outcome.sha)
+                                                  gate_base, outcome.sha)
                     deploy_meta["test"]["gate"]["landed"] = landed
                     if not landed_ok:
                         ref = f"refs/deploy-repair/{cfg.site_id}/{tag}"
@@ -698,13 +736,32 @@ def main() -> None:
                                        capture_output=True)
                         deploy_meta["status"] = "blocked"
                         deploy_meta["error"] = f"repair is green but could not land on the branch: {landed}"
-                        state.last_reason = f"repair kept at {ref}; could not land: {landed[:200]}"
+                        # The code failure keeps its backoff (no fresh Opus repair
+                        # every dispatch), and the landing problem alerts once.
+                        code_c = outcome.classification or deploy_repair.Classification("code", "", 1)
+                        land_c = deploy_repair.Classification(
+                            "landing", f"repair kept at {ref}; could not land: {landed[:200]}", 1)
+                        land_sig = "landing-" + (outcome.signature or deploy_repair.failure_signature(land_c))
+                        if outcome.signature:
+                            state.record_red(code_c, outcome.signature, attempts=0, exhausted=True,
+                                             cfg=repair_cfg)
+                        state.record_red(land_c, land_sig, attempts=0, exhausted=True, cfg=repair_cfg)
+                        _alert_landing(cfg, state, land_sig, repair_cfg, ref, landed, run_dir)
                         state.save()
-                        _alert_landing(cfg, ref, landed, run_dir)
                         _save()
                         print(f"[deployer] {deploy_meta['error']}; kept at {ref}", file=sys.stderr)
                         sys.exit(1)
+                    state.record_green(outcome.sha, repaired=True)
+                    reverted = gate.reverted_batch_files(repo_root or wt,
+                                                         os.environ.get("DEPLOYER_BATCH_BASE_SHA", ""),
+                                                         gate_base, outcome.sha)
+                    if reverted:
+                        deploy_meta["test"]["gate"]["reverted_batch_files"] = reverted
+                        print(f"[deployer] the repair restored {len(reverted)} file(s) the batch had "
+                              f"changed ({reverted[:5]}); this batch's recs are NOT marked shipped",
+                              file=sys.stderr)
                     print(f"[deployer] gate repaired and green; repair {landed}", file=sys.stderr)
+                state.save()
                 ship_sha = outcome.sha
                 deploy_meta["sha"] = ship_sha
                 tested_image = outcome.image_id
@@ -1072,7 +1129,8 @@ def main() -> None:
         if deploy_meta.get("sha"):
             state.record_deployed(deploy_meta["sha"], tag)
             state.save()
-        _mark_shipped(run_dir, deploy_meta, tag, image, state)
+        if not reverted:
+            _mark_shipped(run_dir, deploy_meta, tag, image, state)
         _save()
 
     except subprocess.TimeoutExpired:
