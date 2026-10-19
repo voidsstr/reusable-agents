@@ -82,6 +82,17 @@ PRICE_RESOURCES = (
 # AVAILABLE_DATE is PA-API's "available from <date>" (orderable ahead).
 ORDERABLE_TYPES = frozenset({"PREORDER", "LEADTIME", "AVAILABLE_DATE"})
 
+# Stock text for an orderable listing whose availability message Amazon left
+# empty. Seen 2026-10-19 on B0GWZZP5B2: AVAILABLE_DATE with message "", stored
+# as '' over "Only 2 left in stock", so the page read as in stock. Each text
+# names the state in words a site's stock-text parser already knows
+# ("pre-order", "available to ship in").
+ORDERABLE_TEXT = {
+    "PREORDER": "Pre-order on Amazon; not shipping yet",
+    "LEADTIME": "Available to ship in a later window; not in stock now",
+    "AVAILABLE_DATE": "Available to ship in a later window; not in stock now",
+}
+
 # Statuses whose correct write is "price = NULL, mark unavailable".
 UNAVAILABLE_STATUSES = frozenset({"unavailable", "no_offer", "not_found", "non_usd"})
 
@@ -170,6 +181,9 @@ def classify_item(asin: str, raw: Optional[dict], error: Optional[str] = None,
             out.availability = None
     else:
         out.currency = expected_currency.upper()
+        if not (out.availability or "").strip():
+            # '' is not NULL, so a caller's "In Stock" default never fires.
+            out.availability = ORDERABLE_TEXT.get(out.availability_type)
     return out
 
 

@@ -104,6 +104,19 @@ def test_classify_available_date_is_priced():
     assert classify_item("A", _item("A", avail="AVAILABLE_DATE")).status == "priced"
 
 
+def test_classify_orderable_with_empty_message_names_the_state():
+    raw = _item("A", 39.99, avail="AVAILABLE_DATE")
+    raw["offersV2"]["listings"][0]["availability"]["message"] = ""
+    o = classify_item("A", raw)
+    assert o.status == "priced" and o.price == 39.99
+    assert o.availability == "Available to ship in a later window; not in stock now"
+    raw["offersV2"]["listings"][0]["availability"]["type"] = "PREORDER"
+    assert "Pre-order" in classify_item("A", raw).availability
+    # An empty in-stock message stays None, so the caller's default applies.
+    raw["offersV2"]["listings"][0]["availability"]["type"] = "IN_STOCK"
+    assert classify_item("A", raw).availability is None
+
+
 def test_classify_no_listings_and_not_found_and_missing():
     assert classify_item("A", _item("A", listings=False)).status == "no_offer"
     assert not classify_item("A", _item("A", listings=False)).buyable
