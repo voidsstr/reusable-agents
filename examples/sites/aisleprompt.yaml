@@ -110,11 +110,13 @@ implementer:
                        "azure/**", "Dockerfile*", "docker-compose*.yml", "tests/run-local-suite.sh"]
 deployer:
   test:
-    full_interval_days: 7
-    # Pinned to smoke until the all-pages gate replaces this block: run.sh no
-    # longer forces DEPLOYER_TEST_SCOPE=smoke, and auto-selection would pick
-    # the never-green full tier (last full run 2026-05-05).
-    test_scope: smoke
+    # 2026-10-19: the all-pages deploy gate (aisleprompt tests/GATE.md), run on
+    # EVERY deploy. Keep it a single command: with a smoke/full pair the
+    # deployer runs smoke on most deploys and the full suite only weekly
+    # (_select_test_scope). The three projects partition every top-level test;
+    # the quarantine project (tests that need production data) runs only with
+    # GATE_INCLUDE_QUARANTINE=1.
+    #
     # 2026-08-30: this runs tests/run-local-suite.sh, which BUILDS
     # Dockerfile.azure -- the image Azure Container Apps runs -- from the
     # working tree, starts it on :10020 against the local fixture Postgres
@@ -126,12 +128,8 @@ deployer:
     # started -- the dev container is on :4004 -- so every gate run failed
     # and the deployer, which hard-gates on test failure, shipped nothing
     # for weeks.
-    smoke:
-      cwd: tests
-      cmd: bash run-local-suite.sh --grep "@smoke"
-    full:
-      cwd: tests
-      cmd: bash run-local-suite.sh
+    cwd: tests
+    cmd: bash run-local-suite.sh --project=gate-serial --project=gate-pages --project=gate-specs
   build:
     cwd: .
     cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
