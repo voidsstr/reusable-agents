@@ -91,14 +91,10 @@ coverage_targets:
     rec_priority: medium
     json_ld: "Article"
     title_template: "{product-A} vs {product-B}: Which is Better in 2026?"
-local_dev:
-  port: 4001
-  url: http://localhost:4001
-  health_url: http://localhost:4001/
-  ensure_running:
-    cwd: .
-    cmd: docker compose up -d frontend backend db
-  health_timeout_s: 90
+# local_dev (the standing :4001 dev stack) was removed 2026-10-19: nothing in
+# the gate used it, and its health probe blocked deploys (rc 79) for reasons
+# unrelated to the code under test.
+
 implementer:
   repo_path: /home/voidsstr/development/aisleprompt
   branch: master
@@ -132,10 +128,10 @@ deployer:
     # for weeks.
     smoke:
       cwd: tests
-      cmd: bash run-local-suite.sh --reporter=line --grep "@smoke"
+      cmd: bash run-local-suite.sh --grep "@smoke"
     full:
       cwd: tests
-      cmd: bash run-local-suite.sh --reporter=line
+      cmd: bash run-local-suite.sh
   build:
     cwd: .
     cmd: docker build -f Dockerfile.azure -t {image}:{tag} .
