@@ -83,7 +83,7 @@ The signatures + exact fixes live in **SKILL.md §11**. Summary:
 | A | **>5 agents failed at once**, logs `[Errno 28] No space left on device` | Disk-full. `df -h /` first; deleted-but-open leak (df ≫ du) needs operator sudo `lsof +L1` → restart holder; standing preventive = delete 265G stale ollama dup. Then bulk `reset-failed` the stale units + restart zombied daemons. |
 | B | pool `state.json` **0/6 authed**, "OAuth session expired"; volume → 0 | Re-auth each profile (operator): `HOME=…/profile-<N> …/claude /login`. Auto-recovers on next drain tick. |
 | C | `*-seo-opportunity-agent` fails, `refresh-token.py … HTTP 400` | GSC token weekly expiry. Reset unit each tick (expected, no re-email); operator runs `install/fix-gsc-now.sh`. |
-| D | `[deployer:test:smoke] rc=1` on app deploys, prod @smoke green | Stale `localhost:4001` gate fixture. Diagnose first (reproduce `:4001` @smoke), rebuild it — never blind-revert. |
+| D | `TEST GATE RED` in the dispatch log; gate state `red` | The deployer's repair loop handles code failures itself (Opus repair → re-test → deploy) and emails once per failure signature after a spent cycle. Read `~/.reusable-agents/deployer/gate-state/<site>.json` + the artifacts in `test-failure-context.json`. Infra failures are retried, never "fixed". Never blind-revert or weaken a test. |
 | E | `kitchen-scraper … timed out after 2400s` | Fixed by 9fb1a07 (run-level deadline). Recurrence = deadline regressed; else note-only. |
 | F | single transient run failure (Azure-PG timeout, one `000`, "0 proposals") | `reset-failed` / re-probe + note; act only on the 2nd consecutive. |
 
@@ -233,5 +233,8 @@ Check the live list in `agents/keep-the-lights-on/<system>/incidents.json`.
 - `.claude/skills/keep-the-lights-on/systems/` — registry + per-system configs + `_example.yaml`.
 - `README.md` → "Goals & metrics — the north star" — the goals model the improvement cycle serves.
 - `docs/agents-catalog.md` — the full agent roster.
-- Memories: `aisleprompt-deploy-gate-tests-4001-fixture`, `os-disk-space-leak`,
-  `specpicks-scraper-disk-leak` — incident detail.
+- `agents/deployer/AGENT.md` → "Test → repair → retest": the deploy gate and its
+  repair loop (playbook D).
+- Memories: `os-disk-space-leak`, `specpicks-scraper-disk-leak` — incident detail.
+  (The `aisleprompt-deploy-gate-tests-4001-fixture` memory was never written on
+  this host; the `:4001` gate it described was retired 2026-10-19.)

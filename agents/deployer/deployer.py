@@ -26,7 +26,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 from shared.site_config import load_config_from_env  # noqa: E402
 from framework.core import deploy_gate  # noqa: E402
+from framework.core import deploy_repair  # noqa: E402
+from framework.core.implementer_scope import ScopePolicy  # noqa: E402
 from framework.core.locks import site_deploy_lock  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gate_runner as gate  # noqa: E402
 
 
 def _now_iso() -> str:
@@ -215,43 +220,6 @@ def _expand_local_dev(cmd: str | None, local_dev_block: dict) -> str | None:
     if url:
         out = out.replace("{local_dev_url}", str(url))
     return out
-
-
-def _clean_build_root(repo_root: str | None, site_id: str, *,
-                      enabled: bool = True) -> tuple[str | None, "callable"]:
-    """Return (build_root, cleanup) for the build stage.
-
-    The build used to run in the live working tree, so whatever sat
-    uncommitted there shipped to prod. On 2026-09-25 that deployed another
-    agent's half-finished aisleprompt change (reviews API 500s for ~7 min)
-    and two untracked migrations. A detached worktree of HEAD shares the
-    object store, takes a second, and contains exactly what was committed.
-    Falls back to the live tree (with a warning) when git can't make one.
-    """
-    noop = lambda: None  # noqa: E731
-    if not enabled or not repo_root or not os.path.isdir(os.path.join(repo_root, ".git")):
-        return repo_root, noop
-    base = Path(os.path.expanduser("~/.reusable-agents/deploy-worktrees"))
-    base.mkdir(parents=True, exist_ok=True)
-    wt = base / f"{re.sub(r'[^A-Za-z0-9_-]', '_', site_id or 'site')}-{os.getpid()}"
-    git = ["git", "-C", repo_root]
-    subprocess.run(git + ["worktree", "prune"], capture_output=True)
-    r = subprocess.run(git + ["worktree", "add", "--detach", "--force", str(wt), "HEAD"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"[deployer] WARN clean-checkout build unavailable ({r.stderr.strip()[:200]}); "
-              f"building from the working tree", file=sys.stderr)
-        return repo_root, noop
-    dirty = subprocess.run(git + ["status", "--porcelain", "--untracked-files=no"],
-                           capture_output=True, text=True).stdout.strip()
-    if dirty:
-        print(f"[deployer] building HEAD from {wt}; NOT shipping "
-              f"{len(dirty.splitlines())} uncommitted tracked change(s) in {repo_root}")
-
-    def cleanup() -> None:
-        subprocess.run(git + ["worktree", "remove", "--force", str(wt)], capture_output=True)
-
-    return str(wt), cleanup
 
 
 def run_step(name: str, cwd: str | None, cmd: str, env: dict | None = None,
@@ -443,6 +411,110 @@ def _gate_summary(snap: dict) -> dict:
     }
 
 
+def _storage_or_none():
+    try:
+        from framework.core.storage import get_storage
+        return get_storage()
+    except Exception:
+        return None
+
+
+def _mark_shipped(run_dir: Path, deploy_meta: dict, tag: str, image: str, state) -> None:
+    """The implementer marked the batch's recs `implemented`; their code is now
+    live in this (or, for already-live, an earlier) deploy. Flip `shipped`."""
+    recs_path = run_dir / "recommendations.json"
+    if not recs_path.is_file():
+        return
+    try:
+        rd = json.loads(recs_path.read_text())
+        # recommendations.json ships in two shapes across producers: a bare
+        # list, or {"recommendations": [...]}. Handle both.
+        if isinstance(rd, list):
+            rec_list = rd
+        elif isinstance(rd, dict):
+            rec_list = rd.get("recommendations", [])
+            if not isinstance(rec_list, list):
+                rec_list = []
+        else:
+            rec_list = []
+        shipped_at = _now_iso()
+        shipped_n = 0
+        for r in rec_list:
+            if not isinstance(r, dict):
+                continue
+            if r.get("implemented") is True and not r.get("shipped"):
+                r["shipped"] = True
+                r["shipped_at"] = shipped_at
+                r["shipped_tag"] = tag
+                r["shipped_image"] = image
+                shipped_n += 1
+        if shipped_n:
+            recs_path.write_text(json.dumps(rd, indent=2))
+            print(f"[deployer] marked {shipped_n} rec(s) as shipped tag={tag}",
+                  file=sys.stderr)
+        deploy_meta["shipped_rec_count"] = shipped_n
+    except Exception as e:
+        print(f"[deployer] warn: shipped-marker write failed: {e}",
+              file=sys.stderr)
+
+
+def _mail(cfg, subject: str, body_html: str) -> None:
+    em = (cfg.get("reporter") or {}).get("email") or {}
+    to = em.get("to") or []
+    sender = em.get("from") or ""
+    m = re.search(r"<([^>]+)>", sender)
+    sender = m.group(1) if m else sender
+    if not to or not sender:
+        print("[deployer] no reporter.email in the site config; not alerting", file=sys.stderr)
+        return
+    try:
+        from shared.site_quality import send_via_msmtp
+        ok, detail = send_via_msmtp(subject=subject, body_html=body_html, to=list(to),
+                                    sender=sender, msmtp_account=em.get("msmtp_account") or "automation",
+                                    bypass_digest=True)
+        print(f"[deployer] alert {'sent' if ok else 'NOT sent'}: {detail}", file=sys.stderr)
+    except Exception as e:
+        print(f"[deployer] alert failed: {e}", file=sys.stderr)
+
+
+def _alert_if_due(cfg, state, outcome, repair_cfg: dict, run_dir: Path) -> None:
+    """Email the operator once a failure has outlasted a full repair cycle,
+    then at most every realert_s. De-duplicated per failure signature."""
+    sig = outcome.signature
+    if not sig or not state.should_alert(sig, repair_cfg):
+        return
+    import html as _html
+    rows = "".join(
+        f"<li><b>{_html.escape(f['title'])}</b> <code>{_html.escape(f.get('file') or '')}"
+        f":{f.get('line') or ''}</code><pre>{_html.escape((f.get('error') or '')[:800])}</pre></li>"
+        for f in (outcome.summary().get("failures") or [])[:10])
+    reps = "".join(f"<li>{_html.escape(r['note'])}</li>" for r in outcome.repairs)
+    body = (
+        f"<p>The pre-deploy test gate for <b>{_html.escape(cfg.site_id)}</b> is red, and the "
+        f"deployer could not repair it. Nothing deploys for this site until it is green.</p>"
+        f"<p><b>Why:</b> {_html.escape(outcome.status_reason)}<br>"
+        f"<b>Commit:</b> {_html.escape(outcome.sha[:12])} · <b>signature:</b> {_html.escape(sig)} · "
+        f"<b>red since:</b> {_html.escape(state.red_since)} · <b>next repair attempt:</b> "
+        f"{_html.escape(state.next_repair_at or 'next deploy')}</p>"
+        f"<p><b>Failing tests</b></p><ul>{rows or '<li>(no test-level failures)</li>'}</ul>"
+        f"<p><b>Repair attempts this run</b></p><ul>{reps or '<li>none</li>'}</ul>"
+        f"<p>Context: <code>{_html.escape(str(run_dir))}/test-failure-context.json</code>; gate state: "
+        f"<code>{_html.escape(str(deploy_repair.state_dir()))}/{_html.escape(cfg.site_id)}.json</code>. "
+        f"Turn repair off with storage <code>{deploy_repair.CONFIG_KEY}</code> "
+        f"<code>{{\"enabled\": false}}</code>.</p>")
+    _mail(cfg, f"[deploy-gate:{cfg.site_id}] RED — {outcome.status_reason[:90]}", body)
+    state.record_alert(sig)
+
+
+def _alert_landing(cfg, ref: str, detail: str, run_dir: Path) -> None:
+    import html as _html
+    _mail(cfg, f"[deploy-gate:{cfg.site_id}] repair green but not landed",
+          f"<p>The deploy gate for <b>{_html.escape(cfg.site_id)}</b> was repaired and is green, "
+          f"but the repair commits could not be put on the live branch, so nothing was deployed.</p>"
+          f"<p>The repair is kept at <code>{_html.escape(ref)}</code>.</p>"
+          f"<pre>{_html.escape(detail[:2000])}</pre><p>Run dir: <code>{_html.escape(str(run_dir))}</code></p>")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--run-dir", required=True)
@@ -496,28 +568,71 @@ def main() -> None:
         (run_dir / "deploy.json").write_text(json.dumps(deploy_meta, indent=2))
 
     deploy_lock = None
+    wt_cleanup = lambda: None  # noqa: E731
     try:
-        # ---- 1. Test (hard gate) ----
-        # Tiered test scope:
-        #   - deployer.test     : full suite (legacy / weekly cadence)
-        #   - deployer.test.smoke : fast subset (per-batch default)
-        #   - deployer.test.full  : explicit full-suite slot (alias for deployer.test)
-        # The framework picks `smoke` by default and bumps to `full` when
-        # the last full run is older than `full_interval_days` (default 7).
-        # Last-full-run state is persisted at
-        #   agents/deployer/state/<site>-last-full-test.json
-        # The whole tier is opt-in: a deployer.test block with only `cmd`
-        # works exactly as before (single command, run every time).
-        if not args.skip_test:
+        # ---- 0. One gate + deploy per target at a time ----
+        # Held from the first test through smoke/rollback (released in the
+        # outer finally). Taken BEFORE the tests since 2026-10-19: same-site
+        # runs used to test in parallel on one fixed container and kill each
+        # other's suite (rc=4, six blocked deploys in four days), and two
+        # overlapping deploys of one app fail each other's smoke and roll each
+        # other back (site_deploy_lock).
+        target = str(deploy_vars.get("app") or cfg.site_id)
+        deploy_lock = site_deploy_lock(target, timeout_s=int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "6600")))
+        try:
+            gate.acquire_lock(deploy_lock, int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "6600")),
+                              "another gate or deploy of this target is in flight")
+        except TimeoutError as e:
+            deploy_meta["status"] = "failure"
+            deploy_meta["error"] = f"deploy lock: {e}"
+            _save()
+            print(f"[deployer] {e}; not deploying alongside it", file=sys.stderr)
+            sys.exit(1)
+
+        # The image tag is stamped once the lock is ours: a run that waited
+        # must not reuse the minute it started in (that is another run's tag).
+        tag = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+        deploy_meta["tag"] = tag
+
+        state = deploy_repair.GateState.load(cfg.site_id)
+        b = deployer.get("build", {}) or {}
+        # Another run may have tested and shipped this very commit while we
+        # waited for the lock. Its image is live, so are our commits.
+        head_now = gate.rev(repo_root) if repo_root else ""
+        if (head_now and head_now == state.last_deployed_sha and not args.dry_run
+                and not args.skip_test and os.environ.get("DEPLOYER_FORCE") != "1"):
+            deploy_meta.update({"status": "already-live", "sha": head_now})
+            print(f"[deployer] {head_now[:12]} is already live (deployed by an earlier run); "
+                  f"nothing to build", file=sys.stderr)
+            _mark_shipped(run_dir, deploy_meta, tag, image, state)
+            _save()
+            return
+
+        # ---- 0b. The commit to test and ship ----
+        # One clean checkout of HEAD serves the gate AND the build, so what is
+        # tested is exactly what ships: never another agent's uncommitted edit
+        # in the live tree (2026-09-25 shipped one), never a commit that landed
+        # after the tests passed.
+        wt, ship_sha, wt_cleanup = gate.checkout(
+            repo_root, cfg.site_id, enabled=b.get("from_clean_checkout", True))
+        wt = wt or repo_root or os.getcwd()
+        deploy_meta["sha"] = ship_sha
+        tested_image = ""
+
+        # ---- 1. Test -> repair -> retest (hard gate) ----
+        # Tiered scope: deployer.test.cmd runs every deploy (legacy); a
+        # smoke/full pair picks per DEPLOYER_TEST_SCOPE / test_scope /
+        # full_interval_days (_select_test_scope). A red gate is classified
+        # first. Infra failures are retried. Code failures get Opus repair
+        # attempts (agents/deployer/REPAIR.md) in the checkout, each vetted by
+        # deploy_repair.check_repair and re-tested. Only a green gate continues.
+        if args.skip_test:
+            print("[deployer] WARNING: --skip-test — deploying WITHOUT the test gate", file=sys.stderr)
+        else:
             t = deployer.get("test", {}) or {}
             scope, test_cmd, test_cwd = _select_test_scope(
                 t, cfg.site_id, run_dir,
             )
-            # Bring up the per-site local dev server (if configured) BEFORE
-            # running the test command. Without this, multiple sites
-            # collide on a hardcoded TEST_URL and tests 404 against the
-            # wrong site's API. The local_dev block is opt-in — sites
-            # that don't declare one keep current behavior.
             local_dev = cfg.get("local_dev") or {}
             test_cmd = _expand_local_dev(test_cmd, local_dev)
             if local_dev:
@@ -536,42 +651,63 @@ def main() -> None:
                     print(f"[deployer:local-dev] ready ({detail})",
                           file=sys.stderr)
             if test_cmd:
-                rc, stdout, stderr = run_step(
-                    f"test:{scope}", test_cwd, test_cmd, repo_root=repo_root)
-                # Sentinel — playwright/jest/etc. exit 0 when their grep
-                # filter matches no tests. That would be a silent deploy
-                # of untested code. Treat "no tests found" as a hard
-                # failure regardless of exit code.
-                combined = (stdout or "") + "\n" + (stderr or "")
-                if "No tests found" in combined or "0 tests found" in combined:
-                    print(f"[deployer] TEST SCOPE EMPTY scope={scope} — "
-                          f"refusing to deploy untested code. Tag at least "
-                          f"one test with @smoke (or set test_scope=full).",
-                          file=sys.stderr)
-                    rc = 78  # distinguishable from real failures
+                repair_cfg = deploy_repair.load_config(
+                    cfg.site_id, deployer.get("repair"), storage=_storage_or_none())
+                runner = gate.GateRunner(
+                    site_id=cfg.site_id, tag=tag, test_cmd=test_cmd, test_cwd=test_cwd,
+                    worktree=wt, repo_root=repo_root or wt,
+                    branch=implementer_block.get("branch") or "",
+                    scope=ScopePolicy.from_site_config({"implementer": implementer_block},
+                                                       dispatch_kind="deploy-repair"),
+                    cfg=repair_cfg, state=state, run_dir=run_dir,
+                    test_timeout_s=t.get("timeout_s"))
+                outcome = runner.run()
+                summary = outcome.summary()
+                (run_dir / "gate.json").write_text(json.dumps(summary, indent=2))
                 deploy_meta["test"] = {
-                    "rc": rc, "skipped": False, "scope": scope,
-                    "stderr_tail": stderr[-1000:],
+                    "rc": 0 if outcome.ok else (summary.get("rc") if summary.get("rc") is not None else 1),
+                    "skipped": False, "scope": scope, "gate": summary,
                 }
-                if rc != 0:
+                if not outcome.ok:
                     deploy_meta["status"] = "blocked"
-                    # Capture failure context for the LLM-fix loop
-                    # (consumed by an upcoming auto-fix dispatcher; for now
-                    # it's just persisted alongside deploy.json so an
-                    # operator or follow-up agent can act on it).
                     fail_ctx = {
-                        "scope": scope, "rc": rc, "cmd": test_cmd,
-                        "cwd": test_cwd, "stderr_tail": stderr[-4000:],
-                        "captured_at": _now_iso(),
+                        "scope": scope, "rc": deploy_meta["test"]["rc"], "cmd": test_cmd,
+                        "cwd": test_cwd, "kind": summary.get("kind"), "reason": outcome.status_reason,
+                        "signature": outcome.signature, "failures": summary.get("failures"),
+                        "artifacts": [r.get("artifacts") for r in outcome.runs],
+                        "repairs": outcome.repairs, "captured_at": _now_iso(),
                     }
-                    (run_dir / "test-failure-context.json").write_text(
-                        json.dumps(fail_ctx, indent=2))
+                    (run_dir / "test-failure-context.json").write_text(json.dumps(fail_ctx, indent=2))
+                    _alert_if_due(cfg, state, outcome, repair_cfg, run_dir)
+                    state.save()
                     _save()
-                    print(f"[deployer] TEST FAILED scope={scope} rc={rc}; "
-                          f"aborting deploy (context: "
-                          f"{run_dir}/test-failure-context.json)",
+                    print(f"[deployer] TEST GATE RED scope={scope}: {outcome.status_reason}; "
+                          f"not deploying (context: {run_dir}/test-failure-context.json)",
                           file=sys.stderr)
                     sys.exit(1)
+                if outcome.flaky:
+                    print(f"[deployer] gate green with {len(outcome.flaky)} flaky test(s): "
+                          f"{outcome.flaky[:5]}", file=sys.stderr)
+                if outcome.repaired:
+                    landed_ok, landed = gate.land(repo_root or wt, implementer_block.get("branch") or "",
+                                                  ship_sha, outcome.sha)
+                    deploy_meta["test"]["gate"]["landed"] = landed
+                    if not landed_ok:
+                        ref = f"refs/deploy-repair/{cfg.site_id}/{tag}"
+                        subprocess.run(["git", "-C", repo_root or wt, "update-ref", ref, outcome.sha],
+                                       capture_output=True)
+                        deploy_meta["status"] = "blocked"
+                        deploy_meta["error"] = f"repair is green but could not land on the branch: {landed}"
+                        state.last_reason = f"repair kept at {ref}; could not land: {landed[:200]}"
+                        state.save()
+                        _alert_landing(cfg, ref, landed, run_dir)
+                        _save()
+                        print(f"[deployer] {deploy_meta['error']}; kept at {ref}", file=sys.stderr)
+                        sys.exit(1)
+                    print(f"[deployer] gate repaired and green; repair {landed}", file=sys.stderr)
+                ship_sha = outcome.sha
+                deploy_meta["sha"] = ship_sha
+                tested_image = outcome.image_id
                 if scope == "full":
                     _record_last_full_test(cfg.site_id)
             else:
@@ -581,38 +717,25 @@ def main() -> None:
             deploy_meta["status"] = "dry-run"; _save()
             return
 
-        # ---- 1b. One deploy per target at a time ----
-        # Held from the build through smoke/rollback (released in the outer
-        # finally). Two overlapping deploys of one app fail each other's smoke
-        # and roll each other back; see site_deploy_lock.
-        deploy_lock = site_deploy_lock(
-            str(deploy_vars.get("app") or cfg.site_id),
-            timeout_s=int(os.environ.get("DEPLOYER_LOCK_WAIT_S", "2700")))
-        if not deploy_lock.try_acquire():
-            print(f"[deployer] waiting for {deploy_lock.path.name}: another deploy "
-                  f"of this target is in flight", file=sys.stderr)
-            try:
-                deploy_lock.acquire()
-            except TimeoutError as e:
-                deploy_meta["status"] = "failure"
-                deploy_meta["error"] = f"deploy lock: {e}"
-                _save()
-                print(f"[deployer] {e}; not deploying alongside it", file=sys.stderr)
-                sys.exit(1)
-            print("[deployer] deploy lock acquired", file=sys.stderr)
-
         # ---- 2. Build ----
-        b = deployer.get("build", {})
-        if b.get("cmd"):
-            build_root, cleanup = _clean_build_root(
-                repo_root, cfg.site_id, enabled=b.get("from_clean_checkout", True))
-            try:
-                rc, _, stderr = run_step("build", b.get("cwd"), repo_root=build_root, cmd=
-                                         _expand(b["cmd"], deploy_vars, tag, image))
-            finally:
-                cleanup()
+        # The image the gate tested is the image that ships: tag it rather than
+        # rebuild (a second build used a different builder and cache, and its
+        # npm layers differed). Without a tested image (--skip-test, no test
+        # command, a gate that is not run-local-suite) build from the checkout.
+        if tested_image and b.get("cmd") and b.get("reuse_tested_image", True):
+            rc, _, stderr = run_step("build", None, repo_root=wt,
+                                     cmd=f"docker tag {shlex.quote(tested_image)} {shlex.quote(image + ':' + tag)}")
             deploy_meta["build"] = {"rc": rc, "skipped": False, "stderr_tail": stderr[-1000:],
-                                    "from_clean_checkout": build_root != repo_root}
+                                    "from_clean_checkout": wt != repo_root,
+                                    "reused_tested_image": tested_image}
+            if rc != 0:
+                deploy_meta["status"] = "failure"; _save()
+                sys.exit(1)
+        elif b.get("cmd"):
+            rc, _, stderr = run_step("build", b.get("cwd"), repo_root=wt, cmd=
+                                     _expand(b["cmd"], deploy_vars, tag, image))
+            deploy_meta["build"] = {"rc": rc, "skipped": False, "stderr_tail": stderr[-1000:],
+                                    "from_clean_checkout": wt != repo_root}
             if rc != 0:
                 deploy_meta["status"] = "failure"; _save()
                 sys.exit(1)
@@ -926,7 +1049,8 @@ def main() -> None:
                 if _tagger.is_file():
                     _tr = subprocess.run(
                         ["bash", str(_tagger), cfg.site_id, tag],
-                        cwd=repo_root, capture_output=True, text=True, timeout=180)
+                        cwd=repo_root, capture_output=True, text=True, timeout=180,
+                        env={**os.environ, "RELEASE_SHA": deploy_meta.get("sha") or ""})
                     for _line in (_tr.stdout or "").splitlines() + (_tr.stderr or "").splitlines():
                         if _line.strip():
                             print(f"[deployer] {_line.strip()}", file=sys.stderr)
@@ -935,52 +1059,11 @@ def main() -> None:
             except Exception as e:
                 print(f"[deployer] WARNING: release tag skipped ({e})", file=sys.stderr)
 
-        # ── Mark recs as shipped ────────────────────────────────────────
-        # The implementer earlier marked recs `implemented: true` when it
-        # committed/applied them. We now know those changes are live in
-        # the deployed container — flip `shipped: true`. The dashboard
-        # surfaces shipped vs implemented-but-not-shipped per rec.
-        recs_path = run_dir / "recommendations.json"
-        if recs_path.is_file():
-            try:
-                rd = json.loads(recs_path.read_text())
-                # recommendations.json ships in two shapes across producers:
-                #   - bare list: `[ {rec}, ... ]` (manual dispatches, some
-                #     PI/SEO agents)
-                #   - dict wrapper: `{ "recommendations": [ {rec}, ... ] }`
-                #     (article-author, others)
-                # Handle both — the previous code did `rd.get(...)` which
-                # blew up on the list shape with
-                # "'list' object has no attribute 'get'" and dropped every
-                # shipped-marker write on those runs.
-                if isinstance(rd, list):
-                    rec_list = rd
-                elif isinstance(rd, dict):
-                    rec_list = rd.get("recommendations", [])
-                    if not isinstance(rec_list, list):
-                        rec_list = []
-                else:
-                    rec_list = []
-                shipped_at = _now_iso()
-                shipped_n = 0
-                for r in rec_list:
-                    if not isinstance(r, dict):
-                        continue
-                    if r.get("implemented") is True and not r.get("shipped"):
-                        r["shipped"] = True
-                        r["shipped_at"] = shipped_at
-                        r["shipped_tag"] = tag
-                        r["shipped_image"] = image
-                        shipped_n += 1
-                if shipped_n:
-                    recs_path.write_text(json.dumps(rd, indent=2))
-                    print(f"[deployer] marked {shipped_n} rec(s) as shipped tag={tag}",
-                          file=sys.stderr)
-                deploy_meta["shipped_rec_count"] = shipped_n
-                _save()
-            except Exception as e:
-                print(f"[deployer] warn: shipped-marker write failed: {e}",
-                      file=sys.stderr)
+        if deploy_meta.get("sha"):
+            state.record_deployed(deploy_meta["sha"], tag)
+            state.save()
+        _mark_shipped(run_dir, deploy_meta, tag, image, state)
+        _save()
 
     except subprocess.TimeoutExpired:
         deploy_meta["status"] = "failure"
@@ -993,6 +1076,7 @@ def main() -> None:
         _save()
         raise
     finally:
+        wt_cleanup()
         if deploy_lock is not None:
             deploy_lock.release()
 

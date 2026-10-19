@@ -1087,6 +1087,34 @@ Deployer skips (intentional): `article-author`, `catalog-audit`, `h2h`
 (DB-only, no docker build), `IMPLEMENTER_SKIP_DEPLOY=1` (manual/debug);
 everything else runs.
 
+**Pre-deploy gate + repair loop (2026-10-19).** Every agent deploy goes through
+`agents/deployer/deployer.py`, which does the following in order:
+1. Takes the site's deploy lock before testing.
+2. Checks out HEAD into a clean worktree.
+3. Runs the site's in-depth Playwright gate (`deployer.test`: the all-pages
+   suite via `tests/run-local-suite.sh`) against the production image built
+   from that checkout.
+4. Ships that same image.
+
+A red gate is classified by `framework/core/deploy_repair.py`:
+- **infra** → retried, never sent to an LLM.
+- **code** → up to 3 Opus repair sessions (`agents/deployer/REPAIR.md`) in the
+  checkout. Each is vetted for scope and for weakened tests, then the gate is
+  re-run.
+- **green** → the repair lands on master and the deploy proceeds.
+- **still red** → blocked; backoff per failure signature; one operator email
+  per signature.
+
+Code: `agents/deployer/gate_runner.py`. State lives in
+`~/.reusable-agents/deployer/gate-state/<site>.json`. Kill switch: storage
+`config/deploy-repair-config.json` `{"enabled": false}` (the gate still
+blocks). Refuse on sight:
+- deploying around the gate (a manual `az containerapp update`, `--skip-test`
+  outside an operator rollback);
+- a caller forcing `DEPLOYER_TEST_SCOPE=smoke`;
+- a repair or agent that edits tests to make them pass;
+- a new page route with no entry in the site's all-pages manifest.
+
 New cloud target: copy a dormant recipe — `deployer.py` doesn't change (it
 just runs the shell commands), so K8s / GCP Cloud Run / Cloudflare Workers
 = just a recipe. Add it to `examples/deployer/README.md` + the recipe list

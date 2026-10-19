@@ -103,9 +103,22 @@ implementer:
   repo_path: /home/voidsstr/development/aisleprompt
   branch: master
   commit_message_template: 'SEO agent: %s'
+  # What the deployer's test-gate repair session may edit
+  # (agents/deployer/gate_runner.py, REPAIR.md); mirrors the site repo's
+  # agents/seo-opportunity-agent/site.yaml.
+  scope_by_dispatch_kind:
+    deploy-repair:
+      allowed_paths: ["src/**", "frontend/**", "db/**", "scripts/**", "tests/**", "data/**",
+                      "vendor/**", "package.json", "package-lock.json", "tsconfig.json"]
+      excluded_paths: ["mobile/**", "ios-extensions/**", "android/**", "agents/**", "aws/**",
+                       "azure/**", "Dockerfile*", "docker-compose*.yml", "tests/run-local-suite.sh"]
 deployer:
   test:
     full_interval_days: 7
+    # Pinned to smoke until the all-pages gate replaces this block: run.sh no
+    # longer forces DEPLOYER_TEST_SCOPE=smoke, and auto-selection would pick
+    # the never-green full tier (last full run 2026-05-05).
+    test_scope: smoke
     # 2026-08-30: this runs tests/run-local-suite.sh, which BUILDS
     # Dockerfile.azure -- the image Azure Container Apps runs -- from the
     # working tree, starts it on :10020 against the local fixture Postgres

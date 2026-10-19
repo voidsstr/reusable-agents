@@ -91,10 +91,16 @@ class SEODeployer(AgentBase):
             except Exception:
                 pass
         status = meta.get("status", "success" if ok else "failure")
+        gate = (meta.get("test") or {}).get("gate") or {}
         summary = (
             f"deploy {status} tag={meta.get('tag','')} "
             f"smoke_ok={meta.get('smoke',{}).get('ok','?')}"
         )
+        if gate:
+            summary += (f" gate={gate.get('kind') or '?'}"
+                        f"{' repaired' if gate.get('repaired') else ''}"
+                        f" runs={len(gate.get('runs') or [])}"
+                        f" repairs={len(gate.get('repairs') or [])}")
         self.decide("result", summary)
 
         return RunResult(
@@ -107,6 +113,11 @@ class SEODeployer(AgentBase):
                 "build_rc": (meta.get("build") or {}).get("rc"),
                 "deploy_rc": (meta.get("deploy") or {}).get("rc"),
                 "smoke_ok": (meta.get("smoke") or {}).get("ok"),
+                "gate_kind": gate.get("kind"),
+                "gate_repaired": 1 if gate.get("repaired") else 0,
+                "gate_repair_attempts": len(gate.get("repairs") or []),
+                "gate_runs": len(gate.get("runs") or []),
+                "sha": meta.get("sha", ""),
             },
         )
 

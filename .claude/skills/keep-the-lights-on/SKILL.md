@@ -707,16 +707,31 @@ Renewal check: `python3 agents/seo-opportunity-agent/lib/collector/refresh-token
 --oauth-file ~/.reusable-agents/seo/.oauth.json` → a `ya29…` token (not
 HTTP 400) = renewed → mark resolved.
 
-**D. aisleprompt deploy-gate stuck (rc=1 on every app deploy).** Signature:
-newest `dispatch-implementer-aisleprompt-*.log` shows `[deployer:test:smoke]
-rc=1` on app-code batches while prod `@smoke` passes. The gate runs `@smoke`
-against a STANDING `localhost:4001` dev container that is NOT rebuilt — if it
-drifts stale, its Playwright browser is missing, or its local DB lacks a
-column, every app deploy blocks while prod is fine. **Diagnose first, never
-blind-revert:** reproduce `cd tests && TEST_URL=http://localhost:4001 npx
-playwright test --config=pw.config.ts --grep @smoke --reporter=line`, read the
-real failing test, then rebuild `:4001` from HEAD / reinstall the browser /
-add the missing local-DB column. See memory `aisleprompt-deploy-gate-tests-4001-fixture`.
+**D. Red deploy gate (any site; replaces the old `:4001` playbook).** Since
+2026-10-19 the deployer repairs its own red gate (`agents/deployer/gate_runner.py`,
+`framework/core/deploy_repair.py`). Read it before acting:
+`~/.reusable-agents/deployer/gate-state/<site>.json` holds `status`,
+`signature`, `cycles`, `next_repair_at`, `last_reason` and `last_failures`. The
+newest dispatch log shows `[deployer:gate]` / `TEST GATE RED` lines. The run
+dir's `test-failure-context.json` names the artifact dirs
+(`~/.reusable-agents/deployer/gate-artifacts/<site>/…`: `report.json`,
+`output.log`, `container.log`, each repair's `session.log`). Cases:
+- `red`, `code`, and `cycles` is 0 or `next_repair_at` is in the past → the loop
+  will retry on the next deploy. Note it. Do nothing.
+- `red`, `code`, and backing off after a spent cycle → the operator has been
+  emailed (once per signature). Look at the failing test and the repair session
+  logs. Fix by hand only if the fix is obvious and small (then run
+  `tests/run-local-suite.sh` and commit). Otherwise wait for the backoff.
+- `infra` (suite exit 2/4/6/7, Docker, lock wait) → nothing was sent to an LLM.
+  Check `docker ps`, disk, `/tmp/agent-framework-locks/local-suite-<site>.lock`
+  and `deploy-<app>.lock` holders.
+- "repair is green but could not land" → cherry-pick
+  `refs/deploy-repair/<site>/<tag>` by hand.
+Never blind-revert, and never weaken a test to get green. Kill switch: storage
+`config/deploy-repair-config.json` `{"enabled": false}` (the gate still blocks).
+aisleprompt's gate no longer uses the standing `:4001` dev container: both
+sites run `tests/run-local-suite.sh`, which builds the production image from the
+deployer's clean checkout, under a host-wide flock.
 
 **E. kitchen-scraper 2400s timeout (flaky).** Signature:
 `agent-aisleprompt-kitchen-scraper` fails with `scraper timed out after

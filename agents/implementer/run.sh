@@ -2835,14 +2835,15 @@ if updated:
 MARK_DEFERRED
         fi
     else
-        echo "[implementer] batch complete — chaining to deployer (per-batch deploy, smoke tests only)"
-        # Per-batch deploys ALWAYS run smoke tests, never the full suite.
-        # The full suite (when present in site.yaml under test.full) is
-        # long-running (15-20 min playwright runs) and holds a throttle
-        # slot hostage. If a periodic full-suite cadence is needed, run
-        # it as a separate scheduled task with DEPLOYER_TEST_SCOPE=full.
+        echo "[implementer] batch complete — chaining to deployer (site's pre-deploy gate, repair loop on red)"
+        # Every deploy runs the site's own gate (deployer.test in site.yaml):
+        # the in-depth all-pages suite since 2026-10-19, run from a clean
+        # checkout of the commit that ships, under the site's deploy lock.
+        # A red gate is repaired and re-tested inside the deployer
+        # (agents/deployer/gate_runner.py). This used to force
+        # DEPLOYER_TEST_SCOPE=smoke, so aisleprompt gated deploys on 15 of
+        # ~685 tests. Set DEPLOYER_TEST_SCOPE yourself to pick a tier.
         SEO_AGENT_CONFIG="$SEO_AGENT_CONFIG" \
-        DEPLOYER_TEST_SCOPE="${DEPLOYER_TEST_SCOPE:-smoke}" \
             bash "$DEPLOYER_SCRIPT" --run-dir "$RESPONDER_RUN_DIR" || {
                 rc=$?
                 echo "[implementer] deployer failed rc=$rc" >&2

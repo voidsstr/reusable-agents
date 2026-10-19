@@ -50,6 +50,24 @@
       "directives": [
         "A failed smoke check after a successful deploy is an incident, not a warning"
       ]
+    },
+    {
+      "id": "goal-red-gates-self-repaired",
+      "title": "A red test gate repairs itself and the deploy goes out",
+      "description": "When the pre-deploy Playwright gate fails on code, the deployer's repair loop (deploy_repair + gate_runner, REPAIR.md) fixes it, re-tests and deploys without a human. gate_repaired is 1 on a run that turned a red gate green.",
+      "target_metric": "gate_repaired",
+      "metric": {
+        "name": "gate_repaired",
+        "current": 0,
+        "target": 1,
+        "direction": "increase",
+        "unit": "runs"
+      },
+      "directives": [
+        "Classify every red gate first: only code failures go to a repair session; infra failures are retried",
+        "Never ship a repair that weakens a test (skip/fixme/only, fewer expect() calls, deleted tests)",
+        "Escalate to the operator once a failure has exhausted a full repair cycle"
+      ]
     }
   ]
 }

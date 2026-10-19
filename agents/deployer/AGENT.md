@@ -34,10 +34,12 @@ The implementer chains to the deployer after every successful batch
   those recs `deferred` so they are not re-dispatched forever. This was added
   after rec-001 was re-dispatched ~50× overnight on 2026-05-13.
 
-A non-zero deployer exit makes the implementer exit with the same rc. The
-chain forces `DEPLOYER_TEST_SCOPE=smoke` unless the caller overrides it, so a
-tiered site never runs its full suite per batch. A site with a single legacy
-`test.cmd` (specpicks today) still runs that command on every deploy.
+A non-zero deployer exit makes the implementer exit with the same rc. Since
+2026-10-19 the chain no longer forces `DEPLOYER_TEST_SCOPE=smoke`: every deploy
+runs the site's own gate (`deployer.test`), which is meant to be the in-depth
+all-pages suite. A tiered site picks its tier by `test.test_scope` or
+`DEPLOYER_TEST_SCOPE` (aisleprompt is pinned to `smoke` until its all-pages
+gate lands).
 
 ## What it does
 
@@ -54,13 +56,61 @@ tiered site never runs its full suite per batch. A site with a single legacy
 
 0. Loads the site config from `SEO_AGENT_CONFIG` (`shared.site_config`). With
    no `deployer:` block it prints "nothing to do" and exits 0. Relative
-   `cwd`s resolve against `implementer.repo_path`. `tag` is the UTC time as
-   `%Y%m%d-%H%M`, so two deploys in the same minute share a tag. On
-   2026-09-23 two runs shared `20260923-1106` and two shared
-   `20260923-1110`; all four were blocked at the test gate, so no image was
-   built under a shared tag.
+   `cwd`s resolve against `implementer.repo_path`.
+   - **Lock first.** Takes `site_deploy_lock(<deploy.vars.app>)` before the
+     tests and holds it through smoke/rollback. Waiting prints a line a minute
+     (`DEPLOYER_LOCK_WAIT_S`, default 6600).
+   - **Tag.** Stamped after the lock as the UTC time `%Y%m%d-%H%M`. A run that
+     waited never reuses its start minute. (On 2026-09-23 two pairs of runs
+     shared a tag.)
+   - **Already live.** When HEAD equals the gate state's `last_deployed_sha`,
+     another run already tested and shipped this commit. Status
+     `already-live`: the recs are marked shipped, nothing is built.
+   - **Checkout.** One detached worktree of HEAD (`gate_runner.checkout`)
+     serves both the test and the build. `deploy.json.sha` records it.
 
-1. **Test (hard gate)**
+1. **Test → repair → retest (hard gate)** — `gate_runner.GateRunner.run()`
+   - **Runs** the scope's command from the checkout as
+     `<cmd> --reporter=line,json --output <artifacts>/test-results`. Any
+     `--reporter` already in the command is dropped. The env carries
+     `GATE_SOURCE_REPO`, `GATE_ARTIFACT_DIR` and
+     `PLAYWRIGHT_JSON_OUTPUT_FILE`, and no `DATABASE_URL*` or other
+     credentials. Output is streamed to `<artifacts>/<run>/output.log`, with a
+     heartbeat line a minute. A timeout (`test.timeout_s`, default 1800)
+     kills the whole process group.
+   - **Classifies** the result with `deploy_repair.classify` (exit code + output
+     + Playwright JSON report): `pass`, `flaky`, `code`, `infra` or `config`.
+     Before a code failure counts, the failed tests are re-run alone at
+     `--workers=1` (`--last-failed`). Green there → `flaky`, the deploy goes
+     on.
+   - **infra** → re-run (`repair.infra_retries`, default 2, after
+     `infra_retry_wait_s`). Never sent to an LLM.
+   - **code** → an Opus repair session (`claude --print` through the
+     claude-pool, `--model repair.model`, `--max-turns repair.max_turns`).
+     cwd is the checkout, the prompt is `deploy_repair.build_repair_prompt` +
+     `REPAIR.md`, and it holds the failing tests with errors, the server log
+     tail, the commits since the last green gate, and a one-test re-run
+     command. The session commits in the checkout. `deploy_repair.check_repair`
+     then vets the commits: implementer scope (`scope_by_dispatch_kind:
+     deploy-repair`), protected gate files, and no weakened tests (skip,
+     fixme, only, fail, fewer `expect()` calls, a deleted test, or a test
+     edit without `TEST-CHANGE-JUSTIFICATION:`). A rejected attempt is reset
+     and the next attempt is told why. An accepted one is re-tested. Up to
+     `repair.max_attempts` (default 3) within `repair.max_wall_s` (5400).
+   - **Green after a repair** → `gate_runner.land` fast-forwards the live
+     branch to the repair, or cherry-picks it if the branch moved. A
+     conflict aborts the pick, blocks the deploy, keeps the repair at
+     `refs/deploy-repair/<site>/<tag>` and emails the operator.
+   - **Still red** → status `blocked`, exit 1, and
+     `<run-dir>/test-failure-context.json` (failures, signature, repairs,
+     artifact paths). The gate state backs off on that failure signature
+     (`repair.backoff_s`). Once a full cycle is spent, the operator gets one
+     email per signature (`reporter.email`, re-sent after `repair.realert_s`).
+     `repair.enabled: false`, storage `config/deploy-repair-config.json`
+     `{"enabled": false}` or `DEPLOY_REPAIR_DISABLED=1` stops repairs. The gate
+     still blocks.
+
+   The test scope and pre-checks below still apply:
    - **Scope** (`_select_test_scope`):
      - a block with only `test.cmd` runs as scope `legacy` every time;
      - otherwise `DEPLOYER_TEST_SCOPE` wins, then `test.test_scope`;
@@ -75,13 +125,16 @@ tiered site never runs its full suite per batch. A site with a single legacy
    - **Empty test scope.** Output containing "No tests found" or
      "0 tests found" is forced to rc 78 (an empty `@smoke` grep must not
      ship untested code).
-   - **Failure.** Any non-zero rc sets status `blocked` and writes
-     `<run-dir>/test-failure-context.json`, then exits 1.
+   - **Failure.** A gate still red after the loop above sets status `blocked`
+     and writes `<run-dir>/test-failure-context.json`, then exits 1.
    - **Full-scope pass.** Records
      `agents/deployer/state/<site>-last-full-test.json`. That file is in the
      repo directory and git-tracked; the current files date from 2026-05-05
      and 05-06.
-2. **Build.** Runs `build.cmd` with `{tag}`, `{image}` and `deploy.vars`
+2. **Build.** Ships the image the gate tested: `docker tag
+   <image-under-test> {image}:{tag}` (`build.reuse_tested_image`, default
+   true). Without a tested image (`--skip-test`, no test command) it runs
+   `build.cmd` in the checkout with `{tag}`, `{image}` and `deploy.vars`
    expanded. Failure → status `failure`.
 3. **Push.** Runs `push.cmd`. Failure → status `failure`.
 4. **Deploy.** Runs `deploy.cmd`.
@@ -207,18 +260,34 @@ Any step that exceeds `run_step`'s 1800 s timeout → `failure` and exit 2.
   `content_verify`, `prior_image`, `rollback{attempted,rc,…}`, `status`
   (`running|blocked|failure|rolled-back|dry-run|success`), `rollback_cmd`,
   `shipped_rec_count` and `error`.
-- `<run-dir>/test-failure-context.json` when the test gate fails.
+- `<run-dir>/gate.json`: the gate summary (`ok`, `sha`, `kind`, `rc`, `failures`
+  with title/file/line/error, `runs`, `repairs`, `flaky`, `landed`,
+  `image_id`). The same object sits in `deploy.json` under `test.gate`.
+- `<run-dir>/test-failure-context.json` when the gate stays red: `kind`,
+  `reason`, `signature`, `failures`, `repairs`, `artifacts`.
+- `~/.reusable-agents/deployer/gate-artifacts/<site>/<tag>-<pid>/`: per gate
+  run `output.log`, Playwright `report.json`, `test-results/` (traces,
+  screenshots), `container.log` on failure, `image-under-test.txt`; per repair
+  `prompt.md` and `session.log`. Kept outside the run dir (which is synced to
+  blob storage) and pruned to the newest 20 runs per site.
+- `~/.reusable-agents/deployer/gate-state/<site>.json`: red/green, failure
+  signature, exhausted cycles, `next_repair_at`, last green and last deployed
+  commit, alert times, the last 30 events. `DEPLOY_GATE_STATE_DIR` overrides
+  the directory.
 - The updated `<run-dir>/recommendations.json` (shipped markers).
 - A container image `<image>:<tag>` in the registry, and the new Container
   App revision.
-- The git push of the site repo, plus the `release/<site>/NNNN` tag.
+- The git push of the site repo, plus the `release/<site>/NNNN` tag on the
+  shipped commit (`RELEASE_SHA`). A green repair also lands its commits on the
+  live branch.
 - Standard AgentBase artifacts under `agents/seo-deployer/runs/<run_ts>/`
   (`plan` / `result` decisions).
 
 ## Goals & metrics
 
-`RunResult.metrics` keys: `tag`, `image`, `test_rc`, `build_rc`, `deploy_rc`,
-`smoke_ok`.
+`RunResult.metrics` keys: `tag`, `image`, `sha`, `test_rc`, `build_rc`,
+`deploy_rc`, `smoke_ok`, `gate_kind`, `gate_repaired` (1 when a repair turned
+the gate green), `gate_repair_attempts`, `gate_runs`.
 
 `goals.json` declares these goals under agent id **`deployer`**:
 
@@ -227,6 +296,7 @@ Any step that exceeds `run_step`'s 1800 s timeout → `failure` and exit 2.
 | `goal-deploys-green` | `deploy_rc` | 0 |
 | `goal-tests-gate-green` | `test_rc` | 0 |
 | `goal-smoke-checks-pass` | `smoke_ok` | 1 |
+| `goal-red-gates-self-repaired` | `gate_repaired` | 1 |
 
 Runs record under `seo-deployer`, which has no goals, so these goals are
 **not auto-updated**. They still show their seed values on 2026-09-23. To fix
@@ -239,15 +309,29 @@ while keeping the explicit agent-id override.
 |---|---|---|
 | `SEO_AGENT_CONFIG` | none (required) | site config path (the implementer passes it through) |
 | `RESPONDER_RUN_DIR` / `SEO_DEPLOYER_RUN_DIR` | none (required) | run dir to ship; `run.sh --run-dir` sets the former |
-| `DEPLOYER_TEST_SCOPE` | auto (the implementer passes `smoke`) | `smoke`, `full` or `legacy` |
+| `DEPLOYER_TEST_SCOPE` | auto (`test.test_scope`, else the tier auto-pick) | `smoke`, `full` or `legacy` |
+| `DEPLOYER_LOCK_WAIT_S` | 6600 | how long to wait for another gate/deploy of the target |
+| `DEPLOYER_FORCE` | unset | `1` re-deploys a HEAD the gate state says is already live |
+| `DEPLOY_REPAIR_DISABLED` | unset | `1` stops repair sessions (the gate still blocks) |
+| `DEPLOY_REPAIR_CLAUDE_BIN` | `claude` on PATH | the claude executable for repairs |
+| `DEPLOY_GATE_STATE_DIR` / `DEPLOY_GATE_ARTIFACTS` | `~/.reusable-agents/deployer/gate-state` / `…/gate-artifacts` | where gate state and artifacts live |
 | `DEPLOYER_SKIP_TEST` | unset | `1` skips the test gate. Dangerous; meant for shipping a fix while test infrastructure is independently broken. |
 | `RESPONDER_SKIP_CONTENT_VERIFY` | unset | `1` disables per-rec content verification |
 | `IMPLEMENTER_SKIP_DEPLOY` | unset | read by the implementer: `1` skips the chain entirely |
 
 Site `deployer:` keys:
 
-- `test.{cmd,cwd}`, or `test.{smoke,full}.{cmd,cwd}`, `test.test_scope` and
-  `test.full_interval_days`
+- `test.{cmd,cwd}`, or `test.{smoke,full}.{cmd,cwd}`, `test.test_scope`,
+  `test.full_interval_days` and `test.timeout_s`
+- `build.reuse_tested_image` (default true) and `build.from_clean_checkout`
+- `repair.*`: `enabled`, `max_attempts`, `max_wall_s`, `attempt_timeout_s`,
+  `test_timeout_s`, `infra_retries`, `infra_retry_wait_s`, `confirm_failures`,
+  `model`, `max_turns`, `claude_bin`, `allow_test_edits`, `test_globs`,
+  `protected_globs`, `backoff_s`, `alert_after_cycles`, `realert_s`
+  (`framework/core/deploy_repair.py` DEFAULTS; the storage config
+  `config/deploy-repair-config.json` overrides, top level then `by_site.<site>`)
+- `implementer.scope_by_dispatch_kind.deploy-repair`: the paths a repair may
+  touch (else the default implementer scope)
 - `build.{cmd,cwd}`, `push.{cmd,cwd}`, `deploy.{cmd,cwd,vars}`. `vars`
   expand as `{key}`; `image`, `app` and `rg` have special meaning.
 - `smoke_check.{base_url,paths,timeout_seconds,settle_seconds}`
@@ -266,7 +350,6 @@ Top-level `local_dev.{port,url,health_url,ensure_running.{cmd,cwd},health_timeou
 ```bash
 # Re-run the ship step for an existing implementer run dir (real deploy!)
 SEO_AGENT_CONFIG=/home/voidsstr/development/specpicks/agents/seo-opportunity-agent/site.yaml \
-DEPLOYER_TEST_SCOPE=smoke \
   bash /home/voidsstr/development/reusable-agents/agents/deployer/run.sh --run-dir <run-dir>
 
 # Test stage only, then stop (dry run is only available on deployer.py directly)
@@ -288,7 +371,11 @@ implementer's log.
 
 | Symptom (`deploy.json.status`) | Cause / action |
 |---|---|
-| `blocked`, `test.rc` = 1, 4 or 5, "TEST FAILED scope=legacy" | The site's test suite failed. Seen on specpicks `run-local-suite.sh` several times on 2026-09-23. Read `<run-dir>/test-failure-context.json`. |
+| `blocked`, "TEST GATE RED … code: N test(s) failed; N repair attempt(s) did not get the gate green" | The gate failed on code and the repair loop could not fix it this run. Read `<run-dir>/test-failure-context.json` (failures, repairs) and the artifacts it names (`report.json`, each repair's `session.log`). The next run re-tries after `next_repair_at` in the gate state. |
+| `blocked`, "… backing off until …" | Same failure signature as a spent repair cycle. Wait, fix it by hand, or clear the site's gate-state file to retry now. |
+| `blocked`, "infra: …" | Test infrastructure (container race, Docker, lock wait) failed after the retries. Nothing was sent to an LLM. Check `docker ps`, `/tmp/agent-framework-locks/local-suite-<site>.lock`, disk. |
+| `blocked`, "repair is green but could not land" | Another commit conflicts with the repair. It is kept at `refs/deploy-repair/<site>/<tag>`; cherry-pick it by hand. |
+| `already-live` | Another run already tested and deployed this HEAD while this one waited for the lock. Recs marked shipped. `DEPLOYER_FORCE=1` re-deploys anyway. |
 | `blocked`, `test.rc=79` | `local_dev` health URL never came up. Check `docker compose ps` in the site repo (the KTLO deploy-gate `:4001` playbook). |
 | `blocked`, `test.rc=78` | The test scope matched no tests. Tag at least one test `@smoke` or use `full`. |
 | `failure` at deploy with `ContainerAppOperationInProgress` | Another deploy held the app for all 3 retries (60/180/360 s). Re-run later. |
