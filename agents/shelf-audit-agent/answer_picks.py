@@ -40,6 +40,12 @@ What it does, per run:
                  person, never dispatched.
        unlink  — no in-stock row of this product at all (other products of the
                  same brand don't count). Dispatchable.
+  6. Fast windows (optional `fast_windows`): inside a dated window (a deal
+     event such as Black Friday → Cyber Monday), a pick broken on its FIRST
+     strike is confirmed when its remedy is in `one_strike_actions` (default
+     relink only: the backup is provably the same product, so acting early
+     costs nothing if the stock was only gone for a moment). Everything else
+     still waits for the second strike.
 """
 from __future__ import annotations
 
@@ -264,6 +270,22 @@ def choose_remedy(broken_row: Optional[dict], candidates: list[dict],
                       % (len(near), ", ".join(c["slug"] for c in near[:3]))}
 
 
+# ---------- fast windows ----------
+
+def active_fast_window(cfg: dict, now: datetime) -> Optional[dict]:
+    """The `fast_windows` entry whose [start, end] dates (inclusive, UTC)
+    contain `now`, else None. Bad dates are ignored."""
+    day = now.astimezone(timezone.utc).date().isoformat()
+    for w in cfg.get("fast_windows") or []:
+        start, end = str(w.get("start") or ""), str(w.get("end") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or \
+                not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+            continue
+        if start <= day <= end:
+            return w
+    return None
+
+
 # ---------- orchestration ----------
 
 def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
@@ -303,20 +325,32 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
                                      "location": (res.get("location") or "")[:200]}
     new_state, confirmed = apply_strikes(state, broken, healthy, now,
                                          float(cfg.get("strike_gap_hours", 8)))
+    def remedy(href):
+        if not (lookup and same_picture):
+            return {"action": "review", "reason": "no replacement lookup configured"}
+        try:
+            row, cands = lookup(pick_slug(href))
+            return choose_remedy(row, cands, same_picture)
+        except Exception as e:
+            return {"action": "review", "reason": "lookup failed: %s" % str(e)[:80]}
+
     remedies = []
     for href in confirmed:
-        info = new_state[href]
-        rem = {"action": "review", "reason": "no replacement lookup configured"}
-        if lookup and same_picture:
-            try:
-                row, cands = lookup(pick_slug(href))
-                rem = choose_remedy(row, cands, same_picture)
-            except Exception as e:
-                rem = {"action": "review", "reason": "lookup failed: %s" % str(e)[:80]}
-        remedies.append({"href": href, "slug": pick_slug(href), **info, **rem})
+        remedies.append({"href": href, "slug": pick_slug(href), **new_state[href],
+                         **remedy(href), "strikes": 2})
+    window = active_fast_window(cfg, now)
+    if window:
+        one_strike = set(window.get("one_strike_actions") or ["relink"])
+        for href in broken:
+            if href in confirmed:
+                continue
+            rem = remedy(href)
+            if rem["action"] in one_strike:
+                remedies.append({"href": href, "slug": pick_slug(href),
+                                 **new_state[href], **rem, "strikes": 1})
     return {"pages": pages, "picks_checked": checked, "broken_now": broken,
             "confirmed": remedies, "pages_without_picks": page_errors,
-            "state": new_state}
+            "state": new_state, "fast_window": window}
 
 
 def to_recs(result: dict, run_ts: str) -> list[dict]:
@@ -338,7 +372,10 @@ def to_recs(result: dict, run_ts: str) -> list[dict]:
             "title": "%d answer pick(s) on top-click pages land on an Amazon search page"
                      % len(auto),
             "severity": "high", "priority": "high", "tier": "lever",
-            "rationale": "Two strikes at least 8 h apart: each pick's click-out no "
+            "rationale": ("Two strikes at least 8 h apart (one strike for a same-product "
+                          "relink inside a fast window)" if any(r.get("strikes") == 1 for r in auto)
+                          else "Two strikes at least 8 h apart") +
+                         ": each pick's click-out no "
                          "longer redirects to a product page. " + "; ".join(line(r) for r in auto),
             "fix": "In each listed page's article body (editorial_articles.body_md), "
                    "RELINK: replace the /k/<slug> link with the /k/<replacement> slug "

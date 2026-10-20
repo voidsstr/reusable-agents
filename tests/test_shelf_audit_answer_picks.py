@@ -123,6 +123,48 @@ class TestRunCheck(unittest.TestCase):
         self.assertIn("/k/dead?source=amazon", recs[0]["rationale"])
 
 
+class TestFastWindow(unittest.TestCase):
+    """Cyber Week (aisleprompt growth-20261020T001200Z-01): a same-product
+    relink goes out on the first strike inside the window; an unlink still
+    waits for the second."""
+    WINDOW = {"start": "2026-11-24", "end": "2026-12-02", "one_strike_actions": ["relink"]}
+
+    def _run(self, now, cands, windows):
+        cfg = {**TestRunCheck.CFG, "fast_windows": windows}
+        docs = {"https://s/api/blog/best-x": {"answer_picks": [
+            {"label": "Best Overall", "href": "/k/dead"}]}}
+        return ap.run_check(cfg, origin="https://s", pages=["/blog/best-x"],
+                            state={}, now=now, fetch_json=docs.get,
+                            probe_fn={"https://s/k/dead": SEARCH}.get,
+                            lookup=lambda slug: ({"title": "Dead Pan 10 inch", "image": "i"}, cands),
+                            same_picture=lambda a, b: ("same", 0))
+
+    def test_window_bounds_are_inclusive_dates(self):
+        w = [self.WINDOW, {"start": "bad", "end": "2026-12-31"}]
+        cfg = {"fast_windows": w}
+        self.assertIsNone(ap.active_fast_window(cfg, datetime(2026, 11, 23, 23, tzinfo=timezone.utc)))
+        self.assertEqual(ap.active_fast_window(cfg, datetime(2026, 11, 24, 0, tzinfo=timezone.utc)), self.WINDOW)
+        self.assertEqual(ap.active_fast_window(cfg, datetime(2026, 12, 2, 23, tzinfo=timezone.utc)), self.WINDOW)
+        self.assertIsNone(ap.active_fast_window(cfg, datetime(2026, 12, 3, 0, tzinfo=timezone.utc)))
+        self.assertIsNone(ap.active_fast_window({}, NOW))
+
+    def test_relink_confirmed_on_first_strike_inside_window(self):
+        in_window = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+        r = self._run(in_window, [{"slug": "pan-b", "title": "Dead Pan 10 inch", "image": "j"}], [self.WINDOW])
+        self.assertEqual([(c["action"], c["strikes"]) for c in r["confirmed"]], [("relink", 1)])
+        recs = ap.to_recs(r, "t")
+        self.assertIn("one strike", recs[0]["rationale"])
+
+    def test_unlink_still_waits_inside_window(self):
+        in_window = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+        self.assertEqual(self._run(in_window, [], [self.WINDOW])["confirmed"], [])
+
+    def test_relink_waits_outside_window(self):
+        before = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+        r = self._run(before, [{"slug": "pan-b", "title": "Dead Pan 10 inch", "image": "j"}], [self.WINDOW])
+        self.assertEqual(r["confirmed"], [])
+
+
 class TestAgentWiring(unittest.TestCase):
     SRC = (_ROOT / "agents" / "shelf-audit-agent" / "agent.py").read_text()
 

@@ -201,7 +201,7 @@ class ShelfAuditAgent(AgentBase):
         self.storage.write_json(state_key, res["state"])
         self.decide("observation",
                     "answer picks: %d checked on %d pages; %d broken now, %d "
-                    "confirmed on a second strike" % (
+                    "confirmed (second strike, or first strike in a fast window)" % (
                         res["picks_checked"], len(pages), len(res["broken_now"]),
                         len(res["confirmed"])))
         summary = {k: res[k] for k in ("pages", "picks_checked", "broken_now",
