@@ -104,6 +104,10 @@ SITE_PROFILES: dict[str, dict] = {
                      "bot_flag_col": "is_bot"},
             "events": {"amazon-clicks": {"source": "amazon"},
                        "instacart-clicks": {"source": "instacart"}},
+            # growth-20261020T001200Z-01: a trailing 7-day human count, so a
+            # deal week reads on its own. Read on 12-01 it is Cyber Week
+            # (11-25 to 12-01); the week to 10-20 was 111.
+            "events_7d": ["amazon-clicks"],
         },
         "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
         "agent_id": "aisleprompt-site-goals-tracker",
@@ -426,6 +430,17 @@ def collect_metrics(profile: dict) -> dict[str, float]:
                                 human_failed.add(ev)
                                 err(f"  human-click query for {ev} failed "
                                     f"(goal not recorded this run): {e}")
+                        for ev in hc_cfg.get("events_7d") or []:
+                            try:
+                                bd = human_clicks.breakdown(
+                                    _conn, hc_spec, table=hc_cfg["table"],
+                                    window_days=7, match=hc_events[ev])
+                                metrics[f"goal-{_slug(ev)}-7d"] = float(
+                                    bd[human_clicks.VERDICT_HUMAN])
+                            except Exception as e:
+                                _conn.rollback()
+                                err(f"  7-day human-click query for {ev} failed "
+                                    f"(goal not recorded this run): {e}")
                     # Events with no human spec keep the legacy raw count.
                     for ev, n in raw_first_party.items():
                         if ev not in hc_events:
@@ -561,6 +576,19 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
                             "Cross-site affiliate revenue from /kitchen. Raw row count is the raw-amazon-clicks-30d metric.",
              "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 200,
                         "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
+             "status": "active"},
+            # growth-20261020T001200Z-01: the Cyber Week read. Nine guides earn
+            # ~200 of 280 human clicks / 30 d, and Black Friday to Cyber Monday
+            # is when that shopping intent peaks.
+            {"id": "goal-amazon-clicks-7d",
+             "title": "7-day Amazon affiliate clicks — verified human (Cyber Week target 180)",
+             "description": "Verified human Amazon affiliate clicks over the trailing 7 days, same "
+                            "framework/core/human_clicks.py filter as goal-amazon-clicks-30d (first-party "
+                            "only). The value recorded on 2026-12-01 is Cyber Week (11-25 to 12-01). "
+                            "Baseline: 111 in the week to 2026-10-20. Target: 180 that week, with no "
+                            "dead answer pick on the nine top-click guides.",
+             "metric": {"name": "human_amazon_clicks_7d", "current": 0, "target": 180,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6},
              "status": "active"},
         ] if is_aisleprompt else [
             # Target 900/30d = 30 verified human clicks/day (reset 2026-09-24
