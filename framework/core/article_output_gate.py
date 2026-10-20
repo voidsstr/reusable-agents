@@ -46,7 +46,10 @@ lane is the operator's way of saying "this format earns citations
 elsewhere on the site, keep a trickle of it going" without opening the
 gate for everything. Counted like occasions: articles tagged ``lane:<id>``
 created in the window (any status but archived) plus ledger batches that
-recorded the lane. The daily cap still applies.
+recorded the lane. The daily cap still applies. A lane may carry a dated
+``boost`` (``{"max_per_window": 3, "until": "2026-11-09"}``): through the
+``until`` date (inclusive) the boost cap replaces ``max_per_window``, and the
+day after, the lane falls back to its base cap with no config change.
 
 **AI-visit evidence** counts distinct visitor IPs per article path and
 drops our own traffic: private / loopback addresses, the
@@ -170,7 +173,8 @@ DEFAULTS: dict[str, Any] = {
         "occasion_count_days": 60,
         "tags_column": "tags",
     },
-    # lane id -> {"max_per_window": int, "window_days": int (default 7)}.
+    # lane id -> {"max_per_window": int, "window_days": int (default 7),
+    #             "boost": {"max_per_window": int, "until": "YYYY-MM-DD"}}.
     # Empty = no lanes; see "Format lanes" above.
     "format_lanes": {},
 }
@@ -623,9 +627,13 @@ class GateDecision:
         return "\n".join(lines) + "\n"
 
 
-def _lane_config(cfg: dict) -> dict[str, dict]:
+def _lane_config(cfg: dict,
+                 today: Optional[_dt.date] = None) -> dict[str, dict]:
     """``format_lanes`` normalised to lane id -> {cap, days}; lanes with a
-    cap below 1 are dropped."""
+    cap below 1 are dropped. A ``boost`` whose ``until`` date is today or
+    later replaces the cap; a past, missing or unparseable ``until`` leaves
+    the base cap."""
+    today = today or _dt.date.today()
     out: dict[str, dict] = {}
     for lid, lc in (cfg.get("format_lanes") or {}).items():
         lc = lc if isinstance(lc, dict) else {"max_per_window": lc}
@@ -634,6 +642,14 @@ def _lane_config(cfg: dict) -> dict[str, dict]:
             days = max(1, int(lc.get("window_days", 7)))
         except (TypeError, ValueError):
             continue
+        boost = lc.get("boost")
+        if isinstance(boost, dict):
+            try:
+                until = _dt.date.fromisoformat(str(boost.get("until")))
+                if today <= until:
+                    cap = int(boost["max_per_window"])
+            except (KeyError, TypeError, ValueError):
+                pass
         lid = str(lid).strip().lower().removeprefix("lane:")
         if lid and cap >= 1:
             out[lid] = {"cap": cap, "days": days}
@@ -693,7 +709,7 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     occ_cap = int(occ_cap) if occ_cap is not None and int(occ_cap) >= 0 else None
     occ_days = int(so.get("occasion_count_days") or 60)
     db_occ: Optional[dict[str, int]] = None
-    lanes = _lane_config(cfg)
+    lanes = _lane_config(cfg, today)
     db_lanes: Optional[dict[str, int]] = None
     own_conn = False
     batch: Optional[list[dict]] = None

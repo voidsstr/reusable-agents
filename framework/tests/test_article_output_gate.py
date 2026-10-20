@@ -323,6 +323,28 @@ def test_format_lane_cap_counts_db_and_ledger(storage):
     assert d.allowed and d.lane_ids == ["cuisine-roundup"]
 
 
+def test_format_lane_boost_raises_cap_until_its_date(storage):
+    cfg = {"format_lanes": {"x-or-y": {
+        "max_per_window": 2, "window_days": 7,
+        "boost": {"max_per_window": 3, "until": "2026-02-28"}}}}
+    # Two already this week: the boosted cap of 3 leaves one slot.
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=cfg)
+    assert d.allowed and d.lane_room == {"x-or-y": 1}
+    # The until date itself is still boosted.
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=cfg,
+              today=dt.date(2026, 2, 28))
+    assert d.allowed and d.lane_room == {"x-or-y": 1}
+    # The day after, the lane is back at 2 and closed.
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=cfg,
+              today=dt.date(2026, 3, 1))
+    assert not d.allowed
+    # A malformed boost is ignored, not fatal.
+    bad = {"format_lanes": {"x-or-y": {"max_per_window": 2,
+                                       "boost": {"until": "soon"}}}}
+    d = _eval(storage, _Conn(batch=["a1"], lanes={"x-or-y": 2}), site_cfg=bad)
+    assert not d.allowed
+
+
 def test_holiday_ranks_before_lane_under_seasonal_override(storage):
     d = _eval(storage, _Conn(batch=["a1"]), today=TODAY,
               site_cfg={**LANES, "max_proposals_per_day": 3})
