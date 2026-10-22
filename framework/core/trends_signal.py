@@ -97,6 +97,9 @@ _TECH_KEYWORDS = {
     "ram", "ddr5", "pcie", "thunderbolt", "usb-c",
     "github", "gitlab", "vscode", "neovim", "cursor", "copilot",
     "kubernetes", "docker", "rust", "python", "javascript", "typescript",
+    # AI hardware (2026-10-22): AI PCs and local-inference machines
+    "rtx", "dgx", "blackwell", "npu", "ai pc", "copilot+", "surface laptop",
+    "surface pro", "jetson", "strix halo", "local llm",
 }
 
 _GAMING_KEYWORDS = {
