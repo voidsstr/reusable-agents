@@ -79,10 +79,59 @@ def _extract(s: str, opener: str) -> Any:
             continue
 
 
+_MAX_QUOTE_REPAIRS = 32
+
+
+def repair_unescaped_quotes(s: str) -> str:
+    """Escape stray `"` characters that end a string value early.
+
+    The most common hard failure from long LLM JSON is a quote the model
+    forgot to escape inside a string: `"tags": ["price tier", ""The brewer
+    is the same": ..."]`. The decoder reads `""` as an empty string, then
+    fails with "Expecting ',' delimiter" at the next letter, and one bad
+    character discards the whole response (2026-10-23: 42 KB of aisleprompt
+    proposals lost to a single quote).
+
+    Each round parses, and on a delimiter error escapes the last `"` before
+    the error position, which is the quote that closed the string too soon.
+    Gives up (returns the input unchanged) on any other error, or when the
+    rounds run out, so a genuinely broken payload still raises."""
+    decoder = json.JSONDecoder()
+    start = s.find("{")
+    if start == -1:
+        start = s.find("[")
+    if start == -1:
+        return s
+    out = s
+    for _ in range(_MAX_QUOTE_REPAIRS):
+        try:
+            decoder.raw_decode(out, start)
+            return out
+        except json.JSONDecodeError as e:
+            if not e.msg.startswith(("Expecting ',' delimiter",
+                                     "Expecting ':' delimiter")):
+                return s
+            q = out.rfind('"', start, e.pos)
+            if q <= start or out[q - 1] == "\\":
+                return s
+            out = out[:q] + '\\"' + out[q + 1:]
+    return s
+
+
+def _extract_repaired(text: str, opener: str) -> Any:
+    try:
+        return _extract(text, opener)
+    except ValueError:
+        repaired = repair_unescaped_quotes(_strip_fences(text or ""))
+        if repaired == _strip_fences(text or ""):
+            raise
+        return _extract(repaired, opener)
+
+
 def extract_json_object(text: str) -> dict:
     """Return the first JSON object in `text`. Raises ValueError if
-    none can be parsed."""
-    value = _extract(text, "{")
+    none can be parsed, even after `repair_unescaped_quotes`."""
+    value = _extract_repaired(text, "{")
     if not isinstance(value, dict):
         raise ValueError(f"expected object, got {type(value).__name__}")
     return value
@@ -90,8 +139,8 @@ def extract_json_object(text: str) -> dict:
 
 def extract_json_array(text: str) -> list:
     """Return the first JSON array in `text`. Raises ValueError if
-    none can be parsed."""
-    value = _extract(text, "[")
+    none can be parsed, even after `repair_unescaped_quotes`."""
+    value = _extract_repaired(text, "[")
     if not isinstance(value, list):
         raise ValueError(f"expected array, got {type(value).__name__}")
     return value
