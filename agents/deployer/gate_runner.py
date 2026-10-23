@@ -66,6 +66,16 @@ def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 
+def _image_exists(image_id: str) -> bool:
+    if not image_id:
+        return False
+    try:
+        return subprocess.run(["docker", "image", "inspect", image_id], capture_output=True,
+                              timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def scrubbed_env(extra: Optional[dict] = None) -> dict:
     env = {k: v for k, v in os.environ.items() if not _SECRET_ENV.match(k)}
     # The claude-pool shim gives the repair session a per-profile HOME, and
@@ -431,9 +441,15 @@ class GateRunner:
             outcome.flaky += [f.title for f in g.classification.failures]
             log(f"[deployer:gate] {len(g.classification.failures)} failing test(s) passed when "
                 f"their files ran alone at --workers=1; treating as flaky")
+            # The confirm run rebuilds the image from the same checkout, which
+            # moves the test tag and leaves the main run's image dangling, so
+            # it can be pruned before the deployer tags it (2026-10-23:
+            # `docker tag sha256:46e7…` rc=1 after a green gate). Ship the main
+            # run's image while it exists, else the confirm run's (same sha).
+            image = g.image_id if _image_exists(g.image_id) else (conf.image_id or g.image_id)
             return GateRun(g.label, 0, dr.Classification(
                 "flaky", f"{len(g.classification.failures)} test(s) failed only under parallel load", 0),
-                g.art_dir, g.image_id, g.seconds, g.report)
+                g.art_dir, image, g.seconds, g.report)
         return g
 
     def _context(self, g: GateRun) -> tuple[str, str, str, str]:

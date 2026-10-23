@@ -593,6 +593,24 @@ def test_loop_confirm_that_passes_cleanly_is_flaky(repo, tmp_path, monkeypatch):
     assert "--last-failed" not in calls["gate"][1][1]
 
 
+@pytest.mark.parametrize("main_image_survives,shipped", [(True, "sha256:main"), (False, "sha256:confirm")])
+def test_loop_flaky_ships_an_image_that_still_exists(repo, tmp_path, monkeypatch, main_image_survives, shipped):
+    # 2026-10-23: the confirm run rebuilt the image, the main run's image was
+    # pruned, and the deployer's `docker tag <main image>` failed after a green gate.
+    gr = _load_gate_runner()
+    r, calls = _runner(gr, repo, tmp_path, monkeypatch, runs=[FAIL, (0, [_spec("a", "expected"), _spec("c", "expected")])])
+    stub = r.run_gate
+
+    def run_gate(label, extra=""):
+        g = stub(label, extra)
+        return g.__class__(g.label, g.rc, g.classification, g.art_dir,
+                           "sha256:confirm" if label.endswith("-confirm") else "sha256:main", g.seconds, g.report)
+    monkeypatch.setattr(r, "run_gate", run_gate)
+    monkeypatch.setattr(gr, "_image_exists", lambda image: main_image_survives and image == "sha256:main")
+    out = r.run()
+    assert out.ok and out.flaky and out.image_id == shipped
+
+
 def test_loop_confirm_cannot_hide_tests_that_did_not_run(repo, tmp_path, monkeypatch):
     gr = _load_gate_runner()
     main = (1, [_spec("hook victim", "unexpected", msg="beforeAll timed out"), _spec("regression", "skipped")])
