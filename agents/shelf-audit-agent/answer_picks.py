@@ -54,7 +54,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 UA = {"User-Agent": "Mozilla/5.0 (compatible; shelf-audit-bot/1.0; answer-pick monitor)"}
 DEFAULT_EXPECT = r"^https://www\.amazon\.com/dp/"
@@ -353,15 +353,29 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
             "state": new_state, "fast_window": window}
 
 
-def to_recs(result: dict, run_ts: str) -> list[dict]:
-    """One rec for the dispatchable fixes, one for the ones a person decides."""
+def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = ()) -> list[dict]:
+    """One rec for the dispatchable fixes, one for the ones a person decides.
+
+    `held_pages` (framework page_hold): a fix on a held page is still
+    reported, but in the person-review rec, never the dispatched one, even a
+    same-product relink."""
     recs = []
-    auto = [r for r in result["confirmed"] if r["action"] in ("relink", "unlink")]
-    manual = [r for r in result["confirmed"] if r["action"] == "review"]
+    held = {p.rstrip("/") for p in held_pages}
+
+    def on_hold(r):
+        return any((p or "").rstrip("/") in held for p in (r.get("pages") or []))
+
+    auto, manual = [], []
+    for r in result["confirmed"]:
+        if r["action"] in ("relink", "unlink") and not on_hold(r):
+            auto.append(r)
+        elif r["action"] in ("relink", "unlink", "review"):
+            manual.append({**r, "held": True} if on_hold(r) else r)
 
     def line(r):
         tgt = (" -> /k/%s" % r["replacement"]) if r.get("replacement") else ""
-        return "%s [%s] %s on %s (now %s %s)%s" % (
+        return "%s%s [%s] %s on %s (now %s %s)%s" % (
+            "PAGE ON HOLD, proposed " if r.get("held") else "",
             r["action"].upper(), r.get("label") or "pick", r["href"],
             ", ".join(r.get("pages") or []), r.get("status"),
             (r.get("location") or "")[:80], tgt)
@@ -394,9 +408,14 @@ def to_recs(result: dict, run_ts: str) -> list[dict]:
             "title": "%d dead answer pick(s) need a person to choose the replacement"
                      % len(manual),
             "severity": "medium", "priority": "medium", "tier": "smaller",
-            "rationale": "In-stock candidates exist but none is provably the same "
-                         "product (title numbers or listing photo differ, e.g. a "
-                         "different pack size). " + "; ".join(line(r) for r in manual),
+            "rationale": ("Either the page is on a page hold (a person approves "
+                          "every change to it), or in-stock candidates exist but none "
+                          "is provably the same product (title numbers or listing "
+                          "photo differ, e.g. a different pack size). "
+                          if any(r.get("held") for r in manual) else
+                          "In-stock candidates exist but none is provably the same "
+                          "product (title numbers or listing photo differ, e.g. a "
+                          "different pack size). ") + "; ".join(line(r) for r in manual),
             "expected_impact": "Avoids auto-swapping in a different product.",
             "answer_picks": manual,
         })

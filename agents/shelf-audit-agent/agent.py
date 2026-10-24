@@ -207,7 +207,11 @@ class ShelfAuditAgent(AgentBase):
         summary = {k: res[k] for k in ("pages", "picks_checked", "broken_now",
                                        "confirmed", "pages_without_picks")}
         self._save_artifact("answer-picks.json", summary)
-        return answer_picks.to_recs(res, self.run_ts), summary
+        # A held page (framework page_hold) is still checked and reported, but
+        # its fixes go to the person-review rec, never the dispatched one.
+        from framework.core import page_hold
+        held = page_hold.held_paths(page_hold.holds_from_site_config(cfg))
+        return answer_picks.to_recs(res, self.run_ts, held_pages=held), summary
 
     def run(self) -> RunResult:
         cfg = self._cfg()

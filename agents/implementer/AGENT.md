@@ -107,6 +107,13 @@ breaks the Live LLM tab + cost reporting.
    This pre-flight check is REQUIRED — agents otherwise hallucinate
    "fixes" for already-fixed code.
 
+   **Page holds.** `run.sh` drops any rec that references a page in the
+   site yaml's `page_holds:` list before you see it, and writes a
+   `DEFERRED: page-hold ...` summary for it (`framework/core/page_hold.py`).
+   If a rec you were given still edits a held page's content, treat it the
+   same way: DEFERRED, no edit, no commit. A person releases a page by
+   removing it from `page_holds`, or one rec with `hold_override: true`.
+
    **Per-rec deep context** (when present): the producing agent may have
    written supporting material at `$RESPONDER_RUN_DIR/rec-context/<rec-id>/`
    — a `context.json` plus an `attachments/` directory of arbitrary files

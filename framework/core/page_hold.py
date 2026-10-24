@@ -1,0 +1,149 @@
+"""Page holds — pages no agent may edit automatically until a person releases them.
+
+Why (aisleprompt, 2026-10-24 growth memo, Lever 1): the Instant Pot guide is
+the site's best AI-referral page, cited for one paragraph ("Duo or Rio? Same
+cooker, buy the cheaper listing"). On 2026-10-23 five commits from three
+agents (shelf-audit, progressive-improvement, seo-opportunity) re-decided its
+picks and CTAs against each other while the page was waiting on a person.
+`implementer_scope` gates by FILE path, and these pages live in a DB row, so
+nothing could say "leave this page alone".
+
+A hold is declared in the site yaml, top level or under `implementer:`:
+
+    page_holds:
+      - path: /blog/best-instant-pots-electric-pressure-cookers-2026
+        reason: "picks need a person; keep the Duo-or-Rio answer verbatim"
+        held_by: operator
+        held_at: 2026-10-24
+        until: 2026-12-02             # optional; the hold lapses after this date
+        allow_dispatch_kinds: []      # optional; e.g. ["crash-fix"]
+
+Consumers:
+  * implementer run.sh (claude path) and build-aider-invocation.py (framework
+    chain) defer any rec that references a held page, with reason
+    "page-hold", before the LLM sees it.
+  * shelf-audit answer_picks.to_recs routes fixes on a held page to the
+    person-review rec instead of the dispatched one.
+
+A rec "references" a page when the path or its last segment (the slug)
+appears in the rec's URL fields or text. That over-matches on purpose: a rec
+that only links TO a held page is deferred too, and a person can release it
+by setting `hold_override: true` on the rec. Missing a real edit is the
+failure this exists to stop; an extra deferral costs one look.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from typing import Any, Iterable, Optional
+from urllib.parse import urlsplit
+
+
+@dataclass(frozen=True)
+class PageHold:
+    path: str
+    reason: str = ""
+    held_by: str = ""
+    held_at: str = ""
+    until: Optional[date] = None
+    allow_dispatch_kinds: tuple[str, ...] = ()
+
+    @property
+    def slug(self) -> str:
+        return self.path.rstrip("/").rsplit("/", 1)[-1]
+
+    def active(self, today: Optional[date] = None) -> bool:
+        today = today or datetime.now(timezone.utc).date()
+        return self.until is None or today <= self.until
+
+
+def _parse_date(v: Any) -> Optional[date]:
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            return date.fromisoformat(v.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _norm_path(p: str) -> str:
+    p = urlsplit(str(p or "").strip()).path
+    if p and not p.startswith("/"):
+        p = "/" + p
+    return p.rstrip("/") or "/"
+
+
+def holds_from_site_config(cfg: Optional[dict]) -> list[PageHold]:
+    """Every hold declared in a site yaml (top level and implementer block)."""
+    cfg = cfg or {}
+    raw = list(cfg.get("page_holds") or [])
+    raw += list(((cfg.get("implementer") or {}).get("page_holds")) or [])
+    out: list[PageHold] = []
+    seen: set[str] = set()
+    for e in raw:
+        if isinstance(e, str):
+            e = {"path": e}
+        if not isinstance(e, dict) or not e.get("path"):
+            continue
+        path = _norm_path(e["path"])
+        if path in seen or path == "/":
+            continue
+        seen.add(path)
+        out.append(PageHold(
+            path=path,
+            reason=str(e.get("reason") or ""),
+            held_by=str(e.get("held_by") or ""),
+            held_at=str(e.get("held_at") or ""),
+            until=_parse_date(e.get("until")),
+            allow_dispatch_kinds=tuple(str(k) for k in (e.get("allow_dispatch_kinds") or [])),
+        ))
+    return out
+
+
+def active_holds(holds: Iterable[PageHold], *, dispatch_kind: str = "",
+                 today: Optional[date] = None) -> list[PageHold]:
+    return [h for h in holds
+            if h.active(today) and not (dispatch_kind and dispatch_kind in h.allow_dispatch_kinds)]
+
+
+def held_paths(holds: Iterable[PageHold], today: Optional[date] = None) -> set[str]:
+    return {h.path for h in holds if h.active(today)}
+
+
+def rec_holds(rec: dict, holds: Iterable[PageHold], *, dispatch_kind: str = "",
+              today: Optional[date] = None) -> list[PageHold]:
+    """The active holds a rec touches. Empty when the rec carries hold_override."""
+    if not isinstance(rec, dict) or rec.get("hold_override") is True:
+        return []
+    live = active_holds(holds, dispatch_kind=dispatch_kind, today=today)
+    if not live:
+        return []
+    blob = json.dumps(rec, default=str, ensure_ascii=False)
+    return [h for h in live if h.path in blob or (len(h.slug) >= 12 and h.slug in blob)]
+
+
+def page_is_held(path: str, holds: Iterable[PageHold], today: Optional[date] = None) -> Optional[PageHold]:
+    p = _norm_path(path)
+    for h in holds:
+        if h.active(today) and h.path == p:
+            return h
+    return None
+
+
+def deferral_reason(hit: list[PageHold]) -> str:
+    parts = []
+    for h in hit:
+        bit = h.path
+        if h.reason:
+            bit += " (%s)" % h.reason
+        parts.append(bit)
+    return "page-hold: rec touches a held page, a person must release it: " + "; ".join(parts)
+
+
+__all__ = ["PageHold", "holds_from_site_config", "active_holds", "held_paths",
+           "rec_holds", "page_is_held", "deferral_reason"]

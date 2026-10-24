@@ -592,6 +592,65 @@ except Exception:
     fi
 fi
 
+# ── Page holds (framework/core/page_hold.py, 2026-10-24) ─────────────────
+# A page the site yaml holds for a person (`page_holds:`) is off limits to
+# every automated edit. Recs that reference one are deferred HERE, before
+# any LLM path, with a DEFERRED summary in the run dir; the rest of the
+# batch continues. build-aider-invocation.py applies the same gate to the
+# framework chain. Release a single rec by setting `hold_override: true`.
+if [ -f "${SEO_AGENT_CONFIG:-/dev/null}" ] && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+    # Prints nothing when no rec is held, else "KEEP:<ids>" (empty when all are held).
+    HOLD_OUT=$(
+        PYTHONPATH="$REPO_ROOT" RUN_DIR="$RESPONDER_RUN_DIR" REC_IDS="${RESPONDER_REC_IDS:-}" \
+        SITE_CONFIG_PATH="$SEO_AGENT_CONFIG" DISPATCH_KIND="$DISPATCH_KIND" \
+        python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+import yaml
+from framework.core import page_hold
+holds = page_hold.holds_from_site_config(yaml.safe_load(Path(os.environ['SITE_CONFIG_PATH']).read_text()) or {})
+wanted = [x.strip() for x in (os.environ.get('REC_IDS') or '').split(',') if x.strip()]
+if not holds or not wanted:
+    sys.exit(0)
+rd = Path(os.environ['RUN_DIR'])
+doc = json.loads((rd / 'recommendations.json').read_text())
+by_id = {(r.get('id') or r.get('rec_id')): r for r in (doc.get('recommendations') or []) if isinstance(r, dict)}
+keep, held = [], []
+for rid in wanted:
+    hit = page_hold.rec_holds(by_id.get(rid) or {}, holds, dispatch_kind=os.environ.get('DISPATCH_KIND') or '')
+    if hit:
+        held.append(rid)
+        (rd / 'changes').mkdir(exist_ok=True)
+        (rd / 'changes' / f'{rid}.summary.md').write_text(
+            'DEFERRED: ' + page_hold.deferral_reason(hit) + '\n')
+        print(f'[implementer] page-hold defer {rid}: {[h.path for h in hit]}', file=sys.stderr)
+    else:
+        keep.append(rid)
+if held:
+    print('KEEP:' + ','.join(keep))
+PY
+    ) || HOLD_OUT=""
+    case "$HOLD_OUT" in
+        "KEEP:")
+            echo "[implementer] page-hold: every rec in this batch touches a held page; deferring all" >&2
+            cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFEOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "page-hold: every rec references a page held for a person (site yaml page_holds)",
+  "rec_ids": "${RESPONDER_REC_IDS:-}",
+  "reason_class": "page-hold",
+  "next_action": "a person releases the page (remove it from page_holds) or sets hold_override: true on the rec"
+}
+DEFEOF
+            exit 0
+            ;;
+        "KEEP:"*)
+            export RESPONDER_REC_IDS="${HOLD_OUT#KEEP:}"
+            echo "[implementer] page-hold: continuing with $RESPONDER_REC_IDS" >&2
+            ;;
+    esac
+fi
+
 case "$IMPLEMENTER_LLM" in
     claude)
         # Claude Code CLI — feeds AGENT.md (or H2H.md) as the prompt

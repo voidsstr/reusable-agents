@@ -58,6 +58,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from framework.core.implementer_scope import ScopePolicy  # noqa: E402
+from framework.core import page_hold  # noqa: E402
 
 
 def _load_recs(path: Path) -> list[dict]:
@@ -1443,6 +1444,43 @@ def main() -> int:
             print("build-aider-invocation: ALL recs out-of-scope — exiting "
                   "without dispatch", file=sys.stderr)
             return 3
+
+    # ---- Page holds (framework/core/page_hold.py) ----
+    # A rec that references a page the site yaml holds for a person is
+    # deferred before the LLM sees it. run.sh applies the same gate on the
+    # claude path; this one covers the framework code-editor chain.
+    if args.site_config and Path(args.site_config).is_file() and selected:
+        try:
+            import yaml  # type: ignore
+            holds = page_hold.holds_from_site_config(
+                yaml.safe_load(Path(args.site_config).read_text()) or {})
+        except Exception as e:  # noqa: BLE001
+            holds = []
+            print(f"build-aider-invocation: page-hold load failed ({e})", file=sys.stderr)
+        if holds:
+            unheld: list[dict] = []
+            for r in selected:
+                hit = page_hold.rec_holds(r, holds, dispatch_kind=args.dispatch_kind)
+                if hit:
+                    out_of_scope.append({
+                        "rec_id": r.get("id"),
+                        "type": (r.get("type") or r.get("category") or "").lower(),
+                        "reason": page_hold.deferral_reason(hit),
+                    })
+                    print(f"  page-hold {r.get('id')}: {[h.path for h in hit]}", file=sys.stderr)
+                else:
+                    unheld.append(r)
+            selected = unheld
+            if not selected:
+                if args.out_deferred:
+                    Path(args.out_deferred).write_text(json.dumps(
+                        {"deferred": out_of_scope,
+                         "deferred_count": len(out_of_scope),
+                         "applied_count": 0,
+                         "reason_class": "page-hold"}, indent=2))
+                print("build-aider-invocation: ALL recs on held pages — exiting "
+                      "without dispatch", file=sys.stderr)
+                return 3
 
     prompt, files, deferred = build_prompt(
         selected, repo_path, args.site or "", args.dispatch_kind, pre_dirty)
