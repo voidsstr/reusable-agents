@@ -563,6 +563,27 @@
       "type": "object",
       "description": "Resolves generic blueprint handler ids (e.g. 'article-author-agent', 'progressive-improvement-agent', 'product-hydration-agent') to the per-site instance ids registered with the framework (e.g. 'specpicks-article-proposal-agent'). The analyzer applies this when tagging a rec's handoff_target so the handoff lands at the right per-site agent. Without overrides, generic ids are used verbatim — works only if a non-namespaced instance is registered.",
       "additionalProperties": { "type": "string" }
+    },
+    "page_holds": {
+      "type": "array",
+      "description": "Pages no agent may edit automatically until a person releases them (framework/core/page_hold.py). The implementer defers any rec that references a held page with reason 'page-hold' before the LLM runs; shelf-audit routes fixes on a held page to its person-review rec. Also accepted under implementer.page_holds.",
+      "items": {
+        "oneOf": [
+          { "type": "string", "description": "Bare path or URL of the held page." },
+          {
+            "type": "object",
+            "required": ["path"],
+            "properties": {
+              "path": { "type": "string", "description": "Site path or full URL of the held page." },
+              "reason": { "type": "string", "description": "Why the page needs a person." },
+              "held_by": { "type": "string", "description": "Who placed the hold (operator, or the rec id that asked for it)." },
+              "held_at": { "type": "string", "description": "Date the hold was placed (YYYY-MM-DD)." },
+              "until": { "type": "string", "description": "Optional YYYY-MM-DD; the hold lapses after this date." },
+              "allow_dispatch_kinds": { "type": "array", "items": { "type": "string" }, "description": "Dispatch kinds still allowed to touch the page, e.g. [\"crash-fix\"]." }
+            }
+          }
+        ]
+      }
     }
   }
 }
