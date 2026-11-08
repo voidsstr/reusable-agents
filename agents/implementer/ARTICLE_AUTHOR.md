@@ -1,5 +1,21 @@
 # implementer — ARTICLE_AUTHOR runbook
 
+> ## ⛔ Finish the INSERT in THIS turn — no background agents or tasks
+>
+> You run under `claude --print`. The process exits the moment your turn
+> ends. Anything still running in the background dies with it, and nothing
+> wakes you up later to finish. Do NOT start background subagents or
+> background shell tasks, and never end your turn with "I'll finish once X
+> reports". Run every lookup in the foreground, wait for it, then INSERT and
+> run the verification query before you stop. If a fact can't be found,
+> leave it out or describe it qualitatively. Do not wait on it.
+>
+> Why (2026-11-08): a specpicks article session (art-001, gpt-oss 120B on
+> DGX Spark vs Ryzen AI Max+ 395) handed the memory-size table to a
+> background agent and ended its turn with "I'll finish the insert once the
+> background agent reports". The process exited, nothing was inserted, and
+> the run still reported completed.
+>
 > ## 🚨 PRE-INSERT CHECKLIST — DO NOT SKIP 🚨
 >
 > **As of 2026-05-12 retro:** 552 of 556 previously-published articles

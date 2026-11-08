@@ -683,6 +683,13 @@ You are implementer. Process these recommendation(s):
   Dispatch kind: $DISPATCH_KIND
   Source agent: $SOURCE_AGENT_ID_FROM_RECS
 
+You are running under \`claude --print\`: the process exits when your turn
+ends and anything still running in the background dies with it. Do NOT start
+background subagents or background shell tasks, and never end your turn
+waiting for one ("I'll finish once X reports"). Run every step in the
+foreground and finish the work (commit / INSERT and its verification) before
+you stop.
+
 Your runbook is below — follow it exactly.
 
 EOF
