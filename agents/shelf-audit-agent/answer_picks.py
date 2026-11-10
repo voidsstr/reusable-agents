@@ -20,7 +20,10 @@ What it does, per run:
      `extra_pages` list, unioned after the click pages. A page whose picks
      are dead earns no clicks, so a click-ranked set alone never sees it.
   2. Picks: each page's JSON (`picks_endpoint`, `{slug}` substituted) →
-     `picks_key[].href` plus `picks_key[].<parts_key>[].href`.
+     `picks_key[].href` plus `picks_key[].<parts_key>[].href`, then the same
+     for each key in `extra_picks_keys` (optional: e.g. a deals page's table
+     rows, which the site serves under its own key so they don't render as
+     answer picks).
   3. Probe each href WITHOUT following the external redirect (same-host
      301s are followed, up to 3 hops). A pick is broken unless the final
      Location matches `expect_location`. The probe UA says "bot", so the
@@ -132,10 +135,15 @@ def audit_pages(conn, cfg: dict, warn: Callable[[str], None] = lambda m: None) -
 # ---------- picks ----------
 
 def extract_pick_hrefs(doc: dict, picks_key: str = "answer_picks",
-                       parts_key: str = "parts") -> list[dict]:
-    """[{label, href}] for every pick and pick part, in page order, deduped."""
+                       parts_key: str = "parts",
+                       extra_keys: Iterable[str] = ()) -> list[dict]:
+    """[{label, href}] for every pick and pick part, in page order, deduped.
+    Picks under each of extra_keys follow those under picks_key."""
     out, seen = [], set()
-    for p in (doc or {}).get(picks_key) or []:
+    items = []
+    for key in [picks_key, *extra_keys]:
+        items.extend((doc or {}).get(key) or [])
+    for p in items:
         if not isinstance(p, dict):
             continue
         label = p.get("label") or p.get("award") or ""
@@ -308,7 +316,8 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
         slug = path[len(prefix):] if path.startswith(prefix) else path.lstrip("/")
         doc = fetch_json(endpoint.replace("{slug}", slug))
         picks = extract_pick_hrefs(doc, cfg.get("picks_key", "answer_picks"),
-                                   cfg.get("parts_key", "parts"))
+                                   cfg.get("parts_key", "parts"),
+                                   cfg.get("extra_picks_keys") or ())
         if not picks:
             page_errors.append(path)
             continue

@@ -26,6 +26,17 @@ class TestPicksAndProbe(unittest.TestCase):
         self.assertEqual(hrefs, ["/k/a?source=amazon", "/k/b", "/k/b1"])
         self.assertEqual(ap.pick_slug("/k/a%20b?source=amazon"), "a b")
 
+    def test_extra_picks_keys_add_a_deals_table(self):
+        # aisleprompt growth-20261110T101200Z-02: the Black Friday page has no
+        # answer_picks; its table rows come back as deal_table_picks.
+        doc = {"answer_picks": [], "deal_table_picks": [
+            {"label": "Air fryer", "name": "Ninja", "href": "/k/ninja"},
+            {"label": "Slow cooker", "name": "Crock-Pot", "href": "/k/crock"},
+        ]}
+        self.assertEqual(ap.extract_pick_hrefs(doc), [])
+        hrefs = [p["href"] for p in ap.extract_pick_hrefs(doc, extra_keys=["deal_table_picks"])]
+        self.assertEqual(hrefs, ["/k/ninja", "/k/crock"])
+
     def test_only_a_dp_redirect_is_healthy(self):
         self.assertTrue(ap.is_healthy(DP))
         self.assertFalse(ap.is_healthy(SEARCH))
