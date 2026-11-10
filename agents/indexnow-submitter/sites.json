@@ -95,6 +95,14 @@
           "incrementalSql": "SELECT slug FROM editorial_articles WHERE status = 'published' AND slug IS NOT NULL AND (updated_at > $1 OR COALESCE(published_at, '1970-01-01'::timestamptz) > $1)",
           "urlTemplate": "slug",
           "urlPrefix": "/blog/"
+        },
+        {
+          "name": "cyber-week-click-guides",
+          "_why": "aisleprompt growth-20261110T101200Z-03: one re-ping a day, 2026-11-20 to 2026-12-02 (ET), for the six buying guides that earn most verified-human Amazon clicks plus the Black Friday post. The token is today's ET date, so each URL is 'changed' once a day and minResubmitHours (24) keeps it to one send a day. Outside the window the query returns nothing. $1 (the watermark) is only there because incremental queries are passed one.",
+          "incrementalOnly": true,
+          "incrementalSql": "SELECT slug, to_char(now() AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') AS lastmod FROM editorial_articles WHERE status = 'published' AND slug = ANY(ARRAY['best-coffee-makers-2026','best-cutting-boards-2026','best-espresso-machines-2026','best-air-fryers-2026','best-slow-cookers-2026','best-meal-prep-containers-2026','black-friday-kitchen-deals-2026']::text[]) AND now() >= '2026-11-20T00:00:00-05:00'::timestamptz AND now() < '2026-12-03T00:00:00-05:00'::timestamptz AND $1::timestamptz IS NOT NULL",
+          "urlTemplate": "slug",
+          "urlPrefix": "/blog/"
         }
       ],
       "gsc_property": "sc-domain:aisleprompt.com",
