@@ -39,8 +39,10 @@ below for the canonical wording.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
@@ -244,28 +246,43 @@ def persist_run(
 #
 #   shipped_levers()                 the ledger (state + live_since per lever)
 #   human_clicks.lever_outcomes()    attaches clicks before/after live_since
-#   lever_verdict()                  too-early / lift / no-lift
+#   lever_verdict()                  too-early / new-surface / lift / no-lift
 #   shipped_levers_prompt_block()    "SHIPPED LEVERS (14d): do not re-propose"
+#   shipped_levers_section()         that block plus the deploy-gate and
+#                                    held-pages lines, for a growth brief
 #   match_shipped() / select_levers()
-#                                    drop re-proposals in code, refill the
-#                                    slot with the next primary-metric rec,
-#                                    keep secondary-metric levers to the last
-#                                    slot, prefer DB-only levers while the
-#                                    site's deploy gate is red
+#                                    drop re-proposals, held-page levers and
+#                                    operator-only items in code, refill the
+#                                    slot with the next dispatchable
+#                                    primary-metric rec, keep secondary-metric
+#                                    levers to the last slot, prefer DB-only
+#                                    levers while the site's deploy gate is red
+#   selection_summary()              what select_levers kept and dropped, as
+#                                    the dispatch-selection.json artifact
+#   ledger_metrics()                 RunResult metrics from the ledger
 #   deploy_gate_status()             that gate, read from deploy_repair's state
 
 LEDGER_DAYS = 14
 LEVER_OUTCOME_DAYS = 7
+# A re-proposal of a lever the implementer DEFERRED is dropped in code only
+# this long after the deferral. Deferrals are often conditional ("fix the
+# click filter first", "implementer no-op: HEAD unchanged"), so after that
+# the prompt line (with the reason) decides, not a 14-day block.
+DEFERRED_HOLD_HOURS = 48
 
 SHIPPED_LEVER_RULE = (
     "NEVER propose a lever substantively equivalent to anything under SHIPPED "
     "LEVERS: same change, same pages or placements, new wording included. "
     "`pre-existing` means the implementer found it already live, so proposing "
-    "it again was a wasted dispatch; `deferred` means the implementer cannot "
-    "do it. A lever whose verdict is `no-lift` after 7 days live did not move "
-    "verified-human clicks: do not re-propose it or a variation of it; pick a "
-    "different surface. Proposals that match a shipped lever are dropped in "
-    "code and their slot goes to your next Amazon-click recommendation."
+    "it again was a wasted dispatch. `deferred` means the implementer did not "
+    "do it, for the reason shown: re-propose it only once that reason no "
+    "longer holds, and say what changed. A lever whose verdict is `no-lift` "
+    "after 7 days live did not move verified-human clicks: do not re-propose "
+    "it or a variation of it; pick a different surface. `new-surface` means "
+    "it added a buy block on pages with nothing to compare against; judge it "
+    "by its own clicks. Proposals that match a shipped lever (or one deferred "
+    f"in the last {DEFERRED_HOLD_HOURS} hours) are dropped in code and their "
+    "slot goes to your next dispatchable Amazon-click recommendation."
 )
 
 _RUN_TS_RE = re.compile(r"^\d{8}T\d{6}Z$")
@@ -279,6 +296,29 @@ LEVER_STOPWORDS = frozenset({
     "into", "before", "after", "plus", "first", "via", "per", "its", "their",
     "them", "they", "now", "more", "less", "our", "real", "live", "fresh",
 })
+
+# Occasion vocabulary is not a change word either. During an event most
+# levers name it ("... before Cyber Week", "Thanksgiving ..."), so two
+# different changes on overlapping pages shared {cyber, week} and the second
+# was dropped as a repeat of the first (measured 2026-11-11 on a real ledger,
+# in the year's biggest deal window). framework CLAUDE.md: title-similarity
+# dedup must exempt holiday-bearing proposals. Occasion NAMES come from the
+# seasonal calendar (ids, aliases, labels; see occasion_phrases()) and are
+# stripped as whole phrases, so "super bowl" goes while "mixing bowl" stays.
+# These generic retail-event words are stripped wherever they appear.
+OCCASION_WORDS = frozenset({
+    "cyber", "monday", "week", "weekend", "holiday", "holidays", "season",
+    "seasonal", "deal", "deals", "sale", "sales", "doorbuster", "doorbusters",
+    "gift", "gifts", "gifting", "xmas", "bfcm",
+})
+
+# ships_via values: the implementer can apply "db" (a data change, no
+# deploy) and "code" (a code change that deploys). Anything a person has to
+# do (a credential, a decision, a manual check) is "operator": it stays in
+# the memo and is never dispatched. A refill (a rec the memo did not rank as
+# a lever) must say db or code.
+DISPATCHABLE_VIA = ("db", "code")
+NON_DISPATCHABLE_VIA = frozenset({"operator", "manual", "person", "none"})
 
 
 def run_ts_datetime(run_ts: str) -> Optional[datetime]:
@@ -323,7 +363,7 @@ def load_run_recs(storage, agent_id: str, *, days: int = LEDGER_DAYS,
             continue
         recs = doc.get("recommendations") if isinstance(doc, dict) else doc
         for r in recs if isinstance(recs, list) else []:
-            if isinstance(r, dict) and (r.get("title") or "").strip():
+            if isinstance(r, dict) and str(r.get("title") or "").strip():
                 out.append({**r, "run_ts": run_ts})
     return out
 
@@ -367,9 +407,21 @@ def lever_status(rec: dict) -> tuple[str, Optional[str]]:
 
 
 def _as_list(v: Any) -> list[str]:
-    if isinstance(v, str):
+    """A rec field as a list of non-empty strings. LLM-written JSON is not
+    trusted: a bare string is one item, a scalar (5) becomes ["5"], and a
+    mapping or anything else unusable becomes []."""
+    if v is None or isinstance(v, (bool, Mapping)):
+        return []
+    if isinstance(v, (str, int, float)):
         v = [v]
-    return [str(x).strip() for x in (v or []) if str(x or "").strip()]
+    elif not isinstance(v, (list, tuple, set, frozenset)):
+        return []
+    return [str(x).strip() for x in v
+            if not isinstance(x, (Mapping, list, tuple, set)) and str(x if x is not None else "").strip()]
+
+
+def _str(v: Any) -> str:
+    return "" if v is None or isinstance(v, (Mapping, list, tuple, set)) else str(v).strip()
 
 
 def shipped_levers(storage, agent_id: str, *, days: int = LEDGER_DAYS,
@@ -380,41 +432,56 @@ def shipped_levers(storage, agent_id: str, *, days: int = LEDGER_DAYS,
     """The do-not-re-propose ledger: this agent's dispatched recs from the
     last `days` days in `include_states`, newest first. Each entry:
     id, title, run_ts, expected_metric, target_urls, placements, ships_via,
-    state, live_since, commit, shipped_tag, deferred_reason."""
+    state, live_since, commit, shipped_tag, deferred_reason, deferred_at.
+    A rec whose fields cannot be read is skipped, never fatal: one malformed
+    rec must not switch the whole ledger (and the repeat filter) off."""
     ledger: list[dict] = []
     for r in load_run_recs(storage, agent_id, days=days, now=now):
-        state, live_since = lever_status(r)
-        if state not in include_states:
+        try:
+            state, live_since = lever_status(r)
+            if state not in include_states:
+                continue
+            deferred_at = _parse_iso(r.get("deferred_at")) if state == "deferred" else None
+            ledger.append({
+                "id": _str(r.get("id")),
+                "title": _str(r.get("title")),
+                "run_ts": _str(r.get("run_ts")),
+                "tier": _str(r.get("tier")),
+                "expected_metric": _str(r.get("expected_metric")),
+                "target_urls": _as_list(r.get("target_urls")),
+                "placements": _as_list(r.get("placements")),
+                "ships_via": _str(r.get("ships_via")).lower(),
+                "state": state,
+                "live_since": live_since,
+                "commit": _commit_of(r),
+                "shipped_tag": _str(r.get("shipped_tag")),
+                "deferred_reason": (_str(r.get("deferred_reason"))[:160]
+                                    if state == "deferred" else ""),
+                "deferred_at": deferred_at.isoformat() if deferred_at else "",
+            })
+        except Exception:
             continue
-        ledger.append({
-            "id": r.get("id") or "",
-            "title": (r.get("title") or "").strip(),
-            "run_ts": r.get("run_ts") or "",
-            "tier": r.get("tier") or "",
-            "expected_metric": r.get("expected_metric") or "",
-            "target_urls": _as_list(r.get("target_urls")),
-            "placements": _as_list(r.get("placements")),
-            "ships_via": str(r.get("ships_via") or "").strip().lower(),
-            "state": state,
-            "live_since": live_since,
-            "commit": _commit_of(r),
-            "shipped_tag": r.get("shipped_tag") or "",
-            "deferred_reason": (str(r.get("deferred_reason") or "")[:160]
-                                if state == "deferred" else ""),
-        })
     ledger.sort(key=lambda e: (e["run_ts"], e["id"]), reverse=True)
     return ledger
 
 
 def lever_verdict(outcome: Optional[dict], *, min_days: float = LEVER_OUTCOME_DAYS,
                   min_gain: int = 2) -> str:
-    """too-early / lift / no-lift for a human_clicks.before_after() result.
+    """n/a / unscoped / too-early / new-surface / lift / no-lift for a
+    human_clicks.before_after() result.
 
     lift = at least `min_gain` more clicks on the lever's pages/placements in
     the window after it went live than in the window before, AND faster
     growth than the site's own over the same two windows (a lever does not
-    get credit for a site-wide surge). unscoped = no pages or placements
-    recorded to measure."""
+    get credit for a site-wide surge; with no clicks before, the comparison
+    is add-one smoothed). unscoped = no pages or placements recorded.
+
+    A placement-scoped lever with no clicks on its placements before (it
+    ADDED the buy block, or the placement column did not exist yet) is
+    judged on its pages' clicks across all placements (`pages_before` /
+    `pages_after`): those clicks may only have moved off another buy block on
+    the same pages. With no pages recorded either there is nothing to compare
+    against: new-surface."""
     if not outcome:
         return "n/a"
     if not outcome.get("scoped"):
@@ -425,8 +492,17 @@ def lever_verdict(outcome: Optional[dict], *, min_days: float = LEVER_OUTCOME_DA
     sb, sa = int(outcome.get("site_before") or 0), int(outcome.get("site_after") or 0)
     if a - b < min_gain:
         return "no-lift"
-    if b and sb and (a / b) <= (sa / sb):
-        return "no-lift"
+    if b == 0 and outcome.get("pages_before") is not None:
+        if not outcome.get("pages_scoped"):
+            return "new-surface"
+        b, a = int(outcome.get("pages_before") or 0), int(outcome.get("pages_after") or 0)
+        if a - b < min_gain:
+            return "no-lift"
+    if sb:
+        if b and (a / b) <= (sa / sb):
+            return "no-lift"
+        if not b and (a + 1) / (b + 1) <= (sa + 1) / (sb + 1):
+            return "no-lift"
     return "lift"
 
 
@@ -481,8 +557,12 @@ def shipped_levers_prompt_block(ledger: list[dict], *, days: int = LEDGER_DAYS,
             if verdict == "no-lift":
                 no_lift += 1
             if o.get("scoped"):
+                pages = ""
+                if not o.get("before") and o.get("pages_before") is not None and o.get("pages_scoped"):
+                    pages = (f" (none on these placements before: judged on its pages, all "
+                             f"placements: before={o.get('pages_before')} after={o.get('pages_after')})")
                 bits.append(f"clicks {o.get('days', LEVER_OUTCOME_DAYS)}d before={o.get('before')}"
-                            f" after({o.get('after_days')}d)={o.get('after')}"
+                            f" after({o.get('after_days')}d)={o.get('after')}{pages}"
                             f" | site before={o.get('site_before')}"
                             f" after={o.get('site_after')} | verdict={verdict}")
             else:
@@ -495,10 +575,63 @@ def shipped_levers_prompt_block(ledger: list[dict], *, days: int = LEDGER_DAYS,
 
 # ── matching + dispatch selection ───────────────────────────────────────────
 
-def lever_tokens(title: str) -> frozenset:
-    """Meaningful title tokens (title_dedup signature minus lever filler)."""
+def _words(text: Any) -> str:
+    """Lowercase words joined by single spaces, padded (" black friday ").
+    Apostrophes are dropped first so "Mother's Day" reads "mothers day"."""
+    s = str(text if text is not None else "").lower()
+    s = s.replace("'", "").replace("’", "")
+    return " " + " ".join(re.findall(r"[a-z0-9]+", s)) + " "
+
+
+@functools.lru_cache(maxsize=1)
+def occasion_phrases() -> tuple[str, ...]:
+    """Occasion names from framework seasonal_calendar, as lowercase phrases,
+    longest first: every occasion's id ("black-friday" -> "black friday"),
+    aliases (when the calendar has them) and label parts ("Black Friday /
+    Cyber Monday (tech deals)" -> "black friday", "cyber monday"). The
+    built-in calendar; a deployment's storage additions are not read here."""
+    try:
+        from framework.core import seasonal_calendar
+        occasions = seasonal_calendar.load_occasions()
+    except Exception:
+        occasions = ()
+    phrases: set[str] = set()
+    for o in occasions:
+        names = [getattr(o, "id", "") or ""]
+        names += list(getattr(o, "aliases", ()) or ())
+        label = re.sub(r"\([^)]*\)", " ", str(getattr(o, "label", "") or ""))
+        names += label.split("/")
+        for n in names:
+            p = _words(str(n).replace("-", " ")).strip()
+            if p:
+                phrases.add(p)
+    return tuple(sorted(phrases, key=lambda p: (-len(p), p)))
+
+
+def strip_occasions(text: Any) -> str:
+    """`text` as padded lowercase words with every calendar occasion name
+    (occasion_phrases) cut out; OCCASION_WORDS are left to the caller."""
+    s = _words(text)
+    for p in occasion_phrases():
+        needle = f" {p} "
+        while needle in s:
+            s = s.replace(needle, " ")
+    return s
+
+
+@functools.lru_cache(maxsize=8192)
+def _lever_tokens(title: str) -> frozenset:
     from framework.core.title_dedup import title_signature
-    return frozenset(t for t in title_signature(title or "") if t not in LEVER_STOPWORDS)
+    return frozenset(t for t in title_signature(strip_occasions(title))
+                     if t not in LEVER_STOPWORDS and t not in OCCASION_WORDS)
+
+
+def lever_tokens(title: Any) -> frozenset:
+    """Meaningful title tokens: title_dedup's signature minus lever filler
+    (LEVER_STOPWORDS) and occasion vocabulary (calendar occasion names as
+    phrases, plus OCCASION_WORDS), so "Cyber Week" or "Thanksgiving" in two
+    titles never makes them the same change."""
+    return _lever_tokens(_str(title))
 
 
 def _norm_targets(values: Any) -> list[str]:
@@ -555,21 +688,29 @@ def match_shipped(rec: dict, ledger: list[dict], *, title_threshold: float = 0.5
     `page_min_shared` title tokens in common that are not just the pages'
     own slug words ("black friday" on the Black Friday page says nothing
     about WHICH change). Two different changes to one busy surface share
-    pages but not change words, so they do not match.
+    pages but not change words, so they do not match. Occasion vocabulary
+    never counts as a change word (lever_tokens): two different Cyber Week
+    levers on overlapping guides are two levers.
 
     Calibrated 2026-11-11 on two growth strategists' dispatched levers since
-    11-04 (78 levers): of the 21 the implementer returned as pre-existing
-    while an earlier lever was in the window, it flags 19 (17/17 on one
-    site, 2/4 on the other); the other 27 matches are the same few themes
+    11-04 (78 levers): of the 23 the implementer returned as pre-existing
+    while an earlier lever was in the window, it flags 21 (19/19 on one
+    site, 2/4 on the other); the other 25 matches are the same few themes
     re-worded run after run (one product surface, one build-page ladder,
-    one homepage module)."""
+    one homepage module). Dropping occasion words cost no pre-existing catch
+    and removed two matches: a different Cyber Week lever on overlapping
+    guides, and a build-ladder follow-up the implementer shipped as new work."""
     from framework.core.title_dedup import is_similar_title
-    ta = lever_tokens(rec.get("title") or "")
+    if not isinstance(rec, Mapping):
+        return None
+    ta = lever_tokens(rec.get("title"))
     if not ta:
         return None
     best: Optional[dict] = None
     for e in ledger or []:
-        tb = lever_tokens(e.get("title") or "")
+        if not isinstance(e, Mapping):
+            continue
+        tb = lever_tokens(e.get("title"))
         if not tb:
             continue
         shared = len(ta & tb)
@@ -588,55 +729,115 @@ def match_shipped(rec: dict, ledger: list[dict], *, title_threshold: float = 0.5
     return best
 
 
+def _deferral_is_recent(entry: Mapping, now: datetime, hours: float) -> bool:
+    when = _parse_iso(entry.get("deferred_at")) or run_ts_datetime(_str(entry.get("run_ts")))
+    return when is None or (now - when) < timedelta(hours=float(hours))
+
+
+def blocking_levers(ledger: Optional[list[dict]], *, now: Optional[datetime] = None,
+                    deferred_hold_hours: float = DEFERRED_HOLD_HOURS) -> list[dict]:
+    """The ledger entries a new rec may not repeat: every live, pre-existing
+    or implemented lever, and a deferred one only within
+    `deferred_hold_hours` of its deferral (deferred_at, else its run_ts)."""
+    now = now or datetime.now(timezone.utc)
+    return [e for e in ledger or [] if isinstance(e, Mapping)
+            and (e.get("state") != "deferred"
+                 or _deferral_is_recent(e, now, deferred_hold_hours))]
+
+
+def ships_via(rec: Mapping) -> str:
+    """The rec's normalized ships_via ("db", "code", "operator", ... or "")."""
+    return _str(rec.get("ships_via")).lower() if isinstance(rec, Mapping) else ""
+
+
 def select_levers(recs: list[dict], ledger: Optional[list[dict]] = None, *,
                   max_n: int = 3, tiers: Iterable[str] = ("lever",),
                   refill_tiers: Iterable[str] = ("smaller",),
                   primary_metrics: Iterable[str] = (),
                   max_secondary: int = 1,
                   prefer_db: bool = False, max_code: int = 1,
+                  holds: Iterable[Any] = (),
+                  deferred_hold_hours: float = DEFERRED_HOLD_HOURS,
+                  now: Optional[datetime] = None,
                   ) -> tuple[list[dict], list[dict]]:
     """Choose which recs a dispatching producer hands to the implementer.
 
     1. Candidates are the recs whose tier is in `tiers`, in memo order.
-    2. A candidate that repeats a shipped lever (match_shipped) is dropped
-       and its slot goes to the next rec from `refill_tiers` whose
-       expected_metric is primary and which repeats nothing.
+    2. A candidate is dropped, and its slot goes to the next refill, when
+       - its ships_via is operator-only (NON_DISPATCHABLE_VIA: a person has
+         to do it, so the implementer can only no-op);
+       - it touches a held page (`holds`: framework page_hold PageHolds;
+         page_hold.rec_holds, prefix* targets included);
+       - it repeats a shipped lever (match_shipped against
+         blocking_levers(): deferred levers block for `deferred_hold_hours`).
+       A refill is the next rec from `refill_tiers` whose expected_metric is
+       primary, whose ships_via is db or code (DISPATCHABLE_VIA: a smaller
+       move the memo did not mark implementable is never promoted), and
+       which touches no held page and repeats nothing.
     3. Primary-metric candidates (e.g. verified-human Amazon clicks) come
        first; at most `max_secondary` others (e.g. AI-referral levers) are
        kept, always after them: "AI referrals in the third slot only".
     4. prefer_db (the site's deploy gate is red, so code reaches no user):
        DB-only recs (`ships_via: db`) come first, at most `max_code` code
        recs are kept, and each held code rec's slot goes to the next DB-only
-       primary rec from `refill_tiers` when there is one.
+       primary refill when there is one.
     5. At most `max_n` are selected.
 
-    Returns (selected, dropped); every dropped item is {"rec", "reason"}
-    and, for repeats, "matched" = {id, title, state, match_reason}."""
+    Returns (selected, dropped); every dropped item is {"rec", "reason"},
+    plus "matched" = {id, title, state, match_reason, match_score} for a
+    repeat and "held" = [held paths] for a page hold."""
     tiers = {str(t).lower() for t in tiers}
     refill_tiers = {str(t).lower() for t in refill_tiers}
     primary = {str(m) for m in primary_metrics}
-    ledger = list(ledger or [])
+    blocking = blocking_levers(ledger, now=now, deferred_hold_hours=deferred_hold_hours)
+    holds = list(holds or [])
     dropped: list[dict] = []
     used: set[int] = set()
 
     def _tier(r: dict) -> str:
-        return str(r.get("tier") or "").lower()
+        return _str(r.get("tier")).lower()
 
     def _is_primary(r: dict) -> bool:
-        return not primary or str(r.get("expected_metric") or "") in primary
+        return not primary or _str(r.get("expected_metric")) in primary
 
     def _is_db(r: dict) -> bool:
-        return str(r.get("ships_via") or "").strip().lower() == "db"
+        return ships_via(r) == "db"
 
-    pool = [r for r in recs if isinstance(r, dict)]
+    def _held(r: dict) -> list:
+        if not holds:
+            return []
+        try:
+            from framework.core import page_hold
+            return page_hold.rec_holds(r, holds)
+        except Exception:
+            return []
+
+    def _skip(r: dict) -> Optional[dict]:
+        """Why a candidate cannot be dispatched, as a dropped item, or None."""
+        via = ships_via(r)
+        if via in NON_DISPATCHABLE_VIA:
+            return {"rec": r, "reason": f"not dispatchable (ships_via={via}): a person has to do it"}
+        hit = _held(r)
+        if hit:
+            from framework.core import page_hold
+            return {"rec": r, "reason": page_hold.deferral_reason(hit),
+                    "held": [h.path for h in hit]}
+        m = match_shipped(r, blocking)
+        if m:
+            return {"rec": r, "reason": "repeats a shipped lever",
+                    "matched": {k: m.get(k) for k in ("id", "title", "state",
+                                                       "match_reason", "match_score")}}
+        return None
+
+    pool = [r for r in recs or [] if isinstance(r, dict)]
 
     def _refill(want_db: bool = False) -> Optional[dict]:
         for i, r in enumerate(pool):
             if i in used or _tier(r) not in refill_tiers or not _is_primary(r):
                 continue
-            if want_db and not _is_db(r):
+            if ships_via(r) not in DISPATCHABLE_VIA or (want_db and not _is_db(r)):
                 continue
-            if match_shipped(r, ledger):
+            if _skip(r):
                 continue
             used.add(i)
             return r
@@ -648,11 +849,9 @@ def select_levers(recs: list[dict], ledger: Optional[list[dict]] = None, *,
         if _tier(r) not in tiers or i in used:
             continue
         used.add(i)
-        m = match_shipped(r, ledger)
-        if m:
-            dropped.append({"rec": r, "reason": "repeats a shipped lever",
-                            "matched": {k: m.get(k) for k in ("id", "title", "state",
-                                                               "match_reason", "match_score")}})
+        why = _skip(r)
+        if why:
+            dropped.append(why)
             n_refill += 1
             continue
         chosen.append(r)
@@ -691,6 +890,54 @@ def select_levers(recs: list[dict], ledger: Optional[list[dict]] = None, *,
     return selected, dropped
 
 
+_SELECTION_KEYS = ("title", "tier", "expected_metric", "ships_via", "target_urls", "placements")
+
+
+def selection_summary(selected: list[dict], dropped: list[dict],
+                      gate: Optional[Mapping] = None) -> dict:
+    """select_levers()' result as a JSON-able record (a producer's
+    dispatch-selection.json): what went out, what was dropped and why."""
+    def _rec(d: Mapping) -> Mapping:
+        r = d.get("rec") if isinstance(d, Mapping) else None
+        return r if isinstance(r, Mapping) else {}
+    return {
+        "selected": [{k: r.get(k) for k in _SELECTION_KEYS}
+                     for r in selected or [] if isinstance(r, Mapping)],
+        "dropped": [{"title": _rec(d).get("title"), "tier": _rec(d).get("tier"),
+                     "reason": d.get("reason"), "matched": d.get("matched"),
+                     "held": d.get("held")}
+                    for d in dropped or [] if isinstance(d, Mapping)],
+        "repeats_dropped": sum(1 for d in dropped or [] if isinstance(d, Mapping) and d.get("matched")),
+        "held_dropped": sum(1 for d in dropped or [] if isinstance(d, Mapping) and d.get("held")),
+        "deploy_gate": (gate or {}).get("status"),
+    }
+
+
+def ledger_metrics(ledger: Optional[list[dict]]) -> dict:
+    """RunResult metrics from a shipped-lever ledger (after
+    human_clicks.lever_outcomes attached outcomes):
+      pre_existing_lever_share_14d  pre-existing / (live + implemented +
+                                    pre-existing): how often a dispatched
+                                    lever was already live
+      shipped_levers_lift_14d / shipped_levers_no_lift_14d
+                                    live levers judged lift / no-lift
+                                    (lever_verdict) after 7 days
+    Keys with no data are left out."""
+    entries = [e for e in ledger or [] if isinstance(e, Mapping)]
+    states = [_str(e.get("state")) for e in entries]
+    done = [s for s in states if s in ("live", "implemented", "pre-existing")]
+    out: dict = {}
+    if done:
+        out["pre_existing_lever_share_14d"] = round(states.count("pre-existing") / len(done), 3)
+    judged = [lever_verdict(e.get("outcome")) for e in entries
+              if e.get("state") == "live" and isinstance(e.get("outcome"), Mapping)]
+    judged = [v for v in judged if v in ("lift", "no-lift")]
+    if judged:
+        out["shipped_levers_no_lift_14d"] = float(judged.count("no-lift"))
+        out["shipped_levers_lift_14d"] = float(judged.count("lift"))
+    return out
+
+
 def deploy_gate_status(site: str) -> dict:
     """The site's deploy gate as the deployer last recorded it
     (framework.core.deploy_repair gate state): {site, status, red_since,
@@ -715,21 +962,52 @@ def deploy_gate_status(site: str) -> dict:
     return out
 
 
-def deploy_gate_prompt_line(gate: dict) -> str:
+def deploy_gate_prompt_line(gate: dict, *, max_code: int = 1) -> str:
     """One brief line on the deploy gate; the red case tells the strategist
-    to prefer DB-only levers (and why)."""
-    status = (gate or {}).get("status") or "unknown"
-    site = (gate or {}).get("site") or "site"
+    to prefer DB-only levers (and why). Prices are left out of the DB-only
+    examples on purpose: a price written by hand gets a fresh timestamp and
+    would pass the freshness and display gates without being verified."""
+    gate = gate or {}
+    status = gate.get("status") or "unknown"
+    site = gate.get("site") or "site"
     if status == "red":
+        hours = gate.get("hours_red")
+        n = max(0, int(max_code))
+        cap = {0: "No code lever is", 1: "At most one code lever is"}.get(
+            n, f"At most {n} code levers are")
         return (f"DEPLOY GATE: RED for {site} since {gate.get('red_since') or '?'} "
-                f"({gate.get('hours_red')}h; {gate.get('last_reason') or 'tests failing'}; "
+                f"({f'{hours}h; ' if hours is not None else ''}"
+                f"{gate.get('last_reason') or 'tests failing'}; "
                 f"production is still on {gate.get('last_deployed_tag') or 'an older tag'}). "
                 "Code changes queue behind the gate and reach no visitor until it is "
-                "green. Prefer DB-ONLY levers (content rows, article bodies, product / "
-                "price / featured data the implementer applies straight to production) "
-                "and mark them \"ships_via\": \"db\". At most one code lever is "
-                "dispatched while the gate is red.")
+                "green. Prefer DB-ONLY levers (content rows, article bodies, pick lists, "
+                "featured flags: data the implementer applies straight to production) "
+                "and mark them \"ships_via\": \"db\". Never write a price by hand: prices "
+                "change only through the site's price-refresh pipeline (ask for a refresh). "
+                f"{cap} dispatched while the gate is red.")
     if status == "green":
         return (f"DEPLOY GATE: green for {site} (last deployed "
                 f"{gate.get('last_deployed_tag') or '?'}); code levers ship on the next deploy.")
     return f"DEPLOY GATE: status unknown for {site}."
+
+
+def shipped_levers_section(ledger: Optional[list[dict]], gate: Optional[Mapping] = None,
+                           holds: Iterable[Any] = (), *, max_chars: Optional[int] = None,
+                           max_code: int = 1, days: int = LEDGER_DAYS,
+                           now: Optional[datetime] = None) -> str:
+    """The body of a growth brief's "SHIPPED LEVERS" section: the deploy-gate
+    line, the held-pages line (framework page_hold.holds_prompt_line, when a
+    page is held) and shipped_levers_prompt_block (cut at `max_chars`)."""
+    parts = [deploy_gate_prompt_line(dict(gate or {}), max_code=max_code)]
+    holds = list(holds or [])
+    if holds:
+        try:
+            from framework.core import page_hold
+            line = page_hold.holds_prompt_line(holds)
+        except Exception:
+            line = ""
+        if line:
+            parts.append(line)
+    block = shipped_levers_prompt_block(list(ledger or []), days=days, now=now)
+    parts.append(block[:max_chars] if max_chars else block)
+    return "\n\n".join(parts)

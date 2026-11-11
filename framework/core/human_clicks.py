@@ -106,6 +106,9 @@ ATTRIBUTION (same verdicts, no second definition of "human")
                              and per-group totals, fastest-rising pages;
                              add_engagement() adds clicks per 100 engaged
                              sessions from a caller-supplied GA4 page map
+                             (add_engagement_from_report() from the GA4
+                             response itself; a failed or empty report
+                             leaves engagement_unavailable, not zeros)
   human_rows() + before_after() + lever_outcomes()
                              verified-human rows over a span, and the counts
                              in the N days before vs after a pivot (a shipped
@@ -890,10 +893,26 @@ def human_rows(conn, spec: Mapping, *, table: str, window_days: int,
     return out
 
 
+def _values(v: Any) -> list:
+    """A filter argument as a list: None/mapping -> [], a bare string or
+    scalar -> [it], any other iterable -> list(it). LLM-written fields
+    (target_urls: 5) must not raise."""
+    if v is None or isinstance(v, Mapping):
+        return []
+    if isinstance(v, (str, bytes, int, float)):
+        return [v]
+    try:
+        return list(v)
+    except TypeError:
+        return [v]
+
+
 def _like_matcher(values: Optional[Iterable[Any]], *, as_path: bool):
     """Predicate for exact values or 'prefix*' patterns; None = no filter."""
     exact, prefixes = set(), []
-    for v in values or []:
+    for v in _values(values):
+        if isinstance(v, (Mapping, list, tuple, set)):
+            continue
         s = page_path(v) if as_path else str(v or "").strip().lower()
         if not s:
             continue
@@ -922,7 +941,13 @@ def before_after(rows: Iterable[Mapping], *, pivot: Any, days: int = 7,
     counts when it matches both filters given. site_before / site_after are
     the same windows with no filter, so a lever's change can be read against
     the site's own trend. The after window ends at `now`: after_days < days
-    while the pivot is recent."""
+    while the pivot is recent.
+
+    With a `groups` filter the result also carries pages_before /
+    pages_after (the page filter alone, every group; the site counts when no
+    page filter is given) and pages_scoped: a lever that ADDS a placement
+    has 0 clicks there before, so rec_memory.lever_verdict judges it on its
+    pages' clicks across all placements instead."""
     pv = _as_utc(pivot)
     now = _as_utc(now) or datetime.now(timezone.utc)
     page_ok = _like_matcher(pages, as_path=True)
@@ -930,6 +955,8 @@ def before_after(rows: Iterable[Mapping], *, pivot: Any, days: int = 7,
     out = {"before": 0, "after": 0, "site_before": 0, "site_after": 0,
            "days": int(days), "after_days": 0.0,
            "scoped": bool(page_ok or grp_ok)}
+    if grp_ok is not None:
+        out.update({"pages_before": 0, "pages_after": 0, "pages_scoped": page_ok is not None})
     if pv is None:
         return out
     start, end = pv - timedelta(days=days), min(pv + timedelta(days=days), now)
@@ -940,8 +967,10 @@ def before_after(rows: Iterable[Mapping], *, pivot: Any, days: int = 7,
             continue
         side = "before" if t < pv else "after"
         out[f"site_{side}"] += 1
-        if (page_ok is None or page_ok(str(r.get("path") or ""))) and \
-                (grp_ok is None or grp_ok(str(r.get("group") or ""))):
+        on_page = page_ok is None or page_ok(str(r.get("path") or ""))
+        if on_page and grp_ok is not None:
+            out[f"pages_{side}"] += 1
+        if on_page and (grp_ok is None or grp_ok(str(r.get("group") or ""))):
             out[side] += 1
     return out
 
@@ -968,9 +997,9 @@ def lever_outcomes(conn, spec: Mapping, *, table: str, levers: list[dict],
         if pv is None:
             lev["outcome"] = None
             continue
-        placements = list(lev.get("placements") or [])
+        placements = [p for p in _values(lev.get("placements")) if str(p or "").strip()]
         res = before_after(rows, pivot=pv, days=days,
-                           pages=lev.get("target_urls") or None,
+                           pages=_values(lev.get("target_urls")) or None,
                            groups=(placements or None) if group_col else None,
                            now=now)
         if placements and not group_col:
@@ -1095,19 +1124,30 @@ def add_engagement(attribution: dict, engaged_by_page: Optional[Mapping[str, Any
     conversion_attribution() result, from {page path: engaged sessions}
     (e.g. GA4 landingPage x engagedSessions). Pages are classified with the
     same templates. Templates with >= `min_engaged` sessions and no human
-    click in 30 days are listed in `zero_click_high_attention`."""
-    if not isinstance(attribution, dict) or attribution.get("error") or (
-            not attribution.get("by_template") and not engaged_by_page):
+    click in 30 days are listed in `zero_click_high_attention`.
+
+    No engaged sessions at all (the GA4 report failed or came back empty)
+    adds no rates: the result gets `engagement_unavailable` instead, so a
+    brief never reads "engaged=0" on every template as if it were data."""
+    if not isinstance(attribution, dict) or attribution.get("error"):
         return attribution
     tpls = attribution.get("templates") or []
     engaged: dict[str, float] = {}
-    for page, n in (engaged_by_page or {}).items():
+    items = engaged_by_page.items() if isinstance(engaged_by_page, Mapping) else ()
+    for page, n in items:
         try:
             v = float(n or 0)
         except (TypeError, ValueError):
             continue
+        if v <= 0:
+            continue
         name = classify_path(page, tpls)
         engaged[name] = engaged.get(name, 0.0) + v
+    if not engaged:
+        attribution.setdefault("engagement_unavailable",
+                               "no engaged-session rows (the GA4 report failed or came back empty)")
+        return attribution
+    attribution.pop("engagement_unavailable", None)
     rows = {r["template"]: r for r in attribution.get("by_template") or []}
     for name, v in engaged.items():
         rows.setdefault(name, {"template": name, "d7": 0, "prev7": 0, "d30": 0,
@@ -1128,6 +1168,23 @@ def add_engagement(attribution: dict, engaged_by_page: Optional[Mapping[str, Any
         for r in attribution["by_template"]
         if r["d30"] == 0 and r["engaged_sessions_30d"] >= int(min_engaged)]
     return attribution
+
+
+def add_engagement_from_report(attribution: dict, report: Optional[Mapping], *,
+                               min_avg_session_s: float = 10.0, min_engaged: int = 25,
+                               source: str = "GA4 engagedSessions, 30d") -> dict:
+    """add_engagement() straight from a ga4_engaged_sessions_request()
+    response (engaged_by_page() in between). A report that carries an error
+    sets `engagement_unavailable` to that error and adds no rates."""
+    if not isinstance(attribution, dict) or attribution.get("error"):
+        return attribution
+    if isinstance(report, Mapping) and report.get("error"):
+        attribution["engagement_unavailable"] = (
+            "GA4 engaged-sessions report failed: " + str(report.get("error"))[:200])
+        return attribution
+    return add_engagement(attribution,
+                          engaged_by_page(report, min_avg_session_s=min_avg_session_s),
+                          min_engaged=min_engaged, source=source)
 
 
 def focus_rows(attribution: Optional[Mapping], *, top: int = 4, rising: int = 2,
@@ -1171,6 +1228,9 @@ def attribution_prompt_block(attribution: Optional[Mapping], *, max_rows: int = 
         lines.append("FOCUS ROWS (top-converting + fastest-growing, last 7 days): " + "; ".join(
             f"{r.get('template')}" + (f" x {r.get('group') or '(none)'}" if grp else "")
             + f" d7={r.get('d7')} prev7={r.get('prev7')}" for r in focus))
+    if a.get("engagement_unavailable"):
+        lines.append(f"Clicks per 100 engaged sessions: unavailable this run "
+                     f"({a['engagement_unavailable']}).")
     lines.append("By template" + (" (clicks per 100 engaged sessions, "
                                   f"{a.get('engagement_source')}; site "
                                   f"{a.get('site_clicks_per_100_engaged')})"

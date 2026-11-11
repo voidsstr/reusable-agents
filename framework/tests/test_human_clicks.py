@@ -571,3 +571,68 @@ def test_ga4_engaged_sessions_request_and_fleet_filter():
     assert hc.engaged_by_page(rep) == {"/blog/best-a": 949.0}
     assert hc.engaged_by_page(rep, min_avg_session_s=0)["/chat"] == 9538.0
     assert hc.engaged_by_page({"error": "x"}) == {}
+
+
+# ── review fixes (2026-11-11) ───────────────────────────────────────────────
+
+def test_before_after_adds_page_counts_when_placement_scoped():
+    now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+    pivot = now - timedelta(days=8)
+    rows = [
+        {"t": _ts(12, now), "path": "/product/a", "group": "pdp-hero"},      # before, page only
+        {"t": _ts(11, now), "path": "/product/a", "group": "pdp-hero"},      # before, page only
+        {"t": _ts(6, now), "path": "/product/a", "group": "new-strip"},      # after, lever
+        {"t": _ts(5, now), "path": "/product/a", "group": "new-strip"},      # after, lever
+        {"t": _ts(4, now), "path": "/product/b", "group": "new-strip"},      # after, other page
+    ]
+    res = hc.before_after(rows, pivot=pivot, days=7, pages=["/product/a"],
+                          groups=["new-strip"], now=now)
+    assert (res["before"], res["after"]) == (0, 2)
+    assert (res["pages_before"], res["pages_after"], res["pages_scoped"]) == (2, 2, True)
+    # placements only: the page counts are the site's, and say so
+    res = hc.before_after(rows, pivot=pivot, days=7, groups=["new-strip"], now=now)
+    assert (res["pages_before"], res["pages_after"], res["pages_scoped"]) == (2, 3, False)
+    # no group filter: no page counts (nothing to fall back to)
+    assert "pages_before" not in hc.before_after(rows, pivot=pivot, days=7,
+                                                 pages=["/product/a"], now=now)
+    # scalar filters from LLM-written JSON do not raise
+    assert hc.before_after(rows, pivot=pivot, days=7, pages=5, groups=7, now=now)["before"] == 0
+
+
+def test_lever_outcomes_tolerates_scalar_fields():
+    now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+    conn = _RowsConn([(_ts(3, now), "/blog/best-a", "hero")])
+    spec = hc.resolve_spec({"referer_col": "ref"}, config={})
+    levers = [{"id": "L1", "live_since": (now - timedelta(days=4)).isoformat(),
+               "target_urls": 5, "placements": 7}]
+    hc.lever_outcomes(conn, spec, table="t", levers=levers, group_col="placement", now=now)
+    assert levers[0]["outcome"]["scoped"] is True
+
+
+def _attr():
+    return {"definition": "d", "group_col": None,
+            "templates": [{"name": "guide", "pattern": "^/blog/best-"}],
+            "totals": {"d7": 3, "prev7": 2, "d30": 9, "wow_pct": 50},
+            "by_template": [{"template": "guide", "d7": 3, "prev7": 2, "d30": 9, "wow_pct": 50}],
+            "rows": [], "rising_pages": []}
+
+
+def test_add_engagement_without_sessions_says_unavailable_not_zero():
+    attr = hc.add_engagement(_attr(), hc.engaged_by_page({"error": "HTTP 403"}),
+                             source="GA4 engagedSessions")
+    assert attr["engagement_unavailable"].startswith("no engaged-session rows")
+    assert "engagement_source" not in attr and "engaged_sessions_30d" not in attr["by_template"][0]
+    block = hc.attribution_prompt_block(attr)
+    assert "engaged=0" not in block and "site None" not in block
+    assert "Clicks per 100 engaged sessions: unavailable this run" in block
+    # straight from the report: the error itself is quoted
+    attr = hc.add_engagement_from_report(_attr(), {"error": "HTTP 403 quota"})
+    assert "HTTP 403 quota" in attr["engagement_unavailable"]
+    # a good report adds the rates and no unavailable note
+    rep = {"rows": [{"dimensionValues": [{"value": "/blog/best-a"}, {"value": "Organic Search"}],
+                     "metricValues": [{"value": "300"}, {"value": "65.0"}]}]}
+    attr = hc.add_engagement_from_report(_attr(), rep, min_avg_session_s=10, source="GA4")
+    assert "engagement_unavailable" not in attr
+    assert attr["by_template"][0]["engaged_sessions_30d"] == 300
+    assert attr["by_template"][0]["clicks_per_100_engaged"] == 3.0
+    assert hc.add_engagement_from_report({"error": "x"}, rep) == {"error": "x"}
