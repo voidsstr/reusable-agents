@@ -64,9 +64,46 @@ def test_holds_app_code_once_red_for_long_enough(storage, gate_dir):
     storage.write_json(dr.HOLD_CONFIG_KEY, ON)
     _red(49)
     d = dr.gate_hold(SITE, "seo", storage=storage, now=NOW)
-    assert d.hold and not d.probe and d.red_for_h == 49.0
+    assert d.hold and not d.probe and d.red_for_h == 49.0 and d.gate_status == "red"
     assert "red for 49h" in d.reason and "prefer DB-only levers" in d.reason
-    assert "5 test(s) failed" in d.reason
+    assert "db_only: true" in d.reason and "5 test(s) failed" in d.reason
+    assert d.retry_at == (NOW + timedelta(hours=1)).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# A batch of recs marked DB-only is never held
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("recs", [
+    [{"id": "growth-01", "db_only": True}],
+    [{"id": "rec-009", "dispatch_kind": "db-only"}, {"id": "rec-010", "db_only": True}],
+    [{"id": "rec-001", "dispatch_kind": "catalog-audit"}],
+    [{"id": "shelf-1", "dispatch_kind": "shelf-audit"}],          # a pass_kinds entry, per rec
+])
+def test_a_batch_whose_every_rec_is_marked_db_only_passes(storage, gate_dir, recs):
+    storage.write_json(dr.HOLD_CONFIG_KEY, {**ON, "pass_kinds": ["shelf-audit"]})
+    _red(49)
+    d = dr.gate_hold(SITE, "seo", subject_tag="growth", recs=recs, storage=storage, now=NOW)
+    assert not d.hold and not d.probe and "marked DB-only" in d.reason
+
+
+@pytest.mark.parametrize("recs", [
+    [{"id": "growth-01", "db_only": True}, {"id": "growth-02"}],     # one unmarked rec holds the batch
+    [{"id": "rec-001", "db_only": "yes"}],                           # only a real true counts
+    [{}],                                                            # a rec id missing from the file
+    [],
+])
+def test_a_batch_with_any_unmarked_rec_is_held(storage, gate_dir, recs):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red(49)
+    assert dr.gate_hold(SITE, "seo", subject_tag="growth", recs=recs, storage=storage, now=NOW).hold
+
+
+def test_status_message_tells_strategists_how_to_get_db_only_work_through(storage, gate_dir):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red(49)
+    msg = dr.gate_hold_status(SITE, storage=storage, now=NOW)["message"]
+    assert msg.startswith("DEPLOY GATE:") and "mark them db_only" in msg
 
 
 @pytest.mark.parametrize("kind,tag", [("h2h", ""), ("catalog-audit", ""), ("article-author", ""),
@@ -108,6 +145,42 @@ def test_one_probe_per_interval_so_the_gate_is_re_tested(storage, gate_dir):
     assert second.hold and not second.probe                     # the probe was granted once
     later = dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(hours=4, minutes=1))
     assert later.probe
+
+
+def test_a_probe_that_got_no_gate_verdict_is_granted_again_after_the_grace(storage, gate_dir):
+    # The probe batch made no commit, failed, or never reached the deployer:
+    # without the grace the gate would not be re-tested for probe_every_h.
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    st = _red(49, last_run_h_ago=5)
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW, state=st).probe
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(hours=2, minutes=59), state=st).hold
+    again = dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(hours=3, minutes=1), state=st)
+    assert again.probe and not again.hold
+
+
+def test_a_probe_answered_by_a_gate_verdict_waits_probe_every_h(storage, gate_dir):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    st = _red(49, last_run_h_ago=5)
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW, state=st).probe
+    # The probe's gate run ends red an hour later.
+    st.record_red(dr.Classification("code", "5 test(s) failed", 1, [dr.TestFailure("t", "a.ts")]),
+                  "sig1", attempts=0, exhausted=False, cfg=dr.DEFAULTS, now=NOW + timedelta(hours=1))
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(hours=3, minutes=30), state=st).hold
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(hours=5, minutes=1), state=st).probe
+
+
+def test_release_probe_gives_back_only_the_probe_it_names(storage, gate_dir):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    st = _red(49, last_run_h_ago=5)
+    d = dr.gate_hold(SITE, "seo", storage=storage, now=NOW, state=st)
+    assert d.probe and d.probe_at == NOW.isoformat()
+    assert not dr.release_probe(SITE, granted_at="2026-11-11T09:00:00+00:00", storage=storage)
+    assert not dr.release_probe(SITE, granted_at="", storage=storage)
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(minutes=1), state=st).hold
+    assert dr.release_probe(SITE, granted_at=d.probe_at, storage=storage)
+    doc = storage.read_json(f"{dr.HOLD_STATE_PREFIX}{SITE}.json")
+    assert "last_probe_at" not in doc and doc["probes_released"] == 1
+    assert dr.gate_hold(SITE, "seo", storage=storage, now=NOW + timedelta(minutes=2), state=st).probe
 
 
 def test_status_for_prompts_never_spends_the_probe(storage, gate_dir):
@@ -228,6 +301,131 @@ def test_dispatch_now_holds_app_code_without_spawning_or_queueing(storage, gate_
     assert skip and "deploy-gate-hold" in why
     log = storage.read_json(f"{dr.HOLD_STATE_PREFIX}{SITE}.json")
     assert log["held_total"] == 1 and log["held"][0]["kind"] == "seo"
+    assert log["parked"] == {"site-a-user-growth-strategist": ["growth-20261111T151200Z-01"]}
+    entry = storage.read_json("framework/defer-backoff/site-a-user-growth-strategist.json")["recs"][
+        "growth-20261111T151200Z-01"]
+    assert entry["count"] == 0 and entry["held_until"] == entry["next_retry_at"]     # a hold, not a defer
+
+
+SEO_RUN = {"agent_id": "site-a-seo-opportunity-agent", "recommendations": [{"id": "rec-001"}]}
+
+
+def _entry(storage, agent, rid):
+    return (storage.read_json(f"framework/defer-backoff/{agent}.json") or {"recs": {}})["recs"].get(rid)
+
+
+def test_holds_never_climb_the_backoff_and_lift_once_the_gate_is_green(storage, gate_dir, no_spawn, tmp_path):
+    # SEO and PI reuse rec ids (rec-001 in every run). Held recs used to climb
+    # 1m..12h and never reset, so a fresh run's rec-001 was still skipped half
+    # a day after the gate went green, and the next red started at 12h.
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red_now(49)
+    agent = "site-a-seo-opportunity-agent"
+    rd = _run_dir(tmp_path, SEO_RUN)
+    for _ in range(8):
+        with pytest.raises(dispatch.DispatchHeld):
+            dispatch.dispatch_now(agent_id=agent, run_dir=str(rd), rec_ids=["rec-001"], site=SITE,
+                                  subject_tag="seo")
+    e = _entry(storage, agent, "rec-001")
+    left = datetime.fromisoformat(e["next_retry_at"]) - datetime.now(timezone.utc)
+    assert e["count"] == 0 and timedelta(minutes=55) < left <= timedelta(hours=1)
+    st = dr.GateState.load(SITE)
+    st.record_green("abc", repaired=False)
+    st.save()
+    # Any later dispatch for the site sees the green gate and lifts the holds.
+    other = _run_dir(tmp_path, {"agent_id": "site-a-progressive-improvement-agent",
+                                "recommendations": [{"id": "rec-004"}]}, "pi")
+    dispatch.dispatch_now(agent_id="site-a-progressive-improvement-agent", run_dir=str(other),
+                          rec_ids=["rec-004"], site=SITE, subject_tag="progressive-improvement")
+    assert _entry(storage, agent, "rec-001") is None
+    assert defer_backoff.should_skip("rec-001", agent, storage=storage) == (False, "")
+    assert storage.read_json(f"{dr.HOLD_STATE_PREFIX}{SITE}.json")["parked"] == {}
+    # The next red starts from a one-hour hold again, not from 12 h.
+    _red_now(49)
+    with pytest.raises(dispatch.DispatchHeld):
+        dispatch.dispatch_now(agent_id=agent, run_dir=str(rd), rec_ids=["rec-001"], site=SITE, subject_tag="seo")
+    left = datetime.fromisoformat(_entry(storage, agent, "rec-001")["next_retry_at"]) - datetime.now(timezone.utc)
+    assert left <= timedelta(hours=1)
+
+
+def test_a_hold_keeps_a_longer_real_defer_and_release_restores_it(storage):
+    agent, now = "site-a-article-proposal-agent", NOW
+    for i in range(4):                                            # 4 real defers: a 2 h cooldown
+        defer_backoff.record_defer("rec-001", agent, "required-model-unavailable", storage=storage,
+                                   now=now + timedelta(seconds=i))
+    real = _entry(storage, agent, "rec-001")["next_retry_at"]
+    defer_backoff.hold("rec-001", agent, now + timedelta(hours=1), "deploy-gate-hold: red", storage=storage,
+                       now=now)
+    e = _entry(storage, agent, "rec-001")
+    assert e["next_retry_at"] == real and e["count"] == 4         # the longer cooldown wins
+    defer_backoff.hold("rec-002", agent, now + timedelta(hours=1), "deploy-gate-hold: red", storage=storage,
+                       now=now)
+    assert defer_backoff.should_skip("rec-002", agent, storage=storage, now=now)[0]
+    assert defer_backoff.release_holds(agent, ["rec-001", "rec-002"], storage=storage) == 2
+    e = _entry(storage, agent, "rec-001")
+    assert e["count"] == 4 and e["next_retry_at"] == real and "held_until" not in e
+    assert _entry(storage, agent, "rec-002") is None
+    assert defer_backoff.release_holds(agent, None, storage=storage) == 0
+
+
+def test_dispatch_now_lets_a_db_only_growth_batch_through(storage, gate_dir, no_spawn, tmp_path):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red_now(49)
+    doc = {**GROWTH, "recommendations": [{"id": "growth-20261111T151200Z-01", "tier": "lever", "db_only": True},
+                                         {"id": "growth-20261111T151200Z-02", "tier": "lever"}]}
+    rd = _run_dir(tmp_path, doc)
+    h = dispatch.dispatch_now(agent_id="site-a-user-growth-strategist", run_dir=str(rd),
+                              rec_ids=["growth-20261111T151200Z-01"], site=SITE, subject_tag="growth")
+    assert h.pid == 1 and len(no_spawn) == 1 and not no_spawn[0].get("extra_env")
+    with pytest.raises(dispatch.DispatchHeld):                    # the unmarked rec of the same run
+        dispatch.dispatch_now(agent_id="site-a-user-growth-strategist", run_dir=str(rd),
+                              rec_ids=["growth-20261111T151200Z-02"], site=SITE, subject_tag="growth")
+
+
+def test_dispatch_now_marks_the_probe_batch_for_the_implementer(storage, gate_dir, no_spawn, tmp_path):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red_now(49, last_run_h_ago=5)
+    rd = _run_dir(tmp_path, SEO_RUN)
+    dispatch.dispatch_now(agent_id="site-a-seo-opportunity-agent", run_dir=str(rd), rec_ids=["rec-001"],
+                          site=SITE, subject_tag="seo")
+    at = storage.read_json(f"{dr.HOLD_STATE_PREFIX}{SITE}.json")["last_probe_at"]
+    assert no_spawn[0]["extra_env"] == {"DEPLOY_GATE_PROBE": "1", "DEPLOY_GATE_PROBE_AT": at}
+
+
+@pytest.mark.parametrize("failure", [dispatch.DispatchError("implementer script not found"),
+                                     TimeoutError("could not acquire dispatch-site-a")])
+def test_dispatch_now_gives_the_probe_back_when_the_dispatch_fails(storage, gate_dir, no_spawn, tmp_path,
+                                                                   monkeypatch, failure):
+    storage.write_json(dr.HOLD_CONFIG_KEY, ON)
+    _red_now(49, last_run_h_ago=5)
+
+    def fail(**kw):
+        raise failure
+    monkeypatch.setattr(dispatch, "_spawn_implementer", fail)
+    rd = _run_dir(tmp_path, SEO_RUN)
+    with pytest.raises(type(failure)):
+        dispatch.dispatch_now(agent_id="site-a-seo-opportunity-agent", run_dir=str(rd), rec_ids=["rec-001"],
+                              site=SITE, subject_tag="seo", fallback_to_queue=False, notify_on_failure=False)
+    doc = storage.read_json(f"{dr.HOLD_STATE_PREFIX}{SITE}.json")
+    assert "last_probe_at" not in doc and doc["probes_released"] == 1
+    # The next app-code dispatch gets the probe at once.
+    d = dr.gate_hold(SITE, "seo", storage=storage)
+    assert d.probe and not d.hold
+
+
+def test_the_deployer_lifts_holds_when_the_gate_turns_green(storage, gate_dir):
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "agents" / "deployer" / "deployer.py"
+    spec = importlib.util.spec_from_file_location("deployer_hold_test", path)
+    d = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(d)
+    agent = "site-a-seo-opportunity-agent"
+    defer_backoff.hold("rec-001", agent, datetime.now(timezone.utc) + timedelta(hours=1), "deploy-gate-hold: red",
+                       storage=storage)
+    dr.record_hold(SITE, agent_id=agent, rec_ids=["rec-001"], kind="seo", reason="red", storage=storage)
+    d._release_gate_holds(SITE)
+    assert _entry(storage, agent, "rec-001") is None
+    d._release_gate_holds(SITE)                                   # nothing parked: a no-op
 
 
 def test_dispatch_now_lets_data_only_work_and_forced_dispatches_through(storage, gate_dir, no_spawn, tmp_path):

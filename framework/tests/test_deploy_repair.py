@@ -943,28 +943,82 @@ def test_data_only_kinds_are_one_list_with_an_env_override(monkeypatch):
     assert not dr.kind_skips_deploy("article-author")
 
 
-@pytest.mark.parametrize("paths,skips", [
-    (["db/migrations/20261111T120000Z_price-rows.sql"], True),
-    (["db/migrations/a.sql", "changes/rec-001.summary.md", "docs/x.md", "agents/shelf-audit-agent/site.yaml"], True),
-    (["db/migrations/a.sql", "src/simple-server.ts"], False),
-    (["frontend/src/App.tsx"], False),
-    (["src/agents/helper.ts"], False),              # only the top-level agents/ dir
-    (["README.md"], False),
-    ([], False),                                    # no evidence: deploy as before
-])
-def test_no_deploy_reason(monkeypatch, paths, skips):
+SKIP = {"globs": ["changes/**", "docs/**", "agents/**"], "while_red_globs": ["db/migrations/**"]}
+
+
+@pytest.fixture
+def no_skip_env(monkeypatch):
     monkeypatch.delenv("DEPLOY_SKIP_PATHS", raising=False)
-    why = dr.no_deploy_reason(paths)
-    assert bool(why) is skips, why
-    if skips:
-        assert "nothing in the app image changed" in why
+    monkeypatch.delenv("DEPLOY_SKIP_PATHS_WHILE_RED", raising=False)
 
 
-def test_no_deploy_paths_env_override(monkeypatch):
+def test_the_path_skip_is_off_without_config(storage, no_skip_env, state_dir):
+    # Nothing configured: every batch with commits deploys, as it always did.
+    for paths in (["docs/x.md"], ["changes/rec-001.summary.md"], ["db/migrations/a.sql"],
+                  ["agents/shelf-audit-agent/site.yaml"]):
+        assert dr.no_deploy_reason(paths, site="site-a", storage=storage, gate_red=True) == ""
+    assert dr.load_skip_config("site-a", storage) == {"globs": (), "while_red_globs": ()}
+
+
+@pytest.mark.parametrize("paths,red,skips", [
+    (["changes/rec-001.summary.md", "docs/x.md", "agents/shelf-audit-agent/site.yaml"], False, "image"),
+    (["db/migrations/20261111T120000Z_price-rows.sql"], False, ""),   # gate green: its own gate checks the boot
+    (["db/migrations/20261111T120000Z_price-rows.sql"], True, "red"),
+    (["db/migrations/a.sql", "changes/rec-001.summary.md"], True, "red"),
+    (["db/migrations/a.sql", "changes/rec-001.summary.md"], False, ""),
+    (["db/migrations/a.sql", "src/simple-server.ts"], True, ""),
+    (["frontend/src/App.tsx"], True, ""),
+    (["src/agents/helper.ts"], True, ""),                             # only the top-level agents/ dir
+    (["README.md"], True, ""),
+    ([], True, ""),                                                   # no evidence: deploy as before
+])
+def test_no_deploy_reason(no_skip_env, paths, red, skips):
+    why = dr.no_deploy_reason(paths, SKIP["globs"], while_red_globs=SKIP["while_red_globs"],
+                              gate_red=red, site="site-a")
+    assert bool(why) is bool(skips), why
+    assert "nothing in the app image changed" not in why
+    if skips == "image":
+        assert "outside the app image" in why
+    if skips == "red":
+        assert "site-a deploy gate is red" in why and "outside the app image" not in why
+
+
+def test_skip_config_from_storage_with_by_site_and_env_overrides(storage, no_skip_env, monkeypatch):
+    storage.write_json(dr.SKIP_CONFIG_KEY, {**SKIP, "by_site": {"site-b": {"globs": ["content/**"]}}})
+    assert dr.load_skip_config("site-a", storage) == {"globs": ("changes/**", "docs/**", "agents/**"),
+                                                      "while_red_globs": ("db/migrations/**",)}
+    assert dr.load_skip_config("site-b", storage)["globs"] == ("content/**",)
+    assert dr.no_deploy_path_globs("site-b", storage) == ("content/**",)
+    assert dr.no_deploy_reason(["docs/x.md"], site="site-a", storage=storage)
+    assert not dr.no_deploy_reason(["docs/x.md"], site="site-b", storage=storage)
     monkeypatch.setenv("DEPLOY_SKIP_PATHS", "none")
-    assert dr.no_deploy_reason(["db/migrations/a.sql"]) == ""
+    assert dr.no_deploy_reason(["docs/x.md"], site="site-a", storage=storage) == ""
     monkeypatch.setenv("DEPLOY_SKIP_PATHS", "content/**")
-    assert dr.no_deploy_reason(["content/a.md"]) and not dr.no_deploy_reason(["db/migrations/a.sql"])
+    monkeypatch.setenv("DEPLOY_SKIP_PATHS_WHILE_RED", "none")
+    assert dr.load_skip_config("site-a", storage) == {"globs": ("content/**",), "while_red_globs": ()}
+    assert dr.no_deploy_reason(["db/migrations/a.sql"], site="site-a", storage=storage, gate_red=True) == ""
+
+
+def test_migrations_skip_only_while_the_sites_gate_is_red(storage, no_skip_env, state_dir):
+    storage.write_json(dr.SKIP_CONFIG_KEY, SKIP)
+    mig = ["db/migrations/20261111T120000Z_x.sql"]
+    assert dr.no_deploy_reason(mig, site="site-a", storage=storage) == ""      # no gate state yet
+    st = dr.GateState.load("site-a")
+    st.record_red(CODE, "sig", attempts=0, exhausted=False, cfg=dr.DEFAULTS)
+    st.save()
+    assert "gate is red" in dr.no_deploy_reason(mig, site="site-a", storage=storage)
+    assert dr.no_deploy_reason(mig, site="site-b", storage=storage) == ""      # another site's gate
+    st.record_green("abc", repaired=False)
+    st.save()
+    assert dr.no_deploy_reason(mig, site="site-a", storage=storage) == ""
+
+
+def test_an_unreadable_skip_config_means_deploy(no_skip_env):
+    class Broken:
+        def read_json(self, key):
+            raise RuntimeError("blob archived")
+    assert dr.load_skip_config("site-a", Broken()) == {"globs": (), "while_red_globs": ()}
+    assert dr.no_deploy_reason(["docs/x.md"], site="site-a", storage=Broken(), gate_red=True) == ""
 
 
 def _run_sh_function(name):
@@ -985,48 +1039,121 @@ def test_run_sh_uses_the_shared_kind_list_not_its_own(tmp_path):
     assert 'elif [ "$DISPATCH_KIND" = "catalog-audit" ]' not in text
     assert 'if [ "$DISPATCH_KIND" = "h2h" ]; then\n    echo "[implementer] H2H dispatch' not in text
     fn = _run_sh_function("_deploy_skip_for_kind")
-    for kind, want in [("h2h", "yes"), ("article-refresh", "yes"), ("product-hydration", "yes"),
-                       ("seo", ""), ("", "")]:
-        r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_deploy_skip_for_kind "{kind}"')
-        assert r.returncode == 0 and r.stdout.strip() == want, (kind, r.stdout, r.stderr)
-    r = _bash(f'set -euo pipefail\nREPO_ROOT="/nonexistent"\n{fn}\n_deploy_skip_for_kind h2h',
-              cwd=str(tmp_path))
-    assert r.returncode == 0 and r.stdout.strip() == ""      # broken helper: deploy, as for app code
+
+    def skip(kind, root=_REPO, env=None):
+        r = _bash(f'set -euo pipefail\nREPO_ROOT="{root}"\n{fn}\nout=$(_deploy_skip_for_kind "{kind}")\n'
+                  f'echo "[$out]"', env={"DATA_ONLY_KINDS": "", **(env or {})}, cwd=str(tmp_path))
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+    for kind, want in [("h2h", "[yes]"), ("article-refresh", "[yes]"), ("product-hydration", "[yes]"),
+                       ("seo", "[]"), ("", "[]")]:
+        assert skip(kind) == want, kind
+    assert skip("seo", env={"DATA_ONLY_KINDS": "seo, h2h"}) == "[yes]"
+    # The framework cannot be imported: the default list still keeps every
+    # data-only kind away from the deployer, and the env override still holds.
+    for kind, want in [("h2h", "[yes]"), ("article-author", "[yes]"), ("catalog-audit", "[yes]"),
+                       ("article-refresh", "[yes]"), ("product-hydration", "[yes]"),
+                       ("seo", "[]"), ("", "[]")]:
+        assert skip(kind, root="/nonexistent") == want, kind
+    assert skip("seo", root="/nonexistent", env={"DATA_ONLY_KINDS": "seo, h2h"}) == "[yes]"
+    assert skip("article-author", root="/nonexistent", env={"DATA_ONLY_KINDS": "h2h"}) == "[]"
 
 
-def test_run_sh_skips_the_deployer_for_migration_only_commits(repo):
+def test_run_sh_fallback_kind_list_matches_the_framework():
+    import re
+    m = re.search(r"\$\{DATA_ONLY_KINDS:-([^}]*)\}", _run_sh_function("_deploy_skip_for_kind"))
+    assert m and sorted(m.group(1).split(",")) == sorted(dr.DATA_ONLY_KINDS)
+
+
+def test_run_sh_skips_the_deployer_only_for_configured_paths(repo, state_dir):
     fn = _run_sh_function("_no_deploy_reason_for_commits")
     base = _git(repo, "rev-parse", "HEAD")
     mig = _commit(repo, "db/migrations/20261111_x.sql", "UPDATE t SET x = 1;\n", "db-only lever")
     summ = _commit(repo, "changes/rec-001.summary.md", "done\n", "summary")
+    on = {"DEPLOY_SKIP_PATHS": "changes/**,docs/**,agents/**", "DEPLOY_SKIP_PATHS_WHILE_RED": "db/migrations/**",
+          "RESPONDER_SITE": "site-a", "DEPLOY_GATE_STATE_DIR": str(state_dir)}
+    off = {**on, "DEPLOY_SKIP_PATHS": "none", "DEPLOY_SKIP_PATHS_WHILE_RED": "none"}
 
-    def reason(b, h, repo_path=str(repo)):
+    def reason(b, h, env, repo_path=str(repo)):
         r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n'
-                  f'_no_deploy_reason_for_commits "{repo_path}" "{b}" "{h}"')
+                  f'_no_deploy_reason_for_commits "{repo_path}" "{b}" "{h}"', env=env)
         assert r.returncode == 0, r.stderr
         return r.stdout.strip()
-    assert "db/" in reason(base, summ) and "changes/" in reason(base, summ)
+    assert reason(mig, summ, off) == ""                         # not configured: deploy
+    assert "changes/" in reason(mig, summ, on)                  # a change summary: not in the image
+    assert reason(base, summ, on) == ""                         # a migration while the gate is green: deploy
+    st = dr.GateState.load("site-a")
+    st.record_red(CODE, "sig", attempts=0, exhausted=False, cfg=dr.DEFAULTS)
+    st.save()
+    why = reason(base, summ, on)
+    assert "db/" in why and "changes/" in why and "gate is red" in why
     app = _commit(repo, "src/page.ts", "export const h1 = 'x';\n", "app change")
-    assert reason(base, app) == ""                            # app code in the range: deploy
-    assert reason(mig, summ) != ""
-    assert reason("", summ) == "" and reason("0" * 40, summ) == ""   # unknown base: deploy
+    assert reason(base, app, on) == ""                          # app code in the range: deploy
+    assert reason("", summ, on) == "" and reason("0" * 40, summ, on) == ""   # unknown base: deploy
+
+
+def test_run_sh_sees_both_paths_of_a_moved_file(repo):
+    # git diff detects renames by default and lists only the new path, so a
+    # file moved out of src/ into docs/ looked like a docs-only batch.
+    fn = _run_sh_function("_no_deploy_reason_for_commits")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir()
+    _git(repo, "mv", "src/page.ts", "docs/page.ts")
+    _git(repo, "commit", "-q", "-m", "move a source file into docs/")
+    head = _git(repo, "rev-parse", "HEAD")
+    assert _git(repo, "diff", "--name-only", base, head) == "docs/page.ts"      # what renames hide
+    r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_no_deploy_reason_for_commits "{repo}" "{base}" "{head}"',
+              env={"DEPLOY_SKIP_PATHS": "docs/**", "DEPLOY_SKIP_PATHS_WHILE_RED": "none"})
+    assert r.returncode == 0 and r.stdout.strip() == "", r.stdout
 
 
 def test_run_sh_helpers_ignore_a_framework_package_in_the_cwd(tmp_path, repo):
     # `python3 -c` puts the cwd ahead of PYTHONPATH: run from another framework
-    # checkout (an older one without these functions), the helpers used to
-    # import that one, fail, and fall back to deploying.
+    # checkout, the helpers used to import that one. The shadow here imports
+    # fine and answers wrongly, so only the right framework passes.
     shadow = tmp_path / "shadow"
     (shadow / "framework" / "core").mkdir(parents=True)
     (shadow / "framework" / "__init__.py").write_text("")
     (shadow / "framework" / "core" / "__init__.py").write_text("")
-    (shadow / "framework" / "core" / "deploy_repair.py").write_text("raise ImportError('shadow')\n")
+    (shadow / "framework" / "core" / "deploy_repair.py").write_text(
+        "def kind_skips_deploy(kind):\n    return False\n\n"
+        "def no_deploy_reason(*a, **k):\n    return ''\n")
     fn = _run_sh_function("_deploy_skip_for_kind")
-    r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_deploy_skip_for_kind h2h', cwd=str(shadow))
+    r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_deploy_skip_for_kind h2h', cwd=str(shadow),
+              env={"DATA_ONLY_KINDS": ""})
     assert r.returncode == 0 and r.stdout.strip() == "yes", r.stderr
     fn = _run_sh_function("_no_deploy_reason_for_commits")
     base = _git(repo, "rev-parse", "HEAD")
-    head = _commit(repo, "db/migrations/20261111_y.sql", "SELECT 1;\n", "db-only")
+    head = _commit(repo, "changes/rec-002.summary.md", "done\n", "summary")
     r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n'
-              f'_no_deploy_reason_for_commits "{repo}" "{base}" "{head}"', cwd=str(shadow))
-    assert r.returncode == 0 and "db/" in r.stdout, r.stderr
+              f'_no_deploy_reason_for_commits "{repo}" "{base}" "{head}"', cwd=str(shadow),
+              env={"DEPLOY_SKIP_PATHS": "changes/**", "DEPLOY_SKIP_PATHS_WHILE_RED": "none"})
+    assert r.returncode == 0 and "changes/" in r.stdout, r.stderr
+
+
+def test_run_sh_never_path_skips_a_gate_probe_batch():
+    text = (_REPO / "agents" / "implementer" / "run.sh").read_text()
+    i = text.index("NO_DEPLOY_WHY=$(_no_deploy_reason_for_commits")
+    assert '"${DEPLOY_GATE_PROBE:-0}" != "1"' in text[i - 200:i]
+    block = text[text.index("DEPLOY_SKIP_KIND=$(_deploy_skip_for_kind"):text.index("# ── Did claude actually apply")]
+    # A probe that will not run the deployer is given back: data-only kind,
+    # no commits, no deployer at all.
+    assert block.count("_release_gate_probe") == 3
+
+
+def test_run_sh_gives_back_an_unused_gate_probe(storage, tmp_path):
+    fn = _run_sh_function("_release_gate_probe")
+    key = f"{dr.HOLD_STATE_PREFIX}site-a.json"
+    at = "2026-11-11T12:00:00+00:00"
+    storage.write_json(key, {"last_probe_at": at})
+    env = {"RESPONDER_SITE": "site-a", "DEPLOY_GATE_PROBE_AT": at}
+
+    def run(extra, root=_REPO):
+        r = _bash(f'set -euo pipefail\nREPO_ROOT="{root}"\n{fn}\n_release_gate_probe\necho done',
+                  env={**env, **extra}, cwd=str(tmp_path))
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+    assert run({}).strip() == "done" and storage.read_json(key)["last_probe_at"] == at   # not a probe batch
+    assert run({"DEPLOY_GATE_PROBE": "1"}, root="/nonexistent").strip() == "done"       # never fails
+    assert "released" in run({"DEPLOY_GATE_PROBE": "1"})
+    assert "last_probe_at" not in storage.read_json(key)

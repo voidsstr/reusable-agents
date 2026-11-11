@@ -420,6 +420,52 @@ def _storage_or_none():
         return None
 
 
+def _release_gate_holds(site: str) -> None:
+    """The gate is green: lift the defer_backoff holds the deploy-gate hold put
+    on this site's recs while it was red (deploy_repair.release_holds), so
+    they dispatch now instead of at their retry time. Never fails the deploy."""
+    try:
+        lifted = deploy_repair.release_holds(site, storage=_storage_or_none())
+        if lifted:
+            print(f"[deployer] gate green: lifted {lifted} deploy-gate hold(s)", file=sys.stderr)
+    except Exception as e:
+        print(f"[deployer] WARN could not lift deploy-gate holds: {e}", file=sys.stderr)
+
+
+def _kick_placement_watch(cfg) -> None:
+    """Start the placement-level conversion watch for this site in the
+    background (framework/core/placement_watch.py). It judges the newest
+    deploy that has 24+ h of clicks after it, so evaluating after every gated
+    deployer run, red or green, lets a busy site flag a drop on a money
+    placement within the day; the daily site-goals-tracker run is the
+    backstop. --min-interval-m keeps it to about one evaluation an hour, and
+    a site with no entry in config/placement-watch-config.json exits at once.
+    Never waits on it and never fails the deploy. PLACEMENT_WATCH_AFTER_DEPLOY=0
+    turns it off."""
+    if os.environ.get("PLACEMENT_WATCH_AFTER_DEPLOY", "1") == "0":
+        return
+    try:
+        root = Path(__file__).resolve().parents[2]
+        site = str(cfg.site_id)
+        email = (cfg.get("reporter") or {}).get("email") or {}
+        log_dir = Path(os.environ.get("FRAMEWORK_DISPATCH_LOG_DIR", "/tmp/reusable-agents-logs"))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in site) or "site"
+        env = {**os.environ,
+               "PYTHONPATH": os.pathsep.join(p for p in (str(root), os.environ.get("PYTHONPATH", "")) if p)}
+        with open(log_dir / f"placement-watch-{safe}.log", "ab") as log:
+            # cwd = this framework checkout: `python3 -m` puts the cwd first on
+            # sys.path, so another checkout in the caller's cwd cannot shadow it.
+            subprocess.Popen(
+                [sys.executable, "-m", "framework.core.placement_watch", "--site", site, "--live",
+                 "--min-interval-m", os.environ.get("PLACEMENT_WATCH_MIN_INTERVAL_M", "55"),
+                 "--email-json", json.dumps(email, default=str)],
+                cwd=str(root), env=env, stdin=subprocess.DEVNULL, stdout=log,
+                stderr=subprocess.STDOUT, start_new_session=True)
+    except Exception as e:
+        print(f"[deployer] placement watch not started ({e})", file=sys.stderr)
+
+
 def _mark_shipped(run_dir: Path, deploy_meta: dict, tag: str, image: str, state) -> None:
     """The implementer marked the batch's recs `implemented`; their code is now
     live in this (or, for already-live, an earlier) deploy. Flip `shipped`."""
@@ -719,6 +765,7 @@ def main() -> None:
                           f"{outcome.flaky[:5]}", file=sys.stderr)
                 if not outcome.repaired:
                     state.record_green(outcome.sha, repaired=False)
+                    _release_gate_holds(cfg.site_id)
                 elif args.dry_run and os.environ.get("DEPLOYER_DRY_RUN_LAND") != "1":
                     # A dry run never moves the live branch.
                     ref = f"refs/deploy-repair/{cfg.site_id}/{tag}"
@@ -752,6 +799,7 @@ def main() -> None:
                         print(f"[deployer] {deploy_meta['error']}; kept at {ref}", file=sys.stderr)
                         sys.exit(1)
                     state.record_green(outcome.sha, repaired=True)
+                    _release_gate_holds(cfg.site_id)
                     reverted = gate.reverted_batch_files(repo_root or wt,
                                                          os.environ.get("DEPLOYER_BATCH_BASE_SHA", ""),
                                                          gate_base, outcome.sha)
@@ -1147,6 +1195,10 @@ def main() -> None:
         wt_cleanup()
         if deploy_lock is not None:
             deploy_lock.release()
+        # After every gated run (not a dry run, not an operator's --skip-test):
+        # judge older deploys' effect on verified clicks per money placement.
+        if not args.dry_run and not args.skip_test:
+            _kick_placement_watch(cfg)
 
 
 if __name__ == "__main__":

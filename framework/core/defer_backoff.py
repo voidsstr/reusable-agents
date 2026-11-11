@@ -47,6 +47,16 @@ Backoff schedule (intentionally aggressive after first few attempts):
 
 A success record() resets the count to 0 so the next defer starts fresh.
 
+Holds (2026-11-11). hold() parks a rec until a given time WITHOUT counting a
+defer: framework.core.dispatch uses it while a site's deploy gate is red
+(deploy_repair.gate_hold), which is not a failed attempt of the rec. A hold
+never climbs BACKOFF_SECONDS, never shortens a longer cooldown the rec
+already has, and release_holds() lifts it once the gate is green. Producers
+reuse rec ids across runs (rec-001 in every SEO run), so a hold that
+escalated and never cleared would keep blocking later runs' recs. A held
+entry carries "held_until" / "hold_reason" / "held_at" next to the fields
+above.
+
 Author: 2026-06-09 (queue prioritization audit)
 """
 from __future__ import annotations
@@ -136,9 +146,10 @@ def should_skip(
     now = now or _now()
     if now < next_t:
         remaining = int((next_t - now).total_seconds())
+        why = (entry.get("hold_reason") if entry.get("held_until") else "") or entry.get("last_reason", "")
         return True, (
             f"defer-backoff (attempt {entry.get('count', 0)}, "
-            f"{remaining}s remaining; last_reason={entry.get('last_reason','')!r})"
+            f"{remaining}s remaining; last_reason={why!r})"
         )
     return False, ""
 
@@ -183,6 +194,78 @@ def record_success(
     if rec_id in doc["recs"]:
         del doc["recs"][rec_id]
         _save(source_agent_id, doc, storage=storage)
+
+
+def hold(
+    rec_id: str,
+    source_agent_id: str,
+    until: datetime,
+    reason: str = "",
+    *,
+    storage: Optional[StorageBackend] = None,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Park a rec until `until` without counting a defer (see the module
+    docstring). should_skip() skips it until then; a later cooldown the rec
+    already has is kept. Returns the updated entry."""
+    if not rec_id or not source_agent_id or until is None:
+        return {}
+    now = now or _now()
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    doc = _load(source_agent_id, storage=storage)
+    entry = doc["recs"].get(rec_id) or {}
+    entry.setdefault("count", 0)
+    try:
+        current = datetime.fromisoformat(entry.get("next_retry_at") or "")
+    except (TypeError, ValueError):
+        current = None
+    if current is None or current < until:
+        entry["next_retry_at"] = until.isoformat(timespec="seconds")
+    entry["held_until"] = until.isoformat(timespec="seconds")
+    entry["hold_reason"] = (reason or "")[:200]
+    entry["held_at"] = now.isoformat(timespec="seconds")
+    doc["recs"][rec_id] = entry
+    _save(source_agent_id, doc, storage=storage)
+    return entry
+
+
+def release_holds(
+    source_agent_id: str,
+    rec_ids: Optional[list] = None,
+    *,
+    storage: Optional[StorageBackend] = None,
+) -> int:
+    """Lift holds placed by hold(): for `rec_ids`, or every hold of the agent
+    when None. An entry that is only a hold is dropped. One that also has
+    real defers keeps its count and goes back to the cooldown those alone
+    give. Returns how many holds were lifted."""
+    if not source_agent_id:
+        return 0
+    doc = _load(source_agent_id, storage=storage)
+    wanted = None if rec_ids is None else {str(r) for r in rec_ids}
+    lifted = 0
+    for rid in list(doc["recs"]):
+        entry = doc["recs"][rid]
+        if (wanted is not None and rid not in wanted) or not isinstance(entry, dict) \
+                or "held_until" not in entry:
+            continue
+        lifted += 1
+        count = int(entry.get("count", 0) or 0)
+        if count <= 0:
+            del doc["recs"][rid]
+            continue
+        for k in ("held_until", "hold_reason", "held_at"):
+            entry.pop(k, None)
+        try:
+            last = datetime.fromisoformat(entry.get("last_deferred_at") or "")
+            entry["next_retry_at"] = (last + timedelta(seconds=_next_retry_seconds(count))
+                                      ).isoformat(timespec="seconds")
+        except (TypeError, ValueError):
+            entry["next_retry_at"] = ""
+    if lifted:
+        _save(source_agent_id, doc, storage=storage)
+    return lifted
 
 
 def summary(

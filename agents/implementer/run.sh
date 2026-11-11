@@ -2792,12 +2792,17 @@ esac
 #
 # Skipped automatically for data-only dispatch kinds (article-author,
 # article-refresh, catalog-audit, h2h, product-hydration) since those don't
-# need a docker build, and for batches whose commits touch only paths that
-# put nothing in the app image (db/migrations/**, changes/**, docs/**,
-# agents/**). Both lists live ONCE in framework/core/deploy_repair.py
-# (DATA_ONLY_KINDS, which dispatch.py's site-lock bypass also reads, and
-# NO_DEPLOY_PATH_GLOBS); DATA_ONLY_KINDS / DEPLOY_SKIP_PATHS in the
-# environment override them.
+# need a docker build. The list lives ONCE in framework/core/deploy_repair.py
+# (DATA_ONLY_KINDS, which dispatch.py's site-lock bypass also reads;
+# DATA_ONLY_KINDS in the environment overrides it), with a copy of the
+# default below for when the framework cannot be imported.
+#
+# Also skipped, only when configured (storage config/deploy-skip-paths.json,
+# or DEPLOY_SKIP_PATHS / DEPLOY_SKIP_PATHS_WHILE_RED), for a batch whose
+# commits touch only paths outside the app image, or only DB migrations
+# while the site's gate is red (deploy_repair.no_deploy_reason). A gate
+# probe batch (DEPLOY_GATE_PROBE=1, from dispatch_now) is never path-skipped:
+# it exists to re-run the red gate.
 #
 # Path note: deployer lives at agents/deployer/run.sh. The legacy
 # seo-deployer name + path is kept as a fallback so older clones
@@ -2838,38 +2843,74 @@ PY
 }
 
 # Prints "yes" when this dispatch kind never deploys (the shared
-# DATA_ONLY_KINDS list). Prints nothing on any error: deploy, as for app code.
-# REPO_ROOT goes first on sys.path: `python3 -c` puts the cwd ahead of
-# PYTHONPATH, and a cwd holding another framework checkout would shadow it.
+# DATA_ONLY_KINDS list). REPO_ROOT goes first on sys.path: `python3 -c` puts
+# the cwd ahead of PYTHONPATH, and a cwd holding another framework checkout
+# would shadow it. When the framework cannot answer (import error, no
+# python3) it falls back to the default list, so a data-only batch never
+# starts a deploy because of a helper failure. Keep that copy equal to
+# deploy_repair.DATA_ONLY_KINDS (framework/tests/test_deploy_repair.py checks).
 _deploy_skip_for_kind() {
-    DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" DEPLOY_SKIP_KIND_ARG="${1:-}" python3 -c '
+    local kind="${1:-}" out="" list
+    out=$(DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" DEPLOY_SKIP_KIND_ARG="$kind" python3 -c '
 import os, sys
 sys.path.insert(0, os.environ["DEPLOY_SKIP_REPO_ROOT"])
 from framework.core import deploy_repair as dr
-print("yes" if dr.kind_skips_deploy(os.environ.get("DEPLOY_SKIP_KIND_ARG", "")) else "")
-' 2>/dev/null || true
+print("yes" if dr.kind_skips_deploy(os.environ.get("DEPLOY_SKIP_KIND_ARG", "")) else "no")
+' 2>/dev/null) || out=""
+    case "$out" in
+        yes) echo "yes" ;;
+        no) ;;
+        *)
+            list=$(printf '%s' "${DATA_ONLY_KINDS:-article-author,article-refresh,catalog-audit,h2h,product-hydration}" | tr -d ' ')
+            if [ -n "$kind" ]; then
+                case ",$list," in
+                    *",$kind,"*) echo "yes" ;;
+                esac
+            fi
+            ;;
+    esac
+    return 0
 }
 
-# Prints why the commits <base>..<head> in <repo> need no deploy (every
-# changed path is in the shared NO_DEPLOY_PATH_GLOBS), or nothing when they
-# do. Nothing on any error (unknown base, git failure): deploy.
+# Prints why the commits <base>..<head> in <repo> need no deploy
+# (deploy_repair.no_deploy_reason for this site: off unless configured), or
+# nothing when they do. Nothing on any error (unknown base, git failure):
+# deploy. --no-renames: a file moved out of src/ must show its old path too.
 _no_deploy_reason_for_commits() {
     local repo="${1:-}" base="${2:-}" head="${3:-}"
     [ -n "$repo" ] && [ -n "$base" ] && [ -n "$head" ] || return 0
     local files
-    files=$(git -C "$repo" diff --name-only "$base" "$head" 2>/dev/null) || return 0
+    files=$(git -C "$repo" diff --no-renames --name-only "$base" "$head" 2>/dev/null) || return 0
     [ -n "$files" ] || return 0
-    printf '%s\n' "$files" | DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" python3 -c '
+    printf '%s\n' "$files" | DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" DEPLOY_SKIP_SITE="${RESPONDER_SITE:-}" python3 -c '
 import os, sys
 sys.path.insert(0, os.environ["DEPLOY_SKIP_REPO_ROOT"])
 from framework.core import deploy_repair as dr
-print(dr.no_deploy_reason(sys.stdin.read().splitlines()))
+print(dr.no_deploy_reason(sys.stdin.read().splitlines(), site=os.environ.get("DEPLOY_SKIP_SITE", "")))
 ' 2>/dev/null || true
+}
+
+# A gate probe batch (DEPLOY_GATE_PROBE=1: dispatch_now let it through a held,
+# red gate so the gate gets re-tested) that ends without running the deployer
+# gives the probe back, so the next app-code dispatch re-tests the gate
+# instead of waiting probe_every_h. Never fails.
+_release_gate_probe() {
+    [ "${DEPLOY_GATE_PROBE:-0}" = "1" ] || return 0
+    DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["DEPLOY_SKIP_REPO_ROOT"])
+from framework.core import deploy_repair as dr
+if dr.release_probe(os.environ.get("RESPONDER_SITE", ""),
+                    granted_at=os.environ.get("DEPLOY_GATE_PROBE_AT", "")):
+    print("[implementer] gate probe released: this batch did not run the deployer")
+' 2>/dev/null || true
+    return 0
 }
 
 DEPLOY_SKIP_KIND=$(_deploy_skip_for_kind "$DISPATCH_KIND")
 if [ -n "$DEPLOY_SKIP_KIND" ]; then
     echo "[implementer] $DISPATCH_KIND dispatch — skipping deployer chain (a data-only kind: it writes rows directly, nothing to build)"
+    _release_gate_probe
 elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
     # Per-batch deploy — fire after every batch, not waiting for chain
     # end. The _is_last_batch_in_chain helper is preserved (still used
@@ -2890,6 +2931,7 @@ elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; th
     fi
     if [ -n "$GIT_SHA_NOW" ] && [ "$GIT_SHA_NOW" = "${GIT_SHA_BEFORE:-}" ]; then
         echo "[implementer] no commits this batch (HEAD unchanged ${GIT_SHA_NOW:0:8}) — skipping deployer"
+        _release_gate_probe
         # CRITICAL: claude no-op'd (rec was already-deferred / no actionable
         # change). If we don't mark the source rec as deferred in
         # recommendations.json, the backlog-dispatcher will re-dispatch
@@ -2931,13 +2973,15 @@ if updated:
     print(f"[no-commit-mark] marked {updated} rec(s) as deferred in {key}")
 MARK_DEFERRED
         fi
-    elif NO_DEPLOY_WHY=$(_no_deploy_reason_for_commits "${IMPLEMENTER_REPO_PATH:-}" "${GIT_SHA_BEFORE:-}" "$GIT_SHA_NOW") \
+    elif [ "${DEPLOY_GATE_PROBE:-0}" != "1" ] \
+            && NO_DEPLOY_WHY=$(_no_deploy_reason_for_commits "${IMPLEMENTER_REPO_PATH:-}" "${GIT_SHA_BEFORE:-}" "$GIT_SHA_NOW") \
             && [ -n "$NO_DEPLOY_WHY" ]; then
-        # A DB-only lever's migration (already applied to the database by the
-        # implementer, committed as the record), a change summary, docs or the
-        # site's agent config: running the site's full gate for it only spends
-        # gate time, and on a red gate an Opus repair, on an image that did
-        # not change. The next app-code batch deploys whatever is pending.
+        # Configured paths only (off by default): change summaries, docs or
+        # the site's agent config, none of it in the app image; or, while
+        # the site's gate is red, a DB-only lever's migration (already
+        # applied to the database by the implementer, committed as the
+        # record) that cannot ship before the gate is green anyway. The
+        # next deploy carries these commits.
         echo "[implementer] $NO_DEPLOY_WHY — skipping deployer"
     else
         echo "[implementer] batch complete — chaining to deployer (site's pre-deploy gate, repair loop on red)"
@@ -2959,6 +3003,9 @@ MARK_DEFERRED
                 exit $rc
             }
     fi
+else
+    # No deployer (IMPLEMENTER_SKIP_DEPLOY=1 or no deployer script).
+    _release_gate_probe
 fi
 
 

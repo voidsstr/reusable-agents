@@ -43,13 +43,17 @@ decisions that turn a red gate into test -> fix -> retest -> deploy:
                          config/deploy-repair-config.json (top level, then
                          by_site.<site>).
   data_only_kinds()      the ONE list of dispatch kinds that never deploy
-  no_deploy_reason()     (dispatch.py's site-lock bypass, the implementer's
-                         deployer skip), and the paths whose changes need no
-                         deploy.
-  gate_hold()            whether a dispatch of an app-code kind should wait
+                         (dispatch.py's site-lock bypass, the implementer's
+                         deployer skip).
+  no_deploy_reason()     whether a batch's changed paths need no deploy
+                         (storage config/deploy-skip-paths.json, off unless
+                         configured there).
+  gate_hold()            whether a dispatch of an app-code batch should wait
                          because the site's gate has been red too long
                          (storage config/deploy-gate-hold.json, off unless
-                         enabled there).
+                         enabled there). release_probe() / release_holds()
+                         undo its bookkeeping when a probe never reached the
+                         gate, or the gate is green again.
 
 No site names, no cloud and no LLM client live here. The deployer owns the
 subprocesses; this module owns the decisions so they can be unit tested.
@@ -931,16 +935,6 @@ DATA_ONLY_KINDS: tuple[str, ...] = (
     "article-author", "article-refresh", "catalog-audit", "h2h", "product-hydration",
 )
 
-# Paths whose changes put nothing new in the app image: DB migrations (the
-# implementer applies DB-only changes to the database itself and commits the
-# migration as the record), change summaries, docs, and the site's own agent
-# code (read from disk by the agents, never served). A batch whose commits
-# touch only these skips the deployer. DEPLOY_SKIP_PATHS (comma-separated
-# globs, or "none") in the environment replaces the list.
-NO_DEPLOY_PATH_GLOBS: tuple[str, ...] = (
-    "db/migrations/**", "changes/**", "docs/**", "agents/**",
-)
-
 
 def data_only_kinds() -> frozenset[str]:
     raw = os.environ.get("DATA_ONLY_KINDS")
@@ -952,27 +946,137 @@ def kind_skips_deploy(kind: str) -> bool:
     return bool(kind) and kind.strip() in data_only_kinds()
 
 
-def no_deploy_path_globs() -> tuple[str, ...]:
-    raw = os.environ.get("DEPLOY_SKIP_PATHS")
+# Paths whose changes need no deploy of their own. OFF unless configured, in
+# storage config/deploy-skip-paths.json (top level, then by_site.<site>) or
+# the environment (DEPLOY_SKIP_PATHS / DEPLOY_SKIP_PATHS_WHILE_RED:
+# comma-separated globs, or "none"). Without it every batch with commits
+# deploys, as it always did. Two lists:
+#   globs            paths that are not in the site's app image at all: change
+#                    summaries, docs, the site's own agent code (read from disk
+#                    by the agents). Check a site's Dockerfile before listing a
+#                    path here. A batch whose commits touch only these skips
+#                    the deployer.
+#   while_red_globs  paths that ARE in the image but need no gate run of their
+#                    own while the site's gate is red. DB migrations: the
+#                    implementer applies a DB-only lever to the database itself
+#                    and commits the migration as the record, but the image
+#                    carries db/ and the app replays unrecorded migrations at
+#                    boot, so while the gate is green a migration-only batch
+#                    deploys as before and its own gate run checks that boot.
+#                    While the gate is red nothing can ship anyway. A gate run
+#                    for such a batch only spends gate time, and maybe an Opus
+#                    repair, on a failure it did not cause. The next gate run
+#                    tests the migration with everything else pending.
+SKIP_CONFIG_KEY = "config/deploy-skip-paths.json"
+
+
+def _env_globs(name: str) -> Optional[tuple[str, ...]]:
+    raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
-        return NO_DEPLOY_PATH_GLOBS
+        return None
     if raw.strip().lower() in ("none", "off", "0"):
         return ()
     return tuple(g.strip() for g in raw.split(",") if g.strip())
 
 
-def no_deploy_reason(paths: Iterable[str], globs: Optional[Iterable[str]] = None) -> str:
-    """Why the changed `paths` need no deploy, or "" when they do (or when
-    there are none: no evidence means deploy, as before)."""
+def load_skip_config(site: str = "", storage: Any = None) -> dict:
+    """{"globs": (...), "while_red_globs": (...)}: storage config (top level,
+    then by_site.<site>), then the environment overrides. A missing,
+    unreadable or archived config means both are empty: deploy, as before."""
+    out: dict[str, tuple[str, ...]] = {"globs": (), "while_red_globs": ()}
+    env = {"globs": _env_globs("DEPLOY_SKIP_PATHS"),
+           "while_red_globs": _env_globs("DEPLOY_SKIP_PATHS_WHILE_RED")}
+    if any(v is None for v in env.values()):
+        stored: Any = {}
+        try:
+            if storage is None:
+                from .storage import get_storage
+                storage = get_storage()
+            stored = storage.read_json(SKIP_CONFIG_KEY) or {}
+        except Exception:
+            stored = {}
+        layers = []
+        if isinstance(stored, dict):
+            layers.append(stored)
+            by_site = stored.get("by_site")
+            if site and isinstance(by_site, dict) and isinstance(by_site.get(site), dict):
+                layers.append(by_site[site])
+        for layer in layers:
+            for k in out:
+                v = layer.get(k)
+                if isinstance(v, list):
+                    out[k] = tuple(str(g).strip() for g in v if str(g).strip())
+    for k, v in env.items():
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def no_deploy_path_globs(site: str = "", storage: Any = None) -> tuple[str, ...]:
+    """The configured paths that are never in the app image (`globs`)."""
+    return load_skip_config(site, storage)["globs"]
+
+
+def no_deploy_reason(paths: Iterable[str], globs: Optional[Iterable[str]] = None, *,
+                     while_red_globs: Optional[Iterable[str]] = None,
+                     gate_red: Optional[bool] = None, site: str = "",
+                     storage: Any = None) -> str:
+    """Why the changed `paths` need no deploy, or "" when they do. Also ""
+    when nothing is configured (the default) or there are no paths (no
+    evidence means deploy, as before).
+
+    Every path must match `globs`, or match `while_red_globs` while the site's
+    gate is red (GateState.load(site); `gate_red` overrides that). Lists left
+    as None come from load_skip_config(site, storage)."""
     files = [p.strip() for p in paths if p and p.strip()]
-    pats = tuple(no_deploy_path_globs() if globs is None else globs)
-    if not files or not pats:
+    if not files:
         return ""
-    if not all(_glob_match(p, pats) for p in files):
+    if globs is None or while_red_globs is None:
+        sc = load_skip_config(site, storage)
+        globs = sc["globs"] if globs is None else globs
+        while_red_globs = sc["while_red_globs"] if while_red_globs is None else while_red_globs
+    always, red_only = tuple(globs), tuple(while_red_globs)
+    if not always and not red_only:
         return ""
     tops = sorted({p.lstrip("./").split("/", 1)[0] + "/" for p in files})
-    return (f"the batch's commits touch only {', '.join(tops)} ({len(files)} file(s)); "
-            f"nothing in the app image changed")
+    where = f"{', '.join(tops)} ({len(files)} file(s))"
+    if always and all(_glob_match(p, always) for p in files):
+        return (f"the batch's commits touch only {where}, which the deploy-skip config lists as "
+                f"outside the app image")
+    if not red_only or not all(_glob_match(p, always) or _glob_match(p, red_only) for p in files):
+        return ""
+    if gate_red is None:
+        try:
+            gate_red = bool(site) and GateState.load(site).status == "red"
+        except Exception:
+            gate_red = False
+    if not gate_red:
+        return ""
+    return (f"the batch's commits touch only {where} and the {site or 'site'} deploy gate is red: "
+            f"nothing can ship until it is green, and the next gate run tests these with "
+            f"everything else that is pending")
+
+
+# A rec its producer marked as needing no deploy: `db_only: true` (a database
+# change the implementer applies directly, committing the migration only as
+# the record), or a `dispatch_kind` that is data-only (data_only_kinds(), or
+# the generic "db-only"). gate_hold() lets a batch through when every rec in
+# it is marked: holding it would only delay a change that goes live without a
+# deploy (2026-11-09..11: 13 of the 50 commits one site made while its gate
+# was red were such levers, from four producers). The mark never skips the
+# deployer: whether the implementer's commits need a deploy is still decided
+# from what they touch (no_deploy_reason), so an app-code change a marked
+# batch makes anyway still goes through the gate.
+DB_ONLY_REC_KIND = "db-only"
+
+
+def rec_declares_data_only(rec: Any, extra_kinds: Iterable[str] = ()) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("db_only") is True:
+        return True
+    k = str(rec.get("dispatch_kind") or "").strip()
+    return bool(k) and (k == DB_ONLY_REC_KIND or k in data_only_kinds() or k in set(extra_kinds))
 
 
 # ---------------------------------------------------------------------------
@@ -983,10 +1087,17 @@ def no_deploy_reason(paths: Iterable[str], globs: Optional[Iterable[str]] = None
 # code change could fix. Every app-code dispatch still ran an Opus
 # implementer session, then waited 40-70 minutes in the gate and exited rc=1
 # (9 such runs and 3 reaped as stale in half a day). gate_hold() is the
-# decision dispatch_now() asks before spawning one: hold app-code kinds once
-# the site's gate has been red for `red_for_h`, let data-only kinds through,
+# decision dispatch_now() asks before spawning one: hold app-code batches once
+# the site's gate has been red for `red_for_h`; let data-only kinds, and
+# batches whose every rec is marked DB-only (rec_declares_data_only), through;
 # and let one dispatch through every `probe_every_h` so the gate is re-tested
 # (nothing else re-runs it, and a red that is never re-tested never clears).
+# A probe counts as spent once a gate verdict follows it. One that got none
+# within `probe_grace_h` (the batch failed, or never reached the deployer) is
+# granted again; dispatch_now() and the implementer also give a probe back
+# when they know it will not reach the gate (release_probe). A held rec is
+# parked in defer_backoff for `hold_retry_h` (not a counted defer), and
+# release_holds() lifts the parked recs once the gate is green.
 #
 # OFF unless the storage config enables it. The hold changes what every
 # producer's dispatch does, and it reads the deployer's local gate-state
@@ -999,6 +1110,10 @@ HOLD_DEFAULTS: dict[str, Any] = {
     "enabled": False,
     "red_for_h": 6.0,
     "probe_every_h": 4.0,
+    # Longer than an implementer session plus a gate run with its repair
+    # loop, so a probe still in flight is not granted twice.
+    "probe_grace_h": 3.0,
+    "hold_retry_h": 1.0,
     "pass_kinds": [],
 }
 
@@ -1012,6 +1127,9 @@ class HoldDecision:
     kind: str = ""
     red_since: str = ""
     red_for_h: float = 0.0
+    gate_status: str = ""  # the site's gate status seen: green | red | unknown ("" = not checked)
+    probe_at: str = ""     # when a granted probe was recorded (release_probe names it)
+    retry_at: str = ""     # a held batch's recs are parked in defer_backoff until then
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1050,31 +1168,40 @@ def _last_gate_verdict_at(st: GateState) -> Optional[datetime]:
     return max(times) if times else _parse_iso(st.red_since)
 
 
-def gate_hold(site: str, kind: str, *, subject_tag: str = "", storage: Any = None,
-              now: Optional[datetime] = None, state: Optional[GateState] = None,
-              grant_probe: bool = True) -> HoldDecision:
+def gate_hold(site: str, kind: str, *, subject_tag: str = "", recs: Optional[Iterable[dict]] = None,
+              storage: Any = None, now: Optional[datetime] = None,
+              state: Optional[GateState] = None, grant_probe: bool = True) -> HoldDecision:
     """Should a dispatch of `kind` for `site` wait for the gate?
 
     Holds only when the hold is enabled, the kind is not data-only (by the
-    implementer's kind or the caller's subject_tag), the site's gate is red
-    and has been for red_for_h, and no probe is due. Any error means no hold:
-    the dispatch then behaves exactly as it did before this existed."""
+    implementer's kind or the caller's subject_tag), not every rec in `recs`
+    (the dispatched recs) is marked DB-only, the site's gate is red and has
+    been for red_for_h, and no probe is due. Any error means no hold: the
+    dispatch then behaves exactly as it did before this existed."""
     try:
         cfg = load_hold_config(site, storage)
         if not cfg.get("enabled") or not site:
             return HoldDecision(False, site=site, kind=kind)
+        st = state if state is not None else GateState.load(site)
+        gate = st.status or "unknown"
         passing = set(data_only_kinds()) | {str(k).strip() for k in (cfg.get("pass_kinds") or [])}
         if (kind or "").strip() in passing or (subject_tag or "").strip() in passing:
-            return HoldDecision(False, site=site, kind=kind)
-        st = state if state is not None else GateState.load(site)
+            return HoldDecision(False, site=site, kind=kind, gate_status=gate)
         since = _parse_iso(st.red_since)
         if st.status != "red" or since is None:
-            return HoldDecision(False, site=site, kind=kind)
+            return HoldDecision(False, site=site, kind=kind, gate_status=gate)
         now = now or _now()
         red_h = (now - since).total_seconds() / 3600.0
         base = HoldDecision(False, site=site, kind=kind, red_since=st.red_since,
-                            red_for_h=round(red_h, 1))
+                            red_for_h=round(red_h, 1), gate_status=gate)
         if red_h < float(cfg.get("red_for_h", HOLD_DEFAULTS["red_for_h"])):
+            return base
+        # Every rec marked DB-only: let it through without spending the probe
+        # (it may never reach the gate).
+        batch = list(recs or [])
+        if batch and all(rec_declares_data_only(r, passing) for r in batch):
+            base.reason = (f"all {len(batch)} rec(s) in the batch are marked DB-only "
+                           f"(db_only / a data-only dispatch_kind): not held by the red {site} gate")
             return base
         probe_s = float(cfg.get("probe_every_h", HOLD_DEFAULTS["probe_every_h"])) * 3600.0
         if probe_s > 0:
@@ -1088,13 +1215,18 @@ def gate_hold(site: str, kind: str, *, subject_tag: str = "", storage: Any = Non
             except Exception:
                 doc = {}
             last_probe = _parse_iso(str((doc or {}).get("last_probe_at") or ""))
-            if ((now - last_gate).total_seconds() >= probe_s
-                    and (last_probe is None or (now - last_probe).total_seconds() >= probe_s)):
+            grace_s = float(cfg.get("probe_grace_h", HOLD_DEFAULTS["probe_grace_h"])) * 3600.0
+            # The last probe is spent once a gate verdict follows it; one that
+            # got no verdict within the grace never reached the gate.
+            probe_free = (last_probe is None or last_gate >= last_probe
+                          or (now - last_probe).total_seconds() >= grace_s)
+            if (now - last_gate).total_seconds() >= probe_s and probe_free:
                 if grant_probe:
                     try:
                         doc = doc if isinstance(doc, dict) else {}
                         doc["last_probe_at"] = _iso(now)
                         storage.write_json(_hold_state_key(site), doc)
+                        base.probe_at = doc["last_probe_at"]
                     except Exception:
                         pass
                 base.probe = True
@@ -1103,10 +1235,13 @@ def gate_hold(site: str, kind: str, *, subject_tag: str = "", storage: Any = Non
                                f"this dispatch through so the gate is re-tested")
                 return base
         base.hold = True
+        retry_h = float(cfg.get("hold_retry_h", HOLD_DEFAULTS["hold_retry_h"]))
+        base.retry_at = _iso(now + timedelta(hours=max(retry_h, 0.05)))
         base.reason = (f"the {site} deploy gate has been red for {red_h:.0f}h "
                        f"(since {st.red_since}; {st.last_reason or 'no reason recorded'}). "
-                       f"App-code dispatches wait until it is green; data-only kinds "
-                       f"({', '.join(sorted(passing))}) still run, so prefer DB-only levers")
+                       f"App-code dispatches wait until it is green. Data-only kinds "
+                       f"({', '.join(sorted(passing))}) still run, and so does a batch whose every "
+                       f"rec is marked db_only: true, so prefer DB-only levers and mark them db_only")
         return base
     except Exception:
         return HoldDecision(False, site=site, kind=kind)
@@ -1121,10 +1256,35 @@ def gate_hold_status(site: str, *, storage: Any = None, now: Optional[datetime] 
     return out
 
 
+def release_probe(site: str, *, granted_at: str, storage: Any = None) -> bool:
+    """Give back the probe granted at `granted_at` when it will not reach the
+    gate (the dispatch failed; the batch made no commit or skipped the
+    deployer), so the next app-code dispatch re-tests the gate instead of
+    waiting probe_every_h. A newer probe is left alone. Best-effort; True when
+    the probe was released."""
+    try:
+        if not site or not granted_at:
+            return False
+        if storage is None:
+            from .storage import get_storage
+            storage = get_storage()
+        key = _hold_state_key(site)
+        doc = storage.read_json(key) or {}
+        if not isinstance(doc, dict) or str(doc.get("last_probe_at") or "") != granted_at:
+            return False
+        doc.pop("last_probe_at", None)
+        doc["probes_released"] = int(doc.get("probes_released") or 0) + 1
+        storage.write_json(key, doc)
+        return True
+    except Exception:
+        return False
+
+
 def record_hold(site: str, *, agent_id: str, rec_ids: Iterable[str], kind: str, reason: str,
                 storage: Any = None, now: Optional[datetime] = None) -> None:
     """Note a held dispatch in framework storage (newest 50), best-effort,
-    so an operator or KTLO tick can see what waited and why."""
+    so an operator or KTLO tick can see what waited and why. `parked` lists
+    the recs whose defer_backoff hold release_holds() lifts on green."""
     try:
         if storage is None:
             from .storage import get_storage
@@ -1133,11 +1293,43 @@ def record_hold(site: str, *, agent_id: str, rec_ids: Iterable[str], kind: str, 
         doc = storage.read_json(key) or {}
         if not isinstance(doc, dict):
             doc = {}
+        ids = [str(r) for r in rec_ids]
         held = doc.get("held") if isinstance(doc.get("held"), list) else []
         held.append({"at": _iso(now or _now()), "agent_id": agent_id,
-                     "rec_ids": list(rec_ids)[:20], "kind": kind, "reason": reason[:300]})
+                     "rec_ids": ids[:20], "kind": kind, "reason": reason[:300]})
         doc["held"] = held[-50:]
         doc["held_total"] = int(doc.get("held_total") or 0) + 1
+        parked = doc.get("parked") if isinstance(doc.get("parked"), dict) else {}
+        parked[agent_id] = sorted(set(parked.get(agent_id) or []) | set(ids))[-200:]
+        doc["parked"] = parked
         storage.write_json(key, doc)
     except Exception:
         pass
+
+
+def release_holds(site: str, *, storage: Any = None) -> int:
+    """The site's gate is green (or no longer red): lift the defer_backoff
+    holds put on its held recs (record_hold's `parked`), so they, and later
+    recs that reuse their ids, dispatch now instead of at their retry time.
+    Best-effort; returns the number of holds lifted."""
+    try:
+        if not site:
+            return 0
+        if storage is None:
+            from .storage import get_storage
+            storage = get_storage()
+        key = _hold_state_key(site)
+        doc = storage.read_json(key) or {}
+        parked = doc.get("parked") if isinstance(doc, dict) and isinstance(doc.get("parked"), dict) else {}
+        if not parked:
+            return 0
+        from . import defer_backoff
+        lifted = 0
+        for agent_id, rec_ids in parked.items():
+            lifted += defer_backoff.release_holds(agent_id, list(rec_ids or []), storage=storage)
+        doc["parked"] = {}
+        doc["released_at"] = _iso(_now())
+        storage.write_json(key, doc)
+        return lifted
+    except Exception:
+        return 0

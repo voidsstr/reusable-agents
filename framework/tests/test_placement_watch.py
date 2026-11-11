@@ -413,3 +413,130 @@ def test_tracker_survives_a_failing_watch(monkeypatch, storage):
         raise RuntimeError("db went away")
     monkeypatch.setattr(pw, "watch_site", boom)
     assert mod.run_placement_watch("specpicks", dict(mod.SITE_PROFILES["specpicks"])) is None
+
+
+# ---------------------------------------------------------------------------
+# Sparse placements: judged from the point a total collapse could flag
+# ---------------------------------------------------------------------------
+
+def _flat(per_window, start=T0, days=14):
+    """per_window clicks in hour 12 of each day: a 24 h window holds exactly that many."""
+    return {start + timedelta(days=d, hours=12): per_window for d in range(days)}
+
+
+def test_the_sparse_floor_is_where_a_total_collapse_could_reach_min_z():
+    assert pw.sparse_floor(CFG) == 6.25                                 # min_z 2.5 squared
+    assert pw.sparse_floor({**CFG, "min_z": 2.0}) == 4.0
+    assert pw.sparse_floor({**CFG, "min_baseline_clicks": 8}) == 8.0     # a higher floor still wins
+    a = T0 + timedelta(days=10)
+    seven = _flat(7)
+    assert pw._stats(seven, a, 24, CFG)["status"] == "ok"               # mean 7: judged now (was sparse at 8)
+    gone = {h: (0 if h >= a else n) for h, n in seven.items()}
+    st = pw._stats(gone, a, 24, CFG)
+    assert st["status"] == "drop" and st["z"] >= 2.5                    # a total collapse is caught
+    one_left = {h: (1 if h >= a else n) for h, n in seven.items()}
+    assert pw._stats(one_left, a, 24, CFG)["status"] == "ok"            # only a near-total collapse flags
+    assert pw._stats(_flat(6), a, 24, CFG)["status"] == "sparse"        # z could never reach 2.5
+    assert pw._stats({h: 0 for h in _flat(6)}, a, 24, CFG)["status"] == "sparse"
+
+
+# ---------------------------------------------------------------------------
+# The live CLI the deployer starts after every gated run
+# ---------------------------------------------------------------------------
+
+LIVE_CFG = {"sites": {"site-a": {k: v for k, v in CFG.items() if k not in pw.DEFAULTS}}}
+
+
+@pytest.fixture
+def live(storage, monkeypatch):
+    import psycopg2
+    calls = []
+    monkeypatch.setenv("DATABASE_URL_SITE_A", "test-dsn-placeholder")
+    monkeypatch.setattr(psycopg2, "connect", lambda *a, **k: (calls.append(("connect", a, k)) or _RoConnPW()))
+
+    def fake_watch(site, **kw):
+        calls.append(("watch", site, kw))
+        return {"site": site, "anchor": None, "pending": []}
+    monkeypatch.setattr(pw, "watch_site", fake_watch)
+    return calls
+
+
+class _RoConnPW:
+    def set_session(self, **kw):
+        self.session = kw
+
+    def close(self):
+        pass
+
+
+def test_cli_live_records_and_emails_through_watch_site(storage, live):
+    storage.write_json(pw.CONFIG_KEY, LIVE_CFG)
+    assert pw.main(["--site", "site-a", "--live", "--min-interval-m", "55",
+                    "--email-json", json.dumps(EMAIL)]) == 0
+    (_, _, ck), (_, site, kw) = live
+    assert site == "site-a" and kw["dry_run"] is False and kw["email"] == EMAIL
+    assert "statement_timeout" in ck.get("options", "")
+    assert pw.main(["--site", "site-a"]) == 0 and live[-1][2]["dry_run"] is True     # no --live: a dry run
+
+
+def test_cli_live_skips_a_site_evaluated_within_the_interval(storage, live):
+    storage.write_json(pw.CONFIG_KEY, LIVE_CFG)
+    storage.write_json(pw.state_key("site-a"), {"last_run": {
+        "at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()}})
+    assert pw.main(["--site", "site-a", "--live", "--min-interval-m", "55"]) == 0
+    assert live == []                                                    # no DB connection, no evaluation
+    assert pw.main(["--site", "site-a", "--live", "--min-interval-m", "15"]) == 0
+    assert [c[0] for c in live] == ["connect", "watch"]
+
+
+def test_cli_live_refuses_backtest_inputs_and_skips_unwatched_sites(storage, live, tmp_path):
+    storage.write_json(pw.CONFIG_KEY, LIVE_CFG)
+    f = tmp_path / "cfg.json"
+    f.write_text(json.dumps(LIVE_CFG))
+    for extra in (["--config", str(f)], ["--tags-repo", str(tmp_path)], ["--as-of", "2026-11-11T12:00:00Z"]):
+        assert pw.main(["--site", "site-a", "--live", *extra]) == 2
+    assert pw.main(["--site", "site-a", "--live", "--email-json", "{not json"]) == 2
+    assert pw.main(["--site", "site-z", "--live"]) == 0                  # not watched: nothing to do
+    assert pw.main(["--site", "site-z"]) == 1
+    assert live == []
+
+
+def test_deployer_starts_the_live_watch_in_the_background(monkeypatch, tmp_path):
+    import importlib.util as iu
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "agents" / "deployer" / "deployer.py"
+    spec = iu.spec_from_file_location("deployer_pw_test", path)
+    d = iu.module_from_spec(spec)
+    spec.loader.exec_module(d)
+    started = []
+    monkeypatch.setattr(d.subprocess, "Popen", lambda cmd, **kw: started.append((cmd, kw)))
+    monkeypatch.setenv("FRAMEWORK_DISPATCH_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("PLACEMENT_WATCH_AFTER_DEPLOY", raising=False)
+
+    class Cfg(dict):
+        site_id = "site-a"
+    d._kick_placement_watch(Cfg(reporter={"email": EMAIL}))
+    (cmd, kw), = started
+    assert cmd[1:5] == ["-m", "framework.core.placement_watch", "--site", "site-a"]
+    assert "--live" in cmd and cmd[cmd.index("--min-interval-m") + 1] == "55"
+    assert json.loads(cmd[cmd.index("--email-json") + 1]) == EMAIL
+    root = str(Path(__file__).resolve().parents[2])
+    assert kw["cwd"] == root and kw["env"]["PYTHONPATH"].split(":")[0] == root
+    assert kw["start_new_session"] is True and kw["stdin"] is d.subprocess.DEVNULL
+    assert (tmp_path / "placement-watch-site-a.log").exists()
+    monkeypatch.setenv("PLACEMENT_WATCH_AFTER_DEPLOY", "0")
+    d._kick_placement_watch(Cfg())
+    assert len(started) == 1
+    monkeypatch.delenv("PLACEMENT_WATCH_AFTER_DEPLOY")
+
+    def boom(cmd, **kw):
+        raise OSError("no fork")
+    monkeypatch.setattr(d.subprocess, "Popen", boom)
+    d._kick_placement_watch(Cfg())                                       # never raises into the deploy
+
+
+def test_deployer_runs_the_watch_only_after_gated_runs():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[2] / "agents" / "deployer" / "deployer.py").read_text()
+    tail = text[text.rindex("    finally:"):]
+    assert "if not args.dry_run and not args.skip_test:\n            _kick_placement_watch(cfg)" in tail

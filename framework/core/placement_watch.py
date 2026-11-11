@@ -19,8 +19,11 @@ deploy (up to `max_window_h`) and on the same clock hours of each of the
 `baseline_days` days before it. A placement is flagged when the window is at
 least `drop_threshold` below the baseline mean AND the drop is unlikely to be
 noise: z = (mean - window) / sqrt(max(mean, sample variance of the baseline
-windows)) >= `min_z`. Placements whose baseline mean is under
-`min_baseline_clicks` are too sparse to judge and are skipped.
+windows)) >= `min_z`. Since the spread is at least sqrt(mean), z can never
+pass sqrt(mean), so a placement whose baseline mean is under min_z**2 (6.25
+at min_z 2.5) could not be flagged even at zero clicks: it is reported as
+`sparse` instead of a misleading `ok`. `min_baseline_clicks` can raise that
+floor. Just above it only a near-total collapse flags.
 
 A flagged placement opens ONE incident (framework/placement-watch/<site>.json)
 and the operator gets ONE email listing the deploys in the window; the
@@ -50,10 +53,15 @@ Everything per site is DATA (storage config `config/placement-watch-config.json`
       }
     }
 
-A site with no entry is not watched. Consumers: agents/site-goals-tracker
-(daily, after its metrics) through watch_site(); `python3 -m
-framework.core.placement_watch --site <site>` prints an evaluation and never
-writes or emails.
+A site with no entry is not watched. Consumers:
+  * agents/deployer/deployer.py starts `python3 -m framework.core.placement_watch
+    --site <site> --live --min-interval-m 55` in the background after every
+    deployer run, red or green. A busy site gets an evaluation every hour or
+    few, so a drop is flagged within the day (hourly evaluation flags a 50%
+    pdp-hero drop 10-19 h after it starts).
+  * agents/site-goals-tracker runs watch_site() daily after its metrics: the
+    backstop when nothing has gone through the deployer.
+Without --live the CLI prints an evaluation and never writes or emails.
 """
 from __future__ import annotations
 
@@ -88,8 +96,10 @@ DEFAULTS: dict[str, Any] = {
     # ...and this many standard deviations below it (Poisson or the
     # baseline's own spread, whichever is wider).
     "min_z": 2.5,
-    # Placements with a smaller baseline mean per window are not judged.
-    "min_baseline_clicks": 8,
+    # Placements with a smaller baseline mean per window are not judged. The
+    # floor is never below min_z**2: under it even zero clicks cannot reach
+    # min_z, so 0 here means exactly that floor.
+    "min_baseline_clicks": 0,
     # Closed incidents kept in the state blob.
     "max_incidents_kept": 50,
 }
@@ -288,6 +298,13 @@ def _window_sum(hours: Mapping[datetime, int], a: datetime, n_hours: int) -> int
     return sum(hours.get(a + timedelta(hours=i), 0) for i in range(n_hours))
 
 
+def sparse_floor(cfg: Mapping) -> float:
+    """The smallest baseline mean per window that is judged: min_z**2 (below
+    it z cannot reach min_z even at zero clicks), or min_baseline_clicks if
+    that is higher."""
+    return max(float(cfg.get("min_baseline_clicks") or 0), float(cfg["min_z"]) ** 2)
+
+
 def _stats(hours: Mapping[datetime, int], a: datetime, n_hours: int, cfg: Mapping) -> dict:
     after = _window_sum(hours, a, n_hours)
     k0 = max(1, math.ceil(n_hours / 24))
@@ -298,7 +315,7 @@ def _stats(hours: Mapping[datetime, int], a: datetime, n_hours: int, cfg: Mappin
     sd = math.sqrt(max(mean, var))
     drop = (1.0 - after / mean) if mean > 0 else 0.0
     z = ((mean - after) / sd) if sd > 0 else 0.0
-    if mean < float(cfg["min_baseline_clicks"]):
+    if mean < sparse_floor(cfg):
         status = "sparse"
     elif drop >= float(cfg["drop_threshold"]) and z >= float(cfg["min_z"]):
         status = "drop"
@@ -591,8 +608,30 @@ def summary_lines(result: Mapping) -> list[str]:
     return out
 
 
+def last_run_age_m(site: str, *, storage: Any = None, now: Optional[datetime] = None) -> Optional[float]:
+    """Minutes since this site's last recorded evaluation (the state blob's
+    last_run.at, written by every live or tracker run), or None when there
+    is none or it cannot be read."""
+    try:
+        if storage is None:
+            from .storage import get_storage
+            storage = get_storage()
+        state = storage.read_json(state_key(site)) or {}
+        last = state.get("last_run") if isinstance(state, dict) else None
+        at = _parse_iso((last or {}).get("at") if isinstance(last, dict) else None)
+    except Exception:
+        return None
+    if at is None:
+        return None
+    return ((now or _now()) - at).total_seconds() / 60.0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    """Print one evaluation. Never writes storage, never emails."""
+    """Print one evaluation. Without --live it never writes storage and never
+    emails. --live (the deployer's background run) records incidents and
+    sends the alert email the way the tracker does, at most once per
+    --min-interval-m, from the stored config, the gate-state deploy log and
+    the current time only."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--site", required=True)
     ap.add_argument("--as-of", default="", help="evaluate as of this ISO time (default now)")
@@ -602,23 +641,43 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "repo instead of the gate-state log (backtests)")
     ap.add_argument("--config", default="", help="a local JSON file in the storage config's shape, "
                     "instead of the storage copy")
+    ap.add_argument("--live", action="store_true", help="record incidents and send the alert email")
+    ap.add_argument("--min-interval-m", type=float, default=0.0,
+                    help="with --live: skip when this site was evaluated less than this many minutes ago")
+    ap.add_argument("--email-json", default="", help="with --live: the site's reporter.email block, as JSON")
     a = ap.parse_args(argv)
     import json
-    import psycopg2
+    if a.live and (a.config or a.tags_repo or a.as_of):
+        print("--live judges the stored config, the gate-state deploy log and the current time only; "
+              "drop --config / --tags-repo / --as-of", file=sys.stderr)
+        return 2
+    try:
+        email = json.loads(a.email_json) if a.email_json else {}
+    except ValueError:
+        print("--email-json is not valid JSON", file=sys.stderr)
+        return 2
     cfg = site_config(a.site, config=json.load(open(a.config)) if a.config else None)
     if not cfg:
         print(f"no entry for {a.site} in {CONFIG_KEY}", file=sys.stderr)
-        return 1
+        return 0 if a.live else 1
+    if a.live and a.min_interval_m > 0:
+        age = last_run_age_m(a.site)
+        if age is not None and age < a.min_interval_m:
+            print(f"{a.site}: evaluated {age:.0f} min ago (interval {a.min_interval_m:g} min); skipped")
+            return 0
     dsn = os.environ.get(a.dsn_env or f"DATABASE_URL_{a.site.upper().replace('-', '_')}", "")
     if not dsn:
         print("no DSN in the environment", file=sys.stderr)
         return 1
     now = _parse_iso(a.as_of) or _now()
-    conn = psycopg2.connect(dsn, connect_timeout=20)
+    import psycopg2
+    # A hung query must not leave the deployer's background run behind.
+    conn = psycopg2.connect(dsn, connect_timeout=20, options="-c statement_timeout=120000")
     try:
         conn.set_session(readonly=True, autocommit=True)
         deploys = deploys_from_release_tags(a.tags_repo, a.site) if a.tags_repo else None
-        res = watch_site(a.site, conn=conn, cfg=cfg, now=now, deploys=deploys, dry_run=True)
+        res = watch_site(a.site, conn=conn, cfg=cfg, now=now, deploys=deploys,
+                         email=email if isinstance(email, dict) else {}, dry_run=not a.live)
     finally:
         conn.close()
     for line in summary_lines(res):

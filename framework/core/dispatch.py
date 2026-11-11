@@ -32,7 +32,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -66,9 +66,10 @@ class DispatchTransient(Exception):
 
 class DispatchHeld(DispatchError):
     """Not dispatched: the site's deploy gate has been red too long for an
-    app-code kind (deploy_repair.gate_hold). Nothing was spawned, queued or
-    emailed; each rec got a defer_backoff entry so the backlog-dispatcher
-    retries it later instead of every tick. Not a failure."""
+    app-code batch (deploy_repair.gate_hold). Nothing was spawned, queued or
+    emailed; each rec is parked in defer_backoff until decision.retry_at (a
+    hold, not a counted defer) so the backlog-dispatcher retries it later
+    instead of every tick. Not a failure."""
 
     def __init__(self, decision):
         self.decision = decision
@@ -147,7 +148,7 @@ def gated_dispatch_now(
       * None when auto_implement=false (the email path takes over)
       * None when the deploy-gate hold kept an app-code batch back
         (dispatch_now raised DispatchHeld; the decision is logged on
-        `agent` and the recs get a defer_backoff entry)
+        `agent` and the recs are parked in defer_backoff)
     """
     auto_implement = True
     if cfg is not None and hasattr(cfg, "get"):
@@ -237,10 +238,33 @@ def dispatch_kind_for(run_dir: str = "") -> str:
     return "seo"
 
 
+def _batch_recs(run_dir: str, rec_ids: list[str]) -> list[dict]:
+    """The dispatched recs from <run_dir>/recommendations.json (all of them
+    when rec_ids is empty). A rec id that is not in the file comes back as
+    {}: an unmarked rec, so the hold judges the batch as app code."""
+    try:
+        doc = json.loads((Path(run_dir) / "recommendations.json").read_text()) if run_dir else {}
+    except Exception:
+        return [{} for _ in rec_ids]
+    recs = doc.get("recommendations") if isinstance(doc, dict) else doc
+    recs = [r for r in (recs if isinstance(recs, list) else []) if isinstance(r, dict)]
+    if not rec_ids:
+        return recs
+    by_id: dict[str, dict] = {}
+    for r in recs:
+        for k in ("id", "rec_id", "rec_uid"):
+            if r.get(k) is not None:
+                by_id.setdefault(str(r[k]), r)
+    return [by_id.get(str(rid), {}) for rid in rec_ids]
+
+
 def _deploy_gate_hold(*, site: str, agent_id: str, run_dir: str, rec_ids: list[str],
                       subject_tag: str):
-    """The deploy-gate hold decision for this batch, or None to dispatch.
-    Fails open: any error dispatches exactly as before the hold existed."""
+    """The deploy-gate hold decision for this batch (a HoldDecision), or None
+    when the check failed: any error dispatches exactly as before the hold
+    existed. A held batch's recs are parked in defer_backoff until
+    decision.retry_at, and the hold is recorded so release_holds() can lift
+    them; seeing the site's gate not red lifts earlier holds."""
     try:
         from . import deploy_repair as _dr
         kind = dispatch_kind_for(run_dir)
@@ -248,20 +272,29 @@ def _deploy_gate_hold(*, site: str, agent_id: str, run_dir: str, rec_ids: list[s
         for suffix, k in _PRODUCER_KIND_SUFFIXES:
             if agent_id.endswith(suffix) and _dr.kind_skips_deploy(k):
                 kind = k
-        decision = _dr.gate_hold(site, kind, subject_tag=subject_tag)
+        decision = _dr.gate_hold(site, kind, subject_tag=subject_tag,
+                                 recs=_batch_recs(run_dir, rec_ids))
     except Exception as e:
         _log(f"[dispatch] deploy-gate hold check failed ({e}); dispatching as usual")
         return None
-    if decision.probe:
+    if decision.gate_status and decision.gate_status != "red":
+        try:
+            lifted = _dr.release_holds(site)
+            if lifted:
+                _log(f"[dispatch] the {site} gate is {decision.gate_status}: lifted {lifted} deploy-gate hold(s)")
+        except Exception:
+            pass
+    if decision.reason and not decision.hold:
         _log(f"[dispatch] {decision.reason} ({agent_id} {rec_ids})")
     if not decision.hold:
-        return None
+        return decision
     try:
         from . import defer_backoff
+        until = _parse_utc(decision.retry_at) or (datetime.now(timezone.utc) + timedelta(hours=1))
         for rid in rec_ids:
-            defer_backoff.record_defer(rid, agent_id, f"deploy-gate-hold: {decision.reason}")
+            defer_backoff.hold(rid, agent_id, until, f"deploy-gate-hold: {decision.reason}")
     except Exception as e:
-        _log(f"[dispatch] defer_backoff record failed for held recs: {e}")
+        _log(f"[dispatch] defer_backoff hold failed for held recs: {e}")
     try:
         _dr.record_hold(site, agent_id=agent_id, rec_ids=rec_ids, kind=kind,
                         reason=decision.reason)
@@ -269,6 +302,23 @@ def _deploy_gate_hold(*, site: str, agent_id: str, run_dir: str, rec_ids: list[s
         pass
     _log(f"[dispatch] HELD {agent_id} recs={rec_ids} kind={kind} site={site}: {decision.reason}")
     return decision
+
+
+def _parse_utc(s: str) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(str(s or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _probe_env(decision) -> dict:
+    """Implementer env for a batch the hold let through as the gate probe:
+    run.sh then never skips the deployer for it on its paths, and gives the
+    probe back (deploy_repair.release_probe) when it ends without one."""
+    if decision is None or not decision.probe or not decision.probe_at:
+        return {}
+    return {"DEPLOY_GATE_PROBE": "1", "DEPLOY_GATE_PROBE_AT": decision.probe_at}
 
 
 def dispatch_now(
@@ -295,10 +345,13 @@ def dispatch_now(
     Deploy-gate hold (deploy_repair.gate_hold, storage
     config/deploy-gate-hold.json, off unless enabled there): while the site's
     gate has been red for `red_for_h`, an app-code batch raises DispatchHeld
-    before anything is spawned, queued or emailed, and each rec gets a
-    defer_backoff entry. Data-only kinds always pass, and one dispatch per
-    `probe_every_h` passes so the gate gets re-tested. honor_gate_hold=False
-    skips the check (an operator forcing a dispatch).
+    before anything is spawned, queued or emailed, and each rec is parked in
+    defer_backoff until the hold's retry time. Data-only kinds and batches
+    whose every rec is marked DB-only (`db_only: true`) always pass, and one
+    dispatch per `probe_every_h` passes so the gate gets re-tested: that
+    batch's implementer gets DEPLOY_GATE_PROBE=1, and the probe is given back
+    if the dispatch fails here. honor_gate_hold=False skips the check (an
+    operator forcing a dispatch).
 
     Resilience:
       - Acquires a SITE-LEVEL lock. Two dispatches against the same site
@@ -321,12 +374,42 @@ def dispatch_now(
     if not Path(run_dir).is_dir():
         raise DispatchError(f"run_dir does not exist: {run_dir}")
 
+    gate = None
     if honor_gate_hold:
-        held = _deploy_gate_hold(site=site, agent_id=agent_id, run_dir=run_dir,
+        gate = _deploy_gate_hold(site=site, agent_id=agent_id, run_dir=run_dir,
                                  rec_ids=rec_ids, subject_tag=subject_tag)
-        if held is not None:
-            raise DispatchHeld(held)
+        if gate is not None and gate.hold:
+            raise DispatchHeld(gate)
+    probe_env = _probe_env(gate)
+    try:
+        return _dispatch_unheld(
+            agent_id=agent_id, run_dir=run_dir, rec_ids=rec_ids, action=action, site=site,
+            subject_tag=subject_tag, implementer_script=implementer_script,
+            batch_index=batch_index, batch_total=batch_total, request_id=request_id,
+            max_retries=max_retries, fallback_to_queue=fallback_to_queue,
+            notify_on_failure=notify_on_failure, lock_timeout_s=lock_timeout_s,
+            implementer_backend=implementer_backend, extra_env=probe_env)
+    except Exception:
+        # The probe never reached an implementer: give it back so the next
+        # app-code dispatch re-tests the gate instead of waiting probe_every_h.
+        if probe_env:
+            try:
+                from .deploy_repair import release_probe
+                if release_probe(site, granted_at=probe_env["DEPLOY_GATE_PROBE_AT"]):
+                    _log(f"[dispatch] the {site} gate probe was not used (dispatch failed); released")
+            except Exception:
+                pass
+        raise
 
+
+def _dispatch_unheld(*, agent_id: str, run_dir: str, rec_ids: list[str], action: str,
+                     site: str, subject_tag: str, implementer_script: Optional[str],
+                     batch_index: int, batch_total: int, request_id: str, max_retries: int,
+                     fallback_to_queue: bool, notify_on_failure: bool, lock_timeout_s: int,
+                     implementer_backend: Optional[str],
+                     extra_env: Optional[dict] = None) -> DispatchHandle:
+    """dispatch_now after the deploy-gate hold check: site lock, spawn,
+    retries, auto-queue fallback, failure email."""
     script = implementer_script or _resolve_implementer_script()
     if not script or not Path(script).is_file():
         raise DispatchError(f"implementer script not found at {script}")
@@ -376,6 +459,7 @@ def dispatch_now(
                     batch_total=batch_total,
                     script=script,
                     implementer_backend=implementer_backend,
+                    extra_env=extra_env,
                 )
                 return handle
             except DispatchTransient as e:
@@ -430,7 +514,8 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
                        action: str, site: str, subject_tag: str,
                        request_id: str, batch_index: int, batch_total: int,
                        script: str,
-                       implementer_backend: Optional[str] = None) -> DispatchHandle:
+                       implementer_backend: Optional[str] = None,
+                       extra_env: Optional[dict] = None) -> DispatchHandle:
     """Spawn the implementer in a detached systemd-run --scope.
     Returns DispatchHandle on successful spawn. Raises DispatchTransient
     on retryable failures.
@@ -524,6 +609,9 @@ def _spawn_implementer(*, agent_id: str, run_dir: str, rec_ids: list[str],
     if batch_total:
         env["RESPONDER_BATCH_INDEX"] = str(batch_index)
         env["RESPONDER_BATCH_TOTAL"] = str(batch_total)
+    # Caller-specific additions (dispatch_now's gate-probe marker).
+    for k, v in (extra_env or {}).items():
+        env[str(k)] = str(v)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = LOG_DIR / f"dispatch-implementer-{site or 'shared'}-{ts}.log"
