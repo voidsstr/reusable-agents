@@ -21,9 +21,13 @@ edits code and deploys.
 
 DEMAND FIRST (2026-11-11, site config ``demand_scoring``, off by default):
 before any of that, the products people actually clicked through to Amazon
-(framework human_clicks) that fail the Top-Pick floor (confidence < 0.5) are
-run through the site's own categoriser and given a score where its rules
-confirm their category. See demand.py for what it will and will not write.
+(framework human_clicks) that were never scored (confidence IS NULL), are
+priced like a Top Pick and are in the catalogue's domain are run through the
+site's own categoriser, and given a score where its rules confirm their
+category (hinted AND unhinted) and the title is not an accessory for a
+device category. ``mode: report`` (the default) only lists those writes in
+the run's demand-scoring.json; ``mode: write`` applies them. See demand.py
+for what it will and will not write.
 """
 import json
 import os
@@ -86,12 +90,17 @@ class CategoryIntegrityAgent(AgentBase):
         conn.rollback()
         return {k: int(n) for k, n in counts.items() if k and n > 0}
 
-    def _demand_scoring(self, conn) -> dict:
-        """Score clicked low-confidence products with the site's categoriser
-        (demand.py). Never raises: any failure is reported and nothing is
-        written, and the de-categorisation pass still runs."""
+    def _demand_scoring(self, conn, *, domain: set | None = None,
+                        foreign: set | None = None) -> dict:
+        """Score clicked never-scored products with the site's categoriser
+        (demand.py has the rules). In ``report`` mode (the default for an
+        enabled phase) the would-be writes are only listed; ``write`` applies
+        them. Never raises: any failure is reported and nothing is written,
+        and the de-categorisation pass still runs. ``domain`` / ``foreign``
+        are the off-domain vocabularies: an off-domain title is never scored."""
         dcfg = demand.resolve(self.cfg.get("demand_scoring"))
-        out: dict = {"enabled": bool(dcfg["enabled"]), "verdicts": {}, "written": 0,
+        out: dict = {"enabled": bool(dcfg["enabled"]), "mode": dcfg["mode"],
+                     "verdicts": {}, "written": 0, "writes": [],
                      "clicked_asins": 0, "candidates": 0, "error": "", "unresolved": [],
                      "pass_pct": None}
         if not dcfg["enabled"]:
@@ -100,63 +109,107 @@ class CategoryIntegrityAgent(AgentBase):
         if bad:
             out["error"] = "; ".join(bad)
             return out
+        price_gate = bool(dcfg["require_valid_price"])
+        currency = str(dcfg.get("currency") or "USD")
         try:
             clicks = self._clicked_asins(conn, dcfg)
             out["clicked_asins"] = len(clicks)
             if not clicks:
                 return out
+            # The Top-Pick price filter (pricing-integrity): a score must not
+            # lift a product those surfaces keep off for its price.
+            price_ok = ("""(p.price IS NOT NULL AND p.price >= 1.0
+                             AND (p.currency IS NULL OR p.currency = %s)
+                             AND (p.original_price IS NULL OR p.original_price >= p.price))"""
+                        if price_gate else "TRUE")
             with conn.cursor() as cur:
-                cur.execute("""SELECT p.id, p.asin, p.title, p.brand, p.category_id, c.slug,
-                                      p.category_confidence, COALESCE(p.category_validated, false)
-                                 FROM products p LEFT JOIN categories c ON c.id = p.category_id
-                                WHERE p.asin = ANY(%s) AND p.is_active
-                                  AND COALESCE(p.category_confidence, 0) < %s""",
-                            (list(clicks), demand.DISPLAY_FLOOR))
+                cur.execute(f"""SELECT p.id, p.asin, p.title, p.brand, p.category_id, c.slug,
+                                       p.category_confidence, COALESCE(p.category_validated, false),
+                                       {price_ok} AS price_ok
+                                  FROM products p LEFT JOIN categories c ON c.id = p.category_id
+                                 WHERE p.asin = ANY(%s) AND p.is_active
+                                   AND COALESCE(p.category_confidence, 0) < %s""",
+                            ((currency,) if price_gate else ())
+                            + (list(clicks), demand.DISPLAY_FLOOR))
                 rows = [dict(zip(("id", "asin", "title", "brand", "category_id", "slug",
-                                  "confidence", "validated"), r)) for r in cur.fetchall()]
+                                  "confidence", "validated", "price_ok"), r))
+                        for r in cur.fetchall()]
                 cur.execute("SELECT slug, MIN(id) FROM categories WHERE is_active GROUP BY slug")
                 slug_ids = dict(cur.fetchall())
             conn.rollback()
-            # Most-clicked first; validated rows are counted, never scored.
+            for r in rows:
+                r["off_domain"] = bool(domain and foreign
+                                       and is_off_domain(r["title"] or "", domain, foreign)[0])
+            # Most-clicked first. Rows a row-level rule already settles
+            # (validated, explicitly scored, price-gated, off-domain) are
+            # counted but never sent to the classifier.
             rows.sort(key=lambda r: (-clicks.get(r["asin"], 0), r["id"]))
-            todo = [r for r in rows if not r["validated"]][:dcfg["max_per_run"]]
+            settled = {r["id"] for r in rows
+                       if r["validated"] or r["confidence"] is not None
+                       or r.get("price_ok") is False or r["off_domain"]}
+            todo = [r for r in rows if r["id"] not in settled][:dcfg["max_per_run"]]
             todo_ids = {r["id"] for r in todo}
             out["candidates"] = len(todo)
             results = demand.run_classifier(dcfg, [
                 {"asin": r["asin"], "title": r["title"] or "", "brand": r["brand"],
                  "hint": r["slug"]} for r in todo])
+            unhinted: dict = {}
+            if dcfg["require_agreement"]:
+                # The categoriser's own best placement, with no hint, must
+                # agree with the category a confirm would keep.
+                unhinted = demand.run_classifier(dcfg, [
+                    {"asin": r["asin"], "title": r["title"] or "", "brand": r["brand"],
+                     "hint": None} for r in todo if r["category_id"] is not None])
+            guard = dcfg.get("accessory_guard") or {}
             updates, unresolved = [], []
             for r in rows:
-                if r["id"] not in todo_ids and not r["validated"]:
+                if r["id"] not in todo_ids and r["id"] not in settled:
                     continue                      # over this run's cap
+                res = results.get(r["asin"])
                 verdict, upd = demand.decide(
-                    r, results.get(r["asin"]), min_score=dcfg["min_score"],
+                    r, res, min_score=dcfg["min_score"],
                     assign_uncategorised=bool(dcfg["assign_uncategorised"]),
-                    slug_ids=slug_ids)
+                    slug_ids=slug_ids, unhinted=unhinted.get(r["asin"]),
+                    require_agreement=bool(dcfg["require_agreement"]), guard=guard)
                 out["verdicts"][verdict] = out["verdicts"].get(verdict, 0) + 1
                 if upd:
                     updates.append(upd)
-                elif verdict in ("unplaced", "conflict", "low-score", "unknown-slug"):
-                    res = results.get(r["asin"]) or {}
+                    out["writes"].append({
+                        "asin": r["asin"], "clicks": clicks.get(r["asin"], 0),
+                        "verdict": verdict,
+                        "category": r["slug"] if verdict == "confirm" else (res or {}).get("slug"),
+                        "confidence": upd["category_confidence"],
+                        "title": (r["title"] or "")[:90]})
+                elif verdict in demand.UNRESOLVED:
+                    res = res or {}
                     unresolved.append({"asin": r["asin"], "clicks": clicks.get(r["asin"], 0),
                                        "verdict": verdict, "category": r["slug"],
                                        "rules_slug": res.get("slug"),
                                        "rules_confidence": res.get("confidence"),
+                                       "best_slug": (unhinted.get(r["asin"]) or {}).get("slug"),
+                                       "accessory_term": demand.accessory_term(r["title"], guard),
                                        "title": (r["title"] or "")[:90]})
-            if updates:
+            if updates and dcfg["mode"] == "write":
+                price_guard = ("""
+                                          AND price IS NOT NULL AND price >= 1.0
+                                          AND (currency IS NULL OR currency = %s)
+                                          AND (original_price IS NULL OR original_price >= price)"""
+                               if price_gate else "")
                 with conn.cursor() as cur:
                     for u in updates:
                         # Only while the row is as we read it: still active,
-                        # still below the floor, not validated, same category.
-                        cur.execute("""UPDATE products
-                                          SET category_id = %s, category_confidence = %s,
-                                              updated_at = NOW()
-                                        WHERE id = %s AND is_active
-                                          AND COALESCE(category_confidence, 0) < %s
-                                          AND NOT COALESCE(category_validated, false)
-                                          AND category_id IS NOT DISTINCT FROM %s""",
+                        # still never scored, not validated, same category,
+                        # still priced for a Top Pick.
+                        cur.execute(f"""UPDATE products
+                                           SET category_id = %s, category_confidence = %s,
+                                               updated_at = NOW()
+                                         WHERE id = %s AND is_active
+                                           AND category_confidence IS NULL
+                                           AND NOT COALESCE(category_validated, false)
+                                           AND category_id IS NOT DISTINCT FROM %s{price_guard}""",
                                     (u["category_id"], u["category_confidence"], u["id"],
-                                     demand.DISPLAY_FLOOR, u["expect_category_id"]))
+                                     u["expect_category_id"])
+                                    + ((currency,) if price_gate else ()))
                         out["written"] += cur.rowcount
                 conn.commit()
             out["unresolved"] = sorted(unresolved, key=lambda u: -u["clicks"])[:int(
@@ -192,19 +245,22 @@ class CategoryIntegrityAgent(AgentBase):
         try:
             # Demand first: score the clicked products before the unscored
             # share is measured and before any de-categorisation.
-            self.status("scoring clicked low-confidence products", progress=0.1)
-            dem = self._demand_scoring(conn)
+            self.status("scoring clicked never-scored products", progress=0.1)
+            dem = self._demand_scoring(conn, domain=domain, foreign=foreign)
             if dem.get("enabled"):
+                report_only = dem.get("mode") != "write"
                 self.decide("observation",
-                            f"demand scoring: {dem['clicked_asins']} clicked ASINs, "
-                            f"{dem['candidates']} low-confidence rows classified, "
-                            f"{dem['written']} scored; verdicts {dem['verdicts']}"
+                            f"demand scoring ({dem.get('mode')}): {dem['clicked_asins']} clicked "
+                            f"ASINs, {dem['candidates']} never-scored rows classified, "
+                            + (f"{len(dem.get('writes') or [])} would be scored (report only)"
+                               if report_only else f"{dem['written']} scored")
+                            + f"; verdicts {dem['verdicts']}"
                             + (f"; error: {dem['error']}" if dem.get("error") else ""))
                 for u in dem.get("unresolved", [])[:5]:
                     self.decide("observation",
                                 f"clicked but unconfirmed ({u['verdict']}, {u['clicks']} clicks) "
                                 f"in {u['category']}: {u['title'][:70]}")
-                if dem.get("unresolved") or dem.get("written"):
+                if dem.get("unresolved") or dem.get("written") or dem.get("writes"):
                     try:
                         self.storage.write_json(
                             f"agents/{self.agent_id}/runs/{self.run_ts}/demand-scoring.json",
@@ -291,13 +347,22 @@ class CategoryIntegrityAgent(AgentBase):
         if dem.get("enabled"):
             v = dem.get("verdicts") or {}
             metrics.update({
+                "demand_write_mode": 1.0 if dem.get("mode") == "write" else 0.0,
                 "demand_clicked_asins": float(dem.get("clicked_asins") or 0),
                 "demand_candidates": float(dem.get("candidates") or 0),
                 "demand_scored": float(dem.get("written") or 0),
+                # rows that met every rule (written in write mode, listed in
+                # report mode)
+                "demand_would_write": float(len(dem.get("writes") or [])),
                 "demand_confirmed": float(v.get("confirm", 0)),
                 "demand_assigned": float(v.get("assign", 0)),
                 "demand_unplaced": float(v.get("unplaced", 0)),
                 "demand_conflicts": float(v.get("conflict", 0)),
+                "demand_disagree": float(v.get("disagree", 0)),
+                "demand_accessory": float(v.get("accessory", 0)),
+                "demand_off_domain": float(v.get("off-domain", 0)),
+                "demand_price_gated": float(v.get("price-gated", 0)),
+                "demand_explicit_skipped": float(v.get("explicit-score", 0)),
                 "demand_validated_skipped": float(v.get("validated", 0)),
                 "demand_error": 1.0 if dem.get("error") else 0.0,
             })
@@ -305,9 +370,15 @@ class CategoryIntegrityAgent(AgentBase):
                 # Share of clicked active ASINs that clear the Top-Pick
                 # confidence floor (>= 0.5) after this run.
                 metrics["clicked_confidence_pass_pct"] = float(dem["pass_pct"])
-            demand_note = (f"{int(dem.get('written') or 0)} clicked low-confidence products "
-                           f"scored" + (f" ({dem['pass_pct']}% of clicked products now clear "
-                                        f"the 0.5 floor)" if dem.get("pass_pct") is not None else "")
+            if dem.get("mode") == "write":
+                demand_note = f"{int(dem.get('written') or 0)} clicked never-scored products scored"
+            else:
+                demand_note = (f"{len(dem.get('writes') or [])} clicked never-scored products "
+                               f"would be scored (report only; demand_scoring.mode: write "
+                               f"applies them)")
+            demand_note = (demand_note
+                           + (f" ({dem['pass_pct']}% of clicked products clear "
+                              f"the 0.5 floor)" if dem.get("pass_pct") is not None else "")
                            + (f" [demand phase error: {dem['error'][:120]}]" if dem.get("error") else "")
                            + "; ")
         return RunResult(

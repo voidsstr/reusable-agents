@@ -383,7 +383,12 @@ def _demand_ranked_config(raw_cfg: dict, *, agent_id: str, site: str,
     (the products table it already prices), its 24h freshness window as the
     long tail's gate, and -- when prioritize_featured_and_linked is on -- the
     featured and editorially-linked products as site SQL groups after the
-    demand tiers. Any problem resolving it keeps the old selector."""
+    demand tiers. Any problem resolving it keeps the old selector.
+
+    Freshness is the newer of price_updated_at and last_fetched_at: an ASIN
+    Amazon left out of a response only records the attempt in
+    last_fetched_at (see _stamp_miss), and must go to the back of its tier
+    rather than return to the head of the queue every run."""
     try:
         from framework.core import price_refresh_priority as prp
     except Exception:
@@ -393,7 +398,8 @@ def _demand_ranked_config(raw_cfg: dict, *, agent_id: str, site: str,
              + (" AND c.site_id = %(hyd_site_id)s" if site_id_filter else ""))
     site_cfg: dict = {
         "catalog": {"table": "products", "asin_col": "asin",
-                    "fresh_cols": ["price_updated_at"], "where": where,
+                    "fresh_cols": ["price_updated_at", "last_fetched_at"],
+                    "where": where,
                     "params": ({"hyd_site_id": site_id_filter} if site_id_filter else {}),
                     "asin_regex": _HYDRATION_ASIN_REGEX},
         "long_tail": {"enabled": True, "gate_hours": freshness_hours},
@@ -455,7 +461,10 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
                                   demand_info: dict | None = None,
                                   storage=None) -> list[dict]:
     """Return Amazon-sourced products whose price_updated_at is older than
-    `freshness_hours` (or NULL).
+    `freshness_hours` (or NULL) and that were not attempted within the window
+    either: GREATEST() ignores NULLs, so a last_fetched_at stamped by a miss
+    (_stamp_miss: the ASIN was left out of the response) defers the row
+    instead of re-picking it every run.
 
     With `demand_cfg` (see _demand_ranked_config) the framework's
     demand-ranked order is used instead, and `demand_info` (when given) is
@@ -515,8 +524,9 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
               AND p.asin ~ '^[A-Z0-9]{{10}}$'
               {site_clause}
               AND (
-                  p.price_updated_at IS NULL
-                  OR p.price_updated_at < NOW() - (%s || ' hours')::interval
+                  GREATEST(p.price_updated_at, p.last_fetched_at) IS NULL
+                  OR GREATEST(p.price_updated_at, p.last_fetched_at)
+                     < NOW() - (%s || ' hours')::interval
               )
             ORDER BY tier ASC, COALESCE(p.review_count, 0) DESC, p.id ASC
             LIMIT %s
@@ -531,8 +541,9 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
               AND p.asin ~ '^[A-Z0-9]{{10}}$'
               {site_clause}
               AND (
-                  p.price_updated_at IS NULL
-                  OR p.price_updated_at < NOW() - (%s || ' hours')::interval
+                  GREATEST(p.price_updated_at, p.last_fetched_at) IS NULL
+                  OR GREATEST(p.price_updated_at, p.last_fetched_at)
+                     < NOW() - (%s || ' hours')::interval
               )
             ORDER BY COALESCE(p.review_count, 0) DESC, p.id ASC
             LIMIT %s
@@ -542,43 +553,120 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
         return [dict(r) for r in cur.fetchall()]
 
 
+# quality_flags is '{}' (a legacy object default) on many rows; fold it to an
+# empty array so flag removal / concatenation stays a flat array.
+_FLAGS_BASE = "COALESCE(NULLIF(quality_flags, '{}'::jsonb), '[]'::jsonb)"
+
+
+def _outcome_flags_cfg(raw_cfg: dict) -> dict | None:
+    """The site's Amazon-offer flags a price verdict must keep right, from
+    site.yaml ``price_refresh.outcome_flags``:
+
+        outcome_flags:
+          owned: [flag, ...]                 # cleared by every verdict
+          by_status: {unavailable: [...], not_found: [...],
+                      no_offer: [...], non_usd: [...]}   # set per outcome
+
+    i.e. the flags the site's own price verifier owns. A site that reads such
+    flags as "unbuyable" needs this before this agent re-prices products
+    ahead of that verifier (the demand-ranked order does): otherwise a
+    product that came back in stock is priced but stays flagged unbuyable,
+    and one that went out of stock is never flagged. None (the default) =
+    no flag bookkeeping, as before. Flags named under by_status are always
+    cleared too, so a verdict never duplicates one."""
+    block = raw_cfg.get("outcome_flags") if isinstance(raw_cfg, dict) else None
+    if not isinstance(block, dict):
+        return None
+    owned = [str(f) for f in (block.get("owned") or []) if str(f).strip()]
+    by_status = {str(k): [str(f) for f in (v or []) if str(f).strip()]
+                 for k, v in (block.get("by_status") or {}).items()
+                 if isinstance(v, (list, tuple))}
+    for flags in by_status.values():
+        owned += [f for f in flags if f not in owned]
+    if not owned:
+        return None
+    return {"owned": owned, "by_status": by_status}
+
+
 @with_retry(retries=3, backoff=1.5,
             on=(psycopg2.OperationalError, psycopg2.InterfaceError))
 def _persist_provider_refresh(conn, product_id: int, parsed: dict, *,
                                 provider: str) -> None:
-    """Apply normalized provider output (PA-API or BrightData) to a
-    product row. Stamps price_updated_at + last_fetched_at and tags the
-    raw_amazon_data with the source provider for auditability. Commits
-    per row."""
-    set_clauses = ["price_updated_at = NOW()", "last_fetched_at = NOW()"]
+    """Apply normalized provider output (Creators, PA-API or BrightData) to
+    a product row, tag raw_amazon_data with the source provider for
+    auditability, and commit per row.
+
+    price_updated_at is the site's "this price was checked at" time: the
+    24h display gate and the PDP's price-as-of date read it. So it is only
+    stamped when this refresh decided the price:
+      * ``price`` set: the price is written (price_updated_at + last_fetched_at).
+      * ``unpriced`` set: the provider answered and there is no valid price
+        (out of stock, no New offer, used-only, foreign currency). price and
+        original_price become NULL, availability is written (default
+        'Currently unavailable'), and both timestamps are stamped.
+      * neither: nothing is known about the price, so price, availability
+        and price_updated_at are left alone and only last_fetched_at records
+        the attempt. Stamping price_updated_at here re-dated a stale price
+        as fresh: on 2026-11-11, 90 specpicks rows read "Currently
+        unavailable." next to a price this agent had just re-stamped.
+    ``list_price_current`` means the provider reports the list price
+    whenever Amazon shows one (Creators savingBasis), so a missing one is
+    written as NULL. That is the price verifier's rule: a retained old list
+    price is how a "Save $X" off a stale basis appears.
+    ``flags_clear`` / ``flags_add`` (from _outcome_flags_cfg) rewrite the
+    site's Amazon-offer flags with a priced or unpriced verdict, never
+    without one."""
+    set_clauses: list[str] = []
     params: list[Any] = []
-    if parsed.get("price") is not None:
-        set_clauses.append("price = %s")
-        params.append(parsed["price"])
-    if parsed.get("original_price") is not None:
-        set_clauses.append("original_price = %s")
-        params.append(parsed["original_price"])
-    elif parsed.get("price") is not None:
-        # No list price in this refresh, but the row may still hold an OLD
-        # one. If the new price has risen above it we would leave behind
-        # original_price < price -- a "Save -$50" negative discount, which
-        # the pricing-integrity rules forbid on any visible pick.
-        #
-        # This is a real regression seen in the field: a Creators run that
-        # refreshed 430 rows pushed catalog-wide negative discounts from
-        # 277 to 314, purely from stale list prices left in place. Clearing
-        # conditionally (rather than unconditionally) preserves legitimate
-        # discounts where the stored list price is still above the price.
-        set_clauses.append(
-            "original_price = CASE WHEN original_price < %s THEN NULL "
-            "ELSE original_price END")
-        params.append(parsed["price"])
-    if parsed.get("currency"):
-        set_clauses.append("currency = %s")
-        params.append(parsed["currency"])
-    if parsed.get("availability"):
-        set_clauses.append("availability = %s")
-        params.append(parsed["availability"])
+    price = parsed.get("price")
+    flags_clear = parsed.get("flags_clear")
+    if isinstance(flags_clear, list) and (price is not None or parsed.get("unpriced")):
+        # The site's own Amazon-offer flags (price_refresh.outcome_flags): a
+        # verdict written here must leave them as the site's price verifier
+        # would, or a product that came back in stock stays "unbuyable".
+        set_clauses.append(f"quality_flags = ({_FLAGS_BASE} - %s::text[]) "
+                           "|| to_jsonb(%s::text[])")
+        params += [list(flags_clear), list(parsed.get("flags_add") or [])]
+    if price is not None:
+        set_clauses += ["price = %s", "price_updated_at = NOW()",
+                        "last_fetched_at = NOW()"]
+        params.append(price)
+        if parsed.get("list_price_current"):
+            set_clauses.append("original_price = %s")
+            params.append(parsed.get("original_price"))
+        elif parsed.get("original_price") is not None:
+            set_clauses.append("original_price = %s")
+            params.append(parsed["original_price"])
+        else:
+            # No list price in this refresh, but the row may still hold an
+            # OLD one. If the new price has risen above it we would leave
+            # behind original_price < price -- a "Save -$50" negative
+            # discount, which the pricing-integrity rules forbid on any
+            # visible pick.
+            #
+            # This is a real regression seen in the field: a Creators run
+            # that refreshed 430 rows pushed catalog-wide negative discounts
+            # from 277 to 314, purely from stale list prices left in place.
+            # Clearing conditionally (rather than unconditionally) preserves
+            # legitimate discounts where the stored list price is still
+            # above the price.
+            set_clauses.append(
+                "original_price = CASE WHEN original_price < %s THEN NULL "
+                "ELSE original_price END")
+            params.append(price)
+        if parsed.get("currency"):
+            set_clauses.append("currency = %s")
+            params.append(parsed["currency"])
+        if parsed.get("availability"):
+            set_clauses.append("availability = LEFT(%s, 100)")
+            params.append(parsed["availability"])
+    elif parsed.get("unpriced"):
+        set_clauses += ["price = NULL", "original_price = NULL",
+                        "availability = LEFT(COALESCE(%s, 'Currently unavailable'), 100)",
+                        "price_updated_at = NOW()", "last_fetched_at = NOW()"]
+        params.append(parsed.get("availability") or None)
+    else:
+        set_clauses.append("last_fetched_at = NOW()")
     if parsed.get("is_prime") is not None:
         set_clauses.append("is_prime = %s")
         params.append(bool(parsed["is_prime"]))
@@ -753,16 +841,30 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
     commit, and compliance accounting are identical -- only the fetch
     differs. With `demand_cfg` the candidates come in the framework's
     demand-ranked order (price_refresh_priority) and the summary carries
-    `demand_ranked`, `by_tier` (candidates) and `refreshed_by_tier`.
+    `demand_ranked` and `by_tier` (candidates); `refreshed_by_tier` is
+    added only when that order was actually used.
+
+    Each answered item is classified with the framework's price outcome
+    rules (amazon_price_refresh.classify_item), the same rules the price
+    verifier and catalog-freshness write by: `priced` writes the price and
+    Amazon's current list price (or none); out of stock / no New offer /
+    used-only / foreign currency writes price NULL (`unpriced`, counted in
+    `refreshed` and `unpriced`); a per-ASIN error (ItemNotAccessible) also
+    clears the price (`inaccessible`); an ASIN left out of the response
+    only records the attempt; a failed batch writes nothing. With
+    `price_refresh.outcome_flags` set, every verdict also rewrites the
+    site's Amazon-offer flags the way its price verifier does.
     """
     from framework.core.amazon_creators import (
         CreatorsUnavailable, hi_res_image_url, parse_item)
+    from framework.core.amazon_price_refresh import classify_item
 
     freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
     # The API caps getItems at 10 ASINs; the client chunks internally, but
     # keeping our loop aligned makes the per-batch status readable.
     batch_size = int(raw_cfg.get("creators_batch_size", 10))
     max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
+    flags = _outcome_flags_cfg(raw_cfg)
     demand_info: dict = {}
     candidates = _select_stale_amazon_prices(
         conn, site_id_filter=site_id_filter,
@@ -784,13 +886,17 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
     summary = {
         "provider": "creators",
         "refreshed": 0, "failed": 0, "processed": 0,
-        "batches": 0, "asins_seen": 0, "inaccessible": 0,
+        "batches": 0, "asins_seen": 0, "inaccessible": 0, "unpriced": 0,
         "compliance_pass": 0, "compliance_fail": 0,
     }
     if demand_cfg:
         summary["demand_ranked"] = demand_ranked
         summary["by_tier"] = dict(demand_info.get("by_tier") or {})
-        summary["refreshed_by_tier"] = {}
+        if demand_ranked:
+            # Only a demand-ranked selection tags rows with tier NAMES. The
+            # fallback selector's integer tiers (0 featured / 1 editorial /
+            # 2 tail) would otherwise be booked as demand refreshes.
+            summary["refreshed_by_tier"] = {}
         if demand_info.get("error"):
             summary["demand_error"] = demand_info["error"]
         if (demand_info.get("signals") or {}).get("errors"):
@@ -833,12 +939,25 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
             if not rows:
                 continue
             p = parse_item(raw)
-            # Map to the shared persist contract's key names.
+            o = classify_item(asin, raw)
+            priced = o.status == "priced"
+            # Map to the shared persist contract's key names. The price
+            # fields follow the outcome, never the raw listing: a used-only,
+            # out-of-stock or foreign-currency item has no price to show.
             payload = {
-                "price": p.get("price"),
-                "original_price": p.get("original_price"),
-                "currency": p.get("currency"),
-                "availability": p.get("availability"),
+                "price": o.price if priced else None,
+                "original_price": o.original_price if priced else None,
+                "list_price_current": True,
+                "unpriced": not priced,
+                "currency": o.currency if priced else None,
+                # A priced row with an empty availability message reads as
+                # in stock (the price verifier's default), never as the
+                # "Currently unavailable" an earlier unpriced write left.
+                "availability": (o.availability or ("In Stock" if priced else None)),
+                # the site's Amazon-offer flags, as its price verifier keeps them
+                "flags_clear": flags["owned"] if flags else None,
+                "flags_add": ([] if priced else flags["by_status"].get(o.status, []))
+                             if flags else None,
                 "rating": p.get("rating"),
                 "review_count": p.get("review_count"),
                 # SL1500 form, the one shelf-audit writes: the raw 500px URL
@@ -853,8 +972,11 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
                     _persist_provider_refresh(conn, row["id"], payload,
                                               provider="creators")
                     summary["refreshed"] += 1
+                    if not priced:
+                        summary["unpriced"] += 1
                     if "refreshed_by_tier" in summary:
-                        t = row.get("tier") or "long-tail"
+                        t = row.get("tier")
+                        t = t if isinstance(t, str) and t else "long-tail"
                         summary["refreshed_by_tier"][t] = summary["refreshed_by_tier"].get(t, 0) + 1
                     compliance = _compliance_flags(payload)
                     if all(compliance.values()):
@@ -872,9 +994,10 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
                     decide_cb("error",
                               f"Creators persist failed for {asin}: {str(e)[:200]}")
 
-        # An ItemNotAccessible ASIN is delisted/regional/not-offered. Stamp
-        # the miss so it ages out of the stale queue instead of being
-        # retried every single run forever.
+        # An ItemNotAccessible ASIN is delisted/regional/not-offered: no
+        # valid price (outcome not_found), so the price is cleared and
+        # re-dated, which also ages it out of the stale queue instead of
+        # retrying it every single run forever.
         for asin, msg in errors.items():
             rows = by_asin.get(asin) or []
             if not rows:
@@ -882,7 +1005,10 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
             summary["inaccessible"] += 1
             for row in rows:
                 try:
-                    _stamp_miss(conn, row["id"], f"creators: {msg[:120]}")
+                    _mark_not_found(
+                        conn, row["id"], f"creators: {str(msg)[:120]}",
+                        flags_clear=flags["owned"] if flags else None,
+                        flags_add=flags["by_status"].get("not_found", []) if flags else None)
                 except Exception:
                     try:
                         conn.rollback()
@@ -1010,16 +1136,69 @@ def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
 @with_retry(retries=3, backoff=1.5,
             on=(psycopg2.OperationalError, psycopg2.InterfaceError))
 def _stamp_miss(conn, product_id: int, reason: str) -> None:
-    """Record a fetch miss without overwriting a real price. Stamps
-    price_updated_at so we don't try the same row every tick."""
+    """Record a fetch miss (the provider silently left the ASIN out) without
+    touching the price. Stamps last_fetched_at, NOT price_updated_at: the
+    price was not checked, so it must keep ageing toward the display gate.
+    Both selectors treat a recent last_fetched_at as "tried", so the row is
+    not retried every tick."""
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE products SET price_updated_at = NOW(), "
+            "UPDATE products SET last_fetched_at = NOW(), "
             "fetch_attempts = COALESCE(fetch_attempts, 0) + 1, "
             "fetch_error = %s WHERE id = %s",
             [reason[:500], product_id],
         )
     conn.commit()
+
+
+@with_retry(retries=3, backoff=1.5,
+            on=(psycopg2.OperationalError, psycopg2.InterfaceError))
+def _mark_not_found(conn, product_id: int, reason: str, *,
+                    flags_clear: list | None = None,
+                    flags_add: list | None = None) -> None:
+    """Amazon answered with a per-ASIN error (ItemNotAccessible / invalid
+    ASIN): there is no valid price, so it is cleared and re-dated, the same
+    write the price verifier and catalog-freshness make for a not_found
+    outcome (framework amazon_price_refresh). The page stays live (never
+    deactivated); the site shows "check price on Amazon". With the site's
+    outcome flags configured, they are rewritten like the verifier does."""
+    flags_sql, params = "", []
+    if isinstance(flags_clear, list):
+        flags_sql = (f"quality_flags = ({_FLAGS_BASE} - %s::text[]) "
+                     "|| to_jsonb(%s::text[]), ")
+        params = [list(flags_clear), list(flags_add or [])]
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE products SET price = NULL, original_price = NULL, "
+            "availability = 'Currently unavailable', " + flags_sql +
+            "price_updated_at = NOW(), last_fetched_at = NOW(), "
+            "fetch_attempts = COALESCE(fetch_attempts, 0) + 1, "
+            "fetch_error = %s WHERE id = %s",
+            params + [reason[:500], product_id],
+        )
+    conn.commit()
+
+
+def _price_outcome_metrics(summary: dict) -> dict:
+    """RunResult metrics for the price pass beyond refreshed/failed.
+
+    prices_demand_ranked: 1 when the candidates came in the framework
+    demand order (price_refresh_priority). prices_refreshed_demand: rows
+    refreshed outside the long tail (recently clicked / AI-used / site
+    groups), counted ONLY on a demand-ranked run; a run that fell back to
+    the review_count selector reports 0, never its featured/editorial
+    tiers. prices_unpriced: rows whose price was cleared because Amazon
+    answered with no valid offer; prices_inaccessible: ASINs Amazon
+    reported not accessible (price cleared too)."""
+    demand_ranked = bool(summary.get("demand_ranked"))
+    by_tier = (summary.get("refreshed_by_tier") or {}) if demand_ranked else {}
+    return {
+        "prices_demand_ranked": int(demand_ranked),
+        "prices_refreshed_demand": sum(
+            n for t, n in by_tier.items() if isinstance(t, str) and t != "long-tail"),
+        "prices_unpriced": int(summary.get("unpriced") or 0),
+        "prices_inaccessible": int(summary.get("inaccessible") or 0),
+    }
 
 
 def _refresh_amazon_prices(*, conn, raw_cfg: dict,
@@ -1540,8 +1719,12 @@ class ProductHydrationAgent(AgentBase):
                 ))
                 self.decide(
                     "action",
-                    f"{provider}: refreshed {paapi_summary['refreshed']}, "
-                    f"failed {paapi_summary['failed']}, "
+                    f"{provider}: refreshed {paapi_summary['refreshed']}"
+                    + (f" ({paapi_summary['unpriced']} without a valid offer -> price cleared)"
+                       if paapi_summary.get("unpriced") else "")
+                    + (f", {paapi_summary['inaccessible']} not accessible -> price cleared"
+                       if paapi_summary.get("inaccessible") else "")
+                    + f", failed {paapi_summary['failed']}, "
                     f"compliance {paapi_summary['compliance_pass']}/"
                     f"{paapi_summary['compliance_pass'] + paapi_summary['compliance_fail']} pass"
                     + (f", est cost ${paapi_summary.get('estimated_cost_usd', 0):.4f}"
@@ -1923,13 +2106,7 @@ class ProductHydrationAgent(AgentBase):
                 "prices_failed": totals["prices_failed"],
                 "amazon_paapi_batches": paapi_summary.get("batches", 0),
                 "amazon_paapi_skipped_reason": paapi_summary.get("skipped_reason"),
-                # Demand-ranked price order (framework price_refresh_priority):
-                # 1 when this run used it; prices refreshed outside the long
-                # tail (recently clicked / AI-used / site groups).
-                "prices_demand_ranked": int(bool(paapi_summary.get("demand_ranked"))),
-                "prices_refreshed_demand": sum(
-                    n for t, n in (paapi_summary.get("refreshed_by_tier") or {}).items()
-                    if t != "long-tail"),
+                **_price_outcome_metrics(paapi_summary),
                 "compliance_pass": totals["compliance_pass"],
                 "compliance_fail": totals["compliance_fail"],
                 **{f"per_type_{ct}": n for ct, n in per_type_counts.items()},

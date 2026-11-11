@@ -40,7 +40,10 @@ def test_site_block_turns_it_on_with_the_agents_catalog(hyd, storage):
         agent_id="x-hyd", site="x", site_id_filter="pc", storage=storage)
     assert cfg and cfg["enabled"]
     cat = cfg["catalog"]
-    assert cat["table"] == "products" and cat["fresh_cols"] == ["price_updated_at"]
+    assert cat["table"] == "products"
+    # an attempt (last_fetched_at, see _stamp_miss) counts as fresh: a miss
+    # goes to the back of its tier, not the head of the queue (review fix)
+    assert cat["fresh_cols"] == ["price_updated_at", "last_fetched_at"]
     assert "c.site_id = %(hyd_site_id)s" in cat["where"] and cat["params"] == {"hyd_site_id": "pc"}
     assert cfg["long_tail"] == {"enabled": True, "gate_hours": 24}
     # featured / editorial keep their meaning, after the demand tiers
