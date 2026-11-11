@@ -353,12 +353,114 @@ def _persist_product(conn, product_id: int, updates: dict[str, str | None],
 # Amazon PA-API price refresh
 # ---------------------------------------------------------------------------
 
+# The SQL the tiered selector below ranks first: published articles' declared
+# products and published buying-guide picks. Shared with the demand-ranked
+# path, where it is a site SQL group.
+_EDITORIAL_ASINS_SQL = """
+                SELECT DISTINCT unnest(related_product_asins) AS asin
+                FROM editorial_articles
+                WHERE status='published' AND related_product_asins IS NOT NULL
+                UNION
+                SELECT DISTINCT (p->>'asin') AS asin
+                FROM buying_guides bg, jsonb_array_elements(bg.picks) p
+                WHERE bg.status='published'
+                  AND jsonb_typeof(bg.picks)='array'
+                  AND (p->>'asin') IS NOT NULL
+                  AND (p->>'asin') <> ''
+"""
+
+_HYDRATION_ASIN_REGEX = "^[A-Z0-9]{10}$"
+
+
+def _demand_ranked_config(raw_cfg: dict, *, agent_id: str, site: str,
+                          site_id_filter: str | None, storage=None) -> dict | None:
+    """The resolved framework price_refresh_priority config for this run, or
+    None when demand ranking is off for this agent (the default).
+
+    Turned on by site.yaml `price_refresh.demand_priority: {enabled: true,
+    sources: {...}}` or by storage config/price-refresh-priority-config.json
+    (by_site.<site> / by_agent_id.<agent>). This agent supplies the catalog
+    (the products table it already prices), its 24h freshness window as the
+    long tail's gate, and -- when prioritize_featured_and_linked is on -- the
+    featured and editorially-linked products as site SQL groups after the
+    demand tiers. Any problem resolving it keeps the old selector."""
+    try:
+        from framework.core import price_refresh_priority as prp
+    except Exception:
+        return None
+    freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
+    where = ("c.is_active = TRUE AND c.asin IS NOT NULL AND c.asin <> ''"
+             + (" AND c.site_id = %(hyd_site_id)s" if site_id_filter else ""))
+    site_cfg: dict = {
+        "catalog": {"table": "products", "asin_col": "asin",
+                    "fresh_cols": ["price_updated_at"], "where": where,
+                    "params": ({"hyd_site_id": site_id_filter} if site_id_filter else {}),
+                    "asin_regex": _HYDRATION_ASIN_REGEX},
+        "long_tail": {"enabled": True, "gate_hours": freshness_hours},
+    }
+    if raw_cfg.get("prioritize_featured_and_linked"):
+        site_cfg["extra_groups"] = [
+            {"name": "featured", "kind": "sql", "gate_hours": freshness_hours,
+             "sql": "SELECT asin FROM products WHERE is_featured = TRUE AND is_active = TRUE"},
+            {"name": "editorial", "kind": "sql", "gate_hours": freshness_hours,
+             "sql": _EDITORIAL_ASINS_SQL},
+        ]
+    block = raw_cfg.get("demand_priority")
+    try:
+        if isinstance(block, dict):
+            site_cfg = prp.merge_config(site_cfg, block)
+        cfg = prp.resolve_config(agent_id=agent_id, site=site, site_cfg=site_cfg,
+                                 storage=storage)
+    except Exception:
+        return None
+    return cfg if cfg.get("enabled") else None
+
+
+def _select_demand_ranked(conn, demand_cfg: dict, *, site_id_filter: str | None,
+                          limit: int, storage=None) -> tuple[list[dict], dict]:
+    """Stale product rows in framework demand order (price_refresh_priority):
+    recently clicked, then AI-used, then the site groups, then the long tail
+    oldest first -- instead of review_count. Returns (rows, info); every
+    active row of a chosen ASIN is returned, each tagged with its `tier`."""
+    from framework.core import price_refresh_priority as prp
+    tiers = prp.collect_tiers(conn, demand_cfg, storage=storage)
+    cands = prp.rank_refresh_candidates(conn, demand_cfg, limit=limit, tiers=tiers)
+    info = {"by_tier": prp.tier_counts(cands), "signals": tiers.summary()}
+    if not cands:
+        return [], info
+    site_clause = "AND p.site_id = %s" if site_id_filter else ""
+    params: list[Any] = [[c.asin for c in cands]]
+    if site_id_filter:
+        params.append(site_id_filter)
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source
+              FROM products p
+             WHERE p.asin = ANY(%s) AND p.is_active = TRUE {site_clause}
+             ORDER BY p.id""", params)
+        rows = [dict(r) for r in cur.fetchall()]
+    pos = {c.asin: i for i, c in enumerate(cands)}
+    tier = {c.asin: c.tier for c in cands}
+    rows.sort(key=lambda r: (pos.get(r["asin"], len(pos)), r["id"]))
+    for r in rows:
+        r["tier"] = tier.get(r["asin"], prp.LONG_TAIL)
+    return rows, info
+
+
 def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
                                   freshness_hours: int,
                                   limit: int,
-                                  prioritize_featured_and_linked: bool = False) -> list[dict]:
+                                  prioritize_featured_and_linked: bool = False,
+                                  demand_cfg: dict | None = None,
+                                  demand_info: dict | None = None,
+                                  storage=None) -> list[dict]:
     """Return Amazon-sourced products whose price_updated_at is older than
     `freshness_hours` (or NULL).
+
+    With `demand_cfg` (see _demand_ranked_config) the framework's
+    demand-ranked order is used instead, and `demand_info` (when given) is
+    filled with its per-tier counts. If that path fails, this falls back to
+    the modes below and records the error in `demand_info["error"]`.
 
     Two ordering modes:
       • plain: `ORDER BY review_count DESC` — old behavior
@@ -373,6 +475,22 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
         which keeps the most user-visible prices <24h fresh while the
         long tail catches up.
     """
+    if demand_cfg:
+        try:
+            rows, info = _select_demand_ranked(conn, demand_cfg,
+                                               site_id_filter=site_id_filter,
+                                               limit=limit, storage=storage)
+            if demand_info is not None:
+                demand_info.update(info)
+            return rows
+        except Exception as e:  # noqa: BLE001 -- the old selector still works
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if demand_info is not None:
+                demand_info["error"] = f"{type(e).__name__}: {e}"[:300]
+
     site_clause = "AND p.site_id = %s" if site_id_filter else ""
     params: list[Any] = []
     if site_id_filter:
@@ -382,17 +500,7 @@ def _select_stale_amazon_prices(conn, *, site_id_filter: str | None,
 
     if prioritize_featured_and_linked:
         sql = f"""
-            WITH editorial_asins AS (
-                SELECT DISTINCT unnest(related_product_asins) AS asin
-                FROM editorial_articles
-                WHERE status='published' AND related_product_asins IS NOT NULL
-                UNION
-                SELECT DISTINCT (p->>'asin') AS asin
-                FROM buying_guides bg, jsonb_array_elements(bg.picks) p
-                WHERE bg.status='published'
-                  AND jsonb_typeof(bg.picks)='array'
-                  AND (p->>'asin') IS NOT NULL
-                  AND (p->>'asin') <> ''
+            WITH editorial_asins AS ({_EDITORIAL_ASINS_SQL}
             )
             SELECT p.id, p.asin, p.title, p.price, p.price_updated_at, p.source,
                    CASE
@@ -535,7 +643,8 @@ def _compliance_flags(parsed: dict) -> dict:
 
 def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
                         site_id_filter: str | None,
-                        status_cb, decide_cb) -> dict:
+                        status_cb, decide_cb, demand_cfg: dict | None = None,
+                        storage=None) -> dict:
     """Refresh price + offer data via Amazon PA-API. Used once SpecPicks
     qualifies for the Creators API (3 qualifying purchases). Until then
     the BrightData path is the default — see _refresh_via_brightdata."""
@@ -547,6 +656,7 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
         freshness_hours=freshness_hours, limit=max_per_run,
         prioritize_featured_and_linked=bool(
             raw_cfg.get("prioritize_featured_and_linked", False)),
+        demand_cfg=demand_cfg, storage=storage,
     )
     decide_cb("observation",
               f"PA-API: {len(candidates)} stale-price products to refresh "
@@ -627,7 +737,8 @@ def _refresh_via_paapi(*, conn, paapi_cfg: PaapiConfig, raw_cfg: dict,
 
 def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
                           site_id_filter: str | None,
-                          status_cb, decide_cb) -> dict:
+                          status_cb, decide_cb, demand_cfg: dict | None = None,
+                          storage=None) -> dict:
     """Refresh price + offer data via the Amazon Creators API.
 
     This is the provider to use: it is the only Amazon path whose
@@ -640,7 +751,9 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
     Shares _select_stale_amazon_prices + _persist_provider_refresh with the
     other providers, so the candidate ordering, freshness window, per-row
     commit, and compliance accounting are identical -- only the fetch
-    differs.
+    differs. With `demand_cfg` the candidates come in the framework's
+    demand-ranked order (price_refresh_priority) and the summary carries
+    `demand_ranked`, `by_tier` (candidates) and `refreshed_by_tier`.
     """
     from framework.core.amazon_creators import (
         CreatorsUnavailable, hi_res_image_url, parse_item)
@@ -650,25 +763,47 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
     # keeping our loop aligned makes the per-batch status readable.
     batch_size = int(raw_cfg.get("creators_batch_size", 10))
     max_per_run = int(raw_cfg.get("max_refresh_per_run", 200))
+    demand_info: dict = {}
     candidates = _select_stale_amazon_prices(
         conn, site_id_filter=site_id_filter,
         freshness_hours=freshness_hours, limit=max_per_run,
         prioritize_featured_and_linked=bool(
             raw_cfg.get("prioritize_featured_and_linked", False)),
+        demand_cfg=demand_cfg, demand_info=demand_info, storage=storage,
     )
+    demand_ranked = bool(demand_cfg) and "error" not in demand_info
+    if demand_cfg and demand_info.get("error"):
+        decide_cb("error", "demand-ranked price selection failed, used the "
+                           f"review_count order: {demand_info['error']}")
+    order_note = (" demand-ranked " + ", ".join(
+        f"{k}={v}" for k, v in (demand_info.get("by_tier") or {}).items())
+        if demand_ranked else "")
     decide_cb("observation",
               f"Creators: {len(candidates)} stale-price products to refresh "
-              f"(freshness={freshness_hours}h, cap={max_per_run})")
+              f"(freshness={freshness_hours}h, cap={max_per_run}){order_note}")
     summary = {
         "provider": "creators",
         "refreshed": 0, "failed": 0, "processed": 0,
         "batches": 0, "asins_seen": 0, "inaccessible": 0,
         "compliance_pass": 0, "compliance_fail": 0,
     }
+    if demand_cfg:
+        summary["demand_ranked"] = demand_ranked
+        summary["by_tier"] = dict(demand_info.get("by_tier") or {})
+        summary["refreshed_by_tier"] = {}
+        if demand_info.get("error"):
+            summary["demand_error"] = demand_info["error"]
+        if (demand_info.get("signals") or {}).get("errors"):
+            summary["demand_signal_errors"] = demand_info["signals"]["errors"]
     if not candidates:
         return summary
 
-    by_asin = {p["asin"]: p for p in candidates}
+    # Every candidate row of an ASIN is written: a {asin: row} map updated
+    # one row and left the ASIN's other active row stale, so it was picked
+    # again next run, forever.
+    by_asin: dict[str, list[dict]] = {}
+    for p in candidates:
+        by_asin.setdefault(p["asin"], []).append(p)
     asins = list(by_asin.keys())
     for i in range(0, len(asins), batch_size):
         chunk = asins[i:i + batch_size]
@@ -694,8 +829,8 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
 
         summary["asins_seen"] += len(items)
         for asin, raw in items.items():
-            row = by_asin.get(asin)
-            if not row:
+            rows = by_asin.get(asin) or []
+            if not rows:
                 continue
             p = parse_item(raw)
             # Map to the shared persist contract's key names.
@@ -713,46 +848,50 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
                 "brand": p.get("brand"),
                 "title": p.get("title"),
             }
-            try:
-                _persist_provider_refresh(conn, row["id"], payload,
-                                          provider="creators")
-                summary["refreshed"] += 1
-                compliance = _compliance_flags(payload)
-                if all(compliance.values()):
-                    summary["compliance_pass"] += 1
-                else:
-                    summary["compliance_fail"] += 1
-            except Exception as e:
-                summary["failed"] += 1
-                # Same rationale as the PA-API path: without a rollback one
-                # bad row poisons the connection for the rest of the run.
+            for row in rows:
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                decide_cb("error",
-                          f"Creators persist failed for {asin}: {str(e)[:200]}")
+                    _persist_provider_refresh(conn, row["id"], payload,
+                                              provider="creators")
+                    summary["refreshed"] += 1
+                    if "refreshed_by_tier" in summary:
+                        t = row.get("tier") or "long-tail"
+                        summary["refreshed_by_tier"][t] = summary["refreshed_by_tier"].get(t, 0) + 1
+                    compliance = _compliance_flags(payload)
+                    if all(compliance.values()):
+                        summary["compliance_pass"] += 1
+                    else:
+                        summary["compliance_fail"] += 1
+                except Exception as e:
+                    summary["failed"] += 1
+                    # Same rationale as the PA-API path: without a rollback one
+                    # bad row poisons the connection for the rest of the run.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    decide_cb("error",
+                              f"Creators persist failed for {asin}: {str(e)[:200]}")
 
         # An ItemNotAccessible ASIN is delisted/regional/not-offered. Stamp
         # the miss so it ages out of the stale queue instead of being
         # retried every single run forever.
         for asin, msg in errors.items():
-            row = by_asin.get(asin)
-            if not row:
+            rows = by_asin.get(asin) or []
+            if not rows:
                 continue
             summary["inaccessible"] += 1
-            try:
-                _stamp_miss(conn, row["id"], f"creators: {msg[:120]}")
-            except Exception:
+            for row in rows:
                 try:
-                    conn.rollback()
+                    _stamp_miss(conn, row["id"], f"creators: {msg[:120]}")
                 except Exception:
-                    pass
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
         for a in chunk:
             if a in items or a in errors:
                 continue
-            row = by_asin.get(a)
-            if row:
+            for row in by_asin.get(a) or []:
                 try:
                     _stamp_miss(conn, row["id"], "creators: not in response")
                 except Exception:
@@ -766,7 +905,8 @@ def _refresh_via_creators(*, conn, creators_client, raw_cfg: dict,
 
 def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
                              site_id_filter: str | None,
-                             status_cb, decide_cb) -> dict:
+                             status_cb, decide_cb, demand_cfg: dict | None = None,
+                             storage=None) -> dict:
     """Refresh price + offer data via Bright Data's Amazon Products
     dataset. Default provider until PA-API qualification clears."""
     freshness_hours = int(raw_cfg.get("price_freshness_hours", 24))
@@ -777,6 +917,7 @@ def _refresh_via_brightdata(*, conn, bd_cfg: BrightDataConfig, raw_cfg: dict,
         freshness_hours=freshness_hours, limit=max_per_run,
         prioritize_featured_and_linked=bool(
             raw_cfg.get("prioritize_featured_and_linked", False)),
+        demand_cfg=demand_cfg, storage=storage,
     )
     decide_cb("observation",
               f"BrightData: {len(candidates)} stale-price products "
@@ -886,7 +1027,9 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
                             bd_cfg: BrightDataConfig | None,
                             provider: str,
                             site_id_filter: str | None,
-                            status_cb, decide_cb) -> dict:
+                            status_cb, decide_cb,
+                            agent_id: str = "", site: str = "",
+                            storage=None) -> dict:
     """Top-level dispatcher — selects the provider and delegates.
 
     `creators` is the Amazon path whose credentials are provisioned, so it
@@ -895,8 +1038,21 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
     otherwise silently refresh nothing forever. Falling back beats
     reporting a skip, and the swap is recorded via decide_cb so it shows up
     in the run's decision log rather than happening invisibly.
+
+    `agent_id` / `site` / `storage` resolve the optional demand-ranked
+    candidate order (framework price_refresh_priority; off unless the site
+    or the storage config turns it on for this agent).
     """
     from framework.core.amazon_creators import client_from_env
+
+    demand_cfg = _demand_ranked_config(raw_cfg, agent_id=agent_id, site=site,
+                                       site_id_filter=site_id_filter,
+                                       storage=storage)
+    if demand_cfg:
+        decide_cb("observation",
+                  "price candidates: framework demand-ranked order ("
+                  + " > ".join(g["name"] for g in demand_cfg["groups"])
+                  + f" > long tail @{demand_cfg['long_tail'].get('gate_hours')}h)")
 
     creators_client = client_from_env(
         partner_tag=raw_cfg.get("associate_tag", "") or "",
@@ -923,6 +1079,7 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
             conn=conn, creators_client=creators_client, raw_cfg=raw_cfg,
             site_id_filter=site_id_filter,
             status_cb=status_cb, decide_cb=decide_cb,
+            demand_cfg=demand_cfg, storage=storage,
         )
     if provider == "paapi":
         if not paapi_cfg:
@@ -936,6 +1093,7 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
             conn=conn, paapi_cfg=paapi_cfg, raw_cfg=raw_cfg,
             site_id_filter=site_id_filter,
             status_cb=status_cb, decide_cb=decide_cb,
+            demand_cfg=demand_cfg, storage=storage,
         )
     if provider == "brightdata":
         if not bd_cfg:
@@ -949,6 +1107,7 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
             conn=conn, bd_cfg=bd_cfg, raw_cfg=raw_cfg,
             site_id_filter=site_id_filter,
             status_cb=status_cb, decide_cb=decide_cb,
+            demand_cfg=demand_cfg, storage=storage,
         )
     return {"provider": provider,
             "skipped_reason": f"unknown provider: {provider}",
@@ -1375,6 +1534,9 @@ class ProductHydrationAgent(AgentBase):
                     provider=provider,
                     site_id_filter=self.site_id_filter,
                     status_cb=self.status, decide_cb=self.decide,
+                    agent_id=self.agent_id,
+                    site=str((cfg.get("site") or {}).get("id") or ""),
+                    storage=getattr(self, "storage", None),
                 ))
                 self.decide(
                     "action",
@@ -1761,6 +1923,13 @@ class ProductHydrationAgent(AgentBase):
                 "prices_failed": totals["prices_failed"],
                 "amazon_paapi_batches": paapi_summary.get("batches", 0),
                 "amazon_paapi_skipped_reason": paapi_summary.get("skipped_reason"),
+                # Demand-ranked price order (framework price_refresh_priority):
+                # 1 when this run used it; prices refreshed outside the long
+                # tail (recently clicked / AI-used / site groups).
+                "prices_demand_ranked": int(bool(paapi_summary.get("demand_ranked"))),
+                "prices_refreshed_demand": sum(
+                    n for t, n in (paapi_summary.get("refreshed_by_tier") or {}).items()
+                    if t != "long-tail"),
                 "compliance_pass": totals["compliance_pass"],
                 "compliance_fail": totals["compliance_fail"],
                 **{f"per_type_{ct}": n for ct, n in per_type_counts.items()},

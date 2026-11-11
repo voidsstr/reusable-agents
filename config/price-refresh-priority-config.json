@@ -1,0 +1,7 @@
+{
+  "schema_version": "1",
+  "_comment": "Demand-ranked Amazon price refresh (framework/core/price_refresh_priority.py). Resolution, lowest to highest: the module DEFAULTS (tiers clicked-48h@5h, clicked-14d@12h, ai-answer-time@20h, clicked-30d@12h, then the long tail oldest first @24h; enabled=false) <- `defaults` <- `by_site.<site>` <- the consumer's site config (site.yaml block or site code) <- `by_agent_id.<agent-id>`. Dicts deep-merge; lists replace, except `extra_groups` (appends) and `group_overrides` ({name: partial group}). A storage copy at config/price-refresh-priority-config.json replaces this repo file wholesale. Only VALUES live here (and only generic ones: per-site tables and click specs belong in the site repos, or in storage by_site); the ranking logic stays in the module. Kill switch for one consumer without a commit: storage by_agent_id.<agent-id> = {\"enabled\": false}.",
+  "defaults": {},
+  "by_site": {},
+  "by_agent_id": {}
+}
