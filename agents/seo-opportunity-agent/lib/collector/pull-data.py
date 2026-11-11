@@ -204,6 +204,54 @@ def collect_ga4(token: str, cfg, data: Path) -> None:
             resp = {}
         (data / fname).write_text(json.dumps(resp, indent=1))
         warn(f"  ✓ {fname}: {len(resp.get('rows') or [])} rows")
+    collect_ga4_money_pages(token, prop, src.get("money_pages") or {}, data)
+
+
+MONEY_PAGES_FILE = "ga4-money-pages.json"
+
+
+def money_pages_request(mp: dict) -> dict:
+    """GA4 body for data_sources.ga4.money_pages: engaged sessions per page
+    path over the last `window_days`, one country, the listed cities out
+    (cloud datacenters, not readers). The finalizer intersects the rows with
+    the site's conversion_winners pages (framework/core/demand_signal.py)."""
+    days = int(mp.get("window_days") or 7)
+    end = date.today() - timedelta(days=1)
+    start = end - timedelta(days=days - 1)
+    filters = []
+    if mp.get("country"):
+        filters.append({"filter": {"fieldName": "country",
+                                   "stringFilter": {"value": str(mp["country"])}}})
+    cities = [str(c) for c in (mp.get("exclude_cities") or []) if str(c).strip()]
+    if cities:
+        filters.append({"notExpression": {"filter": {
+            "fieldName": "city", "inListFilter": {"values": cities}}}})
+    body = {
+        "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
+        "dimensions": [{"name": "pagePath"}],
+        "metrics": [{"name": "engagedSessions"}],
+        "orderBys": [{"metric": {"metricName": "engagedSessions"}, "desc": True}],
+        "limit": int(mp.get("row_limit") or 2000),
+    }
+    if len(filters) == 1:
+        body["dimensionFilter"] = filters[0]
+    elif filters:
+        body["dimensionFilter"] = {"andGroup": {"expressions": filters}}
+    return body
+
+
+def collect_ga4_money_pages(token: str, prop: str, mp: dict, data: Path) -> None:
+    """Optional (enabled: true): write ga4-money-pages.json. A failure warns
+    and writes nothing, so the money-page metric is simply absent this run."""
+    if not mp.get("enabled"):
+        return
+    try:
+        resp = ga4_report(token, prop, money_pages_request(mp))
+    except Exception as e:
+        warn(f"  ! {MONEY_PAGES_FILE} failed ({str(e)[:120]}) — metric skipped")
+        return
+    (data / MONEY_PAGES_FILE).write_text(json.dumps(resp, indent=1))
+    warn(f"  ✓ {MONEY_PAGES_FILE}: {len(resp.get('rows') or [])} rows")
 
 
 # ---------------------------------------------------------------------------

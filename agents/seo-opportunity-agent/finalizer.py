@@ -183,6 +183,11 @@ def finalize(agent, *, cfg, run_ts: str, run_dir: Path) -> dict:
 
     metrics = {"rec_count": len(rec_ids), **north_star, **per_category,
                **measured}
+    # SHOP-23: traffic to the pages that sell (data_sources.ga4.money_pages).
+    try:
+        metrics.update(_money_page_sessions(agent, cfg, run_dir))
+    except Exception as e:  # never fail the run over a goal metric
+        print(f"[finalize] money-page sessions skipped: {e}", file=sys.stderr)
 
     return {
         "summary": summary,
@@ -190,6 +195,79 @@ def finalize(agent, *, cfg, run_ts: str, run_dir: Path) -> dict:
         "metrics": metrics,
         "request_id": request_id,
     }
+
+
+DEFAULT_MONEY_PAGES_METRIC = "money_guide_us_engaged_sessions_7d"
+
+
+def _norm_path(p: str) -> str:
+    p = str(p or "").split("?", 1)[0].split("#", 1)[0].strip()
+    return p.rstrip("/") or "/"
+
+
+def money_page_set(sig: Optional[dict], *, top_n: int = 20,
+                   path_prefixes: Optional[list] = None) -> list[str]:
+    """Top-N conversion_winners page paths by verified clicks (the only
+    money-page list; no hand-kept fallback)."""
+    rows = ((sig or {}).get("conversion_winners") or {}).get("pages") or []
+    prefixes = tuple(path_prefixes or ())
+    out: list[str] = []
+    for r in sorted((r for r in rows if isinstance(r, dict) and r.get("path")),
+                    key=lambda r: -float(r.get("clicks") or 0)):
+        p = _norm_path(r["path"])
+        if prefixes and not p.startswith(prefixes):
+            continue
+        if p not in out:
+            out.append(p)
+        if len(out) >= top_n:
+            break
+    return out
+
+
+def sum_engaged_sessions(ga4_resp: dict, pages: list[str]) -> float:
+    """Sum GA4 engagedSessions (metric 0) over rows whose pagePath, without
+    query string or trailing slash, is in `pages`."""
+    want = set(pages)
+    total = 0.0
+    for row in (ga4_resp or {}).get("rows") or []:
+        try:
+            path = _norm_path(row["dimensionValues"][0]["value"])
+            val = float(row["metricValues"][0]["value"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        if path in want:
+            total += val
+    return total
+
+
+def _money_page_sessions(agent, cfg, run_dir: Path) -> dict:
+    """{<metric_key>: engaged sessions on the money pages, money_pages_counted}
+    when data_sources.ga4.money_pages is enabled, the collector wrote
+    ga4-money-pages.json and the site's conversion_winners signal is fresh.
+    Otherwise {} (goal not measured this run, never a fake 0)."""
+    import json as _json
+    mp = (((cfg.get("data_sources") or {}).get("ga4") or {}).get("money_pages")) or {}
+    if not mp.get("enabled"):
+        return {}
+    f = run_dir / "data" / "ga4-money-pages.json"
+    if not f.exists():
+        return {}
+    from framework.core import demand_signal
+    site_id = getattr(cfg, "site_id", "") or ""
+    sig = demand_signal.read_demand(agent.storage, site_id,
+                                    max_age_hours=int(mp.get("signal_max_age_hours") or 72))
+    pages = money_page_set(sig, top_n=int(mp.get("top_n") or 20),
+                           path_prefixes=mp.get("path_prefixes"))
+    if not pages:
+        try:
+            agent.decide("warning", "money-page sessions: no fresh conversion_winners "
+                                    f"pages for site {site_id!r}; metric not recorded")
+        except Exception:
+            pass
+        return {}
+    total = sum_engaged_sessions(_json.loads(f.read_text()), pages)
+    key = str(mp.get("metric_key") or DEFAULT_MONEY_PAGES_METRIC)
+    return {key: total, "money_pages_counted": float(len(pages))}
 
 
 def _category_rec_counts(recs: list) -> dict:

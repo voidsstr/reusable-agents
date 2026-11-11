@@ -54,7 +54,23 @@
           "type": "object",
           "required": ["property_id"],
           "properties": {
-            "property_id": { "type": "string", "description": "GA4 property numeric id, as a string." }
+            "property_id": { "type": "string", "description": "GA4 property numeric id, as a string." },
+            "money_pages": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Optional: traffic to the pages that sell. The collector writes data/ga4-money-pages.json (engagedSessions per pagePath, one country, datacenter cities out); the finalizer sums it over the top_n conversion_winners pages (framework/core/demand_signal.py, published by the site's search-demand-agent) and emits RunResult.metrics[<metric_key>] plus money_pages_counted. No fresh signal = no metric (never a hand-kept page list).",
+              "properties": {
+                "enabled": { "type": "boolean", "default": false },
+                "metric_key": { "type": "string", "default": "money_guide_us_engaged_sessions_7d", "description": "RunResult.metrics key a goal binds to." },
+                "window_days": { "type": "integer", "minimum": 1, "maximum": 90, "default": 7 },
+                "top_n": { "type": "integer", "minimum": 1, "default": 20, "description": "How many conversion_winners pages (by verified clicks) count." },
+                "path_prefixes": { "type": "array", "items": { "type": "string" }, "description": "Only count conversion_winners pages under these path prefixes (e.g. /blog/). Empty = all." },
+                "country": { "type": "string", "description": "GA4 country dimension value to keep, e.g. 'United States'. Omit for all countries." },
+                "exclude_cities": { "type": "array", "items": { "type": "string" }, "description": "GA4 city values to drop (cloud datacenter cities)." },
+                "signal_max_age_hours": { "type": "integer", "minimum": 1, "default": 72 },
+                "row_limit": { "type": "integer", "minimum": 1, "default": 2000 }
+              }
+            }
           }
         },
         "db": {
