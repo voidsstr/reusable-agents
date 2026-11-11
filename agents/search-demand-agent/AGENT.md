@@ -1,11 +1,14 @@
 # Search-Demand Steering — engine (`search-demand-agent`)
 
-> Turns 28 days of Google Search Console and GA4 data into a compact
-> "what to write next" signal: winning page templates, category demand
-> lanes, uncovered queries, strike-distance queries and hot head-to-head
-> pairs. Author agents inject it into their prompts, which biases new
-> content toward proven search demand. North Star: **organic clicks +
-> indexed pages** (publish where readers already search and click).
+> Turns the site's verified-human affiliate clicks plus 28 days of Google
+> Search Console and GA4 data into a compact "what to write next" signal.
+> It leads with WHAT SELLS (where clicks that pass `human_clicks.py` come
+> from: templates, topic clusters per 100 articles, categories, pages,
+> products, placements). Then it covers winning page templates, category
+> demand lanes, uncovered queries, strike-distance queries and hot
+> head-to-head pairs. Author agents inject it into their prompts. North
+> Star: **verified-human affiliate clicks**, then organic clicks + indexed
+> pages.
 
 This is the shared **engine**. Per-site instances run it. Deterministic, no
 LLM.
@@ -20,7 +23,7 @@ LLM.
 | Schedule | none. Not registered (`GET /api/agents/search-demand-agent` → 404) |
 | Entry command | `python3 agent.py` with `SEARCH_DEMAND_CONFIG` (plus `AGENT_ID`, and the DSN env if used) |
 | Category | seo (per instance manifest) |
-| Status | engine only. Live instance: `specpicks-search-demand-agent` (05:35 and 17:35 America/Detroit). No aisleprompt instance as of 2026-09-23 |
+| Status | engine only. Live instance: `specpicks-search-demand-agent` (05:35 and 17:35 America/Detroit). `aisleprompt-search-demand-agent` (07:50 and 15:50) created 2026-11-11, registered by the operator |
 | Contract | `framework/core/demand_signal.py` (`write_demand` / `read_demand` / `build_prompt_block`) |
 | Instance runbook | `specpicks: agents/search-demand-agent/AGENT.md` |
 
@@ -70,10 +73,26 @@ LLM.
    with score > 0 are kept, each tagged with the #1 template.
 10. **Hot head-to-head pairs**: the top 10 resolved `/vs/` pairs by GA4
     views, plus the top 10 GSC queries containing " vs ", capped at 15.
-11. **Publish**: `demand_signal.write_demand(storage, site_id, payload)`
+11. **WHAT SELLS** (optional, `data_sources.affiliate_clicks`, added
+    2026-11-11): `_conversion_winners` reads the click table through
+    `human_clicks.human_counts_by`, resolving the spec with
+    `profile=<AGENT_ID>`. It queries 30d, 7d and 14d per facet (page,
+    product, placement, category), all in one read-only session under
+    `statement_timeout`. `summarize_conversions` (pure) builds
+    `conversion_winners` from those counts:
+    - totals: sums over the page facet, NULL pages included;
+    - pages: normalized paths, classified by the block's `templates` (else
+      the top-level list);
+    - template yields: `clicks_per_100` over published articles;
+    - clusters: `ai_traffic.cluster_yield` over `articles_query`;
+    - products: resolved by `products_query`;
+    - categories: from the products, or from `category_col`.
+
+    A failure logs a `warning` and the signal ships without it.
+12. **Publish**: `demand_signal.write_demand(storage, site_id, payload)`
     writes `framework/demand-signal/<site_id>.json` and adds `site` and
     `generated_at`.
-12. **Outcome metric**: `steered_published_7d` counts published
+13. **Outcome metric**: `steered_published_7d` counts published
     `editorial_articles` from the last 7 days whose title `ILIKE` the first
     word of one of the top 15 steer topics. The docstring calls it
     "imperfect but directionally honest".
@@ -89,6 +108,11 @@ LLM.
   referrals plus live user fetches (ChatGPT-User, Perplexity-User,
   Claude-User), spoofed crawler IPs dropped. GSC and GA4 cannot see this
   demand, and the article proposer had no other input for it.
+- Site affiliate click table (optional, read only,
+  `data_sources.affiliate_clicks`): first-party click rows. Only the rows
+  `framework/core/human_clicks.py` labels `human` count, the same
+  definition the goal trackers use. GA4 views include crawlers, so this is
+  the only purchase signal the authors get.
 - Config: the instance `site.yaml`.
 
 ## Outputs
@@ -103,8 +127,24 @@ LLM.
   referrals per 100 published articles (a yield; clusters under 20 articles
   listed last as too few to judge), then the product pages assistants land
   on (single-product lookups: PDP / head-to-head work, not category
-  round-ups). Consumers ignore a signal older than 72h
-  (`DEFAULT_MAX_AGE_HOURS`).
+  round-ups). With `data_sources.affiliate_clicks` the signal also carries
+  `conversion_winners`, with keys `label`, `window_days`, `trend_days`,
+  `definition` and `total` `{d30, d7, prev7}`, plus these lists:
+  - `templates`: `{template, clicks, d7, prev7, pages, articles,
+    clicks_per_100}`;
+  - `placements`: `{placement, clicks, d7, prev7}`;
+  - `clusters`: `{cluster, articles, clicks, d7, clicks_per_100}`;
+  - `categories`: `{category, clicks, d7, prev7, products, value}`;
+  - `products`: `{key, title, category, price, link, clicks, d7, prev7}`;
+  - `pages`: `{path, template, clicks, d7, prev7}`.
+
+  `build_prompt_block` renders it FIRST as **WHAT SELLS (verified-human
+  <label> clicks, 30d; last 7d vs prior 7d)**, with this rule: a proposal
+  that extends a WHAT SELLS cluster or category ranks above an
+  AI-citation-only lane and must link the converting page or product. The
+  block never shows a per-product price, so authors don't quote a stale
+  one. `template_winners` is relabelled "GA4 views (includes crawlers)".
+  Consumers ignore a signal older than 72h (`DEFAULT_MAX_AGE_HOURS`).
 - **Decisions**: `info` "demand signal written to …", plus `warning`s for
   GA4, vocabulary or template-total failures.
 - **No DB writes, no recs, no handoffs, no agent-specific email.** The
@@ -119,7 +159,19 @@ LLM.
 `RunResult.metrics`: `gsc_rows`, `ga4_rows`, `topics_emitted`,
 `strike_found`, `zero_coverage_found`, `h2h_hot_found`,
 `steered_published_7d`, and with AI demand `ai_demand_clusters`,
-`ai_referrals_on_articles`, `ai_demand_top_products`.
+`ai_referrals_on_articles`, `ai_demand_top_products`. With WHAT SELLS:
+
+- `conversion_clicks_30d`, `conversion_clicks_7d`,
+  `conversion_clicks_prev7d`.
+- `conversion_article_clicks_30d`: clicks on published article paths.
+- Only when `articles_query` returns `published_at`:
+  - `conversion_new_article_clicks_30d`: clicks on articles published in
+    the last 30d.
+  - `conversion_recent_articles_7d`.
+  - `conversion_top5_cluster_share_7d_pct`: share of the last 7 days'
+    articles that fall in a top-5 WHAT SELLS cluster, i.e. clicks per 100
+    at or above the site average (`demand_signal.top_conversion_clusters`).
+    It is omitted when no cluster qualifies.
 
 ## Goals & metrics
 
@@ -149,6 +201,7 @@ Env vars:
 | `auth.oauth_file` | required | Google OAuth refresh-token file |
 | `templates[]` | `[]` | ordered `{name, pattern[, prefix]}`, where the first regex match wins. `prefix` sets the GA4 total filter explicitly |
 | `min_impressions` | 20 | ceiling for the adaptive floor |
+| `data_sources.affiliate_clicks` | none (off) | WHAT SELLS. Keys: `label` (merchant name in the title, default `affiliate`), `dsn_env` (default `data_sources.db.dsn_env`), `table`, `spec` (human_clicks columns; storage `by_profile[<AGENT_ID>]` overrides apply, or set `profile`), `match` (`{col: value}`; a list means IN), `page_col` (alias `group_col`; a path or full-URL column), `page_path_template` (`{value}`), optional `product_col` / `placement_col` / `category_col`, `products_query` (`key, title, category[, price][, link]` for `%(keys)s`; price is used only for the aggregate category value), `templates[]` (click-page classifier, default the top-level `templates`), `articles_query` / `article_path_template` / `clusters` (default `data_sources.ai_traffic`'s; a `published_at` column enables the dated metrics), `top_pages` 12, `top_products` 12, `top_categories` 10, `max_product_lookup` 5000, `statement_timeout_ms` 30000. Any failure logs a warning and the signal ships without the block. |
 | `data_sources.ai_traffic` | none (off) | AI-assistant demand. Keys: `dsn_env` (default `data_sources.db.dsn_env`), `config` (overrides for `ai_traffic.DEFAULTS`, e.g. `referral_sources`, `live_fetch_sources`), `articles_query` (`slug, title` of published articles), `article_path_template` (`/reviews/{slug}`), `clusters[]` (`{name, pattern}`; regex on "slug title", first match wins), `product_prefix`, `product_key_regex`, `products_query` (`key, title, category` for `%(keys)s`; double any literal `%`), `top_products` (15). Any failure logs a warning and the signal ships without the block. |
 
 ## Short-circuit & idempotency
@@ -192,15 +245,20 @@ exactly the block authors inject.
 | warning `category vocab unavailable` | DSN env unset or DB unreachable | check the DSN env named in `data_sources.db.dsn_env` |
 | `topics_emitted` = 0 | no GSC/GA4 evidence matched the vocabulary | check `gsc_rows` / `ga4_rows` in the run metrics |
 | Authors not steered | signal older than 72h (producer dead) → `read_demand` returns None | check the instance timer and last run |
+| warning `affiliate_clicks failed …` / no WHAT SELLS block | click-table name, column (`spec`, `page_col`, …) or `products_query` wrong, or the DSN env is unset. A window with 0 human clicks renders no block by design | run the instance once with `AGENT_FORCE_RUN=1`; compare `conversion_clicks_30d` with `python3 -m framework.cli.human_clicks` for the same table, spec and match |
 
 ## Related agents
 
-- **Instance**: `specpicks-search-demand-agent` (`specpicks: agents/search-demand-agent/`).
+- **Instances**: `specpicks-search-demand-agent` (`specpicks: agents/search-demand-agent/`),
+  `aisleprompt-search-demand-agent` (`aisleprompt: agents/search-demand-agent/`, 2026-11-11).
 - **Consumers**: `specpicks-article-proposal-agent` calls
   `demand_signal.read_demand(storage, "specpicks")` and injects
   `build_prompt_block()` above the trends block. The head-to-head agent
   does **not** consume it yet (only the article-proposal agent references
-  `demand_signal` as of 2026-09-23).
+  `demand_signal` as of 2026-09-23). A consumer that only wants the
+  purchase evidence calls `demand_signal.build_conversion_block(sig)`, or
+  for deterministic ranking `conversion_clicks(sig, "products")` and
+  `top_conversion_clusters(sig)`.
 - **Shared auth**: `seo-opportunity-agent` collector (`refresh-token.py`,
   `~/.reusable-agents/seo/.oauth.json`).
 - **Sibling signal primitives**: `framework/core/seasonal_calendar.py`,

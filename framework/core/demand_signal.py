@@ -29,7 +29,7 @@ Signal payload shape (all keys optional — consumers must tolerate absence):
     "site": "specpicks",
     "generated_at": "2026-08-18T18:20:00+00:00",
     "template_winners": [{"template", "views", "clicks", "impressions",
-                          "pages", "views_per_page"}],
+                          "pages", "views_per_page"}],   # GA4 views include crawlers
     "steer_topics":     [{"topic", "category_slug", "template",
                           "impressions", "clicks", "sample_queries": []}],
     "zero_coverage":    [{"query", "impressions", "position"}],
@@ -41,7 +41,31 @@ Signal payload shape (all keys optional — consumers must tolerate absence):
                           "referrals_per_100", "fetches_per_100"}],
         "top_products": [{"key", "title", "category", "referrals", "fetches"}],
     },
+    "conversion_winners": {             # first-party affiliate clicks that pass
+        "label",                        #   framework/core/human_clicks.py
+        "window_days", "trend_days",    # 30, 7
+        "definition",                   # which rows count, in words
+        "total":      {"d30", "d7", "prev7"},
+        "templates":  [{"template", "clicks", "d7", "prev7", "pages",
+                        "articles", "clicks_per_100"}],
+        "placements": [{"placement", "clicks", "d7", "prev7"}],
+        "clusters":   [{"cluster", "articles", "clicks", "d7",
+                        "clicks_per_100"}],   # via ai_traffic.cluster_yield
+        "categories": [{"category", "clicks", "d7", "prev7", "products",
+                        "value"}],
+        "products":   [{"key", "title", "category", "price", "link", "clicks",
+                        "d7", "prev7"}],
+        "pages":      [{"path", "template", "clicks", "d7", "prev7"}],
+    },
   }
+
+In ``conversion_winners`` "clicks" / "d30" count the last ``window_days``,
+"d7" the last ``trend_days`` and "prev7" the ``trend_days`` before those.
+"articles" / "clicks_per_100" appear only where published articles map to the
+row, "value" (summed clicked list price) and "price" only when the producer's
+product lookup returns a price, "link" (the internal path to cite) only when it
+returns one. GA4 views include crawlers, so
+``template_winners`` measures reach; ``conversion_winners`` measures what sold.
 """
 from __future__ import annotations
 
@@ -102,17 +126,18 @@ def build_prompt_block(sig: dict, *, max_topics: int = 10,
     """
     if not sig:
         return ""
-    lines: list[str] = []
+    # WHAT SELLS leads: verified purchase intent outranks every traffic count.
+    lines: list[str] = _conversion_lines(sig.get("conversion_winners") or {})
     gen = str(sig.get("generated_at", ""))[:16].replace("T", " ")
     lines.append(f"PROVEN SEARCH DEMAND (GSC+GA4, 28d, generated {gen} UTC) — this is what")
     lines.append("readers of THIS site actually open and search. Weight it above generic trends.")
 
     winners = sig.get("template_winners") or []
     if winners:
-        lines.append("Page-template performance (views per page — the format that wins):")
+        lines.append("Page-template GA4 views (includes crawlers — reach, not sales):")
         for w in winners[:5]:
             lines.append(
-                f"  - {w.get('template')}: {w.get('views', 0):,} views / "
+                f"  - {w.get('template')}: {w.get('views', 0):,} GA4 views / "
                 f"{w.get('pages', 0)} pages ({w.get('views_per_page', 0):.0f}/page), "
                 f"{w.get('clicks', 0):,} GSC clicks")
 
@@ -202,3 +227,204 @@ def _ai_demand_lines(ai: dict, *, max_clusters: int = 8, max_products: int = 8,
             out.append(f"  - {label}{cat}: {p.get('referrals', 0)} referrals, "
                        f"{p.get('fetches', 0)} fetches")
     return out
+
+
+# ── WHAT SELLS (conversion_winners) ─────────────────────────────────────────
+
+# facet → the row field that names it (conversion_clicks keys).
+_CONVERSION_FACETS = {
+    "templates": "template", "placements": "placement", "clusters": "cluster",
+    "categories": "category", "products": "key", "pages": "path",
+}
+
+# A cluster's per-100 yield is worth ranking on once it has enough articles OR
+# enough clicks: 2 clicks on 3 articles is noise, 60 clicks on 5 guides is not.
+CONVERSION_MIN_ARTICLES = 10
+CONVERSION_MIN_CLICKS = 10
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _judged(row: dict, *, min_articles: int, min_clicks: int) -> bool:
+    return _int(row.get("articles")) >= min_articles or _int(row.get("clicks")) >= min_clicks
+
+
+def _site_article_yield(clusters: list) -> Optional[float]:
+    """Clicks per 100 published articles across every cluster (the site's
+    average article), or None without articles."""
+    n = sum(_int(c.get("articles")) for c in clusters or [])
+    return 100.0 * sum(_int(c.get("clicks")) for c in clusters or []) / n if n else None
+
+
+def _conversion_lines(cw: dict, *, max_templates: int = 6, max_clusters: int = 6,
+                      max_categories: int = 6, max_products: int = 6,
+                      max_pages: int = 6, max_placements: int = 6,
+                      min_articles: int = CONVERSION_MIN_ARTICLES,
+                      min_clicks: int = CONVERSION_MIN_CLICKS) -> list[str]:
+    """The WHAT SELLS section: where the site's verified-human affiliate
+    clicks come from — page templates, article topic clusters per 100
+    published articles (a yield, like the AI-demand clusters), product
+    categories, single pages and products, on-page placements. Empty when the
+    window has no clicks: there is nothing to steer toward."""
+    total = cw.get("total") or {}
+    if not _int(total.get("d30")):
+        return []
+    w, t = _int(cw.get("window_days")) or 30, _int(cw.get("trend_days")) or 7
+    label = str(cw.get("label") or "affiliate")
+
+    def trend(r: dict) -> str:
+        return f"{t}d {_int(r.get('d7')):,} vs {_int(r.get('prev7')):,}"
+
+    def clicks(r: dict) -> str:
+        n = _int(r.get("clicks"))
+        return f"{n:,} click{'' if n == 1 else 's'}"
+
+    out = [f"WHAT SELLS (verified-human {label} clicks, {w}d; last {t}d vs prior {t}d): "
+           f"{_int(total.get('d30')):,} clicks, {trend(total)}.",
+           "Only clicks the framework's human-click filter accepts count (no bots, crawlers or "
+           "datacenter IPs). This is the purchase signal; it outranks every view, impression "
+           "and citation count below."]
+
+    tpl_rows = cw.get("templates") or []
+    tpls = [r for r in tpl_rows if _int(r.get("clicks"))][:max_templates]
+    if tpls:
+        out.append("Page templates by clicks:")
+        for r in tpls:
+            yld = (f"; {r.get('clicks_per_100', 0):g} per 100 of {_int(r['articles']):,} "
+                   "published articles" if _int(r.get("articles")) else "")
+            out.append(f"  - {r.get('template')}: {clicks(r)} ({trend(r)}) "
+                       f"from {_int(r.get('pages')):,} pages{yld}")
+        # Article formats below the cut, zero-click ones included: a format
+        # with hundreds of articles and no clicks is the strongest "stop" signal.
+        shown_names = {r.get("template") for r in tpls}
+        low = sorted((r for r in tpl_rows
+                      if _int(r.get("articles")) and r.get("template") not in shown_names),
+                     key=lambda r: (-float(r.get("clicks_per_100") or 0),
+                                    -_int(r.get("articles"))))
+        if low:
+            out.append("  Other article templates: " + " · ".join(
+                f"{r.get('template')} {r.get('clicks_per_100', 0):g}/100 of "
+                f"{_int(r['articles']):,} articles" for r in low[:6]))
+
+    judged, small = [], []
+    for c in cw.get("clusters") or []:
+        if _int(c.get("articles")):
+            (judged if _judged(c, min_articles=min_articles, min_clicks=min_clicks)
+             else small).append(c)
+    shown = (judged + small)[:max_clusters]
+    if shown:
+        avg = _site_article_yield(cw.get("clusters") or [])
+        out.append("Article topic clusters by clicks per 100 published articles"
+                   + (f" (site average {avg:.1f})" if avg is not None else "")
+                   + " — the lane where one more article is likeliest to sell:")
+        for c in shown:
+            few = ("" if _judged(c, min_articles=min_articles, min_clicks=min_clicks)
+                   else "; too few articles and clicks to judge")
+            out.append(f"  - {c.get('cluster')}: {c.get('clicks_per_100', 0):g}/100 "
+                       f"({clicks(c)}, {t}d {_int(c.get('d7')):,}, "
+                       f"{_int(c.get('articles')):,} articles{few})")
+        rest = judged[max_clusters:]   # judged clusters always fill the cap first
+        if rest:
+            out.append("  Below those: " + " · ".join(
+                f"{c.get('cluster')} {c.get('clicks_per_100', 0):g}/100 "
+                f"({_int(c.get('articles')):,} articles)" for c in rest[:8]))
+
+    cats = [r for r in (cw.get("categories") or []) if _int(r.get("clicks"))]
+    if cats:
+        out.append("Product categories by clicks:")
+        for r in cats[:max_categories]:
+            extra = f", {_int(r['products']):,} products" if _int(r.get("products")) else ""
+            if r.get("value"):
+                extra += f", ${float(r['value']):,.0f} clicked list value"
+            out.append(f"  - {r.get('category')}: {clicks(r)} ({trend(r)}){extra}")
+
+    pages = [r for r in (cw.get("pages") or []) if _int(r.get("clicks"))]
+    if pages:
+        out.append("Top converting pages (extend these, or link them from new articles):")
+        for r in pages[:max_pages]:
+            tp = f" [{r['template']}]" if r.get("template") else ""
+            out.append(f"  - {r.get('path')}{tp}: {clicks(r)} ({trend(r)})")
+
+    prods = [r for r in (cw.get("products") or []) if _int(r.get("clicks"))]
+    if prods:
+        # No per-product price here: a price in the prompt invites a stale
+        # price quote in the article. Category value above is aggregate.
+        out.append("Top converting products (link them where they fit):")
+        for r in prods[:max_products]:
+            # With a link the title only has to be recognisable.
+            name = str(r.get("title") or r.get("key") or "")[:60 if r.get("link") else 90]
+            cat = f" [{r['category']}]" if r.get("category") else ""
+            ref = r.get("link") or (r.get("key") if r.get("title") else "")
+            ref = f" {ref}" if ref else ""
+            out.append(f"  - {name}{cat}{ref}: {clicks(r)} ({trend(r)})")
+
+    pls = [r for r in (cw.get("placements") or []) if _int(r.get("clicks"))]
+    if pls:
+        out.append("Click placements (the on-page slot that got the click): " + " · ".join(
+            f"{r.get('placement')} {_int(r['clicks']):,}" for r in pls[:max_placements]))
+
+    out.append("RULE: a proposal that extends a WHAT SELLS cluster or category ranks above an "
+               "AI-citation-only lane, and must link the converting page or product it extends "
+               "(name it in why_now).")
+    return out
+
+
+def build_conversion_block(sig: Optional[dict], **caps: int) -> str:
+    """Only the WHAT SELLS section of `sig` ("" when it has no click data).
+
+    For a consumer that wants the purchase evidence without the GSC/GA4
+    sections, e.g. a head-to-head picker whose prompt already lists its pairs.
+    Keyword arguments are :func:`_conversion_lines` caps (``max_pages=…``).
+    """
+    return "\n".join(_conversion_lines((sig or {}).get("conversion_winners") or {}, **caps))
+
+
+def conversion_clicks(sig: Optional[dict], facet: str) -> dict[str, int]:
+    """``{name: verified clicks over the window}`` for one WHAT SELLS facet.
+
+    `facet` is "products" (keyed by product key, e.g. an ASIN), "categories",
+    "pages" (keyed by path), "templates", "clusters" or "placements". Empty
+    when the signal has no conversion data. For deterministic rankers, e.g.
+    boosting a head-to-head pair whose product sells.
+    """
+    field = _CONVERSION_FACETS.get(facet)
+    if not field:
+        raise ValueError(f"unknown conversion facet {facet!r}; "
+                         f"expected one of {sorted(_CONVERSION_FACETS)}")
+    out: dict[str, int] = {}
+    for r in ((sig or {}).get("conversion_winners") or {}).get(facet) or []:
+        key = r.get(field)
+        if key not in (None, ""):
+            out[str(key)] = out.get(str(key), 0) + _int(r.get("clicks"))
+    return out
+
+
+def top_conversion_clusters(sig: Optional[dict], n: int = 5, *,
+                            min_articles: int = CONVERSION_MIN_ARTICLES,
+                            min_clicks: int = CONVERSION_MIN_CLICKS,
+                            above_average: bool = True,
+                            exclude: tuple[str, ...] = ("other",)) -> list[str]:
+    """Names of the `n` article clusters with the best clicks-per-100 yield.
+
+    These are the "top WHAT SELLS clusters" a new article is measured
+    against, so a cluster qualifies only with at least one click, enough
+    articles or clicks to judge, and (`above_average`) a yield at or above the
+    site's average article — on a site with nine clusters a plain top 5
+    would count a below-average lane as a winner. `exclude` drops the
+    catch-all bucket of unmatched articles (ai_traffic.cluster_yield's
+    "other").
+    """
+    rows = ((sig or {}).get("conversion_winners") or {}).get("clusters") or []
+    floor = (_site_article_yield(rows) or 0.0) if above_average else 0.0
+    ranked = sorted(
+        (c for c in rows
+         if _int(c.get("clicks")) > 0 and c.get("cluster") not in exclude
+         and _judged(c, min_articles=min_articles, min_clicks=min_clicks)
+         and float(c.get("clicks_per_100") or 0) >= round(floor, 1)),
+        key=lambda c: (-float(c.get("clicks_per_100") or 0), str(c.get("cluster"))))
+    return [str(c.get("cluster")) for c in ranked[:max(0, int(n))]]
