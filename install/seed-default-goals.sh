@@ -179,12 +179,22 @@ put_goals "aisleprompt-seo-opportunity-agent" "$AP_REV_GOALS"
 # (db-queries blocks ai_referrals_30d / ai_live_fetches_30d → db.<block>.<col>
 # metrics). Status-only entries retire an existing goal and keep its history
 # (framework/core/goals.py init_goals).
+#
+# 2026-11-11 (A10): the Amazon goal had sat "accomplished" since 10-10 on a
+# target of 200, so it never reached the audit prompt (only active goals do).
+# Re-armed at 450 (~1.5x the ~330/30d left after the Safari-17 bot fleet was
+# filtered) with reopen, so falling back below target re-activates it. The
+# annotation marks the 11-11 step down as a measurement fix, not a regression.
+# init_goals re-activates an accomplished goal whose new target is past its
+# current value; a stale current that still meets it waits for the next run.
 AP_AI_GOALS='{"goals":[
   {"id":"goal-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d (REVENUE)",
-   "description":"Amazon affiliate clicks by real people in the last 30 days: kitchen_click_events rows that pass framework/core/human_clicks.py (site bot flag, headless/stale-browser UAs, datacenter IPs, no referer, velocity). Same definition as the site-goals-tracker goal. It used to read the GA4 kitchen_click event, which reported 0-1 while people were clicking.",
-   "metric":{"name":"human_amazon_clicks_30d","current":135,"target":200,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "description":"Amazon affiliate clicks by real people in the last 30 days: kitchen_click_events rows that pass framework/core/human_clicks.py (site bot flag, headless/stale-browser UAs incl. the Safari 17.0-17.2 fleet, datacenter IPs, no referer, velocity). Same definition as the site-goals-tracker goal. It used to read the GA4 kitchen_click event, which reported 0-1 while people were clicking. Re-baselined 2026-11-11 to ~330 once the Safari-17 fleet was removed; target 450.",
+   "metric":{"name":"human_amazon_clicks_30d","current":326,"target":450,"direction":"increase","unit":"clicks","horizon_weeks":12,"reopen":true},
    "target_metric":"revenue_28d.amazon-clicks_db_30d",
-   "directives":["prefer fixes on the pages that already produce human Amazon clicks and on the /blog/best-* guides AI assistants fetch","one clear Amazon link with the affiliate tag and rel=\"sponsored nofollow\" where the reader decides; never show a price that is not fresh"]},
+   "is_revenue_goal":true,
+   "annotations":[{"ts":"2026-11-11","kind":"measurement-correction","value":326,"note":"measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet (one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) is not a regression."}],
+   "directives":["prefer fixes on the pages that already produce human Amazon clicks and on the /blog/best-* guides AI assistants fetch","one clear Amazon link with the affiliate tag and rel=\"sponsored nofollow\" where the reader decides; never show a price that is not fresh","the evergreen /blog/best-<appliance> guides (coffee makers, cutting boards, espresso, slow cookers, air fryers, meal-prep containers, nonstick pans) carry ~95% of real clicks: keep their answer picks in stock and above the fold; recipes, /chat and the homepage convert ~0"]},
   {"id":"goal-ai-referrals-30d","title":"Visits sent by AI assistants / 30d",
    "description":"Visits referred from ChatGPT, Perplexity, Copilot or Claude in the last 30 days (ai_traffic_log kind=referral; db-queries block ai_referrals_30d).",
    "metric":{"name":"ai_referrals_30d","current":26,"target":75,"direction":"increase","unit":"visits","horizon_weeks":16},
@@ -217,9 +227,11 @@ put_goals "aisleprompt-progressive-improvement-agent" "$AP_PI_RETIRE"
 # of counting its own memo recs.
 AP_GROWTH_GOALS='{"goals":[
   {"id":"goal-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d",
-   "description":"Mirrored each run from aisleprompt-site-goals-tracker goal-amazon-clicks-30d (framework/core/human_clicks.py). The memo is judged by whether this moves.",
-   "metric":{"name":"human_amazon_clicks_30d","current":135,"target":200,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "description":"Mirrored each run from aisleprompt-site-goals-tracker goal-amazon-clicks-30d (framework/core/human_clicks.py). The memo is judged by whether this moves. Re-baselined 2026-11-11 to ~330 once the Safari-17 fleet was removed; target 450.",
+   "metric":{"name":"human_amazon_clicks_30d","current":326,"target":450,"direction":"increase","unit":"clicks","horizon_weeks":12,"reopen":true},
    "target_metric":"human_amazon_clicks_30d",
+   "is_revenue_goal":true,
+   "annotations":[{"ts":"2026-11-11","kind":"measurement-correction","value":326,"note":"measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet (one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) is not a regression."}],
    "directives":["every lever names the AI-landed or human-click pages it works on and its expected change in verified-human Amazon clicks"]},
   {"id":"goal-ai-assistant-sessions-30d","title":"AI-assistant sessions / 30d",
    "description":"Mirrored each run from aisleprompt-site-goals-tracker goal-ai-assistant-sessions-30d (GA4 AI Assistant channel).",
@@ -246,15 +258,30 @@ SP_SEO_GOALS='{"goals":[
    "target_metric":"db.ai_referrals_30d.last_30d",
    "directives":["audit the pages in ai_landed_pages first: make each answer its query in the first screen, load fast, and link the right product","never trade honesty (prices, availability, authorship, testing claims) for visibility"]},
   {"id":"goal-human-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d",
-   "description":"Amazon affiliate click-outs framework/core/human_clicks.py classifies as a person; outbound_clicks is ~99% crawlers, so the raw row count is not the metric. 0 on 2026-09-25.",
-   "metric":{"name":"human_amazon_clicks_30d","current":0,"target":30,"direction":"increase","unit":"clicks","horizon_weeks":12},
+   "description":"Amazon affiliate click-outs framework/core/human_clicks.py classifies as a person, counted on JS-beacon rows (data_sources.db.human_clicks match target=amazon, via=beacon); outbound_clicks is ~99% crawlers, so the raw row count is not the metric. 0 on 2026-09-25, 1,351 on 2026-11-11, ~81% of them from /product/* pages. Target 3,000 (~100/day) ratchets 25% past the value each time it is reached, so the goal stays in the audit prompt.",
+   "metric":{"name":"human_amazon_clicks_30d","current":1351,"target":3000,"direction":"increase","unit":"clicks","horizon_weeks":12,"ratchet":{"factor":1.25}},
    "target_metric":"db.amazon_human_clicks_30d.last_30d",
-   "directives":["on AI-landed pages make the tagged Amazon link (eBay for pre-2012 hardware) the obvious next step, showing a price only when it is under 24h old"]},
+   "is_revenue_goal":true,
+   "directives":["audit the /product/* pages that earn verified Amazon clicks first (~81% of clicks, nearly all on the first pageview within seconds): protect the pdp-hero buy box above the fold with the tagged Amazon link (eBay for pre-2012 hardware) and a price only when it is under 24h old; fix PDPs where it is missing or dead, never restyle a converting one","on articles, extend what already sells (in-season deal roundups, best-X-under-$Y, best-X-for-console/PS5/office guides); AI x-vs-y, quant and retro-history pages earn almost no clicks, so do not spend recs polishing them","on AI-landed pages make the tagged Amazon link (eBay for pre-2012 hardware) the obvious next step, showing a price only when it is under 24h old"]},
   {"id":"goal-recs-emitted-per-run","status":"abandoned"},
   {"id":"goal-recs-shipped-30d","status":"abandoned"},
   {"id":"goal-amazon-clicks-30d","status":"abandoned"}
 ]}'
 put_goals "specpicks-seo-opportunity-agent" "$SP_SEO_GOALS"
+
+# specpicks user-growth-strategist (2026-11-11, A10): its RunResult.metrics
+# human_amazon_clicks_30d (growth-queries.yaml, beacon rows) feeds this goal.
+# It sat "accomplished" on a target of 30 since 09-30. The same 3,000 target
+# and 25% ratchet as the SEO agent's goal and the site-goals-tracker's.
+SP_GROWTH_GOALS='{"goals":[
+  {"id":"goal-human-amazon-clicks-30d","title":"Verified-human Amazon clicks / 30d",
+   "description":"Amazon affiliate click-outs framework/core/human_clicks.py classifies as a person, counted on JS-beacon rows (growth-queries.yaml match target=amazon, via=beacon). 0 on 2026-09-25, 1,345 on 2026-11-11. Target 3,000 (~100/day) ratchets 25% past the value each time it is reached. The memo is judged by whether this moves.",
+   "metric":{"name":"human_amazon_clicks_30d","current":1345,"target":3000,"direction":"increase","unit":"clicks","horizon_weeks":12,"ratchet":{"factor":1.25}},
+   "target_metric":"human_amazon_clicks_30d",
+   "is_revenue_goal":true,
+   "directives":["on AI-landed pages make the tagged Amazon link (eBay for pre-2012 hardware) the obvious next step; show a price only when it is under 24h old","no more email-capture UI while captures read 0"]}
+]}'
+put_goals "specpicks-user-growth-strategist" "$SP_GROWTH_GOALS"
 
 # ── seo-opportunity-agent — Bing index coverage (audit F090, 2026-09-25) ────
 # Bing's index serves ChatGPT search, Copilot, DuckDuckGo and Yahoo. Bound to

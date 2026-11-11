@@ -12,18 +12,31 @@ Each `run()` should:
      contributing toward goal-zero-broken-pages")
   3. At end of run, update goal metrics + push progress_history (helper:
      `record_goal_progress`)
+
+Status rules: `apply_measurement` is the one place they live. It is shared by
+record_goal_progress and metric_helper.record/record_many:
+  - A measurement that reaches metric.target accomplishes the goal.
+  - metric.ratchet {"factor": F}: reaching the target instead raises it to
+    ceil(value × F) (a decrease goal lowers it to floor(value ÷ F)), and the
+    goal stays active. A north-star count never "finishes", so it never drops
+    out of the prompts. A ratchet implies re-open.
+  - Re-open: an accomplished goal whose new measurement falls back past its
+    target becomes active again. This happens when metric.reopen is true, when
+    the goal has a ratchet, or when storage config/goals-config.json sets
+    reopen_on_regression (fleet default, or by_agent_id.<id>). It is off by
+    default, so goals without these settings behave as before.
+init_goals (and so PUT /api/agents/<id>/goals) re-activates an accomplished
+goal when a seed moves its target, or changes its ratchet/reopen rule, so that
+the current value no longer meets it. A seed never accomplishes a goal. Nor
+does a seed ratchet one: that needs a fresh measurement, not a stale current.
 """
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
-
-try:
-    import jsonschema
-except ImportError as e:
-    raise SystemExit("jsonschema required (pip install jsonschema)") from e
+from typing import Any, Callable, Optional, Union
 
 from .storage import StorageBackend, get_storage
 
@@ -31,14 +44,173 @@ from .storage import StorageBackend, get_storage
 _HERE = Path(__file__).resolve().parent
 SCHEMA_PATH = _HERE.parent.parent / "shared" / "schemas" / "agent-goals.schema.json"
 
+# Storage config (optional): {"schema_version": "1",
+#   "reopen_on_regression": false,
+#   "by_agent_id": {"<agent-id>": {"reopen_on_regression": true}}}
+CONFIG_KEY = "config/goals-config.json"
+RATCHET_HISTORY_LIMIT = 20
+ANNOTATIONS_LIMIT = 50
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _validate_goals_doc(doc: dict) -> None:
+    # Imported here, not at module load, so metric_helper (which shares the
+    # status rules below) does not need jsonschema just to record a value.
+    try:
+        import jsonschema
+    except ImportError as e:
+        raise SystemExit("jsonschema required (pip install jsonschema)") from e
     schema = json.loads(SCHEMA_PATH.read_text())
     jsonschema.validate(doc, schema)
+
+
+# ---------------------------------------------------------------------------
+# Status rules: accomplish / ratchet / re-open
+# ---------------------------------------------------------------------------
+
+def _num(v: Any) -> Optional[float]:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def load_goals_config(storage: Optional[StorageBackend] = None) -> dict:
+    """Storage config/goals-config.json; {} when absent or unreadable."""
+    try:
+        doc = (storage or get_storage()).read_json(CONFIG_KEY)
+    except Exception:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def reopen_on_regression(agent_id: str, storage: Optional[StorageBackend] = None,
+                         config: Optional[dict] = None) -> bool:
+    """Fleet default for re-opening goals that have no metric.reopen of their
+    own: by_agent_id.<id>.reopen_on_regression, else the top-level value,
+    else False."""
+    cfg = load_goals_config(storage) if config is None else config
+    per = (cfg.get("by_agent_id") or {}).get(agent_id)
+    if isinstance(per, dict) and isinstance(per.get("reopen_on_regression"), bool):
+        return per["reopen_on_regression"]
+    return cfg.get("reopen_on_regression") is True
+
+
+def lazy_reopen_default(agent_id: str,
+                        storage: Optional[StorageBackend] = None) -> Callable[[], bool]:
+    """A zero-arg callable that reads the fleet default once, on first use.
+    Recording a value for a goal that opts in or out itself never reads it."""
+    memo: list[bool] = []
+
+    def _get() -> bool:
+        if not memo:
+            memo.append(reopen_on_regression(agent_id, storage=storage))
+        return memo[0]
+    return _get
+
+
+def target_met(metric: Optional[dict], value: Any = None) -> Optional[bool]:
+    """True/False when `value` (default: metric.current) meets metric.target
+    in metric.direction; None when either is not a number or the direction
+    is unknown."""
+    m = metric or {}
+    tgt = _num(m.get("target"))
+    val = _num(m.get("current") if value is None else value)
+    if tgt is None or val is None:
+        return None
+    direction = m.get("direction", "increase")
+    if direction == "increase":
+        return val >= tgt
+    if direction == "decrease":
+        return val <= tgt
+    return None
+
+
+def ratchet_factor(metric: Optional[dict]) -> Optional[float]:
+    """metric.ratchet.factor when it is a number above 1, else None."""
+    r = (metric or {}).get("ratchet")
+    f = _num(r.get("factor")) if isinstance(r, dict) else None
+    return f if f is not None and f > 1 else None
+
+
+def ratcheted_target(value: float, target: float, direction: str,
+                     factor: float) -> Optional[Union[int, float]]:
+    """The next target once `value` has met `target`; None when it cannot
+    move (e.g. a decrease goal already at 0). Whole-number targets stay whole
+    numbers; fractional ones (a CTR) keep 6 decimals."""
+    whole = float(target).is_integer()
+    if direction == "increase":
+        base = max(value, target)
+        raw = base * factor
+        new = int(math.ceil(raw)) if whole else round(raw, 6)
+        return new if new > base else None
+    if direction == "decrease":
+        base = min(value, target)
+        raw = base / factor
+        new = int(math.floor(raw)) if whole else round(raw, 6)
+        return new if new < base else None
+    return None
+
+
+def _reopen_wanted(metric: dict, reopen_default: Union[bool, Callable[[], bool]]) -> bool:
+    if ratchet_factor(metric):
+        return True
+    if isinstance(metric.get("reopen"), bool):
+        return metric["reopen"]
+    return bool(reopen_default() if callable(reopen_default) else reopen_default)
+
+
+def apply_measurement(goal: dict, value: float, *, now: Optional[str] = None,
+                      reopen_default: Union[bool, Callable[[], bool]] = False) -> list[dict]:
+    """Apply the automatic status rules for one fresh measurement.
+
+    Mutates `goal` (status, accomplished_at, metric.target, ratchet_history,
+    reopened_at/reopened_reason) and returns what happened as events:
+    [{"event": "accomplished"|"ratcheted"|"reopened", ...}]. The caller has
+    already stored `value` in metric.current. A retired (abandoned) goal
+    keeps its measurements but never changes status.
+    """
+    status = goal.get("status") or "active"
+    m = goal.get("metric")
+    if status == "abandoned" or not isinstance(m, dict):
+        return []
+    met = target_met(m, value)
+    if met is None:
+        return []
+    now = now or _now()
+    target = m["target"]
+    direction = m.get("direction", "increase")
+    factor = ratchet_factor(m)
+    if met:
+        if factor:
+            new_target = ratcheted_target(float(value), float(target), direction, factor)
+            if new_target is not None:
+                m["target"] = new_target
+                hist = goal.get("ratchet_history")
+                hist = hist if isinstance(hist, list) else []
+                hist.append({"ts": now, "value": value,
+                             "from_target": target, "to_target": new_target})
+                goal["ratchet_history"] = hist[-RATCHET_HISTORY_LIMIT:]
+                if status == "accomplished":
+                    goal["status"] = "active"
+                    goal["accomplished_at"] = None
+                return [{"event": "ratcheted", "value": value,
+                         "from_target": target, "to_target": new_target}]
+        if status != "accomplished":
+            goal["status"] = "accomplished"
+            goal["accomplished_at"] = now
+            return [{"event": "accomplished", "value": value, "target": target}]
+        return []
+    if status == "accomplished" and _reopen_wanted(m, reopen_default):
+        goal["status"] = "active"
+        goal["accomplished_at"] = None
+        goal["reopened_at"] = now
+        goal["reopened_reason"] = (f"measurement {float(value):g} fell back past "
+                                   f"target {float(target):g}")
+        return [{"event": "reopened", "value": value, "target": target}]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +248,35 @@ def write_goals_doc(
     return doc
 
 
+def _apply_seed_target(metric: dict, seed_target: Any) -> None:
+    """Apply a seed's metric.target. On a ratcheting goal, a routine re-seed
+    keeps the ratcheted target: a re-seed is routine when its target equals
+    metric.seed_target, the target the last seed asked for. Agents such as
+    site-goals-tracker re-seed every run. A changed seed target always wins."""
+    if (ratchet_factor(metric) and "target" in metric
+            and metric.get("seed_target") == seed_target):
+        return
+    metric["target"] = seed_target
+    if ratchet_factor(metric):
+        metric["seed_target"] = seed_target
+    else:
+        metric.pop("seed_target", None)
+
+
+def _merge_annotations(goal: dict, notes: Any) -> None:
+    """Add a seed's dated notes. Identity is (ts, note), and notes already on
+    the goal are never dropped."""
+    have = goal.get("annotations")
+    have = [a for a in have if isinstance(a, dict)] if isinstance(have, list) else []
+    seen = {(a.get("ts"), a.get("note")) for a in have}
+    for a in notes if isinstance(notes, list) else []:
+        if (isinstance(a, dict) and a.get("ts") and a.get("note")
+                and (a["ts"], a["note"]) not in seen):
+            have.append(dict(a))
+            seen.add((a["ts"], a["note"]))
+    goal["annotations"] = have[-ANNOTATIONS_LIMIT:]
+
+
 def init_goals(
     agent_id: str,
     goals: list[dict],
@@ -83,11 +284,17 @@ def init_goals(
 ) -> dict:
     """Idempotently seed a default set of goals for an agent. Existing goals
     with the same `id` are preserved (their progress_history is kept), so
-    re-running this never wipes progress. New goal ids get added."""
+    re-running this never wipes progress. New goal ids get added.
+
+    An accomplished goal is re-activated when the seed moves its target past
+    its current value, or changes its metric.ratchet / metric.reopen rule
+    while the current value misses the target. This is how a stale target
+    is re-armed."""
     s = storage or get_storage()
     existing = read_active_goals(agent_id, storage=s)
     by_id = {g["id"]: g for g in existing}
     merged: list[dict] = []
+    now = _now()
     for g in goals:
         gid = g["id"]
         if gid in by_id:
@@ -117,29 +324,63 @@ def init_goals(
             elif want == "active" and cur.get("status") == "abandoned":
                 cur["status"] = "active"
                 cur.pop("abandoned_at", None)
+            rules_changed = False
             if "metric" in g:
                 cur_metric = cur.get("metric", {})
-                cur_metric.update({
-                    k: v for k, v in g["metric"].items()
-                    if k in ("target", "direction", "unit", "horizon_weeks", "name")
-                })
+                seed_m = g["metric"] or {}
+                before = (cur_metric.get("target"), cur_metric.get("ratchet"),
+                          cur_metric.get("reopen"))
+                for k, v in seed_m.items():
+                    if k in ("direction", "unit", "horizon_weeks", "name"):
+                        cur_metric[k] = v
+                    elif k in ("ratchet", "reopen"):  # re-arm rules; null removes
+                        if v is None:
+                            cur_metric.pop(k, None)
+                        else:
+                            cur_metric[k] = v
+                if "target" in seed_m:
+                    _apply_seed_target(cur_metric, seed_m["target"])
                 # Ensure 'current' is a number (schema requires it). Use the
                 # incoming default if cur_metric.current is null/missing.
                 if cur_metric.get("current") is None:
-                    cur_metric["current"] = g["metric"].get("current", 0)
+                    cur_metric["current"] = seed_m.get("current", 0)
                 cur["metric"] = cur_metric
+                rules_changed = before != (cur_metric.get("target"),
+                                           cur_metric.get("ratchet"),
+                                           cur_metric.get("reopen"))
+            if "annotations" in g:
+                _merge_annotations(cur, g["annotations"])
+            # Re-arm: a seed that moved an accomplished goal's target (or its
+            # ratchet/reopen rule) past the current value re-activates it.
+            # A routine re-seed changes nothing, so it never flips status.
+            if (rules_changed and cur.get("status") == "accomplished"
+                    and target_met(cur.get("metric")) is False):
+                m = cur["metric"]
+                cur["status"] = "active"
+                cur["accomplished_at"] = None
+                cur["reopened_at"] = now
+                cur["reopened_reason"] = (
+                    f"re-armed by seed: target {m.get('target')} is past the "
+                    f"current value {m.get('current')}")
             merged.append(cur)
         elif g.get("status") == "abandoned" and not g.get("title"):
             continue  # retire entry for a goal this agent never had
         else:
             seeded = dict(g)
             seeded.setdefault("status", "active")
-            seeded.setdefault("created_at", _now())
+            seeded.setdefault("created_at", now)
             seeded.setdefault("progress_history", [])
             # Same null-guard for new goals
             sm = seeded.get("metric")
-            if isinstance(sm, dict) and sm.get("current") is None:
-                sm["current"] = 0
+            if isinstance(sm, dict):
+                sm = seeded["metric"] = dict(sm)
+                if sm.get("current") is None:
+                    sm["current"] = 0
+                if ratchet_factor(sm) and "target" in sm:
+                    sm["seed_target"] = sm["target"]
+            if "annotations" in seeded:
+                seeded.pop("annotations")
+                _merge_annotations(seeded, g["annotations"])
             merged.append(seeded)
     # Preserve any existing goals not mentioned in the new seed list
     seeded_ids = {g["id"] for g in goals}
@@ -168,7 +409,12 @@ def record_goal_progress(
     accomplished: Optional[bool] = None,
     storage: Optional[StorageBackend] = None,
 ) -> dict:
-    """Append a progress entry to one goal. Optionally mark it accomplished."""
+    """Append a progress entry to one goal. Optionally mark it accomplished.
+
+    With `accomplished=None` the status follows `apply_measurement`:
+    accomplish on reaching the target, ratchet (metric.ratchet), or re-open
+    on falling back (metric.reopen / ratchet / config reopen_on_regression).
+    Accomplishments and ratchets are logged to accomplished.jsonl."""
     s = storage or get_storage()
     doc = s.read_json(goals_key(agent_id)) or {
         "schema_version": "1", "agent_id": agent_id,
@@ -178,42 +424,39 @@ def record_goal_progress(
     for g in goals:
         if g["id"] != goal_id:
             continue
+        now = _now()
         g.setdefault("progress_history", []).append({
-            "ts": _now(), "value": value, "run_ts": run_ts, "note": note,
+            "ts": now, "value": value, "run_ts": run_ts, "note": note,
         })
         m = g.setdefault("metric", {})
         m["current"] = value
         if accomplished is True:
             g["status"] = "accomplished"
-            g["accomplished_at"] = _now()
+            g["accomplished_at"] = now
             # Append to accomplished.jsonl for fast audit
             s.append_jsonl(
                 f"agents/{agent_id}/goals/accomplished.jsonl",
-                {"ts": _now(), "goal_id": goal_id, "title": g.get("title", ""),
+                {"ts": now, "goal_id": goal_id, "title": g.get("title", ""),
                  "value": value, "run_ts": run_ts},
             )
         elif accomplished is False:
             g["status"] = "active"
             g["accomplished_at"] = None
-        # Auto-detect accomplishment if metric.target reached. A retired
+        # Automatic status rules (accomplish / ratchet / re-open). A retired
         # (abandoned) goal keeps its measurements but never flips status.
         elif accomplished is None and "target" in m and g.get("status") != "abandoned":
-            target = m.get("target")
-            direction = m.get("direction", "increase")
-            if direction == "increase" and value >= target and g.get("status") != "accomplished":
-                g["status"] = "accomplished"; g["accomplished_at"] = _now()
-                s.append_jsonl(
-                    f"agents/{agent_id}/goals/accomplished.jsonl",
-                    {"ts": _now(), "goal_id": goal_id, "title": g.get("title", ""),
-                     "value": value, "run_ts": run_ts, "auto_detected": True},
-                )
-            elif direction == "decrease" and value <= target and g.get("status") != "accomplished":
-                g["status"] = "accomplished"; g["accomplished_at"] = _now()
-                s.append_jsonl(
-                    f"agents/{agent_id}/goals/accomplished.jsonl",
-                    {"ts": _now(), "goal_id": goal_id, "title": g.get("title", ""),
-                     "value": value, "run_ts": run_ts, "auto_detected": True},
-                )
+            events = apply_measurement(
+                g, value, now=now,
+                reopen_default=lazy_reopen_default(agent_id, storage=s))
+            for ev in events:
+                if ev["event"] not in ("accomplished", "ratcheted"):
+                    continue
+                entry = {"ts": now, "goal_id": goal_id, "title": g.get("title", ""),
+                         "value": value, "run_ts": run_ts, "auto_detected": True}
+                if ev["event"] == "ratcheted":
+                    entry.update(ratcheted=True, from_target=ev["from_target"],
+                                 to_target=ev["to_target"])
+                s.append_jsonl(f"agents/{agent_id}/goals/accomplished.jsonl", entry)
         break
     else:
         raise ValueError(f"goal_id {goal_id!r} not found for agent {agent_id!r}")

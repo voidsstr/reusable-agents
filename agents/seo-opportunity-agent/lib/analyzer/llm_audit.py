@@ -690,18 +690,22 @@ def _objective_line(primary_objective: str) -> str:
 
 
 def _format_goals(active_goals: list[dict] | None) -> str:
-    """Render the agent's active goals so the audit biases toward them."""
+    """Render the agent's active goals so the audit biases toward them.
+
+    Only live (active) goals are shown. A north-star goal stays live by
+    being re-armed in framework/core/goals.py (metric.ratchet / reopen), not
+    by showing finished goals here. Revenue goals (is_revenue_goal) are
+    listed first; the rest keep their stored order."""
     if not active_goals:
         return ""
     lines = ["ACTIVE GOALS — prefer issues that move these metrics:"]
-    for g in active_goals:
-        if not isinstance(g, dict):
-            continue
-        # read_active_goals returns every goal, including accomplished and
-        # abandoned ones. Showing those told the model a finished (or
-        # retired) rec-count goal was still the thing to optimise.
-        if (g.get("status") or "active") not in _LIVE_GOAL_STATUSES:
-            continue
+    # read_active_goals returns every goal, including accomplished and
+    # abandoned ones. Showing those told the model a finished (or
+    # retired) rec-count goal was still the thing to optimise.
+    live = [g for g in active_goals if isinstance(g, dict)
+            and (g.get("status") or "active") in _LIVE_GOAL_STATUSES]
+    live.sort(key=lambda g: not g.get("is_revenue_goal"))  # stable
+    for g in live:
         title = g.get("title") or g.get("id") or ""
         if not title:
             continue

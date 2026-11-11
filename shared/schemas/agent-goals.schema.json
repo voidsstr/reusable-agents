@@ -39,7 +39,27 @@
             "target":       { "type": "number" },
             "direction":    { "type": "string", "enum": ["increase", "decrease"] },
             "unit":         { "type": "string", "description": "Display unit, e.g. 'pages', '$', '%'." },
-            "horizon_weeks":{ "type": "integer" }
+            "horizon_weeks":{ "type": "integer" },
+            "ratchet": {
+              "type": "object",
+              "required": ["factor"],
+              "properties": {
+                "factor": {
+                  "type": "number",
+                  "exclusiveMinimum": 1,
+                  "description": "Reaching the target raises it to ceil(value × factor), or lowers it to floor(value ÷ factor) for a decrease goal, and keeps the goal active instead of accomplishing it. A ratchet also re-opens the goal if it falls back. Use it on north-star counts that should never 'finish' and drop out of the prompts (framework/core/goals.py apply_measurement)."
+                }
+              },
+              "description": "Optional. A ratcheted target survives routine re-seeds (see seed_target). A seed that sets a different target replaces it."
+            },
+            "reopen": {
+              "type": "boolean",
+              "description": "Re-open an accomplished goal when a later measurement falls back past the target (direction-aware). Unset: storage config/goals-config.json reopen_on_regression (by_agent_id.<id>, then the top-level value) decides; it defaults to false."
+            },
+            "seed_target": {
+              "type": "number",
+              "description": "Bookkeeping on ratcheting goals: the target the last seed asked for. A re-seed with the same target keeps the ratcheted metric.target. Written by init_goals, never by hand."
+            }
           }
         },
         "status": {
@@ -49,6 +69,36 @@
         },
         "created_at":      { "type": "string" },
         "accomplished_at": { "type": ["string", "null"] },
+        "reopened_at":     { "type": ["string", "null"], "description": "When the goal last went from accomplished back to active (a measurement fell back past the target, or a seed re-armed it)." },
+        "reopened_reason": { "type": "string", "description": "Why it was re-opened, in one line." },
+        "ratchet_history": {
+          "type": "array",
+          "description": "The last 20 ratchet steps, oldest first: each is a target the goal reached, and the new target set in its place.",
+          "items": {
+            "type": "object",
+            "required": ["ts", "from_target", "to_target"],
+            "properties": {
+              "ts":          { "type": "string" },
+              "value":       { "type": "number" },
+              "from_target": { "type": "number" },
+              "to_target":   { "type": "number" }
+            }
+          }
+        },
+        "annotations": {
+          "type": "array",
+          "description": "Dated notes pinned to the goal's series, e.g. 'measurement correction: Safari-17 fleet removed', so a step change in the value is not read as a regression. init_goals merges a seed's annotations by (ts, note) and never drops existing ones; the last 50 are kept.",
+          "items": {
+            "type": "object",
+            "required": ["ts", "note"],
+            "properties": {
+              "ts":    { "type": "string" },
+              "note":  { "type": "string" },
+              "kind":  { "type": "string", "description": "e.g. 'measurement-correction', 'target-change'." },
+              "value": { "type": "number", "description": "The corrected value the note refers to, if any." }
+            }
+          }
+        },
         "progress_history": {
           "type": "array",
           "items": {

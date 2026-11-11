@@ -138,8 +138,12 @@ SITE_PROFILES: dict[str, dict] = {
             "table": "outbound_clicks",
             "spec": {"time_col": "clicked_at", "referer_col": "source_page",
                      "country_col": "country", "bot_flag_col": "is_bot"},
-            "events": {"amazon-clicks": {"target": "amazon"},
-                       "ebay-clicks": {"target": "ebay"}},
+            # via='beacon' only. A JS click also logs a /r/ redirect twin;
+            # the SEO agent and the growth strategist count the beacon row
+            # and never sum across via. Without the filter this goal read
+            # 1,382 against their 1,359 (2026-11-11, 30d). eBay: 114 both ways.
+            "events": {"amazon-clicks": {"target": "amazon", "via": "beacon"},
+                       "ebay-clicks": {"target": "ebay", "via": "beacon"}},
         },
         "page_count_sql": (
             "SELECT (SELECT COUNT(*) FROM products WHERE is_active = true) + "
@@ -525,6 +529,30 @@ def collect_metrics(profile: dict) -> dict[str, float]:
     return metrics
 
 
+# Click goals keep steering prompts after they are hit (framework/core/goals.py):
+# a ratchet raises the target 25% past the value instead of accomplishing it;
+# reopen puts an accomplished goal back to active when the value falls back.
+# Both are re-applied by init_goals on every run, and a ratcheted target
+# survives these re-seeds (metric.seed_target).
+CLICK_GOAL_RATCHET = {"factor": 1.25}
+
+# A dated note on the AislePrompt click goals so KTLO and the strategists
+# read the 2026-11-11 drop as a measurement fix, not a regression (A05:
+# storage config/human-click-filter-config.json, extra_bot_ua_terms).
+SAFARI_FLEET_NOTE = (
+    "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet "
+    "(one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human "
+    "Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) "
+    "is not a regression.")
+
+
+def _fleet_note(value: Optional[int] = None) -> dict:
+    note = {"ts": "2026-11-11", "kind": "measurement-correction", "note": SAFARI_FLEET_NOTE}
+    if value is not None:
+        note["value"] = value
+    return note
+
+
 def write_goal_definitions(profile: dict, agent_id: str) -> None:
     """Idempotent: write the goal schema for this site if not already present.
     Existing goals' progress_history is preserved by goals.init_goals."""
@@ -539,15 +567,19 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
             "description": (
                 "Total monetization-event clicks in the last 30 days, bots excluded. "
                 + ("Sum of GA4 instacart-cart + verified human instacart-clicks + amazon-clicks." if is_aisleprompt
-                   else "Sum of verified human amazon-clicks + ebay-clicks.")
+                   else "Sum of verified human amazon-clicks + ebay-clicks (JS beacon rows).")
                 + " Per event: max(GA4 event count, first-party click rows that pass "
                   "framework/core/human_clicks.py — no site bot verdict, no headless/"
                   "automation UA, no stale-browser fingerprint, no datacenter IP, no "
                   "Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
             ),
+            # SpecPicks: 3,000 Amazon + 200 eBay, ratcheting like the Amazon goal.
             "metric": {"name": "human_conversions_30d", "current": 0,
-                       "target": 1000 if is_aisleprompt else 1100,
-                       "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
+                       "target": 1000 if is_aisleprompt else 3200,
+                       "direction": "increase", "unit": "human clicks", "horizon_weeks": 12,
+                       **({"reopen": True} if is_aisleprompt
+                          else {"ratchet": CLICK_GOAL_RATCHET})},
+            **({"annotations": [_fleet_note()]} if is_aisleprompt else {}),
             "status": "active",
             "is_revenue_goal": True,
         },
@@ -568,15 +600,24 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
              "metric": {"name": "human_instacart_clicks_30d", "current": 0, "target": 800,
                         "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
              "status": "active"},
+            # Target 450 = ~1.5x the clean ~300-330/30d left once the Safari-17
+            # fleet is filtered (2026-11-11). It was 200, and a recorded 1,549
+            # (half fleet) had held it 'accomplished' since 10-10, so it never
+            # reached a prompt. reopen: it goes active again if it falls back.
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks — verified human (AislePrompt kitchen)",
+             "title": "30-day Amazon affiliate clicks — verified human (AislePrompt)",
              "description": "Verified human Amazon affiliate clicks, last 30 days: kitchen_click_events rows "
                             "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
-                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
-                            "Cross-site affiliate revenue from /kitchen. Raw row count is the raw-amazon-clicks-30d metric.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
-             "status": "active"},
+                            "fingerprints incl. the Safari 17.0-17.2 fleet, datacenter IPs excluded), or the "
+                            "GA4 event count if higher. AislePrompt's money path: ~16 evergreen "
+                            "/blog/best-<appliance> guides carry ~95% of real clicks. Raw row count is the "
+                            "raw-amazon-clicks-30d metric. Re-baselined 2026-11-11 to ~330 after the "
+                            "Safari-17 fleet was removed (see annotations); target 450.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 450,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12,
+                        "reopen": True},
+             "annotations": [_fleet_note(326)],
+             "status": "active", "is_revenue_goal": True},
             # growth-20261020T001200Z-01: the Cyber Week read. Nine guides earn
             # ~200 of 280 human clicks / 30 d, and Black Friday to Cyber Monday
             # is when that shopping intent peaks.
@@ -585,26 +626,33 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
              "description": "Verified human Amazon affiliate clicks over the trailing 7 days, same "
                             "framework/core/human_clicks.py filter as goal-amazon-clicks-30d (first-party "
                             "only). The value recorded on 2026-12-01 is Cyber Week (11-25 to 12-01). "
-                            "Baseline: 111 in the week to 2026-10-20. Target: 180 that week, with no "
-                            "dead answer pick on the nine top-click guides.",
+                            "Baseline: 111 in the week to 2026-10-20 (fleet-free, still valid). Target: 180 "
+                            "that week, with no dead answer pick on the nine top-click guides.",
              "metric": {"name": "human_amazon_clicks_7d", "current": 0, "target": 180,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6},
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6,
+                        "reopen": True},
+             "annotations": [_fleet_note(48)],
              "status": "active"},
         ] if is_aisleprompt else [
-            # Target 900/30d = 30 verified human clicks/day (reset 2026-09-24
-            # from 1000 raw events). The raw count it replaced was 21,258 in
-            # 30d with 0 verified humans — see HUMAN_CLICKS_NOTE.
+            # Target 3,000/30d = ~100 verified human clicks/day; the week of
+            # 2026-11-09 ran ~97-110/day against a 1,359/30d baseline. It was
+            # 900 (30/day), 'accomplished' since 11-07. The ratchet keeps it
+            # active: reaching the target raises it 25% past the value.
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks — verified human (target 30/day)",
+             "title": "30-day Amazon affiliate clicks — verified human (target 100/day)",
              "description": "Verified human Amazon affiliate clicks, last 30 days. Counts outbound_clicks "
-                            "rows that pass framework/core/human_clicks.py: not flagged is_bot, no headless/"
-                            "automation UA (HeadlessChrome, puppeteer, playwright, selenium, curl, python…), "
-                            "no stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei "
+                            "JS-beacon rows (via='beacon', never the /r/ redirect twin) that pass "
+                            "framework/core/human_clicks.py: not flagged is_bot, no headless/automation UA "
+                            "(HeadlessChrome, puppeteer, playwright, selenium, curl, python…), no "
+                            "stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei "
                             "Singapore ranges), no Singapore traffic, an on-site referer, and <=20 clicks per "
                             "IP per day — or the GA4 amazon_click count if higher. Primary revenue source for "
-                            "SpecPicks. The raw row count (~99% bots) is the raw-amazon-clicks-30d metric.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 900,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26},
+                            "SpecPicks; ~81% of clicks come from /product/* pages. The raw row count (~99% "
+                            "bots) is the raw-amazon-clicks-30d metric. Target ratchets 25% past the value "
+                            "each time it is reached.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 3000,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26,
+                        "ratchet": CLICK_GOAL_RATCHET},
              "status": "active", "is_revenue_goal": True},
             {"id": "goal-ebay-clicks-30d",
              "title": "30-day eBay affiliate clicks — verified human",

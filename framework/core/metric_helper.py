@@ -41,6 +41,7 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional
 
+from .goals import apply_measurement, lazy_reopen_default
 from .storage import StorageBackend, get_storage
 
 
@@ -97,18 +98,11 @@ def record(
             m = g.setdefault("metric", {})
             m["current"] = float(value)
             m["updated_at"] = now
-            # Auto-detect accomplishment by direction + target. A retired
-            # (abandoned) goal keeps its measurements but never flips status.
-            if "target" in m and g.get("status") != "abandoned":
-                tgt = m.get("target")
-                direction = m.get("direction", "increase")
-                if tgt is not None:
-                    if direction == "increase" and value >= tgt and g.get("status") != "accomplished":
-                        g["status"] = "accomplished"
-                        g["accomplished_at"] = now
-                    elif direction == "decrease" and value <= tgt and g.get("status") != "accomplished":
-                        g["status"] = "accomplished"
-                        g["accomplished_at"] = now
+            # Shared status rules (goals.apply_measurement): accomplish on
+            # reaching the target, ratchet, or re-open on falling back. A
+            # retired (abandoned) goal keeps its measurements but never flips.
+            apply_measurement(g, float(value), now=now,
+                              reopen_default=lazy_reopen_default(agent_id, storage=s))
             break
         doc["updated_at"] = now
         s.write_json(_active_key(agent_id), doc)
@@ -162,6 +156,7 @@ def record_many(
             "schema_version": "1", "agent_id": agent_id,
             "updated_at": now, "goals": [],
         }
+        reopen_default = lazy_reopen_default(agent_id, storage=s)
         for g in doc.get("goals", []):
             gid = g.get("id")
             if gid not in metrics:
@@ -170,14 +165,7 @@ def record_many(
             m = g.setdefault("metric", {})
             m["current"] = value
             m["updated_at"] = now
-            if "target" in m and g.get("status") != "abandoned":
-                tgt = m.get("target")
-                direction = m.get("direction", "increase")
-                if tgt is not None:
-                    if direction == "increase" and value >= tgt and g.get("status") != "accomplished":
-                        g["status"] = "accomplished"; g["accomplished_at"] = now
-                    elif direction == "decrease" and value <= tgt and g.get("status") != "accomplished":
-                        g["status"] = "accomplished"; g["accomplished_at"] = now
+            apply_measurement(g, value, now=now, reopen_default=reopen_default)
         doc["updated_at"] = now
         s.write_json(_active_key(agent_id), doc)
     except Exception as e:
