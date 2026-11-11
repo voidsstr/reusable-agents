@@ -405,9 +405,16 @@ def _demand_ranked_config(raw_cfg: dict, *, agent_id: str, site: str,
         "long_tail": {"enabled": True, "gate_hours": freshness_hours},
     }
     if raw_cfg.get("prioritize_featured_and_linked"):
+        # Same site scope as the legacy tiered selector, so by_tier sizes on
+        # a shared multi-site products table count only this site's rows.
+        featured: dict = {
+            "name": "featured", "kind": "sql", "gate_hours": freshness_hours,
+            "sql": ("SELECT asin FROM products WHERE is_featured = TRUE AND is_active = TRUE"
+                    + (" AND site_id = %(hyd_site_id)s" if site_id_filter else ""))}
+        if site_id_filter:
+            featured["params"] = {"hyd_site_id": site_id_filter}
         site_cfg["extra_groups"] = [
-            {"name": "featured", "kind": "sql", "gate_hours": freshness_hours,
-             "sql": "SELECT asin FROM products WHERE is_featured = TRUE AND is_active = TRUE"},
+            featured,
             {"name": "editorial", "kind": "sql", "gate_hours": freshness_hours,
              "sql": _EDITORIAL_ASINS_SQL},
         ]
@@ -420,6 +427,31 @@ def _demand_ranked_config(raw_cfg: dict, *, agent_id: str, site: str,
     except Exception:
         return None
     return cfg if cfg.get("enabled") else None
+
+
+def _demand_needs_outcome_flags(raw_cfg: dict, demand_cfg: dict | None) -> str | None:
+    """Why a resolved demand-ranked order must NOT be used this run, or None.
+
+    The demand order makes this agent the first re-pricer of clicked
+    products, at gates shorter than the site's own price verifier re-checks
+    them. A site whose pages read Amazon-offer flags (unavailable-listing,
+    no-buybox, ...) then depends on this agent to keep those flags right:
+    without site.yaml ``price_refresh.outcome_flags`` a product priced back
+    in stock stays flagged unbuyable, and the verifier never re-checks it
+    because its price is always fresh. So demand ranking requires
+    outcome_flags unless the config says the site has no such flags
+    (``require_outcome_flags: false`` in demand_priority or the storage
+    config). The run then keeps the legacy selector and says why."""
+    if not demand_cfg:
+        return None
+    if demand_cfg.get("require_outcome_flags", True) is False:
+        return None
+    if _outcome_flags_cfg(raw_cfg) is not None:
+        return None
+    return ("demand-ranked order is enabled but price_refresh.outcome_flags is not "
+            "configured (set it to the site verifier's owned/by_status flags, or "
+            "require_outcome_flags: false if the site has none); keeping the "
+            "legacy candidate order")
 
 
 def _select_demand_ranked(conn, demand_cfg: dict, *, site_id_filter: str | None,
@@ -607,7 +639,7 @@ def _persist_provider_refresh(conn, product_id: int, parsed: dict, *,
       * neither: nothing is known about the price, so price, availability
         and price_updated_at are left alone and only last_fetched_at records
         the attempt. Stamping price_updated_at here re-dated a stale price
-        as fresh: on 2026-11-11, 90 specpicks rows read "Currently
+        as fresh: on 2026-11-11, 90 reference-deployment rows read "Currently
         unavailable." next to a price this agent had just re-stamped.
     ``list_price_current`` means the provider reports the list price
     whenever Amazon shows one (Creators savingBasis), so a missing one is
@@ -1227,6 +1259,10 @@ def _refresh_amazon_prices(*, conn, raw_cfg: dict,
     demand_cfg = _demand_ranked_config(raw_cfg, agent_id=agent_id, site=site,
                                        site_id_filter=site_id_filter,
                                        storage=storage)
+    blocked = _demand_needs_outcome_flags(raw_cfg, demand_cfg)
+    if blocked:
+        decide_cb("observation", blocked)
+        demand_cfg = None
     if demand_cfg:
         decide_cb("observation",
                   "price candidates: framework demand-ranked order ("
