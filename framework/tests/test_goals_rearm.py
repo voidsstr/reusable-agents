@@ -366,7 +366,10 @@ def test_tracker_and_seed_script_share_the_fleet_note(tracker):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def tracker(monkeypatch):
+def tracker(monkeypatch, tmp_path):
+    # write_goal_definitions reads the site's site.yaml (site_goals block);
+    # point it at a missing file so the live site repos never leak in.
+    monkeypatch.setenv("SITE_GOALS_SITE_YAML", str(tmp_path / "no-site.yaml"))
     spec = iu.spec_from_file_location("site_goals_tracker_rearm_under_test",
                                       _ROOT / "agents" / "site-goals-tracker" / "agent.py")
     mod = iu.module_from_spec(spec)
@@ -408,3 +411,223 @@ def test_tracker_rearms_stale_amazon_goals(storage, tracker):
     tracker.write_goal_definitions(tracker.SITE_PROFILES["specpicks"], sp)
     sp_goal = _by_id(g.read_active_goals(sp, storage=storage))["goal-amazon-clicks-30d"]
     assert sp_goal["status"] == "active" and sp_goal["metric"]["target"] == 3875
+
+
+def _captured_seeds(tracker, monkeypatch, profile, site_yaml=None):
+    """The goal list write_goal_definitions hands to init_goals."""
+    seen = {}
+    monkeypatch.setattr(tracker.goals_mod, "init_goals",
+                        lambda agent_id, goals, storage=None: seen.setdefault("goals", goals))
+    tracker.write_goal_definitions(profile, profile["agent_id"], site_yaml=site_yaml)
+    return _by_id(seen["goals"])
+
+
+def test_tracker_rules_and_targets_come_only_from_goal_overrides(tracker, monkeypatch):
+    """No site branching for the re-arm rules: strip a profile's
+    goal_overrides and no seed carries a ratchet, reopen or annotation."""
+    for site in ("specpicks", "aisleprompt"):
+        bare = {k: v for k, v in tracker.SITE_PROFILES[site].items() if k != "goal_overrides"}
+        for gid, x in _captured_seeds(tracker, monkeypatch, bare, site_yaml={}).items():
+            assert not {"ratchet", "reopen"} & set(x["metric"]), (site, gid)
+            assert "annotations" not in x, (site, gid)
+    sp = _captured_seeds(tracker, monkeypatch, tracker.SITE_PROFILES["specpicks"], site_yaml={})
+    assert sp["goal-amazon-clicks-30d"]["metric"]["target"] == 3000
+    assert sp["goal-amazon-clicks-30d"]["metric"]["ratchet"] == {"factor": 1.25}
+    assert sp["goal-total-conversions-30d"]["metric"]["target"] == 3200
+    ap = _captured_seeds(tracker, monkeypatch, tracker.SITE_PROFILES["aisleprompt"], site_yaml={})
+    assert ap["goal-amazon-clicks-30d"]["metric"]["target"] == 450
+    assert all(ap[gid]["metric"]["reopen"] is True for gid in
+               ("goal-amazon-clicks-30d", "goal-amazon-clicks-7d", "goal-total-conversions-30d"))
+    assert ap["goal-amazon-clicks-7d"]["annotations"][0]["value"] == 48
+
+
+def test_tracker_site_yaml_goal_overrides_win(tracker, monkeypatch, tmp_path, storage):
+    """site.yaml site_goals.goal_overrides is merged over the profile per key;
+    junk is skipped, an unquoted YAML date becomes an ISO string, and a null
+    ratchet removes the built-in one from the stored goal."""
+    import yaml
+    path = tmp_path / "site.yaml"
+    path.write_text(
+        "site: {id: specpicks}\n"
+        "site_goals:\n"
+        "  goal_overrides:\n"
+        "    goal-amazon-clicks-30d:\n"
+        "      target: 4000\n"
+        "      ratchet: null\n"
+        "      reopen: true\n"
+        "      bogus: 1\n"
+        "      annotations:\n"
+        "        - {ts: 2026-12-01, note: Cyber Week read, value: 3100}\n"
+        "        - {note: missing ts}\n"
+        "    goal-total-conversions-30d: {ratchet: {factor: 1.0}}\n"
+        "    goal-no-such-goal: {target: 1}\n")
+    monkeypatch.setenv("SITE_GOALS_SITE_YAML", str(path))
+    profile = tracker.SITE_PROFILES["specpicks"]
+    y = tracker.load_site_yaml(profile)
+    seeds = _captured_seeds(tracker, monkeypatch, profile, site_yaml=y)
+    m = seeds["goal-amazon-clicks-30d"]["metric"]
+    assert m["target"] == 4000 and m["ratchet"] is None and m["reopen"] is True
+    assert "bogus" not in m
+    assert seeds["goal-amazon-clicks-30d"]["annotations"] == [
+        {"ts": "2026-12-01", "note": "Cyber Week read", "value": 3100}]
+    # a ratchet that would not raise is dropped, the built-in one stays
+    assert seeds["goal-total-conversions-30d"]["metric"]["ratchet"] == {"factor": 1.25}
+    assert "goal-no-such-goal" not in seeds
+    assert yaml.safe_load(path.read_text())["site_goals"]   # the file itself is untouched
+
+    # Through the real init_goals: the stored ratchet is removed.
+    monkeypatch.undo()
+    monkeypatch.setenv("SITE_GOALS_SITE_YAML", str(tmp_path / "no-site.yaml"))
+    monkeypatch.setenv("STORAGE_BACKEND", "local")
+    monkeypatch.setenv("AGENT_STORAGE_LOCAL_PATH", str(tmp_path / "storage"))
+    from framework.core.storage import reset_default_backend
+    reset_default_backend()
+    agent = profile["agent_id"]
+    tracker.write_goal_definitions(profile, agent, site_yaml={})
+    assert _by_id(g.read_active_goals(agent, storage=storage))["goal-amazon-clicks-30d"]["metric"]["ratchet"]
+    tracker.write_goal_definitions(profile, agent, site_yaml=y)
+    stored = _by_id(g.read_active_goals(agent, storage=storage))["goal-amazon-clicks-30d"]
+    assert "ratchet" not in stored["metric"] and stored["metric"]["target"] == 4000
+
+
+def test_site_config_schema_accepts_site_goals_block():
+    import json
+    schema = json.loads((_ROOT / "shared" / "schemas" / "site-config.schema.json").read_text())
+    block = schema["properties"]["site_goals"]
+    jsonschema.validate({"goal_overrides": {"goal-amazon-clicks-30d": {
+        "target": 450, "reopen": True, "ratchet": None,
+        "annotations": [{"ts": "2026-11-11", "note": "x", "kind": "measurement-correction",
+                         "value": 326}]}}}, block)
+    for bad in ({"goal_overrides": {"goal-x": {"ratchet": {"factor": 1.0}}}},
+                {"goal_overrides": {"goal-x": {"targett": 5}}},
+                {"goal_overrides": {"goal-x": {"annotations": [{"note": "no ts"}]}}},
+                {"overrides": {}}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(bad, block)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: opt-out seeds, malformed config, NaN, mixed-version imports
+# ---------------------------------------------------------------------------
+
+def _regressed_accomplished_goal(storage, agent="a", gid="goal-x"):
+    """Accomplished at 80 against 75, then fell back to 60 with no rule."""
+    g.init_goals(agent, [_goal(gid, target=75)], storage=storage)
+    _accomplish(storage, agent, gid, 80)
+    g.record_goal_progress(agent, gid, 60, storage=storage)
+    assert _by_id(g.read_active_goals(agent, storage=storage))[gid]["status"] == "accomplished"
+
+
+def test_seed_opting_out_never_rearms(storage):
+    _regressed_accomplished_goal(storage)
+    for seed_metric in ({"reopen": False}, {"ratchet": None}, {"reopen": None}):
+        doc = g.init_goals("a", [_goal("goal-x", target=75, **seed_metric)], storage=storage)
+        got = _by_id(doc)["goal-x"]
+        assert got["status"] == "accomplished", seed_metric
+        assert "reopened_at" not in got
+    # a moved target still re-arms, whatever the reopen rule says
+    doc = g.init_goals("a", [_goal("goal-x", target=70, reopen=False)], storage=storage)
+    assert _by_id(doc)["goal-x"]["status"] == "active"
+
+
+def test_new_goal_seed_with_null_rules_is_valid(storage):
+    doc = g.init_goals("a", [_goal("goal-new", target=5, ratchet=None, reopen=None)],
+                       storage=storage)
+    m = _by_id(doc)["goal-new"]["metric"]
+    assert "ratchet" not in m and "reopen" not in m
+
+
+@pytest.mark.parametrize("cfg", [
+    {"by_agent_id": ["a"]},
+    {"by_agent_id": "a"},
+    {"by_agent_id": {"a": "yes"}},
+    {"by_agent_id": {"a": {"reopen_on_regression": "true"}}},
+    {"reopen_on_regression": "true"},
+    ["not", "a", "mapping"],
+])
+def test_malformed_goals_config_never_blocks_recording(storage, cfg):
+    g.init_goals("a", [_goal("goal-x", target=75), _goal("goal-other", target=1000)],
+                 storage=storage)
+    _accomplish(storage, "a", "goal-x", 80)
+    storage.write_json(g.CONFIG_KEY, cfg)
+    assert g.reopen_on_regression("a", storage=storage) is False
+    assert g.reopen_on_regression("a", config=cfg) is False
+
+    doc = g.record_goal_progress("a", "goal-x", 60, storage=storage)
+    assert _by_id(doc)["goal-x"]["metric"]["current"] == 60
+    assert _by_id(doc)["goal-x"]["status"] == "accomplished"        # re-open stays off
+
+    mh.record_many("a", {"goal-x": 50, "goal-other": 7}, storage=storage)
+    by = _by_id(g.read_active_goals("a", storage=storage))
+    assert by["goal-x"]["metric"]["current"] == 50
+    assert by["goal-other"]["metric"]["current"] == 7                # unrelated goal recorded
+    mh.record("a", "goal-other", 8, storage=storage)
+    assert _by_id(g.read_active_goals("a", storage=storage))["goal-other"]["metric"]["current"] == 8
+
+
+def test_config_read_errors_mean_reopen_off(storage, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("config backend down")
+    monkeypatch.setattr(g, "reopen_on_regression", boom)
+    assert g.lazy_reopen_default("a", storage=storage)() is False
+    g.init_goals("a", [_goal("goal-x", target=75)], storage=storage)
+    _accomplish(storage, "a", "goal-x", 80)
+    doc = g.record_goal_progress("a", "goal-x", 60, storage=storage)
+    assert _by_id(doc)["goal-x"]["metric"]["current"] == 60
+    mh.record_many("a", {"goal-x": 55}, storage=storage)
+    assert _by_id(g.read_active_goals("a", storage=storage))["goal-x"]["metric"]["current"] == 55
+
+
+def test_status_rule_failure_keeps_every_measurement(storage, monkeypatch):
+    g.init_goals("a", [_goal("goal-bad", target=10), _goal("goal-ok", target=10)],
+                 storage=storage)
+    real = g.apply_measurement
+
+    def flaky(goal, value, **kw):
+        if goal["id"] == "goal-bad":
+            raise ValueError("rule bug")
+        return real(goal, value, **kw)
+    monkeypatch.setattr(g, "apply_measurement", flaky)
+    mh.record_many("a", {"goal-bad": 20, "goal-ok": 20}, storage=storage)
+    by = _by_id(g.read_active_goals("a", storage=storage))
+    assert by["goal-bad"]["metric"]["current"] == 20 and by["goal-bad"]["status"] == "active"
+    assert by["goal-ok"]["status"] == "accomplished"
+    doc = g.record_goal_progress("a", "goal-bad", 30, storage=storage)
+    assert _by_id(doc)["goal-bad"]["metric"]["current"] == 30
+    assert len(_by_id(doc)["goal-bad"]["progress_history"]) == 1
+
+
+def test_nan_measurement_never_changes_status(storage):
+    g.init_goals("a", [_goal("goal-x", target=75, reopen=True),
+                       _goal("goal-r", target=10, ratchet={"factor": 1.25})], storage=storage)
+    _accomplish(storage, "a", "goal-x", 80)
+    doc = g.record_goal_progress("a", "goal-x", float("nan"), storage=storage)
+    assert _by_id(doc)["goal-x"]["status"] == "accomplished"
+    doc = g.record_goal_progress("a", "goal-r", float("nan"), storage=storage)
+    assert _by_id(doc)["goal-r"]["metric"]["target"] == 10
+    assert g.target_met({"target": 1, "current": float("nan")}) is None
+
+
+def test_metric_helper_loads_beside_an_older_goals_module(storage, monkeypatch):
+    """A long-running API that imported goals.py before a deploy keeps the
+    old module in memory. The new metric_helper must still import (its
+    read paths serve /goals/cache) and still record values."""
+    import sys
+    import types
+    old_goals = types.ModuleType("framework.core.goals")
+    old_goals.goals_key = g.goals_key          # an older goals.py: no status-rule API
+    monkeypatch.setitem(sys.modules, "framework.core.goals", old_goals)
+    spec = iu.spec_from_file_location("framework.core.metric_helper_mixed_under_test",
+                                      _ROOT / "framework" / "core" / "metric_helper.py")
+    fresh = iu.module_from_spec(spec)
+    fresh.__package__ = "framework.core"
+    spec.loader.exec_module(fresh)              # would raise ImportError with a top-level import
+
+    storage.write_json("agents/a/goals/active.json", {
+        "schema_version": "1", "agent_id": "a", "updated_at": "",
+        "goals": [_goal("goal-x", target=10)]})
+    fresh.record("a", "goal-x", 3, storage=storage)
+    fresh.record_many("a", {"goal-x": 4}, storage=storage)
+    assert storage.read_json("agents/a/goals/active.json")["goals"][0]["metric"]["current"] == 4
+    assert fresh.read_cache("a", storage=storage)["goals"]["goal-x"]["latest_value"] == 4
+    assert [p["value"] for p in fresh.read_goal_progress("a", "goal-x", storage=storage)] == [3, 4]

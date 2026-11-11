@@ -26,14 +26,17 @@ record_goal_progress and metric_helper.record/record_many:
     reopen_on_regression (fleet default, or by_agent_id.<id>). It is off by
     default, so goals without these settings behave as before.
 init_goals (and so PUT /api/agents/<id>/goals) re-activates an accomplished
-goal when a seed moves its target, or changes its ratchet/reopen rule, so that
-the current value no longer meets it. A seed never accomplishes a goal. Nor
-does a seed ratchet one: that needs a fresh measurement, not a stale current.
+goal whose current value misses the seeded target, when the seed moved that
+target or set a rule that asks for re-opening (a ratchet, or reopen: true). A
+seed that only opts out (reopen: false, ratchet: null) never re-opens a goal.
+A seed never accomplishes a goal. Nor does a seed ratchet one: that needs a
+fresh measurement, not a stale current.
 """
 from __future__ import annotations
 
 import json
 import math
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -72,7 +75,8 @@ def _validate_goals_doc(doc: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _num(v: Any) -> Optional[float]:
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
+    # NaN is not a measurement: it must not accomplish, ratchet or re-open.
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
         return None
     return float(v)
 
@@ -90,9 +94,13 @@ def reopen_on_regression(agent_id: str, storage: Optional[StorageBackend] = None
                          config: Optional[dict] = None) -> bool:
     """Fleet default for re-opening goals that have no metric.reopen of their
     own: by_agent_id.<id>.reopen_on_regression, else the top-level value,
-    else False."""
+    else False. A malformed config (by_agent_id not a mapping, a non-bool
+    flag) counts as unset; only a literal true turns re-open on."""
     cfg = load_goals_config(storage) if config is None else config
-    per = (cfg.get("by_agent_id") or {}).get(agent_id)
+    if not isinstance(cfg, dict):
+        return False
+    by = cfg.get("by_agent_id")
+    per = by.get(agent_id) if isinstance(by, dict) else None
     if isinstance(per, dict) and isinstance(per.get("reopen_on_regression"), bool):
         return per["reopen_on_regression"]
     return cfg.get("reopen_on_regression") is True
@@ -101,12 +109,19 @@ def reopen_on_regression(agent_id: str, storage: Optional[StorageBackend] = None
 def lazy_reopen_default(agent_id: str,
                         storage: Optional[StorageBackend] = None) -> Callable[[], bool]:
     """A zero-arg callable that reads the fleet default once, on first use.
-    Recording a value for a goal that opts in or out itself never reads it."""
+    Recording a value for a goal that opts in or out itself never reads it.
+    Any error reading the config means False (re-open off), so a broken
+    config can never stop a measurement from being recorded."""
     memo: list[bool] = []
 
     def _get() -> bool:
         if not memo:
-            memo.append(reopen_on_regression(agent_id, storage=storage))
+            try:
+                memo.append(reopen_on_regression(agent_id, storage=storage))
+            except Exception as e:  # noqa: BLE001 - recording must not fail on config
+                print(f"[goals] {CONFIG_KEY} unusable for {agent_id} ({e}); "
+                      "reopen_on_regression treated as false", file=sys.stderr)
+                memo.append(False)
         return memo[0]
     return _get
 
@@ -286,10 +301,12 @@ def init_goals(
     with the same `id` are preserved (their progress_history is kept), so
     re-running this never wipes progress. New goal ids get added.
 
-    An accomplished goal is re-activated when the seed moves its target past
-    its current value, or changes its metric.ratchet / metric.reopen rule
-    while the current value misses the target. This is how a stale target
-    is re-armed."""
+    An accomplished goal whose current value misses the seeded target is
+    re-activated when the seed moved that target, or changed its rules to
+    ones that ask for re-opening (a metric.ratchet, or metric.reopen true).
+    This is how a stale target is re-armed. A seed that only opts out
+    (reopen false, ratchet null) leaves the goal accomplished. A null
+    ratchet/reopen removes that rule (and is ignored on a new goal)."""
     s = storage or get_storage()
     existing = read_active_goals(agent_id, storage=s)
     by_id = {g["id"]: g for g in existing}
@@ -324,7 +341,7 @@ def init_goals(
             elif want == "active" and cur.get("status") == "abandoned":
                 cur["status"] = "active"
                 cur.pop("abandoned_at", None)
-            rules_changed = False
+            rearm = False
             if "metric" in g:
                 cur_metric = cur.get("metric", {})
                 seed_m = g["metric"] or {}
@@ -345,15 +362,21 @@ def init_goals(
                 if cur_metric.get("current") is None:
                     cur_metric["current"] = seed_m.get("current", 0)
                 cur["metric"] = cur_metric
-                rules_changed = before != (cur_metric.get("target"),
-                                           cur_metric.get("ratchet"),
-                                           cur_metric.get("reopen"))
+                after = (cur_metric.get("target"), cur_metric.get("ratchet"),
+                         cur_metric.get("reopen"))
+                # Re-arm only on a moved target, or on a rule change whose
+                # new rule wants re-opening. An opt-out (reopen false,
+                # ratchet removed) changes the rules but must not re-open.
+                rearm = before != after and (
+                    before[0] != after[0]
+                    or bool(ratchet_factor(cur_metric))
+                    or cur_metric.get("reopen") is True)
             if "annotations" in g:
                 _merge_annotations(cur, g["annotations"])
-            # Re-arm: a seed that moved an accomplished goal's target (or its
-            # ratchet/reopen rule) past the current value re-activates it.
-            # A routine re-seed changes nothing, so it never flips status.
-            if (rules_changed and cur.get("status") == "accomplished"
+            # Re-arm: an accomplished goal whose current value misses the
+            # seeded target goes back to active. A routine re-seed changes
+            # nothing, so it never flips status.
+            if (rearm and cur.get("status") == "accomplished"
                     and target_met(cur.get("metric")) is False):
                 m = cur["metric"]
                 cur["status"] = "active"
@@ -376,6 +399,9 @@ def init_goals(
                 sm = seeded["metric"] = dict(sm)
                 if sm.get("current") is None:
                     sm["current"] = 0
+                for _rule in ("ratchet", "reopen"):  # null = no rule
+                    if _rule in sm and sm[_rule] is None:
+                        sm.pop(_rule)
                 if ratchet_factor(sm) and "target" in sm:
                     sm["seed_target"] = sm["target"]
             if "annotations" in seeded:
@@ -414,7 +440,9 @@ def record_goal_progress(
     With `accomplished=None` the status follows `apply_measurement`:
     accomplish on reaching the target, ratchet (metric.ratchet), or re-open
     on falling back (metric.reopen / ratchet / config reopen_on_regression).
-    Accomplishments and ratchets are logged to accomplished.jsonl."""
+    Accomplishments and ratchets are logged to accomplished.jsonl. If the
+    status rules fail, the value is still recorded and the status is left
+    as it was."""
     s = storage or get_storage()
     doc = s.read_json(goals_key(agent_id)) or {
         "schema_version": "1", "agent_id": agent_id,
@@ -445,9 +473,14 @@ def record_goal_progress(
         # Automatic status rules (accomplish / ratchet / re-open). A retired
         # (abandoned) goal keeps its measurements but never flips status.
         elif accomplished is None and "target" in m and g.get("status") != "abandoned":
-            events = apply_measurement(
-                g, value, now=now,
-                reopen_default=lazy_reopen_default(agent_id, storage=s))
+            try:
+                events = apply_measurement(
+                    g, value, now=now,
+                    reopen_default=lazy_reopen_default(agent_id, storage=s))
+            except Exception as e:  # noqa: BLE001 - keep the measurement
+                print(f"[goals] status rules skipped for {agent_id}/{goal_id}: {e}",
+                      file=sys.stderr)
+                events = []
             for ev in events:
                 if ev["event"] not in ("accomplished", "ratcheted"):
                     continue

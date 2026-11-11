@@ -283,6 +283,48 @@
         }
       }
     },
+    "site_goals": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional. Read by agents/site-goals-tracker, which re-seeds this site's canonical goals (<site>-site-goals-tracker) every run. Without this block the tracker's built-in per-site values apply.",
+      "properties": {
+        "goal_overrides": {
+          "type": "object",
+          "description": "Per-goal targets and re-arm rules, keyed by tracker goal id (e.g. goal-amazon-clicks-30d), merged over the tracker's built-in values on every run, so a site can retune them without a framework commit. Ids the tracker does not define are ignored with a warning. Rules: framework/core/goals.py apply_measurement.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "target": { "type": "number", "description": "Goal target in the metric's unit. On a ratcheting goal a changed value replaces the ratcheted target; an unchanged one keeps it." },
+              "ratchet": {
+                "type": ["object", "null"],
+                "additionalProperties": false,
+                "required": ["factor"],
+                "properties": {
+                  "factor": { "type": "number", "exclusiveMinimum": 1, "description": "Reaching the target raises it to ceil(value x factor) (a decrease goal: floor(value / factor)) and keeps the goal active." }
+                },
+                "description": "null removes a built-in ratchet."
+              },
+              "reopen": { "type": ["boolean", "null"], "description": "true: an accomplished goal goes back to active when the value falls back past the target. null removes a built-in rule." },
+              "annotations": {
+                "type": "array",
+                "description": "Dated notes pinned to the goal, e.g. a measurement correction, so a step change is not read as a regression. Merged by (ts, note); never removed.",
+                "items": {
+                  "type": "object",
+                  "required": ["ts", "note"],
+                  "properties": {
+                    "ts":    { "type": "string", "description": "Date (YYYY-MM-DD); quote it in YAML." },
+                    "note":  { "type": "string" },
+                    "kind":  { "type": "string", "description": "e.g. 'measurement-correction', 'target-change'." },
+                    "value": { "type": "number", "description": "The corrected value the note refers to, if any." }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "analyzer": {
       "type": "object",
       "additionalProperties": true,

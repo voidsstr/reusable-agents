@@ -65,9 +65,34 @@ REFRESH_SCRIPT = (
 OAUTH_FILE = Path(os.path.expanduser("~/.reusable-agents/seo/.oauth.json"))
 
 
+# A dated note pinned to the AislePrompt click goals (goal_overrides below) so
+# KTLO and the strategists read the 2026-11-11 drop as a measurement fix, not
+# a regression (A05: storage config/human-click-filter-config.json,
+# extra_bot_ua_terms). install/seed-default-goals.sh carries the same
+# (ts, note), and goals.init_goals merges annotations by (ts, note).
+SAFARI_FLEET_NOTE = (
+    "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet "
+    "(one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human "
+    "Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) "
+    "is not a regression.")
+
+
+def _fleet_note(value: Optional[int] = None) -> dict:
+    note = {"ts": "2026-11-11", "kind": "measurement-correction", "note": SAFARI_FLEET_NOTE}
+    if value is not None:
+        note["value"] = value
+    return note
+
+
 # Per-site canonical config — lives here in the shared agent so we have a
 # single source of truth for the goal definitions. The DB URLs come from
 # env vars set by per-site wrappers.
+#
+# goal_overrides: per-site targets and re-arm rules (framework/core/goals.py:
+# metric.ratchet / metric.reopen) plus dated annotations, keyed by goal id and
+# merged over write_goal_definitions' defaults. The site's site.yaml
+# `site_goals.goal_overrides` is merged on top (goal_overrides()), so a site
+# can retune them without a framework commit.
 SITE_PROFILES: dict[str, dict] = {
     "aisleprompt": {
         "host": "aisleprompt.com",
@@ -111,6 +136,16 @@ SITE_PROFILES: dict[str, dict] = {
         },
         "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
         "agent_id": "aisleprompt-site-goals-tracker",
+        # Amazon 30d: 450 = ~1.5x the clean ~300-330/30d left once the
+        # Safari-17 fleet is filtered (2026-11-11). It was 200, and a recorded
+        # 1,549 (half fleet) had held it 'accomplished' since 10-10, so it never
+        # reached a prompt. reopen: back to active when the value falls back.
+        "goal_overrides": {
+            "goal-amazon-clicks-30d": {"target": 450, "reopen": True,
+                                       "annotations": [_fleet_note(326)]},
+            "goal-amazon-clicks-7d": {"reopen": True, "annotations": [_fleet_note(48)]},
+            "goal-total-conversions-30d": {"reopen": True, "annotations": [_fleet_note()]},
+        },
     },
     "specpicks": {
         "host": "specpicks.com",
@@ -151,6 +186,15 @@ SITE_PROFILES: dict[str, dict] = {
             "(SELECT COUNT(*) FROM hardware_specs)"
         ),
         "agent_id": "specpicks-site-goals-tracker",
+        # Amazon 30d: 3,000 = ~100 verified human clicks/day; the week of
+        # 2026-11-09 ran ~97-110/day on a 1,359/30d base. It was 900,
+        # 'accomplished' since 11-07. The ratchet raises the target 25% past
+        # the value each time it is reached, so the goal stays active. Total
+        # conversions: 3,000 Amazon + 200 eBay, ratcheting the same way.
+        "goal_overrides": {
+            "goal-amazon-clicks-30d": {"target": 3000, "ratchet": {"factor": 1.25}},
+            "goal-total-conversions-30d": {"target": 3200, "ratchet": {"factor": 1.25}},
+        },
     },
 }
 
@@ -529,33 +573,104 @@ def collect_metrics(profile: dict) -> dict[str, float]:
     return metrics
 
 
-# Click goals keep steering prompts after they are hit (framework/core/goals.py):
-# a ratchet raises the target 25% past the value instead of accomplishing it;
-# reopen puts an accomplished goal back to active when the value falls back.
-# Both are re-applied by init_goals on every run, and a ratcheted target
-# survives these re-seeds (metric.seed_target).
-CLICK_GOAL_RATCHET = {"factor": 1.25}
+# --- per-goal overrides (targets, re-arm rules, annotations) ---
+#
+# The goal definitions below carry default targets. A site's own targets and
+# re-arm rules come from data: SITE_PROFILES[site]["goal_overrides"], then the
+# site.yaml block `site_goals.goal_overrides` (shared/schemas/
+# site-config.schema.json). Click goals keep steering prompts after they are
+# hit (framework/core/goals.py): a ratchet raises the target past the value
+# instead of accomplishing it, and reopen puts an accomplished goal back to
+# active when the value falls back. The tracker re-seeds every run; a
+# ratcheted target survives those re-seeds (metric.seed_target).
 
-# A dated note on the AislePrompt click goals so KTLO and the strategists
-# read the 2026-11-11 drop as a measurement fix, not a regression (A05:
-# storage config/human-click-filter-config.json, extra_bot_ua_terms).
-SAFARI_FLEET_NOTE = (
-    "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet "
-    "(one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human "
-    "Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) "
-    "is not a regression.")
+def _override_annotations(raw, where: str) -> list[dict]:
+    """Dated notes from an override: ts + note required. YAML reads an
+    unquoted 2026-11-11 as a date, so ts is stored as its ISO string."""
+    out: list[dict] = []
+    for a in raw if isinstance(raw, list) else []:
+        if not (isinstance(a, dict) and a.get("ts") and a.get("note")):
+            err(f"  goal override {where}: annotation needs ts and note, ignored: {a!r}")
+            continue
+        ts = a["ts"].isoformat() if hasattr(a["ts"], "isoformat") else str(a["ts"])
+        note = {"ts": ts, "note": str(a["note"])}
+        if a.get("kind"):
+            note["kind"] = str(a["kind"])
+        if isinstance(a.get("value"), (int, float)) and not isinstance(a.get("value"), bool):
+            note["value"] = a["value"]
+        out.append(note)
+    return out
 
 
-def _fleet_note(value: Optional[int] = None) -> dict:
-    note = {"ts": "2026-11-11", "kind": "measurement-correction", "note": SAFARI_FLEET_NOTE}
-    if value is not None:
-        note["value"] = value
-    return note
+def _clean_override(ov, where: str) -> dict:
+    """Keep the override keys the goals schema accepts; warn on the rest, so
+    a typo in a site.yaml never blocks the goal-definition refresh. null
+    ratchet/reopen is kept: init_goals removes that rule."""
+    if not isinstance(ov, dict):
+        err(f"  goal override {where} ignored: not a mapping")
+        return {}
+    out: dict = {}
+    for k, v in ov.items():
+        if k == "target" and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = v
+        elif k == "ratchet" and (v is None or goals_mod.ratchet_factor({"ratchet": v})):
+            out[k] = None if v is None else {"factor": v["factor"]}
+        elif k == "reopen" and (v is None or isinstance(v, bool)):
+            out[k] = v
+        elif k == "annotations":
+            out[k] = _override_annotations(v, where)
+        else:
+            err(f"  goal override {where}.{k} ignored: {v!r}")
+    return out
 
 
-def write_goal_definitions(profile: dict, agent_id: str) -> None:
+def goal_overrides(profile: dict, site_yaml: Optional[dict] = None) -> dict[str, dict]:
+    """{goal_id: {target?, ratchet?, reopen?, annotations?}}: the profile's
+    goal_overrides, then site.yaml `site_goals.goal_overrides` on top. Per key
+    the site.yaml value wins; annotations from both layers are kept."""
+    layers = [("profile", profile.get("goal_overrides"))]
+    sg = (site_yaml or {}).get("site_goals")
+    if isinstance(sg, dict):
+        layers.append(("site.yaml", sg.get("goal_overrides")))
+    out: dict[str, dict] = {}
+    for src, layer in layers:
+        if layer is None:
+            continue
+        if not isinstance(layer, dict):
+            err(f"  {src} goal_overrides ignored: not a mapping")
+            continue
+        for gid, ov in layer.items():
+            clean = _clean_override(ov, f"{src} {gid}")
+            if not clean:
+                continue
+            merged = out.setdefault(str(gid), {})
+            notes = merged.pop("annotations", []) + clean.pop("annotations", [])
+            merged.update(clean)
+            if notes:
+                merged["annotations"] = notes
+    return out
+
+
+def _apply_goal_override(goal: dict, ov: dict) -> None:
+    m = goal.setdefault("metric", {})
+    for k in ("target", "ratchet", "reopen"):
+        if k in ov:
+            m[k] = dict(ov[k]) if isinstance(ov[k], dict) else ov[k]
+    notes = list(goal.get("annotations") or [])
+    seen = {(a.get("ts"), a.get("note")) for a in notes}
+    for a in ov.get("annotations") or []:
+        if (a["ts"], a["note"]) not in seen:
+            notes.append(dict(a))
+            seen.add((a["ts"], a["note"]))
+    if notes:
+        goal["annotations"] = notes
+
+
+def write_goal_definitions(profile: dict, agent_id: str,
+                           site_yaml: Optional[dict] = None) -> None:
     """Idempotent: write the goal schema for this site if not already present.
-    Existing goals' progress_history is preserved by goals.init_goals."""
+    Existing goals' progress_history is preserved by goals.init_goals.
+    `site_yaml` defaults to load_site_yaml(profile); see goal_overrides()."""
     is_aisleprompt = profile["host"] == "aisleprompt.com"
     site_label = "AislePrompt" if is_aisleprompt else "SpecPicks"
 
@@ -573,13 +688,9 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
                   "automation UA, no stale-browser fingerprint, no datacenter IP, no "
                   "Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
             ),
-            # SpecPicks: 3,000 Amazon + 200 eBay, ratcheting like the Amazon goal.
             "metric": {"name": "human_conversions_30d", "current": 0,
-                       "target": 1000 if is_aisleprompt else 3200,
-                       "direction": "increase", "unit": "human clicks", "horizon_weeks": 12,
-                       **({"reopen": True} if is_aisleprompt
-                          else {"ratchet": CLICK_GOAL_RATCHET})},
-            **({"annotations": [_fleet_note()]} if is_aisleprompt else {}),
+                       "target": 1000 if is_aisleprompt else 1100,
+                       "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
             "status": "active",
             "is_revenue_goal": True,
         },
@@ -600,23 +711,15 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
              "metric": {"name": "human_instacart_clicks_30d", "current": 0, "target": 800,
                         "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
              "status": "active"},
-            # Target 450 = ~1.5x the clean ~300-330/30d left once the Safari-17
-            # fleet is filtered (2026-11-11). It was 200, and a recorded 1,549
-            # (half fleet) had held it 'accomplished' since 10-10, so it never
-            # reached a prompt. reopen: it goes active again if it falls back.
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks — verified human (AislePrompt)",
+             "title": f"30-day Amazon affiliate clicks — verified human ({site_label})",
              "description": "Verified human Amazon affiliate clicks, last 30 days: kitchen_click_events rows "
                             "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
-                            "fingerprints incl. the Safari 17.0-17.2 fleet, datacenter IPs excluded), or the "
-                            "GA4 event count if higher. AislePrompt's money path: ~16 evergreen "
-                            "/blog/best-<appliance> guides carry ~95% of real clicks. Raw row count is the "
-                            "raw-amazon-clicks-30d metric. Re-baselined 2026-11-11 to ~330 after the "
-                            "Safari-17 fleet was removed (see annotations); target 450.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 450,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12,
-                        "reopen": True},
-             "annotations": [_fleet_note(326)],
+                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
+                            "Raw row count is the raw-amazon-clicks-30d metric. Step changes from filter "
+                            "updates are noted in the goal's annotations.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 200,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
              "status": "active", "is_revenue_goal": True},
             # growth-20261020T001200Z-01: the Cyber Week read. Nine guides earn
             # ~200 of 280 human clicks / 30 d, and Black Friday to Cyber Monday
@@ -626,20 +729,18 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
              "description": "Verified human Amazon affiliate clicks over the trailing 7 days, same "
                             "framework/core/human_clicks.py filter as goal-amazon-clicks-30d (first-party "
                             "only). The value recorded on 2026-12-01 is Cyber Week (11-25 to 12-01). "
-                            "Baseline: 111 in the week to 2026-10-20 (fleet-free, still valid). Target: 180 "
-                            "that week, with no dead answer pick on the nine top-click guides.",
+                            "Baseline: 111 in the week to 2026-10-20. Target: 180 that week, with no "
+                            "dead answer pick on the nine top-click guides.",
              "metric": {"name": "human_amazon_clicks_7d", "current": 0, "target": 180,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6,
-                        "reopen": True},
-             "annotations": [_fleet_note(48)],
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6},
              "status": "active"},
         ] if is_aisleprompt else [
-            # Target 3,000/30d = ~100 verified human clicks/day; the week of
-            # 2026-11-09 ran ~97-110/day against a 1,359/30d baseline. It was
-            # 900 (30/day), 'accomplished' since 11-07. The ratchet keeps it
-            # active: reaching the target raises it 25% past the value.
+            # Default 900/30d = 30 verified human clicks/day (reset 2026-09-24
+            # from 1000 raw events; the raw count it replaced was 21,258 in 30d
+            # with 0 verified humans — see HUMAN_CLICKS_NOTE). The live target
+            # and ratchet come from goal_overrides.
             {"id": "goal-amazon-clicks-30d",
-             "title": "30-day Amazon affiliate clicks — verified human (target 100/day)",
+             "title": f"30-day Amazon affiliate clicks — verified human ({site_label})",
              "description": "Verified human Amazon affiliate clicks, last 30 days. Counts outbound_clicks "
                             "JS-beacon rows (via='beacon', never the /r/ redirect twin) that pass "
                             "framework/core/human_clicks.py: not flagged is_bot, no headless/automation UA "
@@ -647,12 +748,9 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
                             "stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei "
                             "Singapore ranges), no Singapore traffic, an on-site referer, and <=20 clicks per "
                             "IP per day — or the GA4 amazon_click count if higher. Primary revenue source for "
-                            "SpecPicks; ~81% of clicks come from /product/* pages. The raw row count (~99% "
-                            "bots) is the raw-amazon-clicks-30d metric. Target ratchets 25% past the value "
-                            "each time it is reached.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 3000,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26,
-                        "ratchet": CLICK_GOAL_RATCHET},
+                            "SpecPicks. The raw row count (~99% bots) is the raw-amazon-clicks-30d metric.",
+             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 900,
+                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26},
              "status": "active", "is_revenue_goal": True},
             {"id": "goal-ebay-clicks-30d",
              "title": "30-day eBay affiliate clicks — verified human",
@@ -745,7 +843,12 @@ def write_goal_definitions(profile: dict, agent_id: str) -> None:
             "status": "active",
         },
     ]
+    overrides = goal_overrides(profile, load_site_yaml(profile) if site_yaml is None else site_yaml)
+    for gid in sorted(set(overrides) - {g["id"] for g in goals}):
+        err(f"  goal override for {gid} ignored: the tracker defines no such goal")
     for g in goals:
+        if g["id"] in overrides:
+            _apply_goal_override(g, overrides[g["id"]])
         g.setdefault("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
         g.setdefault("progress_history", [])
 

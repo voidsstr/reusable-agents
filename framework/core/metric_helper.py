@@ -41,8 +41,12 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional
 
-from .goals import apply_measurement, lazy_reopen_default
 from .storage import StorageBackend, get_storage
+
+# The status rules live in goals.py (apply_measurement). They are imported
+# inside record()/record_many(), not here: a long-running process (the
+# framework API) that loaded an older goals.py before a deploy must still be
+# able to import this module for read_cache()/read_goal_progress().
 
 
 CACHE_POINTS_LIMIT = 200  # Keep last N points per goal in the fast cache
@@ -62,6 +66,29 @@ def _progress_key(agent_id: str, goal_id: str) -> str:
 
 def _cache_key(agent_id: str) -> str:
     return f"agents/{agent_id}/goals/timeseries-cache.json"
+
+
+def _reopen_default(agent_id: str, s: StorageBackend):
+    """goals.lazy_reopen_default, or False if goals.py cannot provide it."""
+    try:
+        from .goals import lazy_reopen_default
+        return lazy_reopen_default(agent_id, storage=s)
+    except Exception as e:  # noqa: BLE001
+        print(f"[metric_helper] goals.lazy_reopen_default unavailable: {e}", file=sys.stderr)
+        return False
+
+
+def _apply_status_rules(goal: dict, value: float, now: str, reopen_default,
+                        agent_id: str) -> None:
+    """goals.apply_measurement for one goal. A failure there is logged and
+    leaves that goal's status as it was; it never drops the values recorded
+    for the agent's other goals."""
+    try:
+        from .goals import apply_measurement
+        apply_measurement(goal, value, now=now, reopen_default=reopen_default)
+    except Exception as e:  # noqa: BLE001 - recording must not fail on rules
+        print(f"[metric_helper] status rules skipped for {agent_id}/{goal.get('id')}: {e}",
+              file=sys.stderr)
 
 
 def record(
@@ -101,8 +128,7 @@ def record(
             # Shared status rules (goals.apply_measurement): accomplish on
             # reaching the target, ratchet, or re-open on falling back. A
             # retired (abandoned) goal keeps its measurements but never flips.
-            apply_measurement(g, float(value), now=now,
-                              reopen_default=lazy_reopen_default(agent_id, storage=s))
+            _apply_status_rules(g, float(value), now, _reopen_default(agent_id, s), agent_id)
             break
         doc["updated_at"] = now
         s.write_json(_active_key(agent_id), doc)
@@ -156,7 +182,7 @@ def record_many(
             "schema_version": "1", "agent_id": agent_id,
             "updated_at": now, "goals": [],
         }
-        reopen_default = lazy_reopen_default(agent_id, storage=s)
+        reopen_default = _reopen_default(agent_id, s)
         for g in doc.get("goals", []):
             gid = g.get("id")
             if gid not in metrics:
@@ -165,7 +191,7 @@ def record_many(
             m = g.setdefault("metric", {})
             m["current"] = value
             m["updated_at"] = now
-            apply_measurement(g, value, now=now, reopen_default=reopen_default)
+            _apply_status_rules(g, value, now, reopen_default, agent_id)
         doc["updated_at"] = now
         s.write_json(_active_key(agent_id), doc)
     except Exception as e:
