@@ -1010,3 +1010,23 @@ def test_run_sh_skips_the_deployer_for_migration_only_commits(repo):
     assert reason(base, app) == ""                            # app code in the range: deploy
     assert reason(mig, summ) != ""
     assert reason("", summ) == "" and reason("0" * 40, summ) == ""   # unknown base: deploy
+
+
+def test_run_sh_helpers_ignore_a_framework_package_in_the_cwd(tmp_path, repo):
+    # `python3 -c` puts the cwd ahead of PYTHONPATH: run from another framework
+    # checkout (an older one without these functions), the helpers used to
+    # import that one, fail, and fall back to deploying.
+    shadow = tmp_path / "shadow"
+    (shadow / "framework" / "core").mkdir(parents=True)
+    (shadow / "framework" / "__init__.py").write_text("")
+    (shadow / "framework" / "core" / "__init__.py").write_text("")
+    (shadow / "framework" / "core" / "deploy_repair.py").write_text("raise ImportError('shadow')\n")
+    fn = _run_sh_function("_deploy_skip_for_kind")
+    r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_deploy_skip_for_kind h2h', cwd=str(shadow))
+    assert r.returncode == 0 and r.stdout.strip() == "yes", r.stderr
+    fn = _run_sh_function("_no_deploy_reason_for_commits")
+    base = _git(repo, "rev-parse", "HEAD")
+    head = _commit(repo, "db/migrations/20261111_y.sql", "SELECT 1;\n", "db-only")
+    r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n'
+              f'_no_deploy_reason_for_commits "{repo}" "{base}" "{head}"', cwd=str(shadow))
+    assert r.returncode == 0 and "db/" in r.stdout, r.stderr

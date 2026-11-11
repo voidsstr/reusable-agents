@@ -2839,9 +2839,12 @@ PY
 
 # Prints "yes" when this dispatch kind never deploys (the shared
 # DATA_ONLY_KINDS list). Prints nothing on any error: deploy, as for app code.
+# REPO_ROOT goes first on sys.path: `python3 -c` puts the cwd ahead of
+# PYTHONPATH, and a cwd holding another framework checkout would shadow it.
 _deploy_skip_for_kind() {
-    PYTHONPATH="$REPO_ROOT" DEPLOY_SKIP_KIND_ARG="${1:-}" python3 -c '
-import os
+    DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" DEPLOY_SKIP_KIND_ARG="${1:-}" python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["DEPLOY_SKIP_REPO_ROOT"])
 from framework.core import deploy_repair as dr
 print("yes" if dr.kind_skips_deploy(os.environ.get("DEPLOY_SKIP_KIND_ARG", "")) else "")
 ' 2>/dev/null || true
@@ -2856,8 +2859,9 @@ _no_deploy_reason_for_commits() {
     local files
     files=$(git -C "$repo" diff --name-only "$base" "$head" 2>/dev/null) || return 0
     [ -n "$files" ] || return 0
-    printf '%s\n' "$files" | PYTHONPATH="$REPO_ROOT" python3 -c '
-import sys
+    printf '%s\n' "$files" | DEPLOY_SKIP_REPO_ROOT="$REPO_ROOT" python3 -c '
+import os, sys
+sys.path.insert(0, os.environ["DEPLOY_SKIP_REPO_ROOT"])
 from framework.core import deploy_repair as dr
 print(dr.no_deploy_reason(sys.stdin.read().splitlines()))
 ' 2>/dev/null || true
