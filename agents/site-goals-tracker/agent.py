@@ -65,11 +65,11 @@ REFRESH_SCRIPT = (
 OAUTH_FILE = Path(os.path.expanduser("~/.reusable-agents/seo/.oauth.json"))
 
 
-# A dated note pinned to the AislePrompt click goals (goal_overrides below) so
-# KTLO and the strategists read the 2026-11-11 drop as a measurement fix, not
-# a regression (A05: storage config/human-click-filter-config.json,
-# extra_bot_ua_terms). install/seed-default-goals.sh carries the same
-# (ts, note), and goals.init_goals merges annotations by (ts, note).
+# The dated Safari-17 measurement note. The per-site profiles in
+# config/site-goals-tracker-config.json pin it to the click goals, and
+# install/seed-default-goals.sh carries the same (ts, note);
+# goals.init_goals merges annotations by (ts, note), so all three must agree
+# (framework/tests/test_goals_rearm.py, test_site_goals_tracker_profiles.py).
 SAFARI_FLEET_NOTE = (
     "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet "
     "(one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human "
@@ -77,126 +77,69 @@ SAFARI_FLEET_NOTE = (
     "is not a regression.")
 
 
-def _fleet_note(value: Optional[int] = None) -> dict:
-    note = {"ts": "2026-11-11", "kind": "measurement-correction", "note": SAFARI_FLEET_NOTE}
-    if value is not None:
-        note["value"] = value
-    return note
-
-
-# Per-site canonical config — lives here in the shared agent so we have a
-# single source of truth for the goal definitions. The DB URLs come from
-# env vars set by per-site wrappers.
+# --- per-site profiles (config, not code: SHOP-22) ---
 #
-# goal_overrides: per-site targets and re-arm rules (framework/core/goals.py:
-# metric.ratchet / metric.reopen) plus dated annotations, keyed by goal id and
-# merged over write_goal_definitions' defaults. The site's site.yaml
-# `site_goals.goal_overrides` is merged on top (goal_overrides()), so a site
-# can retune them without a framework commit.
-SITE_PROFILES: dict[str, dict] = {
-    "aisleprompt": {
-        "host": "aisleprompt.com",
-        "gsc_site_url": "sc-domain:aisleprompt.com",
-        "ga4_property_id": "529023310",
-        "db_env": "AISLEPROMPT_DATABASE_URL",
-        # GA4 conversion event names — instacart-cart is the money event.
-        # The instacart-clicks and amazon-clicks events show outbound
-        # interest even when GA4 doesn't yet record a confirmed cart.
-        "conversion_events": ["instacart-cart", "instacart-clicks", "amazon-clicks"],
-        # Every cart-create path on the site goes through trackInstacartCart
-        # (frontend/src/utils/analytics.ts), which sends `instacart_cart_create`.
-        # GA4 event names cannot contain hyphens, so the goal name never matched
-        # and the money goal read 0 while GA4 held the real cart creates.
-        "ga4_event_aliases": {
-            "instacart-cart": ["instacart_cart_create"],
-        },
-        # First-party fallback, authoritative for outbound clicks. See
-        # CONVERSION_SQL_NOTE below.
-        "conversion_sql": {
-            "amazon-clicks": ("SELECT COUNT(*) FROM kitchen_click_events "
-                              "WHERE source = 'amazon' "
-                              "AND created_at > now() - interval '30 days'"),
-            "instacart-clicks": ("SELECT COUNT(*) FROM kitchen_click_events "
-                                 "WHERE source = 'instacart' "
-                                 "AND created_at > now() - interval '30 days'"),
-        },
-        # Verified-human filter (framework/core/human_clicks.py). The goal
-        # value for these events is the HUMAN count; conversion_sql above is
-        # kept only as the raw-* diagnostic. See HUMAN_CLICKS_NOTE.
-        "human_clicks": {
-            "table": "kitchen_click_events",
-            "spec": {"time_col": "created_at", "referer_col": "referer",
-                     "bot_flag_col": "is_bot"},
-            "events": {"amazon-clicks": {"source": "amazon"},
-                       "instacart-clicks": {"source": "instacart"}},
-            # growth-20261020T001200Z-01: a trailing 7-day human count, so a
-            # deal week reads on its own. Read on 12-01 it is Cyber Week
-            # (11-25 to 12-01); the week to 10-20 was 111.
-            "events_7d": ["amazon-clicks"],
-        },
-        "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
-        "agent_id": "aisleprompt-site-goals-tracker",
-        # Amazon 30d: 450 = ~1.5x the clean ~300-330/30d left once the
-        # Safari-17 fleet is filtered (2026-11-11). It was 200, and a recorded
-        # 1,549 (half fleet) had held it 'accomplished' since 10-10, so it never
-        # reached a prompt. reopen: back to active when the value falls back.
-        "goal_overrides": {
-            "goal-amazon-clicks-30d": {"target": 450, "reopen": True,
-                                       "annotations": [_fleet_note(326)]},
-            "goal-amazon-clicks-7d": {"reopen": True, "annotations": [_fleet_note(48)]},
-            "goal-total-conversions-30d": {"reopen": True, "annotations": [_fleet_note()]},
-        },
-    },
-    "specpicks": {
-        "host": "specpicks.com",
-        "gsc_site_url": "sc-domain:specpicks.com",
-        "ga4_property_id": "531274480",
-        "db_env": "SPECPICKS_DATABASE_URL",
-        "conversion_events": ["amazon-clicks", "ebay-clicks"],
-        # The site's delegated listener (frontend/src/utils/affiliateClickTracking.ts)
-        # sends `amazon_click` / `ebay_click`. The goal names use the hyphenated
-        # form, so the GA4 lookup never matched either one and the GA4 side of
-        # these goals has always been 0.
-        "ga4_event_aliases": {
-            "amazon-clicks": ["amazon_click"],
-            "ebay-clicks": ["ebay_click"],
-        },
-        "conversion_sql": {
-            "amazon-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
-                              "WHERE target = 'amazon' "
-                              "AND clicked_at > now() - interval '30 days'"),
-            "ebay-clicks": ("SELECT COUNT(*) FROM outbound_clicks "
-                            "WHERE target = 'ebay' "
-                            "AND clicked_at > now() - interval '30 days'"),
-        },
-        "human_clicks": {
-            "table": "outbound_clicks",
-            "spec": {"time_col": "clicked_at", "referer_col": "source_page",
-                     "country_col": "country", "bot_flag_col": "is_bot"},
-            # via='beacon' only. A JS click also logs a /r/ redirect twin;
-            # the SEO agent and the growth strategist count the beacon row
-            # and never sum across via. Without the filter this goal read
-            # 1,382 against their 1,359 (2026-11-11, 30d). eBay: 114 both ways.
-            "events": {"amazon-clicks": {"target": "amazon", "via": "beacon"},
-                       "ebay-clicks": {"target": "ebay", "via": "beacon"}},
-        },
-        "page_count_sql": (
-            "SELECT (SELECT COUNT(*) FROM products WHERE is_active = true) + "
-            "(SELECT COUNT(*) FROM editorial_articles WHERE status = 'published') + "
-            "(SELECT COUNT(*) FROM hardware_specs)"
-        ),
-        "agent_id": "specpicks-site-goals-tracker",
-        # Amazon 30d: 3,000 = ~100 verified human clicks/day; the week of
-        # 2026-11-09 ran ~97-110/day on a 1,359/30d base. It was 900,
-        # 'accomplished' since 11-07. The ratchet raises the target 25% past
-        # the value each time it is reached, so the goal stays active. Total
-        # conversions: 3,000 Amazon + 200 eBay, ratcheting the same way.
-        "goal_overrides": {
-            "goal-amazon-clicks-30d": {"target": 3000, "ratchet": {"factor": 1.25}},
-            "goal-total-conversions-30d": {"target": 3200, "ratchet": {"factor": 1.25}},
-        },
-    },
-}
+# Each site's profile (GSC/GA4 ids, DB env, conversion events, human-click
+# filter, goal_defaults, event_goals, goal_overrides) lives in
+# config/site-goals-tracker-config.json under by_site.<site>. Layers, lowest
+# first: the repo file, then storage config/site-goals-tracker-config.json,
+# then the JSON file named by SITE_GOALS_PROFILE_FILE (by_site or a bare
+# profile for --site). Dicts deep-merge; lists replace. A new site is a new
+# by_site entry, never a code branch. goal_overrides keep their own extra
+# layer: the site.yaml `site_goals.goal_overrides` block (goal_overrides()).
+
+PROFILES_CONFIG_KEY = "config/site-goals-tracker-config.json"
+_REPO_PROFILES = REPO / "config" / "site-goals-tracker-config.json"
+
+
+def _deep_merge(base: dict, over) -> dict:
+    out = json.loads(json.dumps(base))
+    if isinstance(over, dict):
+        for k, v in over.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+    return out
+
+
+def load_profiles(*, storage=None, read_storage: bool = False,
+                  repo_file: Optional[Path] = None) -> dict[str, dict]:
+    """{site: profile}. Every profile carries `site` (its by_site key) and
+    `label` (display name, default the site key)."""
+    try:
+        doc = json.loads((repo_file or _REPO_PROFILES).read_text())
+    except Exception as e:
+        print(f"  site profiles: repo config unreadable: {e}", file=sys.stderr)
+        doc = {}
+    by_site = dict((doc or {}).get("by_site") or {})
+    if read_storage:
+        try:
+            from framework.core.storage import get_storage
+            over = (storage or get_storage()).read_json(PROFILES_CONFIG_KEY) or {}
+            for site, prof in (over.get("by_site") or {}).items():
+                by_site[site] = _deep_merge(by_site.get(site) or {}, prof)
+        except Exception as e:
+            print(f"  site profiles: storage override not applied: {e}", file=sys.stderr)
+    extra = os.environ.get("SITE_GOALS_PROFILE_FILE")
+    if extra:
+        try:
+            over = json.loads(Path(os.path.expanduser(extra)).read_text())
+            for site, prof in (over.get("by_site") or {}).items():
+                by_site[site] = _deep_merge(by_site.get(site) or {}, prof)
+        except Exception as e:
+            print(f"  site profiles: {extra} not applied: {e}", file=sys.stderr)
+    out = {}
+    for site, prof in by_site.items():
+        if isinstance(prof, dict):
+            out[site] = {**prof, "site": prof.get("site") or site,
+                         "label": prof.get("label") or site}
+    return out
+
+
+# The repo profiles, for callers and tests that want them without a storage
+# read; main() re-reads with the storage layer.
+SITE_PROFILES: dict[str, dict] = load_profiles()
 
 
 # GA4 sessionSource substrings for engines that serve Bing's index
@@ -671,103 +614,40 @@ def write_goal_definitions(profile: dict, agent_id: str,
     """Idempotent: write the goal schema for this site if not already present.
     Existing goals' progress_history is preserved by goals.init_goals.
     `site_yaml` defaults to load_site_yaml(profile); see goal_overrides()."""
-    is_aisleprompt = profile["host"] == "aisleprompt.com"
-    site_label = "AislePrompt" if is_aisleprompt else "SpecPicks"
+    site_label = profile.get("label") or _short_site(profile)
+    defaults = profile.get("goal_defaults") or {}
+
+    def target(gid: str, fallback):
+        return (defaults.get(gid) or {}).get("target", fallback)
+
+    def text(gid: str, fallback: str) -> str:
+        return (defaults.get(gid) or {}).get("description") or fallback
 
     goals = [
         # Conversion goals (the ultimate KPIs)
         {
             "id": "goal-total-conversions-30d",
             "title": f"30-day total conversion clicks — verified human ({site_label})",
-            "description": (
+            "description": text(
+                "goal-total-conversions-30d",
                 "Total monetization-event clicks in the last 30 days, bots excluded. "
-                + ("Sum of GA4 instacart-cart + verified human instacart-clicks + amazon-clicks." if is_aisleprompt
-                   else "Sum of verified human amazon-clicks + ebay-clicks (JS beacon rows).")
-                + " Per event: max(GA4 event count, first-party click rows that pass "
-                  "framework/core/human_clicks.py — no site bot verdict, no headless/"
-                  "automation UA, no stale-browser fingerprint, no datacenter IP, no "
-                  "Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
-            ),
+                "Per event: max(GA4 event count, first-party click rows that pass "
+                "framework/core/human_clicks.py)."),
             "metric": {"name": "human_conversions_30d", "current": 0,
-                       "target": 1000 if is_aisleprompt else 1100,
+                       "target": target("goal-total-conversions-30d", 1000),
                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
             "status": "active",
             "is_revenue_goal": True,
         },
-        # Per-event conversion goals
-        *([
-            {"id": "goal-instacart-cart-30d",
-             "title": "30-day Instacart cart creates",
-             "description": "GA4 'instacart-cart' event count last 30 days. The money event for AislePrompt.",
-             "metric": {"name": "instacart_cart_creates", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "events", "horizon_weeks": 12},
-             "status": "active", "is_revenue_goal": True},
-            {"id": "goal-instacart-clicks-30d",
-             "title": "30-day Instacart button clicks — verified human",
-             "description": "Verified human Instacart button clicks, last 30 days: kitchen_click_events rows "
-                            "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
-                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
-                            "Outbound-interest leading indicator. Raw row count is the raw-instacart-clicks-30d metric.",
-             "metric": {"name": "human_instacart_clicks_30d", "current": 0, "target": 800,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
-             "status": "active"},
-            {"id": "goal-amazon-clicks-30d",
-             "title": f"30-day Amazon affiliate clicks — verified human ({site_label})",
-             "description": "Verified human Amazon affiliate clicks, last 30 days: kitchen_click_events rows "
-                            "that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser "
-                            "fingerprints, datacenter IPs excluded), or the GA4 event count if higher. "
-                            "Raw row count is the raw-amazon-clicks-30d metric. Step changes from filter "
-                            "updates are noted in the goal's annotations.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 12},
-             "status": "active", "is_revenue_goal": True},
-            # growth-20261020T001200Z-01: the Cyber Week read. Nine guides earn
-            # ~200 of 280 human clicks / 30 d, and Black Friday to Cyber Monday
-            # is when that shopping intent peaks.
-            {"id": "goal-amazon-clicks-7d",
-             "title": "7-day Amazon affiliate clicks — verified human (Cyber Week target 180)",
-             "description": "Verified human Amazon affiliate clicks over the trailing 7 days, same "
-                            "framework/core/human_clicks.py filter as goal-amazon-clicks-30d (first-party "
-                            "only). The value recorded on 2026-12-01 is Cyber Week (11-25 to 12-01). "
-                            "Baseline: 111 in the week to 2026-10-20. Target: 180 that week, with no "
-                            "dead answer pick on the nine top-click guides.",
-             "metric": {"name": "human_amazon_clicks_7d", "current": 0, "target": 180,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 6},
-             "status": "active"},
-        ] if is_aisleprompt else [
-            # Default 900/30d = 30 verified human clicks/day (reset 2026-09-24
-            # from 1000 raw events; the raw count it replaced was 21,258 in 30d
-            # with 0 verified humans — see HUMAN_CLICKS_NOTE). The live target
-            # and ratchet come from goal_overrides.
-            {"id": "goal-amazon-clicks-30d",
-             "title": f"30-day Amazon affiliate clicks — verified human ({site_label})",
-             "description": "Verified human Amazon affiliate clicks, last 30 days. Counts outbound_clicks "
-                            "JS-beacon rows (via='beacon', never the /r/ redirect twin) that pass "
-                            "framework/core/human_clicks.py: not flagged is_bot, no headless/automation UA "
-                            "(HeadlessChrome, puppeteer, playwright, selenium, curl, python…), no "
-                            "stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei "
-                            "Singapore ranges), no Singapore traffic, an on-site referer, and <=20 clicks per "
-                            "IP per day — or the GA4 amazon_click count if higher. Primary revenue source for "
-                            "SpecPicks. The raw row count (~99% bots) is the raw-amazon-clicks-30d metric.",
-             "metric": {"name": "human_amazon_clicks_30d", "current": 0, "target": 900,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 26},
-             "status": "active", "is_revenue_goal": True},
-            {"id": "goal-ebay-clicks-30d",
-             "title": "30-day eBay affiliate clicks — verified human",
-             "description": "Verified human eBay affiliate clicks, last 30 days (same human_clicks.py filter "
-                            "as the Amazon goal), or the GA4 ebay_click count if higher. Retro-marketplace "
-                            "revenue for SpecPicks. Raw row count is the raw-ebay-clicks-30d metric.",
-             "metric": {"name": "human_ebay_clicks_30d", "current": 0, "target": 200,
-                        "direction": "increase", "unit": "human clicks", "horizon_weeks": 16},
-             "status": "active", "is_revenue_goal": True},
-        ]),
+        # Per-event conversion goals: the site's own (profile event_goals).
+        *json.loads(json.dumps(profile.get("event_goals") or [])),
         # Leading-indicator goals
         {
             "id": "goal-organic-clicks-30d",
             "title": f"30-day organic clicks ({site_label})",
             "description": "GSC organic search clicks in the last 30 days. Drives all downstream conversions.",
             "metric": {"name": "organic_clicks_30d", "current": 0,
-                       "target": 5000 if is_aisleprompt else 3000,
+                       "target": target("goal-organic-clicks-30d", 3000),
                        "direction": "increase", "unit": "clicks", "horizon_weeks": 16},
             "status": "active",
         },
@@ -779,7 +659,7 @@ def write_goal_definitions(profile: dict, agent_id: str,
                            "rate of any human channel on the site; the GEO/AI-search "
                            "thesis in docs/seo-growth-strategy.md is measured here.",
             "metric": {"name": "ai_assistant_sessions_30d", "current": 0,
-                       "target": 50 if is_aisleprompt else 100,
+                       "target": target("goal-ai-assistant-sessions-30d", 100),
                        "direction": "increase", "unit": "sessions", "horizon_weeks": 8},
             "status": "active",
         },
@@ -791,7 +671,7 @@ def write_goal_definitions(profile: dict, agent_id: str,
                            "every engine that serves or retrieves from Bing's index. GSC "
                            "cannot see any of these.",
             "metric": {"name": "ga4_sessions_bing_plus_chatgpt", "current": 0,
-                       "target": 400 if is_aisleprompt else 300,
+                       "target": target("goal-bing-index-sessions-30d", 300),
                        "direction": "increase", "unit": "sessions", "horizon_weeks": 8},
             "status": "active",
         },
@@ -800,7 +680,7 @@ def write_goal_definitions(profile: dict, agent_id: str,
             "title": f"30-day organic impressions ({site_label})",
             "description": "GSC search impressions in the last 30 days. Index of overall search visibility.",
             "metric": {"name": "organic_impressions_30d", "current": 0,
-                       "target": 100000 if is_aisleprompt else 50000,
+                       "target": target("goal-organic-impressions-30d", 50000),
                        "direction": "increase", "unit": "impressions", "horizon_weeks": 16},
             "status": "active",
         },
@@ -832,13 +712,11 @@ def write_goal_definitions(profile: dict, agent_id: str,
         {
             "id": "goal-active-pages-count",
             "title": f"Active publishable pages ({site_label})",
-            "description": (
-                "Total active rows in main content tables (recipes for AislePrompt; products + articles + hardware for SpecPicks). Index of how much content is in the funnel."
-                if is_aisleprompt else
-                "Total active rows in products + editorial_articles + hardware_specs. Index of catalog and content depth."
-            ),
+            "description": text("goal-active-pages-count",
+                                "Total active rows in the site's main content tables "
+                                "(profile page_count_sql). Index of how much content is in the funnel."),
             "metric": {"name": "active_pages", "current": 0,
-                       "target": 60000 if is_aisleprompt else 25000,
+                       "target": target("goal-active-pages-count", 25000),
                        "direction": "increase", "unit": "rows", "horizon_weeks": 24},
             "status": "active",
         },
@@ -864,9 +742,10 @@ def main() -> None:
     args = p.parse_args()
 
     site_name = args.site
-    if not site_name or site_name not in SITE_PROFILES:
-        raise SystemExit(f"--site must be one of: {list(SITE_PROFILES)}")
-    profile = SITE_PROFILES[site_name]
+    profiles = load_profiles(read_storage=True)
+    if not site_name or site_name not in profiles:
+        raise SystemExit(f"--site must be one of: {list(profiles)}")
+    profile = profiles[site_name]
     agent_id = profile["agent_id"]
     err(f"[site-goals-tracker] site={site_name} agent_id={agent_id}")
 
@@ -1065,7 +944,9 @@ def _slug(s: str) -> str:
 
 
 def _short_site(profile: dict) -> str:
-    return "aisleprompt" if profile["host"] == "aisleprompt.com" else "specpicks"
+    """The site key (by_site entry); legacy profiles without one fall back to
+    the host's first label (example.com -> example)."""
+    return str(profile.get("site") or str(profile.get("host") or "").split(".")[0])
 
 
 def _db_fallback(profile: dict) -> str:

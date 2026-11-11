@@ -1,0 +1,297 @@
+{
+  "schema_version": "1",
+  "_doc": "Per-site profiles for agents/site-goals-tracker (moved out of agent code, SHOP-22). Storage config/site-goals-tracker-config.json deep-merges over this file (by_site.<site>.<key>); a site.yaml site_goals.goal_overrides block still merges over goal_overrides. Generic goals take their per-site target/description from goal_defaults; event_goals are the site's own per-event conversion goals, inserted after goal-total-conversions-30d.",
+  "by_site": {
+    "aisleprompt": {
+      "host": "aisleprompt.com",
+      "gsc_site_url": "sc-domain:aisleprompt.com",
+      "ga4_property_id": "529023310",
+      "db_env": "AISLEPROMPT_DATABASE_URL",
+      "conversion_events": [
+        "instacart-cart",
+        "instacart-clicks",
+        "amazon-clicks"
+      ],
+      "ga4_event_aliases": {
+        "instacart-cart": [
+          "instacart_cart_create"
+        ]
+      },
+      "conversion_sql": {
+        "amazon-clicks": "SELECT COUNT(*) FROM kitchen_click_events WHERE source = 'amazon' AND created_at > now() - interval '30 days'",
+        "instacart-clicks": "SELECT COUNT(*) FROM kitchen_click_events WHERE source = 'instacart' AND created_at > now() - interval '30 days'"
+      },
+      "human_clicks": {
+        "table": "kitchen_click_events",
+        "spec": {
+          "time_col": "created_at",
+          "referer_col": "referer",
+          "bot_flag_col": "is_bot"
+        },
+        "events": {
+          "amazon-clicks": {
+            "source": "amazon"
+          },
+          "instacart-clicks": {
+            "source": "instacart"
+          }
+        },
+        "events_7d": [
+          "amazon-clicks"
+        ]
+      },
+      "page_count_sql": "SELECT COUNT(*) FROM recipe_catalog WHERE COALESCE(is_active, TRUE) = TRUE",
+      "agent_id": "aisleprompt-site-goals-tracker",
+      "goal_overrides": {
+        "goal-amazon-clicks-30d": {
+          "target": 450,
+          "reopen": true,
+          "annotations": [
+            {
+              "ts": "2026-11-11",
+              "kind": "measurement-correction",
+              "note": "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet (one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) is not a regression.",
+              "value": 326
+            }
+          ]
+        },
+        "goal-amazon-clicks-7d": {
+          "reopen": true,
+          "annotations": [
+            {
+              "ts": "2026-11-11",
+              "kind": "measurement-correction",
+              "note": "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet (one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) is not a regression.",
+              "value": 48
+            }
+          ]
+        },
+        "goal-total-conversions-30d": {
+          "reopen": true,
+          "annotations": [
+            {
+              "ts": "2026-11-11",
+              "kind": "measurement-correction",
+              "note": "measurement correction: Safari-17 fleet removed — a Safari 17.0-17.2 bot fleet (one click per IP, 0% US) was 348 of 681 30-day and 326 of 378 7-day verified-human Amazon clicks; filtered from 2026-11-11. The step down to ~330 (30d) / ~50 (7d) is not a regression."
+            }
+          ]
+        }
+      },
+      "site": "aisleprompt",
+      "label": "AislePrompt",
+      "goal_defaults": {
+        "goal-total-conversions-30d": {
+          "target": 1000,
+          "description": "Total monetization-event clicks in the last 30 days, bots excluded. Sum of GA4 instacart-cart + verified human instacart-clicks + amazon-clicks. Per event: max(GA4 event count, first-party click rows that pass framework/core/human_clicks.py — no site bot verdict, no headless/automation UA, no stale-browser fingerprint, no datacenter IP, no Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
+        },
+        "goal-organic-clicks-30d": {
+          "target": 5000
+        },
+        "goal-ai-assistant-sessions-30d": {
+          "target": 50
+        },
+        "goal-bing-index-sessions-30d": {
+          "target": 400
+        },
+        "goal-organic-impressions-30d": {
+          "target": 100000
+        },
+        "goal-indexed-pages-pct": {
+          "target": 60
+        },
+        "goal-unknown-to-google-count": {
+          "target": 50
+        },
+        "goal-crawled-not-indexed-count": {
+          "target": 0
+        },
+        "goal-active-pages-count": {
+          "target": 60000,
+          "description": "Total active rows in main content tables (recipes for AislePrompt; products + articles + hardware for SpecPicks). Index of how much content is in the funnel."
+        }
+      },
+      "event_goals": [
+        {
+          "id": "goal-instacart-cart-30d",
+          "title": "30-day Instacart cart creates",
+          "description": "GA4 'instacart-cart' event count last 30 days. The money event for AislePrompt.",
+          "metric": {
+            "name": "instacart_cart_creates",
+            "current": 0,
+            "target": 200,
+            "direction": "increase",
+            "unit": "events",
+            "horizon_weeks": 12
+          },
+          "status": "active",
+          "is_revenue_goal": true
+        },
+        {
+          "id": "goal-instacart-clicks-30d",
+          "title": "30-day Instacart button clicks — verified human",
+          "description": "Verified human Instacart button clicks, last 30 days: kitchen_click_events rows that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser fingerprints, datacenter IPs excluded), or the GA4 event count if higher. Outbound-interest leading indicator. Raw row count is the raw-instacart-clicks-30d metric.",
+          "metric": {
+            "name": "human_instacart_clicks_30d",
+            "current": 0,
+            "target": 800,
+            "direction": "increase",
+            "unit": "human clicks",
+            "horizon_weeks": 12
+          },
+          "status": "active"
+        },
+        {
+          "id": "goal-amazon-clicks-30d",
+          "title": "30-day Amazon affiliate clicks — verified human (AislePrompt)",
+          "description": "Verified human Amazon affiliate clicks, last 30 days: kitchen_click_events rows that pass framework/core/human_clicks.py (bots, headless UAs, stale-browser fingerprints, datacenter IPs excluded), or the GA4 event count if higher. Raw row count is the raw-amazon-clicks-30d metric. Step changes from filter updates are noted in the goal's annotations.",
+          "metric": {
+            "name": "human_amazon_clicks_30d",
+            "current": 0,
+            "target": 200,
+            "direction": "increase",
+            "unit": "human clicks",
+            "horizon_weeks": 12
+          },
+          "status": "active",
+          "is_revenue_goal": true
+        },
+        {
+          "id": "goal-amazon-clicks-7d",
+          "title": "7-day Amazon affiliate clicks — verified human (Cyber Week target 180)",
+          "description": "Verified human Amazon affiliate clicks over the trailing 7 days, same framework/core/human_clicks.py filter as goal-amazon-clicks-30d (first-party only). The value recorded on 2026-12-01 is Cyber Week (11-25 to 12-01). Baseline: 111 in the week to 2026-10-20. Target: 180 that week, with no dead answer pick on the nine top-click guides.",
+          "metric": {
+            "name": "human_amazon_clicks_7d",
+            "current": 0,
+            "target": 180,
+            "direction": "increase",
+            "unit": "human clicks",
+            "horizon_weeks": 6
+          },
+          "status": "active"
+        }
+      ]
+    },
+    "specpicks": {
+      "host": "specpicks.com",
+      "gsc_site_url": "sc-domain:specpicks.com",
+      "ga4_property_id": "531274480",
+      "db_env": "SPECPICKS_DATABASE_URL",
+      "conversion_events": [
+        "amazon-clicks",
+        "ebay-clicks"
+      ],
+      "ga4_event_aliases": {
+        "amazon-clicks": [
+          "amazon_click"
+        ],
+        "ebay-clicks": [
+          "ebay_click"
+        ]
+      },
+      "conversion_sql": {
+        "amazon-clicks": "SELECT COUNT(*) FROM outbound_clicks WHERE target = 'amazon' AND clicked_at > now() - interval '30 days'",
+        "ebay-clicks": "SELECT COUNT(*) FROM outbound_clicks WHERE target = 'ebay' AND clicked_at > now() - interval '30 days'"
+      },
+      "human_clicks": {
+        "table": "outbound_clicks",
+        "spec": {
+          "time_col": "clicked_at",
+          "referer_col": "source_page",
+          "country_col": "country",
+          "bot_flag_col": "is_bot"
+        },
+        "events": {
+          "amazon-clicks": {
+            "target": "amazon",
+            "via": "beacon"
+          },
+          "ebay-clicks": {
+            "target": "ebay",
+            "via": "beacon"
+          }
+        }
+      },
+      "page_count_sql": "SELECT (SELECT COUNT(*) FROM products WHERE is_active = true) + (SELECT COUNT(*) FROM editorial_articles WHERE status = 'published') + (SELECT COUNT(*) FROM hardware_specs)",
+      "agent_id": "specpicks-site-goals-tracker",
+      "goal_overrides": {
+        "goal-amazon-clicks-30d": {
+          "target": 3000,
+          "ratchet": {
+            "factor": 1.25
+          }
+        },
+        "goal-total-conversions-30d": {
+          "target": 3200,
+          "ratchet": {
+            "factor": 1.25
+          }
+        }
+      },
+      "site": "specpicks",
+      "label": "SpecPicks",
+      "goal_defaults": {
+        "goal-total-conversions-30d": {
+          "target": 1100,
+          "description": "Total monetization-event clicks in the last 30 days, bots excluded. Sum of verified human amazon-clicks + ebay-clicks (JS beacon rows). Per event: max(GA4 event count, first-party click rows that pass framework/core/human_clicks.py — no site bot verdict, no headless/automation UA, no stale-browser fingerprint, no datacenter IP, no Singapore headless traffic, on-site referer, <=20 clicks/IP/day)."
+        },
+        "goal-organic-clicks-30d": {
+          "target": 3000
+        },
+        "goal-ai-assistant-sessions-30d": {
+          "target": 100
+        },
+        "goal-bing-index-sessions-30d": {
+          "target": 300
+        },
+        "goal-organic-impressions-30d": {
+          "target": 50000
+        },
+        "goal-indexed-pages-pct": {
+          "target": 60
+        },
+        "goal-unknown-to-google-count": {
+          "target": 50
+        },
+        "goal-crawled-not-indexed-count": {
+          "target": 0
+        },
+        "goal-active-pages-count": {
+          "target": 25000,
+          "description": "Total active rows in products + editorial_articles + hardware_specs. Index of catalog and content depth."
+        }
+      },
+      "event_goals": [
+        {
+          "id": "goal-amazon-clicks-30d",
+          "title": "30-day Amazon affiliate clicks — verified human (SpecPicks)",
+          "description": "Verified human Amazon affiliate clicks, last 30 days. Counts outbound_clicks JS-beacon rows (via='beacon', never the /r/ redirect twin) that pass framework/core/human_clicks.py: not flagged is_bot, no headless/automation UA (HeadlessChrome, puppeteer, playwright, selenium, curl, python…), no stale-browser fingerprint, no datacenter IP (incl. Tencent/Alibaba/Huawei Singapore ranges), no Singapore traffic, an on-site referer, and <=20 clicks per IP per day — or the GA4 amazon_click count if higher. Primary revenue source for SpecPicks. The raw row count (~99% bots) is the raw-amazon-clicks-30d metric.",
+          "metric": {
+            "name": "human_amazon_clicks_30d",
+            "current": 0,
+            "target": 900,
+            "direction": "increase",
+            "unit": "human clicks",
+            "horizon_weeks": 26
+          },
+          "status": "active",
+          "is_revenue_goal": true
+        },
+        {
+          "id": "goal-ebay-clicks-30d",
+          "title": "30-day eBay affiliate clicks — verified human",
+          "description": "Verified human eBay affiliate clicks, last 30 days (same human_clicks.py filter as the Amazon goal), or the GA4 ebay_click count if higher. Retro-marketplace revenue for SpecPicks. Raw row count is the raw-ebay-clicks-30d metric.",
+          "metric": {
+            "name": "human_ebay_clicks_30d",
+            "current": 0,
+            "target": 200,
+            "direction": "increase",
+            "unit": "human clicks",
+            "horizon_weeks": 16
+          },
+          "status": "active",
+          "is_revenue_goal": true
+        }
+      ]
+    }
+  }
+}
