@@ -64,6 +64,17 @@ class DispatchTransient(Exception):
     """Transient — retryable."""
 
 
+class DispatchHeld(DispatchError):
+    """Not dispatched: the site's deploy gate has been red too long for an
+    app-code kind (deploy_repair.gate_hold). Nothing was spawned, queued or
+    emailed; each rec got a defer_backoff entry so the backlog-dispatcher
+    retries it later instead of every tick. Not a failure."""
+
+    def __init__(self, decision):
+        self.decision = decision
+        super().__init__(f"held, not dispatched: {decision.reason}")
+
+
 # Result -----------------------------------------------------------------
 
 class DispatchHandle:
@@ -134,6 +145,9 @@ def gated_dispatch_now(
     Returns:
       * DispatchHandle when auto_implement=true and the dispatch fired
       * None when auto_implement=false (the email path takes over)
+      * None when the deploy-gate hold kept an app-code batch back
+        (dispatch_now raised DispatchHeld; the decision is logged on
+        `agent` and the recs get a defer_backoff entry)
     """
     auto_implement = True
     if cfg is not None and hasattr(cfg, "get"):
@@ -161,16 +175,100 @@ def gated_dispatch_now(
                 pass
         return None
 
-    return dispatch_now(
-        agent_id=agent_id,
-        run_dir=run_dir,
-        rec_ids=rec_ids,
-        action=action,
-        site=site,
-        subject_tag=subject_tag,
-        request_id=request_id,
-        **dispatch_kwargs,
-    )
+    try:
+        return dispatch_now(
+            agent_id=agent_id,
+            run_dir=run_dir,
+            rec_ids=rec_ids,
+            action=action,
+            site=site,
+            subject_tag=subject_tag,
+            request_id=request_id,
+            **dispatch_kwargs,
+        )
+    except DispatchHeld as held:
+        if agent is not None and hasattr(agent, "decide"):
+            try:
+                agent.decide(
+                    "observation",
+                    f"deploy-gate hold: {len(rec_ids)} rec(s) not dispatched. "
+                    f"{held.decision.reason}",
+                    evidence={"rec_ids": list(rec_ids), "gate": "deploy-gate-hold",
+                              **held.decision.to_dict()},
+                )
+            except Exception:
+                pass
+        return None
+
+
+# The implementer's DISPATCH_KIND, worked out from the run dir the same way
+# agents/implementer/run.sh does it (keep the two in step). The hold below
+# must judge what the implementer will actually do with the batch.
+_PRODUCER_KIND_SUFFIXES = (
+    ("-head-to-head-agent", "h2h"),
+    ("-article-proposal-agent", "article-author"),
+    ("-catalog-audit-agent", "catalog-audit"),
+)
+
+
+def dispatch_kind_for(run_dir: str = "") -> str:
+    """seo (app code, the default) | h2h | article-author | catalog-audit |
+    article-refresh, from <run_dir>/recommendations.json: its top-level
+    agent_id / agent suffix, then any rec typed article-author-proposal, then
+    a batch made only of article-refresh recs. Mirrors run.sh."""
+    try:
+        doc = json.loads((Path(run_dir) / "recommendations.json").read_text()) if run_dir else {}
+    except Exception:
+        doc = {}
+    if isinstance(doc, dict):
+        recs = doc.get("recommendations") or []
+        src = str(doc.get("agent_id") or doc.get("agent") or "")
+    else:
+        recs, src = (doc if isinstance(doc, list) else []), ""
+    recs = [r for r in recs if isinstance(r, dict)]
+    for suffix, kind in _PRODUCER_KIND_SUFFIXES:
+        if src.endswith(suffix):
+            return kind
+    if any(r.get("type") == "article-author-proposal" for r in recs):
+        return "article-author"
+    if recs and {(r.get("dispatch_kind") or r.get("type") or r.get("rec_type") or "")
+                 for r in recs} == {"article-refresh"}:
+        return "article-refresh"
+    return "seo"
+
+
+def _deploy_gate_hold(*, site: str, agent_id: str, run_dir: str, rec_ids: list[str],
+                      subject_tag: str):
+    """The deploy-gate hold decision for this batch, or None to dispatch.
+    Fails open: any error dispatches exactly as before the hold existed."""
+    try:
+        from . import deploy_repair as _dr
+        kind = dispatch_kind_for(run_dir)
+        # The producer's own id says data-only too (fail open toward dispatching).
+        for suffix, k in _PRODUCER_KIND_SUFFIXES:
+            if agent_id.endswith(suffix) and _dr.kind_skips_deploy(k):
+                kind = k
+        decision = _dr.gate_hold(site, kind, subject_tag=subject_tag)
+    except Exception as e:
+        _log(f"[dispatch] deploy-gate hold check failed ({e}); dispatching as usual")
+        return None
+    if decision.probe:
+        _log(f"[dispatch] {decision.reason} ({agent_id} {rec_ids})")
+    if not decision.hold:
+        return None
+    try:
+        from . import defer_backoff
+        for rid in rec_ids:
+            defer_backoff.record_defer(rid, agent_id, f"deploy-gate-hold: {decision.reason}")
+    except Exception as e:
+        _log(f"[dispatch] defer_backoff record failed for held recs: {e}")
+    try:
+        _dr.record_hold(site, agent_id=agent_id, rec_ids=rec_ids, kind=kind,
+                        reason=decision.reason)
+    except Exception:
+        pass
+    _log(f"[dispatch] HELD {agent_id} recs={rec_ids} kind={kind} site={site}: {decision.reason}")
+    return decision
 
 
 def dispatch_now(
@@ -190,8 +288,17 @@ def dispatch_now(
     notify_on_failure: bool = True,
     lock_timeout_s: int = 1800,
     implementer_backend: Optional[str] = None,
+    honor_gate_hold: bool = True,
 ) -> DispatchHandle:
     """Dispatch a list of rec ids to the implementer.
+
+    Deploy-gate hold (deploy_repair.gate_hold, storage
+    config/deploy-gate-hold.json, off unless enabled there): while the site's
+    gate has been red for `red_for_h`, an app-code batch raises DispatchHeld
+    before anything is spawned, queued or emailed, and each rec gets a
+    defer_backoff entry. Data-only kinds always pass, and one dispatch per
+    `probe_every_h` passes so the gate gets re-tested. honor_gate_hold=False
+    skips the check (an operator forcing a dispatch).
 
     Resilience:
       - Acquires a SITE-LEVEL lock. Two dispatches against the same site
@@ -214,6 +321,12 @@ def dispatch_now(
     if not Path(run_dir).is_dir():
         raise DispatchError(f"run_dir does not exist: {run_dir}")
 
+    if honor_gate_hold:
+        held = _deploy_gate_hold(site=site, agent_id=agent_id, run_dir=run_dir,
+                                 rec_ids=rec_ids, subject_tag=subject_tag)
+        if held is not None:
+            raise DispatchHeld(held)
+
     script = implementer_script or _resolve_implementer_script()
     if not script or not Path(script).is_file():
         raise DispatchError(f"implementer script not found at {script}")
@@ -232,11 +345,11 @@ def dispatch_now(
     # (one frontend/backend deploy at a time). DB-only kinds (catalog-
     # audit / h2h) and content-only kinds (article-author) bypass the
     # site lock so a deploy doesn't block a DB migration or article
-    # insert. Override by setting DATA_ONLY_KINDS / APP_CODE_KINDS env.
-    _data_only = set((os.environ.get("DATA_ONLY_KINDS") or
-                      "catalog-audit,h2h,article-author,product-hydration"
-                      ).split(","))
-    _data_only.discard("")
+    # insert. The list is the one the implementer uses to skip the
+    # deployer (deploy_repair.data_only_kinds); DATA_ONLY_KINDS in the
+    # environment overrides it for both.
+    from .deploy_repair import data_only_kinds as _data_only_kinds
+    _data_only = _data_only_kinds()
     needs_site_lock = (subject_tag or "").strip() not in _data_only
 
     @contextmanager

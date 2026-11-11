@@ -2790,8 +2790,14 @@ esac
 # avoids the "uncommitted work locked behind a never-completing chain"
 # failure mode of per-chain deploys.
 #
-# Skipped automatically for DB-only dispatches (article-author, h2h,
-# catalog-audit) since those don't need a docker build.
+# Skipped automatically for data-only dispatch kinds (article-author,
+# article-refresh, catalog-audit, h2h, product-hydration) since those don't
+# need a docker build, and for batches whose commits touch only paths that
+# put nothing in the app image (db/migrations/**, changes/**, docs/**,
+# agents/**). Both lists live ONCE in framework/core/deploy_repair.py
+# (DATA_ONLY_KINDS, which dispatch.py's site-lock bypass also reads, and
+# NO_DEPLOY_PATH_GLOBS); DATA_ONLY_KINDS / DEPLOY_SKIP_PATHS in the
+# environment override them.
 #
 # Path note: deployer lives at agents/deployer/run.sh. The legacy
 # seo-deployer name + path is kept as a fallback so older clones
@@ -2831,14 +2837,35 @@ sys.exit(0)
 PY
 }
 
-if [ "$DISPATCH_KIND" = "h2h" ]; then
-    echo "[implementer] H2H dispatch — skipping deployer chain"
-elif [ "$DISPATCH_KIND" = "article-author" ]; then
-    echo "[implementer] article-author dispatch — skipping deployer chain (articles ship via DB insert, no build)"
-elif [ "$DISPATCH_KIND" = "catalog-audit" ]; then
-    echo "[implementer] catalog-audit dispatch — skipping deployer chain (DB-only fixes, no build)"
-elif [ "$DISPATCH_KIND" = "article-refresh" ]; then
-    echo "[implementer] article-refresh dispatch — skipping deployer chain (DB-only rewrite of a published article, no build)"
+# Prints "yes" when this dispatch kind never deploys (the shared
+# DATA_ONLY_KINDS list). Prints nothing on any error: deploy, as for app code.
+_deploy_skip_for_kind() {
+    PYTHONPATH="$REPO_ROOT" DEPLOY_SKIP_KIND_ARG="${1:-}" python3 -c '
+import os
+from framework.core import deploy_repair as dr
+print("yes" if dr.kind_skips_deploy(os.environ.get("DEPLOY_SKIP_KIND_ARG", "")) else "")
+' 2>/dev/null || true
+}
+
+# Prints why the commits <base>..<head> in <repo> need no deploy (every
+# changed path is in the shared NO_DEPLOY_PATH_GLOBS), or nothing when they
+# do. Nothing on any error (unknown base, git failure): deploy.
+_no_deploy_reason_for_commits() {
+    local repo="${1:-}" base="${2:-}" head="${3:-}"
+    [ -n "$repo" ] && [ -n "$base" ] && [ -n "$head" ] || return 0
+    local files
+    files=$(git -C "$repo" diff --name-only "$base" "$head" 2>/dev/null) || return 0
+    [ -n "$files" ] || return 0
+    printf '%s\n' "$files" | PYTHONPATH="$REPO_ROOT" python3 -c '
+import sys
+from framework.core import deploy_repair as dr
+print(dr.no_deploy_reason(sys.stdin.read().splitlines()))
+' 2>/dev/null || true
+}
+
+DEPLOY_SKIP_KIND=$(_deploy_skip_for_kind "$DISPATCH_KIND")
+if [ -n "$DEPLOY_SKIP_KIND" ]; then
+    echo "[implementer] $DISPATCH_KIND dispatch — skipping deployer chain (a data-only kind: it writes rows directly, nothing to build)"
 elif [ -x "$DEPLOYER_SCRIPT" ] && [ "${IMPLEMENTER_SKIP_DEPLOY:-0}" != "1" ]; then
     # Per-batch deploy — fire after every batch, not waiting for chain
     # end. The _is_last_batch_in_chain helper is preserved (still used
@@ -2900,6 +2927,14 @@ if updated:
     print(f"[no-commit-mark] marked {updated} rec(s) as deferred in {key}")
 MARK_DEFERRED
         fi
+    elif NO_DEPLOY_WHY=$(_no_deploy_reason_for_commits "${IMPLEMENTER_REPO_PATH:-}" "${GIT_SHA_BEFORE:-}" "$GIT_SHA_NOW") \
+            && [ -n "$NO_DEPLOY_WHY" ]; then
+        # A DB-only lever's migration (already applied to the database by the
+        # implementer, committed as the record), a change summary, docs or the
+        # site's agent config: running the site's full gate for it only spends
+        # gate time, and on a red gate an Opus repair, on an image that did
+        # not change. The next app-code batch deploys whatever is pending.
+        echo "[implementer] $NO_DEPLOY_WHY — skipping deployer"
     else
         echo "[implementer] batch complete — chaining to deployer (site's pre-deploy gate, repair loop on red)"
         # Every deploy runs the site's own gate (deployer.test in site.yaml):

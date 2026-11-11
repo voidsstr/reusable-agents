@@ -674,3 +674,339 @@ def test_loop_infra_is_retried_then_blocks_without_repair(repo, tmp_path, monkey
     out = r.run()
     assert not out.ok and calls["repair"] == 0 and out.classification.kind == "infra"
     assert len(calls["gate"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11: a repair followed by a flaky confirm must ship
+# ---------------------------------------------------------------------------
+
+def test_loop_repair_then_flaky_confirm_ships(repo, tmp_path, monkeypatch):
+    # 2026-11-11 aisleprompt: the repair fixed the real failure, the re-run
+    # then failed only tests that time out under parallel load, and their
+    # spec files passed alone (361 passed, 0 failed). The confirm's GateRun
+    # carried the MAIN report, so verify_repaired saw unexpected > 0 and
+    # threw the correct repair away.
+    gr = _load_gate_runner()
+    rerun = (1, [_spec("a", "expected"), _spec("c", "unexpected", msg="Timeout 45000ms exceeded")])
+    confirm = (0, [_spec("a", "expected"), _spec("c", "expected")])
+    r, calls = _runner(gr, repo, tmp_path, monkeypatch, runs=[FAIL, FAIL, rerun, confirm],
+                       repair=_commit_repair(repo))
+    base = _git(repo, "rev-parse", "HEAD")
+    out = r.run()
+    assert out.ok and out.repaired, (out.status_reason, out.repairs)
+    assert calls["repair"] == 1
+    assert out.sha == _git(repo, "rev-parse", "HEAD") != base
+    assert "all pages › c" in out.flaky
+    assert [lab for lab, _ in calls["gate"]] == ["run-1", "run-1-confirm", "run-2", "run-2-confirm"]
+
+
+def test_loop_repair_then_flaky_confirm_still_rejects_a_vanished_test(repo, tmp_path, monkeypatch):
+    # The confirm path must not become a way round "failing tests must PASS":
+    # 'a' failed before the repair and is in neither the re-run nor the confirm.
+    gr = _load_gate_runner()
+    rerun = (1, [_spec("c", "unexpected", msg="Timeout 45000ms exceeded")])
+    confirm = (0, [_spec("c", "expected")])
+    r, calls = _runner(gr, repo, tmp_path, monkeypatch, runs=[FAIL, FAIL, rerun, confirm],
+                       repair=_commit_repair(repo), cfg={"max_attempts": 1})
+    base = _git(repo, "rev-parse", "HEAD")
+    out = r.run()
+    assert not out.ok and calls["repair"] == 1
+    assert _git(repo, "rev-parse", "HEAD") == base            # the repair was reset
+    note = next(x["note"] for x in out.repairs if "re-run rejected" in x["note"])
+    assert "re-run or its confirm run" in note and "all pages › a" in note
+    assert "disappear" not in out.status_reason
+
+
+def test_verify_repaired_with_a_confirm_report(tmp_path):
+    before = dr.Classification("code", "", 1, [dr.TestFailure("all pages › a", "ui/all-pages.spec.ts",
+                                                               project="chromium")])
+    main = _rep(tmp_path, [_spec("a", "expected"), _spec("c", "unexpected", msg="t")], "main.json")
+    assert not dr.verify_repaired(before, main)[0]                 # the main report alone
+    clean = _rep(tmp_path, [_spec("a", "expected"), _spec("c", "expected")], "clean.json")
+    assert dr.verify_repaired(before, main, clean) == (True, [])
+    # The confirm run must be clean...
+    dirty = _rep(tmp_path, [_spec("c", "unexpected", msg="t")], "dirty.json")
+    ok, problems = dr.verify_repaired(before, main, dirty)
+    assert not ok and any("confirm run still has" in p for p in problems)
+    # ...and must have passed every test the re-run failed.
+    other = _rep(tmp_path, [_spec("a", "expected")], "other.json")
+    ok, problems = dr.verify_repaired(before, main, other)
+    assert not ok and any("did not pass in the confirm run" in p for p in problems)
+
+
+# ---------------------------------------------------------------------------
+# Environment reds: timeouts on tests that were quick in the last green run
+# ---------------------------------------------------------------------------
+
+def _t_timed(status, msg="", *, ms=300, timeout=30000):
+    t = _t(status, msg)
+    t["timeout"] = timeout
+    t["results"][0]["duration"] = ms
+    return t
+
+
+def _tspec(title, status, *, msg="", ms=300, timeout=30000, file="ui/all-pages.spec.ts", expected="passed"):
+    t = _t_timed(status, msg, ms=ms, timeout=timeout)
+    t["expectedStatus"] = expected
+    return {"title": title, "file": file, "line": 1, "tests": [t]}
+
+
+API_TIMEOUT = "TimeoutError: apiRequestContext.post: Timeout 45000ms exceeded.\nCall log:\n  - POST /api/x"
+TEST_TIMEOUT = ("Test timeout of 120000ms exceeded.\n"
+                "TimeoutError: apiRequestContext.post: Timeout 120000ms exceeded.")
+LOCATOR_TIMEOUT = "Error: locator.click: Timeout 5000ms exceeded.\nwaiting for getByRole('button')"
+ENV_ON = {**dr.DEFAULTS, "environment_timeouts": True}
+
+
+def _key(title, file="ui/all-pages.spec.ts"):
+    return f"{file}::chromium::all pages › {title}"
+
+
+def test_parse_report_records_passing_durations_and_test_timeouts(tmp_path):
+    rep = _rep(tmp_path, [_tspec("quick", "expected", ms=1234),
+                          _tspec("slow", "unexpected", msg=API_TIMEOUT, ms=45040, timeout=60000)])
+    assert rep.durations == {_key("quick"): 1.23}
+    (f,) = rep.failures
+    assert f.timeout_ms == 60000
+
+
+def test_environment_classification_is_off_by_default(tmp_path):
+    rep = _rep(tmp_path, [_tspec("import", "unexpected", msg=API_TIMEOUT)])
+    green = {_key("import"): 0.4}
+    assert dr.classify(1, "", rep, last_green=green, cfg=dict(dr.DEFAULTS)).kind == "code"
+    assert dr.classify(1, "", rep, last_green=green).kind == "code"
+
+
+def test_timeouts_on_tests_that_were_quick_in_the_last_green_are_environment(tmp_path):
+    rep = _rep(tmp_path, [_tspec("guest import", "unexpected", msg=API_TIMEOUT),
+                          _tspec("site import", "unexpected", msg=TEST_TIMEOUT, timeout=120000),
+                          _tspec("home", "expected")])
+    green = {_key("guest import"): 0.3, _key("site import"): 2.5, _key("home"): 1.0}
+    c = dr.classify(1, "", rep, last_green=green, cfg=ENV_ON)
+    assert c.kind == "environment" and not c.ok and len(c.failures) == 2
+    assert "0.3-2.5s in the last green run" in c.reason and "45-120s" in c.reason
+
+
+@pytest.mark.parametrize("why,specs,green", [
+    ("slow in the last green too",
+     [_tspec("import", "unexpected", msg=API_TIMEOUT)], {_key("import"): 30.0}),
+    ("no green duration for it",
+     [_tspec("import", "unexpected", msg=API_TIMEOUT)], {_key("other"): 0.3}),
+    ("an assertion failure beside the timeout",
+     [_tspec("import", "unexpected", msg=API_TIMEOUT), _tspec("picks", "unexpected", msg="expect(x).toBe(y)")],
+     {_key("import"): 0.3, _key("picks"): 0.5}),
+    ("an element wait timing out is how a UI regression fails",
+     [_tspec("button", "unexpected", msg=LOCATOR_TIMEOUT)], {_key("button"): 0.8}),
+    ("a test that did not run in another file",
+     [_tspec("import", "unexpected", msg=API_TIMEOUT),
+      _tspec("never ran", "skipped", file="ui/other.spec.ts")],
+     {_key("import"): 0.3}),
+])
+def test_reds_that_are_not_environment_stay_code(tmp_path, why, specs, green):
+    rep = _rep(tmp_path, specs)
+    assert dr.classify(1, "", rep, last_green=green, cfg=ENV_ON).kind == "code", why
+
+
+def test_a_serial_neighbour_of_a_timed_out_test_may_not_have_run(tmp_path):
+    rep = _rep(tmp_path, [_tspec("import", "unexpected", msg=API_TIMEOUT), _tspec("next in group", "skipped")])
+    c = dr.classify(1, "", rep, last_green={_key("import"): 0.3}, cfg=ENV_ON)
+    assert c.kind == "environment"
+
+
+def test_environment_alerts_at_once_and_does_not_climb_the_backoff(state_dir):
+    st = dr.GateState.load("site-env")
+    env = dr.Classification("environment", "3 test(s) now time out", 1, [dr.TestFailure("t", "a.ts")])
+    st.record_red(env, "env1", attempts=0, exhausted=False, cfg=dr.DEFAULTS, now=NOW)
+    assert st.should_alert("env1", dr.DEFAULTS, NOW)
+    st.record_alert("env1", NOW)
+    assert not st.should_alert("env1", dr.DEFAULTS, NOW + timedelta(hours=3))
+    assert st.entry("env1")["cycles"] == 0 and st.may_repair("env1", now=NOW)[0]
+
+
+def _env_runner(gr, repo, tmp_path, monkeypatch, runs, **kw):
+    r, calls = _runner(gr, repo, tmp_path, monkeypatch, runs=runs,
+                       cfg={"environment_timeouts": True, "env_retry_wait_s": 0, **kw.pop("cfg", {})}, **kw)
+    r.state.last_green_durations = {_key("a"): 0.3, _key("c"): 1.0}
+    stub = r.run_gate
+
+    def run_gate(label, extra=""):
+        g = stub(label, extra)
+        # The stub classified without the durations; classify the way run_gate does.
+        c = dr.classify(g.rc, "", g.report, last_green=r.state.last_green_durations, cfg=r.cfg)
+        return g.__class__(g.label, g.rc, c, g.art_dir, g.image_id, g.seconds, g.report)
+    monkeypatch.setattr(r, "run_gate", run_gate)
+    return r, calls
+
+
+ENV_FAIL = (1, [_tspec("a", "unexpected", msg=API_TIMEOUT), _tspec("c", "expected")])
+
+
+def test_loop_environment_red_is_confirmed_retried_once_then_blocks_without_repair(repo, tmp_path, monkeypatch):
+    gr = _load_gate_runner()
+    r, calls = _env_runner(gr, repo, tmp_path, monkeypatch,
+                           runs=[ENV_FAIL, ENV_FAIL, ENV_FAIL, ENV_FAIL], repair=_commit_repair(repo))
+    out = r.run()
+    assert not out.ok and calls["repair"] == 0
+    assert out.classification.kind == "environment"
+    assert out.status_reason.startswith("environment:") and "no code repair" in out.status_reason
+    assert [lab for lab, _ in calls["gate"]] == ["run-1", "run-1-confirm", "run-2", "run-2-confirm"]
+    assert r.state.entry(out.signature)["kind"] == "environment"
+    assert r.state.should_alert(out.signature, r.cfg)
+
+
+def test_loop_known_environment_red_is_not_retried_again(repo, tmp_path, monkeypatch):
+    gr = _load_gate_runner()
+    r, calls = _env_runner(gr, repo, tmp_path, monkeypatch, runs=[ENV_FAIL, ENV_FAIL])
+    first = dr.classify(1, "", dr.parse_report(_write(tmp_path, _report_data(ENV_FAIL[1]), "e.json")),
+                        last_green=r.state.last_green_durations, cfg=r.cfg)
+    r.state.record_red(first, dr.failure_signature(first), attempts=0, exhausted=False, cfg=r.cfg)
+    out = r.run()
+    assert not out.ok and calls["repair"] == 0 and len(calls["gate"]) == 2
+
+
+def test_loop_environment_timeouts_that_pass_alone_ship_as_flaky(repo, tmp_path, monkeypatch):
+    gr = _load_gate_runner()
+    r, calls = _env_runner(gr, repo, tmp_path, monkeypatch,
+                           runs=[ENV_FAIL, (0, [_tspec("a", "expected", ms=29600), _tspec("c", "expected")])])
+    out = r.run()
+    assert out.ok and out.flaky and calls["repair"] == 0
+
+
+def test_loop_green_records_the_durations_for_the_next_environment_check(repo, tmp_path, monkeypatch):
+    gr = _load_gate_runner()
+    r, calls = _runner(gr, repo, tmp_path, monkeypatch,
+                       runs=[(0, [_tspec("a", "expected", ms=420), _tspec("c", "expected", ms=1500)])])
+    r.state.last_green_durations = {_key("gone"): 3.0, _key("a"): 9.9}
+    assert r.run().ok
+    assert r.state.last_green_durations == {_key("a"): 0.42, _key("c"): 1.5}
+    again = dr.GateState.load("site")
+    assert again.last_green_durations == {_key("a"): 0.42, _key("c"): 1.5}
+
+
+def test_green_durations_keep_an_older_value_for_a_test_still_in_the_suite(state_dir, tmp_path):
+    st = dr.GateState.load("site-d")
+    st.last_green_durations = {_key("a"): 0.3, _key("old"): 1.0}
+    main = _rep(tmp_path, [_tspec("a", "unexpected", msg=API_TIMEOUT), _tspec("c", "expected", ms=700)], "m.json")
+    st.record_green_durations(main, None)
+    assert st.last_green_durations == {_key("a"): 0.3, _key("c"): 0.7}
+
+
+# ---------------------------------------------------------------------------
+# Deploy log (outlives the 30-event history) and old state files
+# ---------------------------------------------------------------------------
+
+def test_deploy_log_outlives_the_history_and_merges_legacy_events(state_dir):
+    # A state file from before the deploy log: its deploys are only history events.
+    (state_dir).mkdir(parents=True, exist_ok=True)
+    (state_dir / "site-log.json").write_text(json.dumps({"site": "site-log", "history": [
+        {"at": "2026-11-09T13:54:37+00:00", "event": "deployed", "sha": "9c52b0916f4f",
+         "tag": "20261109-1348"},
+        {"at": "2026-11-09T16:26:39+00:00", "event": "red", "signature": "s"}]}))
+    st = dr.GateState.load("site-log")
+    assert [d["tag"] for d in st.deploys] == ["20261109-1348"]
+    t0 = datetime(2026, 11, 10, 0, 0, tzinfo=timezone.utc)
+    for i in range(40):
+        st.record_deployed(f"{i:040d}", f"20261110-{i:04d}", now=t0 + timedelta(hours=i))
+    assert len(st.history) == 30 and len(st.deploys) == 41
+    st.save()
+    log = dr.GateState.load("site-log").deploy_log()
+    assert len(log) == 41 and log[0]["tag"] == "20261109-1348"
+    assert log[-1]["sha"] == f"{39:040d}"                      # the full sha, not history's 12
+    assert [d["at"] for d in log] == sorted(d["at"] for d in log)
+    assert all(e.get("event") != "deployed" or e["tag"] != "20261109-1348" for e in st.history)
+
+
+def test_state_written_before_the_deploy_log_loads(state_dir):
+    (state_dir).mkdir(parents=True, exist_ok=True)
+    (state_dir / "site-v1.json").write_text(json.dumps({
+        "site": "site-v1", "status": "green", "history": [
+            {"at": "2026-11-11T15:55:19+00:00", "event": "deployed", "sha": "31f1273cea7c",
+             "tag": "20261111-1547"}]}))
+    st = dr.GateState.load("site-v1")
+    assert st.last_green_durations == {}
+    assert st.deploy_log() == [{"at": "2026-11-11T15:55:19+00:00", "sha": "31f1273cea7c",
+                                "tag": "20261111-1547"}]
+
+
+# ---------------------------------------------------------------------------
+# One shared list of kinds and paths that never deploy
+# ---------------------------------------------------------------------------
+
+def test_data_only_kinds_are_one_list_with_an_env_override(monkeypatch):
+    monkeypatch.delenv("DATA_ONLY_KINDS", raising=False)
+    assert dr.data_only_kinds() == {"article-author", "article-refresh", "catalog-audit", "h2h",
+                                    "product-hydration"}
+    assert dr.kind_skips_deploy("h2h") and dr.kind_skips_deploy(" catalog-audit ")
+    assert not dr.kind_skips_deploy("seo") and not dr.kind_skips_deploy("")
+    monkeypatch.setenv("DATA_ONLY_KINDS", "h2h, catalog-audit")
+    assert dr.data_only_kinds() == {"h2h", "catalog-audit"}
+    assert not dr.kind_skips_deploy("article-author")
+
+
+@pytest.mark.parametrize("paths,skips", [
+    (["db/migrations/20261111T120000Z_price-rows.sql"], True),
+    (["db/migrations/a.sql", "changes/rec-001.summary.md", "docs/x.md", "agents/shelf-audit-agent/site.yaml"], True),
+    (["db/migrations/a.sql", "src/simple-server.ts"], False),
+    (["frontend/src/App.tsx"], False),
+    (["src/agents/helper.ts"], False),              # only the top-level agents/ dir
+    (["README.md"], False),
+    ([], False),                                    # no evidence: deploy as before
+])
+def test_no_deploy_reason(monkeypatch, paths, skips):
+    monkeypatch.delenv("DEPLOY_SKIP_PATHS", raising=False)
+    why = dr.no_deploy_reason(paths)
+    assert bool(why) is skips, why
+    if skips:
+        assert "nothing in the app image changed" in why
+
+
+def test_no_deploy_paths_env_override(monkeypatch):
+    monkeypatch.setenv("DEPLOY_SKIP_PATHS", "none")
+    assert dr.no_deploy_reason(["db/migrations/a.sql"]) == ""
+    monkeypatch.setenv("DEPLOY_SKIP_PATHS", "content/**")
+    assert dr.no_deploy_reason(["content/a.md"]) and not dr.no_deploy_reason(["db/migrations/a.sql"])
+
+
+def _run_sh_function(name):
+    text = (_REPO / "agents" / "implementer" / "run.sh").read_text()
+    start = text.index(f"{name}() {{")
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+def _bash(script, env=None, cwd=None):
+    import os
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          env={**os.environ, **(env or {})}, cwd=cwd)
+
+
+def test_run_sh_uses_the_shared_kind_list_not_its_own(tmp_path):
+    text = (_REPO / "agents" / "implementer" / "run.sh").read_text()
+    assert 'elif [ "$DISPATCH_KIND" = "catalog-audit" ]' not in text
+    assert 'if [ "$DISPATCH_KIND" = "h2h" ]; then\n    echo "[implementer] H2H dispatch' not in text
+    fn = _run_sh_function("_deploy_skip_for_kind")
+    for kind, want in [("h2h", "yes"), ("article-refresh", "yes"), ("product-hydration", "yes"),
+                       ("seo", ""), ("", "")]:
+        r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n_deploy_skip_for_kind "{kind}"')
+        assert r.returncode == 0 and r.stdout.strip() == want, (kind, r.stdout, r.stderr)
+    r = _bash(f'set -euo pipefail\nREPO_ROOT="/nonexistent"\n{fn}\n_deploy_skip_for_kind h2h',
+              cwd=str(tmp_path))
+    assert r.returncode == 0 and r.stdout.strip() == ""      # broken helper: deploy, as for app code
+
+
+def test_run_sh_skips_the_deployer_for_migration_only_commits(repo):
+    fn = _run_sh_function("_no_deploy_reason_for_commits")
+    base = _git(repo, "rev-parse", "HEAD")
+    mig = _commit(repo, "db/migrations/20261111_x.sql", "UPDATE t SET x = 1;\n", "db-only lever")
+    summ = _commit(repo, "changes/rec-001.summary.md", "done\n", "summary")
+
+    def reason(b, h, repo_path=str(repo)):
+        r = _bash(f'set -euo pipefail\nREPO_ROOT="{_REPO}"\n{fn}\n'
+                  f'_no_deploy_reason_for_commits "{repo_path}" "{b}" "{h}"')
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+    assert "db/" in reason(base, summ) and "changes/" in reason(base, summ)
+    app = _commit(repo, "src/page.ts", "export const h1 = 'x';\n", "app change")
+    assert reason(base, app) == ""                            # app code in the range: deploy
+    assert reason(mig, summ) != ""
+    assert reason("", summ) == "" and reason("0" * 40, summ) == ""   # unknown base: deploy

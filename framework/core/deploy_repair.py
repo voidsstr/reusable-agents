@@ -7,12 +7,17 @@ stayed on master, every later dispatch rebuilt it and failed again, and the
 site's deploys stayed blocked until a person looked. This module holds the
 decisions that turn a red gate into test -> fix -> retest -> deploy:
 
-  classify()             pass / flaky / code / infra / config, from the test
-                         command's exit code, its output and Playwright's JSON
-                         report. Only `code` ever reaches an LLM. An infra
-                         failure (a container race, Docker down, a registry
-                         blip, a browser that cannot launch) is retried, never
-                         "fixed" in code.
+  classify()             pass / flaky / code / infra / config / environment,
+                         from the test command's exit code, its output and
+                         Playwright's JSON report. Only `code` ever reaches an
+                         LLM. An infra failure (a container race, Docker down,
+                         a registry blip, a browser that cannot launch) is
+                         retried, never "fixed" in code. `environment` (opt-in,
+                         `environment_timeouts`): every failure is a request or
+                         navigation timeout on a test that passed quickly in
+                         the last green run, so an upstream the test container
+                         calls got slow; it is retried and alerted, never
+                         repaired.
   parse_report()         the failing tests, and the tests that never ran
                          because a beforeAll or a serial neighbour failed.
   failure_signature()    a stable id for one set of failures.
@@ -32,10 +37,19 @@ decisions that turn a red gate into test -> fix -> retest -> deploy:
   GateState              per-site memory across runs: per-signature cycles and
                          backoff (an infra red cannot reset a code failure's
                          backoff), a daily cap on repair sessions, alert times,
-                         last green / deployed commit.
+                         last green / deployed commit, a log of deploys, and
+                         the last green run's per-test durations.
   load_config()          DEFAULTS < site.yaml deployer.repair < storage
                          config/deploy-repair-config.json (top level, then
                          by_site.<site>).
+  data_only_kinds()      the ONE list of dispatch kinds that never deploy
+  no_deploy_reason()     (dispatch.py's site-lock bypass, the implementer's
+                         deployer skip), and the paths whose changes need no
+                         deploy.
+  gate_hold()            whether a dispatch of an app-code kind should wait
+                         because the site's gate has been red too long
+                         (storage config/deploy-gate-hold.json, off unless
+                         enabled there).
 
 No site names, no cloud and no LLM client live here. The deployer owns the
 subprocesses; this module owns the decisions so they can be unit tested.
@@ -113,6 +127,25 @@ DEFAULTS: dict[str, Any] = {
     "alert_after_cycles": 1,
     "alert_red_for_s": 7200,
     "realert_s": 86400,
+    # Environment reds (opt-in). On 2026-11-09 one site's gate container
+    # started reaching a slow LAN LLM host, three import tests that had
+    # passed in about a second began timing out at 45-120 s, and 17 Opus
+    # repair sessions went into a failure no code change could fix. With this
+    # on, a red run whose every failure is a request or navigation timeout
+    # (env_timeout_patterns) on a test that took at most env_fast_fraction of
+    # that timeout in the last green run is classed `environment`: re-run
+    # once (env_retries), then blocked and alerted at once, never repaired.
+    # Off by default: it withholds LLM repair from a class of reds, so an
+    # operator switches it on in the storage config.
+    "environment_timeouts": False,
+    "env_timeout_patterns": [
+        r"(?:apiRequestContext|request|fetch)\.\w+: (?:Test )?[Tt]imeout (?:of )?\d+ms exceeded",
+        r"page\.(?:goto|reload|goBack|goForward|waitForURL|waitForLoadState|waitForNavigation"
+        r"|waitForResponse|waitForRequest|waitForEvent): (?:Test )?[Tt]imeout (?:of )?\d+ms exceeded",
+    ],
+    "env_fast_fraction": 0.25,
+    "env_retries": 1,
+    "env_retry_wait_s": 60,
 }
 
 
@@ -185,6 +218,7 @@ class TestFailure:
     error: str = ""                 # first error message, ANSI stripped
     attachments: list = field(default_factory=list)   # screenshot / trace paths
     did_not_run: bool = False       # skipped because a beforeAll / serial neighbour failed
+    timeout_ms: int = 0             # the test's own timeout, from the report
 
     @property
     def key(self) -> str:
@@ -203,6 +237,7 @@ class Report:
     global_errors: list = field(default_factory=list)
     passed_keys: set = field(default_factory=set)     # keys of tests that passed (incl. flaky)
     all_keys: set = field(default_factory=set)
+    durations: dict = field(default_factory=dict)     # key -> seconds of the passing attempt
 
     @property
     def total(self) -> int:
@@ -245,9 +280,22 @@ def parse_report(path: str | Path) -> Optional[Report]:
                 full = " › ".join(here + [spec.get("title") or ""])
                 f = TestFailure(title=full, file=spec.get("file") or suite.get("file") or "",
                                 line=int(spec.get("line") or 0), project=t.get("projectName") or "")
+                try:
+                    f.timeout_ms = int(t.get("timeout") or 0)
+                except (TypeError, ValueError):
+                    f.timeout_ms = 0
                 rep.all_keys.add(f.key)
                 if status in ("expected", "flaky"):
                     rep.passed_keys.add(f.key)
+                    # How long the passing attempt took: the environment
+                    # check compares a later timeout against it.
+                    passing = [r for r in (t.get("results") or [])
+                               if isinstance(r, dict) and r.get("status") == "passed"]
+                    try:
+                        if passing:
+                            rep.durations[f.key] = round(float(passing[-1].get("duration") or 0) / 1000.0, 2)
+                    except (TypeError, ValueError):
+                        pass
                 if status == "flaky":
                     rep.flaky_titles.append(full)
                 # A test that was skipped although it was expected to run did
@@ -327,7 +375,7 @@ _BROWSER_INFRA_RE = re.compile(
 
 @dataclass
 class Classification:
-    kind: str            # pass | flaky | code | infra | config
+    kind: str            # pass | flaky | code | infra | config | environment
     reason: str
     rc: int
     failures: list = field(default_factory=list)   # list[TestFailure]
@@ -337,7 +385,74 @@ class Classification:
         return self.kind in ("pass", "flaky")
 
 
-def classify(rc: int, output: str, report: Optional[Report]) -> Classification:
+_TIMEOUT_MS_RE = re.compile(r"[Tt]imeout (?:of )?(\d+)ms")
+
+
+def _timeout_limit_ms(f: TestFailure) -> int:
+    """The tightest timeout named in the test's error, else the test's own."""
+    found = [int(x) for x in _TIMEOUT_MS_RE.findall(f.error or "")]
+    return min(found) if found else int(f.timeout_ms or 0)
+
+
+def environment_reason(report: Optional[Report], last_green: Optional[dict],
+                       cfg: Optional[dict]) -> str:
+    """Why this red looks like the test environment rather than the code, or
+    "" when it does not (or the check is off).
+
+    Every test that ran and failed must have timed out on a request or a
+    navigation (cfg env_timeout_patterns, never an element or assertion
+    wait, which is how a UI regression fails), and must have passed in the
+    last green run in at most env_fast_fraction of that timeout. A test that
+    did not run counts only beside a timed-out test in the same file (its
+    serial group). A global error, or any test with no green duration,
+    means "code" as before. The gate still blocks either way."""
+    cfg = cfg or {}
+    if not cfg.get("environment_timeouts") or report is None or not last_green:
+        return ""
+    if report.global_errors:
+        return ""
+    tests = [f for f in report.failures if f.title != "<global error>"]
+    ran = [f for f in tests if not f.did_not_run]
+    if not ran:
+        return ""
+    try:
+        pats = [re.compile(p) for p in (cfg.get("env_timeout_patterns")
+                                        or DEFAULTS["env_timeout_patterns"])]
+        frac = float(cfg.get("env_fast_fraction", DEFAULTS["env_fast_fraction"]))
+    except (re.error, TypeError, ValueError):
+        return ""
+    files: set[str] = set()
+    then_s: list[float] = []
+    limits_s: list[float] = []
+    for f in ran:
+        if not any(p.search(f.error or "") for p in pats):
+            return ""
+        limit_ms = _timeout_limit_ms(f)
+        try:
+            then = float(last_green.get(f.key))
+        except (TypeError, ValueError):
+            return ""
+        if limit_ms <= 0 or then > frac * limit_ms / 1000.0:
+            return ""
+        files.add(f.file)
+        then_s.append(then)
+        limits_s.append(limit_ms / 1000.0)
+    if any(f.did_not_run and f.file not in files for f in tests):
+        return ""
+
+    def _span(xs: list[float]) -> str:
+        lo, hi = min(xs), max(xs)
+        return f"{lo:g}s" if lo == hi else f"{lo:g}-{hi:g}s"
+    return (f"{len(ran)} test(s) that took {_span(then_s)} in the last green run now time out "
+            f"at {_span(limits_s)}: an upstream the test container calls got slow or "
+            f"unreachable (LLM, network), not the code")
+
+
+def classify(rc: int, output: str, report: Optional[Report], *,
+             last_green: Optional[dict] = None, cfg: Optional[dict] = None) -> Classification:
+    """`last_green` is GateState.last_green_durations and `cfg` the repair
+    config; with both, a timeout-only red can come back as `environment`
+    (environment_reason). Without them the result is what it always was."""
     text = (output or "")[-400_000:]
     dnr = report.did_not_run if report is not None else 0
     if rc in CONFIG_RC or _NO_TESTS.search(text) and (report is None or report.total == 0):
@@ -359,6 +474,9 @@ def classify(rc: int, output: str, report: Optional[Report]) -> Classification:
         tests = [f for f in report.failures if f.title != "<global error>"]
         if tests and all(_BROWSER_INFRA_RE.search(f.error or "") for f in tests):
             return Classification("infra", "the test browser could not launch", rc)
+        env = environment_reason(report, last_green, cfg)
+        if env:
+            return Classification("environment", env, rc or 1, list(report.failures))
         failed = sum(1 for f in tests if not f.did_not_run)
         what = (f"{failed} test(s) failed" if failed else "the test run reported errors")
         if dnr:
@@ -386,7 +504,8 @@ def summarize_failures(failures: Iterable[TestFailure], limit: int = 12) -> list
     return out
 
 
-def verify_repaired(before: Classification, after: Optional[Report]) -> tuple[bool, list[str]]:
+def verify_repaired(before: Classification, after: Optional[Report],
+                    confirm: Optional[Report] = None) -> tuple[bool, list[str]]:
     """After a repair and a green re-run: did the failing tests really pass?
 
     Every test that failed or did not run before the repair must be in the new
@@ -394,18 +513,41 @@ def verify_repaired(before: Classification, after: Optional[Report]) -> tuple[bo
     running, and the suite must not have shrunk. A repair that gets green by
     excluding, renaming or skipping the failing tests is rejected here, whatever
     the syntax of the change.
+
+    `confirm` is the report of the confirm run, when the re-run went green
+    through it: the re-run failed some tests under parallel load and their
+    spec files then passed alone at --workers=1. The re-run's own report
+    still lists those failures, so judging it alone rejected every such green
+    (2026-11-11: a correct repair, then 361 passed / 0 failed in the confirm,
+    no deploy). With `confirm`, the confirm run must be clean (0 failed,
+    0 not run), every test the re-run failed must have passed in it, and
+    every previously failing test must have passed in one of the two.
     """
     if after is None:
         return False, ["the re-run produced no Playwright report"]
     problems: list[str] = []
-    if after.unexpected or after.did_not_run:
-        problems.append(f"the re-run still has {after.unexpected} failed and "
-                        f"{after.did_not_run} not-run test(s)")
+    passed = set(after.passed_keys)
+    if confirm is None:
+        if after.unexpected or after.did_not_run:
+            problems.append(f"the re-run still has {after.unexpected} failed and "
+                            f"{after.did_not_run} not-run test(s)")
+    else:
+        if confirm.unexpected or confirm.did_not_run:
+            problems.append(f"the confirm run still has {confirm.unexpected} failed and "
+                            f"{confirm.did_not_run} not-run test(s)")
+        unconfirmed = [f for f in after.failures
+                       if f.title != "<global error>" and f.key not in confirm.passed_keys]
+        if unconfirmed:
+            names = "; ".join(f.title for f in unconfirmed[:5])
+            problems.append(f"{len(unconfirmed)} test(s) that failed in the re-run did not pass "
+                            f"in the confirm run: {names}")
+        passed |= confirm.passed_keys
     missing = [f for f in before.failures
-               if f.title != "<global error>" and f.key not in after.passed_keys]
+               if f.title != "<global error>" and f.key not in passed]
     if missing:
         names = "; ".join(f.title for f in missing[:5])
-        problems.append(f"{len(missing)} previously failing test(s) did not pass in the re-run "
+        where = "the re-run" if confirm is None else "the re-run or its confirm run"
+        problems.append(f"{len(missing)} previously failing test(s) did not pass in {where} "
                         f"(missing, renamed or skipped): {names}")
     return (not problems), problems
 
@@ -583,6 +725,16 @@ class GateState:
     last_deployed_tag: str = ""
     alerts: dict = field(default_factory=dict)        # signature -> iso
     history: list = field(default_factory=list)       # last 30 events
+    # Every deploy, newest last: {at, sha, tag}. `history` keeps 30 events,
+    # which is under a day of a busy site's deploys; the placement watch
+    # (framework/core/placement_watch.py) compares clicks before and after
+    # deploys up to a few days old.
+    deploys: list = field(default_factory=list)
+    # test key -> seconds its passing attempt took in the last green run
+    # (environment_reason compares a later timeout against it).
+    last_green_durations: dict = field(default_factory=dict)
+
+    DEPLOYS_KEEP = 400
 
     @classmethod
     def load(cls, site: str) -> "GateState":
@@ -593,6 +745,12 @@ class GateState:
             return cls(site=site)
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         st = cls(**{**known, "site": site})
+        # State written before the deploy log (2026-11-11) has its deploys
+        # only in the 30-event history: seed the log so they outlive it.
+        if "deploys" not in d:
+            st.deploys = [{"at": e.get("at"), "sha": e.get("sha") or "", "tag": e.get("tag") or ""}
+                          for e in st.history
+                          if isinstance(e, dict) and e.get("event") == "deployed" and e.get("at")]
         # State written before per-signature tracking (2026-10-19) kept one
         # signature with top-level cycles / next_repair_at.
         if d.get("signature") and "failures" not in d:
@@ -608,8 +766,8 @@ class GateState:
         tmp.write_text(json.dumps(asdict(self), indent=2))
         os.replace(tmp, p)
 
-    def _event(self, what: str, **extra: Any) -> None:
-        self.history.append({"at": _iso(_now()), "event": what, **extra})
+    def _event(self, what: str, *, at: Optional[datetime] = None, **extra: Any) -> None:
+        self.history.append({"at": _iso(at or _now()), "event": what, **extra})
         self.history = self.history[-30:]
 
     def entry(self, signature: str) -> dict:
@@ -664,7 +822,7 @@ class GateState:
             backoff = list(cfg.get("backoff_s") or DEFAULTS["backoff_s"])
             wait = backoff[min(e["cycles"], len(backoff) - 1)]
             e["next_repair_at"] = _iso(now + timedelta(seconds=int(wait)))
-        self._event("red", signature=signature, kind=c.kind, attempts=attempts,
+        self._event("red", at=now, signature=signature, kind=c.kind, attempts=attempts,
                     exhausted=exhausted)
 
     def record_deferred(self, c: Classification, signature: str, *, wait_s: int, why: str,
@@ -675,7 +833,7 @@ class GateState:
         e = self._mark_red(c, signature, now)
         e["next_repair_at"] = _iso(now + timedelta(seconds=int(wait_s)))
         self.last_reason = f"{c.kind}: {c.reason}; {why}"
-        self._event("deferred", signature=signature, why=why[:120])
+        self._event("deferred", at=now, signature=signature, why=why[:120])
 
     def record_green(self, sha: str, *, repaired: bool) -> None:
         was_red = self.status == "red"
@@ -688,10 +846,48 @@ class GateState:
         self.last_failures = []
         self._event("green", sha=sha[:12], repaired=repaired, was_red=was_red)
 
-    def record_deployed(self, sha: str, tag: str) -> None:
+    def record_deployed(self, sha: str, tag: str, now: Optional[datetime] = None) -> None:
+        now = now or _now()
         self.last_deployed_sha = sha
         self.last_deployed_tag = tag
-        self._event("deployed", sha=sha[:12], tag=tag)
+        self.history.append({"at": _iso(now), "event": "deployed", "sha": sha[:12], "tag": tag})
+        self.history = self.history[-30:]
+        self.deploys.append({"at": _iso(now), "sha": sha, "tag": tag})
+        self.deploys = self.deploys[-self.DEPLOYS_KEEP:]
+
+    def deploy_log(self) -> list[dict]:
+        """Every known deploy, oldest first: `deploys`, plus `deployed`
+        history events written before `deploys` existed. Deduplicated by tag."""
+        seen: dict[str, dict] = {}
+        for e in list(self.history) + list(self.deploys):
+            if not isinstance(e, dict) or (e.get("event") not in (None, "deployed")):
+                continue
+            at = _parse_iso(str(e.get("at") or ""))
+            if at is None:
+                continue
+            key = str(e.get("tag") or "") or _iso(at)
+            cur = seen.get(key)
+            if cur is None or len(str(e.get("sha") or "")) > len(str(cur.get("sha") or "")):
+                seen[key] = {"at": _iso(at), "sha": str(e.get("sha") or ""), "tag": str(e.get("tag") or "")}
+        return sorted(seen.values(), key=lambda d: d["at"])
+
+    def record_green_durations(self, *reports: Optional[Report]) -> None:
+        """Keep how long each test's passing attempt took in this green run.
+        A later report's duration wins over an earlier one's for the same
+        test. A test with no fresh duration keeps its older value while it is
+        still in the suite; tests no longer in the suite drop out."""
+        fresh: dict[str, float] = {}
+        present: set[str] = set()
+        for r in reports:
+            if r is None:
+                continue
+            fresh.update(r.durations)
+            present |= r.all_keys
+        if not fresh:
+            return
+        keep = {k: v for k, v in self.last_green_durations.items()
+                if k in present and k not in fresh}
+        self.last_green_durations = {**keep, **fresh}
 
     def should_alert(self, signature: str, cfg: dict, now: Optional[datetime] = None) -> bool:
         now = now or _now()
@@ -699,8 +895,10 @@ class GateState:
         if e.get("kind") == "code":
             if int(e.get("cycles") or 0) < int(cfg.get("alert_after_cycles", 1)):
                 return False
-        elif e.get("kind") == "landing":
-            pass                     # a green repair stuck off the branch needs a human now
+        elif e.get("kind") in ("landing", "environment"):
+            # A green repair stuck off the branch, or an upstream the test
+            # container depends on, needs a human now: no repair will come.
+            pass
         else:
             since = _parse_iso(self.red_since)
             if since is None or (now - since).total_seconds() < int(cfg.get("alert_red_for_s", 7200)):
@@ -714,3 +912,232 @@ class GateState:
         if len(self.alerts) > 20:
             for k in sorted(self.alerts, key=self.alerts.get)[:-20]:
                 self.alerts.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# What deploys at all: one list for the dispatcher and the implementer
+# ---------------------------------------------------------------------------
+
+# Dispatch kinds whose batches never go through the deployer: they write rows
+# (catalog-audit, h2h, product-hydration) or publish / rewrite article rows
+# (article-author, article-refresh). framework/core/dispatch.py lets them past
+# the per-site dispatch lock, agents/implementer/run.sh skips the deployer
+# chain for them, and gate_hold() never holds them. Until 2026-11-11 the
+# dispatcher and run.sh each kept their own copy, and the two had drifted
+# (product-hydration in one, article-refresh in the other).
+# DATA_ONLY_KINDS (comma-separated) in the environment replaces the list for
+# all three.
+DATA_ONLY_KINDS: tuple[str, ...] = (
+    "article-author", "article-refresh", "catalog-audit", "h2h", "product-hydration",
+)
+
+# Paths whose changes put nothing new in the app image: DB migrations (the
+# implementer applies DB-only changes to the database itself and commits the
+# migration as the record), change summaries, docs, and the site's own agent
+# code (read from disk by the agents, never served). A batch whose commits
+# touch only these skips the deployer. DEPLOY_SKIP_PATHS (comma-separated
+# globs, or "none") in the environment replaces the list.
+NO_DEPLOY_PATH_GLOBS: tuple[str, ...] = (
+    "db/migrations/**", "changes/**", "docs/**", "agents/**",
+)
+
+
+def data_only_kinds() -> frozenset[str]:
+    raw = os.environ.get("DATA_ONLY_KINDS")
+    kinds = raw.split(",") if raw else DATA_ONLY_KINDS
+    return frozenset(k.strip() for k in kinds if k and k.strip())
+
+
+def kind_skips_deploy(kind: str) -> bool:
+    return bool(kind) and kind.strip() in data_only_kinds()
+
+
+def no_deploy_path_globs() -> tuple[str, ...]:
+    raw = os.environ.get("DEPLOY_SKIP_PATHS")
+    if raw is None or raw.strip() == "":
+        return NO_DEPLOY_PATH_GLOBS
+    if raw.strip().lower() in ("none", "off", "0"):
+        return ()
+    return tuple(g.strip() for g in raw.split(",") if g.strip())
+
+
+def no_deploy_reason(paths: Iterable[str], globs: Optional[Iterable[str]] = None) -> str:
+    """Why the changed `paths` need no deploy, or "" when they do (or when
+    there are none: no evidence means deploy, as before)."""
+    files = [p.strip() for p in paths if p and p.strip()]
+    pats = tuple(no_deploy_path_globs() if globs is None else globs)
+    if not files or not pats:
+        return ""
+    if not all(_glob_match(p, pats) for p in files):
+        return ""
+    tops = sorted({p.lstrip("./").split("/", 1)[0] + "/" for p in files})
+    return (f"the batch's commits touch only {', '.join(tops)} ({len(files)} file(s)); "
+            f"nothing in the app image changed")
+
+
+# ---------------------------------------------------------------------------
+# Holding app-code dispatches while the gate stays red
+# ---------------------------------------------------------------------------
+
+# 2026-11-09..11: one site's gate was red for two days on failures no
+# code change could fix. Every app-code dispatch still ran an Opus
+# implementer session, then waited 40-70 minutes in the gate and exited rc=1
+# (9 such runs and 3 reaped as stale in half a day). gate_hold() is the
+# decision dispatch_now() asks before spawning one: hold app-code kinds once
+# the site's gate has been red for `red_for_h`, let data-only kinds through,
+# and let one dispatch through every `probe_every_h` so the gate is re-tested
+# (nothing else re-runs it, and a red that is never re-tested never clears).
+#
+# OFF unless the storage config enables it. The hold changes what every
+# producer's dispatch does, and it reads the deployer's local gate-state
+# file; a missing, unreadable or archived config (config blobs are archived
+# 120 days after their last write) must fall back to today's behaviour, never
+# to holding work.
+HOLD_CONFIG_KEY = "config/deploy-gate-hold.json"
+HOLD_STATE_PREFIX = "framework/deploy-gate-hold/"
+HOLD_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "red_for_h": 6.0,
+    "probe_every_h": 4.0,
+    "pass_kinds": [],
+}
+
+
+@dataclass
+class HoldDecision:
+    hold: bool
+    reason: str = ""
+    probe: bool = False
+    site: str = ""
+    kind: str = ""
+    red_since: str = ""
+    red_for_h: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def load_hold_config(site: str, storage: Any = None) -> dict:
+    """HOLD_DEFAULTS < storage config (top level) < by_site.<site>.
+    DEPLOY_GATE_HOLD_DISABLED=1 turns it off whatever the config says."""
+    cfg = dict(HOLD_DEFAULTS)
+    stored: Any = {}
+    try:
+        if storage is None:
+            from .storage import get_storage
+            storage = get_storage()
+        stored = storage.read_json(HOLD_CONFIG_KEY) or {}
+    except Exception:
+        stored = {}
+    if isinstance(stored, dict):
+        cfg.update({k: v for k, v in stored.items() if k != "by_site" and not k.startswith("_")})
+        per_site = (stored.get("by_site") or {}).get(site) if isinstance(stored.get("by_site"), dict) else None
+        if isinstance(per_site, dict):
+            cfg.update({k: v for k, v in per_site.items() if not k.startswith("_")})
+    if os.environ.get("DEPLOY_GATE_HOLD_DISABLED") == "1":
+        cfg["enabled"] = False
+    return cfg
+
+
+def _hold_state_key(site: str) -> str:
+    return f"{HOLD_STATE_PREFIX}{_safe(site)}.json"
+
+
+def _last_gate_verdict_at(st: GateState) -> Optional[datetime]:
+    times = [_parse_iso(str(e.get("at") or "")) for e in st.history
+             if isinstance(e, dict) and e.get("event") in ("red", "deferred", "green")]
+    times = [t for t in times if t is not None]
+    return max(times) if times else _parse_iso(st.red_since)
+
+
+def gate_hold(site: str, kind: str, *, subject_tag: str = "", storage: Any = None,
+              now: Optional[datetime] = None, state: Optional[GateState] = None,
+              grant_probe: bool = True) -> HoldDecision:
+    """Should a dispatch of `kind` for `site` wait for the gate?
+
+    Holds only when the hold is enabled, the kind is not data-only (by the
+    implementer's kind or the caller's subject_tag), the site's gate is red
+    and has been for red_for_h, and no probe is due. Any error means no hold:
+    the dispatch then behaves exactly as it did before this existed."""
+    try:
+        cfg = load_hold_config(site, storage)
+        if not cfg.get("enabled") or not site:
+            return HoldDecision(False, site=site, kind=kind)
+        passing = set(data_only_kinds()) | {str(k).strip() for k in (cfg.get("pass_kinds") or [])}
+        if (kind or "").strip() in passing or (subject_tag or "").strip() in passing:
+            return HoldDecision(False, site=site, kind=kind)
+        st = state if state is not None else GateState.load(site)
+        since = _parse_iso(st.red_since)
+        if st.status != "red" or since is None:
+            return HoldDecision(False, site=site, kind=kind)
+        now = now or _now()
+        red_h = (now - since).total_seconds() / 3600.0
+        base = HoldDecision(False, site=site, kind=kind, red_since=st.red_since,
+                            red_for_h=round(red_h, 1))
+        if red_h < float(cfg.get("red_for_h", HOLD_DEFAULTS["red_for_h"])):
+            return base
+        probe_s = float(cfg.get("probe_every_h", HOLD_DEFAULTS["probe_every_h"])) * 3600.0
+        if probe_s > 0:
+            last_gate = _last_gate_verdict_at(st) or since
+            doc = {}
+            try:
+                if storage is None:
+                    from .storage import get_storage
+                    storage = get_storage()
+                doc = storage.read_json(_hold_state_key(site)) or {}
+            except Exception:
+                doc = {}
+            last_probe = _parse_iso(str((doc or {}).get("last_probe_at") or ""))
+            if ((now - last_gate).total_seconds() >= probe_s
+                    and (last_probe is None or (now - last_probe).total_seconds() >= probe_s)):
+                if grant_probe:
+                    try:
+                        doc = doc if isinstance(doc, dict) else {}
+                        doc["last_probe_at"] = _iso(now)
+                        storage.write_json(_hold_state_key(site), doc)
+                    except Exception:
+                        pass
+                base.probe = True
+                base.reason = (f"probe: the {site} gate has been red for {red_h:.0f}h and last ran "
+                               f"{(now - last_gate).total_seconds() / 3600.0:.1f}h ago; letting "
+                               f"this dispatch through so the gate is re-tested")
+                return base
+        base.hold = True
+        base.reason = (f"the {site} deploy gate has been red for {red_h:.0f}h "
+                       f"(since {st.red_since}; {st.last_reason or 'no reason recorded'}). "
+                       f"App-code dispatches wait until it is green; data-only kinds "
+                       f"({', '.join(sorted(passing))}) still run, so prefer DB-only levers")
+        return base
+    except Exception:
+        return HoldDecision(False, site=site, kind=kind)
+
+
+def gate_hold_status(site: str, *, storage: Any = None, now: Optional[datetime] = None) -> dict:
+    """For a producer's prompt or brief: is app-code work for `site` being
+    held right now, and the one line to tell the LLM. Never grants a probe."""
+    d = gate_hold(site, "seo", storage=storage, now=now, grant_probe=False)
+    out = d.to_dict()
+    out["message"] = (f"DEPLOY GATE: {d.reason}" if d.hold else "")
+    return out
+
+
+def record_hold(site: str, *, agent_id: str, rec_ids: Iterable[str], kind: str, reason: str,
+                storage: Any = None, now: Optional[datetime] = None) -> None:
+    """Note a held dispatch in framework storage (newest 50), best-effort,
+    so an operator or KTLO tick can see what waited and why."""
+    try:
+        if storage is None:
+            from .storage import get_storage
+            storage = get_storage()
+        key = _hold_state_key(site)
+        doc = storage.read_json(key) or {}
+        if not isinstance(doc, dict):
+            doc = {}
+        held = doc.get("held") if isinstance(doc.get("held"), list) else []
+        held.append({"at": _iso(now or _now()), "agent_id": agent_id,
+                     "rec_ids": list(rec_ids)[:20], "kind": kind, "reason": reason[:300]})
+        doc["held"] = held[-50:]
+        doc["held_total"] = int(doc.get("held_total") or 0) + 1
+        storage.write_json(key, doc)
+    except Exception:
+        pass

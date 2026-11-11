@@ -21,7 +21,13 @@ processes:
   synced to blob storage), and pruned.
 - A failed run is confirmed before it counts: the spec files that failed are
   re-run whole at --workers=1. Re-running only the failed tests would let a
-  failed beforeAll or serial neighbour hide tests that never ran.
+  failed beforeAll or serial neighbour hide tests that never ran. A green
+  reached that way after a repair is judged on both reports: the confirm run
+  clean, and every test that failed before the repair passing in one of them.
+- With `environment_timeouts` on, a red whose every failure is a request or
+  navigation timeout on a test that was quick in the last green run is
+  `environment`: confirmed, re-run once, then blocked and alerted, never
+  repaired (deploy_repair.environment_reason).
 - A repair is an Opus session through the claude-pool (`claude --print`) with
   cwd = the worktree and agents/deployer/REPAIR.md as its runbook. It commits
   in the worktree. deploy_repair.check_repair() vets the commits, and after
@@ -335,6 +341,9 @@ class GateRun:
     image_id: str = ""
     seconds: int = 0
     report: Optional[dr.Report] = None
+    # Set when this run went green through _confirm: the clean report of the
+    # failing spec files re-run alone. `report` stays the main run's.
+    confirm_report: Optional[dr.Report] = None
 
 
 @dataclass
@@ -411,7 +420,7 @@ class GateRunner:
         rc, out = run_streamed(f"test:{label}", cmd, cwd=self._cwd(), env=env,
                                timeout_s=self.test_timeout_s, log_path=art / "output.log")
         report = dr.parse_report(art / "report.json")
-        c = dr.classify(rc, out, report)
+        c = dr.classify(rc, out, report, last_green=self.state.last_green_durations, cfg=self.cfg)
         image = ""
         iu = art / "image-under-test.txt"
         if iu.is_file():
@@ -447,9 +456,13 @@ class GateRunner:
             # `docker tag sha256:46e7…` rc=1 after a green gate). Ship the main
             # run's image while it exists, else the confirm run's (same sha).
             image = g.image_id if _image_exists(g.image_id) else (conf.image_id or g.image_id)
+            # Carry the confirm run's report: after a repair, run() verifies
+            # the green against both (the main report alone still lists the
+            # failures the confirm run cleared, which rejected every such
+            # green until 2026-11-11).
             return GateRun(g.label, 0, dr.Classification(
                 "flaky", f"{len(g.classification.failures)} test(s) failed only under parallel load", 0),
-                g.art_dir, image, g.seconds, g.report)
+                g.art_dir, image, g.seconds, g.report, confirm_report=conf.report)
         return g
 
     def _context(self, g: GateRun) -> tuple[str, str, str, str]:
@@ -533,6 +546,7 @@ class GateRunner:
         outcome = GateOutcome(ok=False, sha=base)
         previous: list[str] = []
         infra_left = int(self.cfg.get("infra_retries", 2))
+        env_left = int(self.cfg.get("env_retries", 1))
         blip_checked = False
         rc6_seen = 0
         repairs = 0
@@ -547,7 +561,9 @@ class GateRunner:
                     n += 1
                     g = self.run_gate(f"run-{n}")
                     outcome.runs.append(self._summ(g))
-                    if (g.classification.kind == "code" and g.classification.failures
+                    # An environment red is confirmed too: timeouts under
+                    # parallel load that pass alone are flaky, and ship.
+                    if (g.classification.kind in ("code", "environment") and g.classification.failures
                             and self.cfg.get("confirm_failures", True)):
                         g = self._confirm(g, outcome)
                 rerun_needed = True
@@ -560,10 +576,11 @@ class GateRunner:
                         targets.setdefault(f.key, f)
                 if c.ok:
                     # A green run after a repair must prove the failing tests
-                    # pass now, not that they stopped running.
+                    # pass now, not that they stopped running. A green that
+                    # came through the confirm run is judged on both reports.
                     if last_commit is not None:
                         before = dr.Classification("code", "", 1, list(targets.values()))
-                        ok, problems = dr.verify_repaired(before, g.report)
+                        ok, problems = dr.verify_repaired(before, g.report, g.confirm_report)
                         if not ok:
                             note = f"{previous[-1] if previous else 'repair'} -> re-run rejected: {'; '.join(problems)[:400]}"
                             log(f"[deployer:gate] {note}")
@@ -572,7 +589,8 @@ class GateRunner:
                             _git(self.wt, "reset", "--hard", last_commit["before"])
                             last_commit = None
                             g = GateRun(g.label, 1, dr.Classification(
-                                "code", "the repair made the failing tests disappear", 1,
+                                "code", "the re-run after the repair did not show every failing test "
+                                "passing (" + "; ".join(problems)[:300] + ")", 1,
                                 list(targets.values())), g.art_dir, "", g.seconds, g.report)
                             rerun_needed = False
                             continue
@@ -581,6 +599,10 @@ class GateRunner:
                     outcome.image_id = g.image_id
                     outcome.repaired = repairs > 0 and outcome.sha != base
                     outcome.status_reason = c.reason
+                    # What "quick" means for the next red's environment check.
+                    # The main run's (parallel) timings win; the confirm run
+                    # supplies the tests that only passed there.
+                    self.state.record_green_durations(g.confirm_report, g.report)
                     return outcome
                 sig = dr.failure_signature(c)
                 outcome.signature = sig
@@ -598,6 +620,17 @@ class GateRunner:
                     infra_left -= 1
                     wait = int(self.cfg.get("infra_retry_wait_s", 60))
                     log(f"[deployer:gate] infrastructure failure ({c.reason}); retrying in {wait}s")
+                    time.sleep(wait)
+                    continue
+                # An environment red gets one re-run, unless an earlier run
+                # already retried this exact failure set: then it blocks at
+                # once. Never an LLM repair; the deployer alerts on it.
+                if (c.kind == "environment" and env_left > 0 and self._left() > 600
+                        and self.state.entry(sig).get("kind") != "environment"):
+                    env_left -= 1
+                    wait = int(self.cfg.get("env_retry_wait_s", 60))
+                    log(f"[deployer:gate] {c.reason}; re-running once in {wait}s (no LLM repair "
+                        f"for an environment failure)")
                     time.sleep(wait)
                     continue
                 if c.kind != "code":
