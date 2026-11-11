@@ -808,7 +808,9 @@ def select_levers(recs: list[dict], ledger: Optional[list[dict]] = None, *,
             return []
         try:
             from framework.core import page_hold
-            return page_hold.rec_holds(r, holds)
+            # hold_override is a person releasing one rec; a rec the LLM just
+            # wrote cannot release itself.
+            return page_hold.rec_holds({k: v for k, v in r.items() if k != "hold_override"}, holds)
         except Exception:
             return []
 

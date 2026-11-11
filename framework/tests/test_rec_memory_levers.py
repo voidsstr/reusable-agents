@@ -349,6 +349,10 @@ def test_levers_on_held_pages_are_dropped_and_refilled():
     # no holds: nothing dropped for a hold
     sel, dropped = rm.select_levers(recs, [], max_n=3, primary_metrics=PRIMARY)
     assert not any(d.get("held") for d in dropped)
+    # a memo rec cannot release its own hold (hold_override is a person's call)
+    self_released = [{**recs[0], "hold_override": True}]
+    sel, dropped = rm.select_levers(self_released, [], primary_metrics=PRIMARY, holds=holds)
+    assert sel == [] and dropped[0]["held"] == [held]
 
 
 def test_deferred_levers_block_repeats_only_for_48_hours():
