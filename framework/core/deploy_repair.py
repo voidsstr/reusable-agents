@@ -1105,6 +1105,15 @@ def rec_declares_data_only(rec: Any, extra_kinds: Iterable[str] = ()) -> bool:
 # 120 days after their last write) must fall back to today's behaviour, never
 # to holding work.
 HOLD_CONFIG_KEY = "config/deploy-gate-hold.json"
+# framework/deploy-gate-hold/<site>.json is read-modify-written WITHOUT a
+# lock (gate_hold's probe grant, record_hold, release_probe, release_holds),
+# from concurrent producers and the deployer. Accepted on purpose: a lost
+# write only (a) leaves a few recs parked until hold_retry_h when a
+# record_hold lands inside release_holds' read/write window, or (b) grants
+# one extra probe when two dispatches race the last_probe_at write. Both
+# heal on their own within an hour and neither ships code past a red gate
+# (the deployer's gate still decides). Add an etag/lease here only if the
+# storage layer grows one.
 HOLD_STATE_PREFIX = "framework/deploy-gate-hold/"
 HOLD_DEFAULTS: dict[str, Any] = {
     "enabled": False,

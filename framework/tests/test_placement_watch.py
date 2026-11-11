@@ -194,6 +194,46 @@ def test_a_drop_opens_one_incident_and_sends_one_email(storage):
     assert st["open"] == {} and st["incidents"][-1]["closed_reason"] == "back in range"
 
 
+def test_an_incident_never_back_in_range_expires_and_a_later_drop_alerts_again(storage):
+    sent = []
+
+    def send(email, subject, body):
+        sent.append(subject)
+        return True, "sent"
+    now = DEPLOY_AT + timedelta(hours=25)
+    pw.update_incidents(_drop_result(), "site-a", storage=storage, email=EMAIL, send=send, now=now)
+    assert len(sent) == 1
+    # Then the placement goes sparse / no deploy is judgeable: never "ok".
+    sparse = {"site": "site-a", "anchor": None, "flagged": [],
+              "placements": {"hero": {"status": "sparse"}}}
+    no_anchor = {"site": "site-a", "anchor": None, "flagged": [], "placements": {}}
+    out = pw.update_incidents(sparse, "site-a", storage=storage, email=EMAIL, send=send,
+                              now=now + timedelta(hours=24))
+    assert out["open"] == ["hero"] and out["closed"] == []
+    stale_h = CFG.get("max_window_h", 48) + CFG.get("anchor_max_age_h", 72)
+    out = pw.update_incidents(no_anchor, "site-a", storage=storage, email=EMAIL, send=send,
+                              now=now + timedelta(hours=stale_h - 1))
+    assert out["open"] == ["hero"]
+    out = pw.update_incidents(no_anchor, "site-a", storage=storage, email=EMAIL, send=send,
+                              now=now + timedelta(hours=stale_h))
+    assert out["closed"] == ["hero"] and out["open"] == []
+    st = storage.read_json(pw.state_key("site-a"))
+    assert st["incidents"][-1]["closed_reason"].startswith("expired")
+    # A later, separate drop opens a fresh incident and emails again.
+    out = pw.update_incidents(_drop_result(), "site-a", storage=storage, email=EMAIL, send=send,
+                              now=now + timedelta(hours=stale_h + 1))
+    assert out["new"] == ["hero"] and len(sent) == 2
+
+
+def test_a_still_flagged_incident_does_not_expire(storage):
+    now = DEPLOY_AT + timedelta(hours=25)
+    send = lambda *a: (True, "sent")
+    pw.update_incidents(_drop_result(), "site-a", storage=storage, email=EMAIL, send=send, now=now)
+    out = pw.update_incidents(_drop_result(), "site-a", storage=storage, email=EMAIL, send=send,
+                              now=now + timedelta(days=30))
+    assert out["open"] == ["hero"] and out["closed"] == []
+
+
 def test_an_email_that_did_not_go_out_is_retried_next_run(storage):
     calls = []
 

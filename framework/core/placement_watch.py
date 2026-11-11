@@ -535,6 +535,24 @@ def update_incidents(result: dict, site: str, *, storage: Any = None, cfg: Optio
             inc.update({"closed_at": _iso(now), "closed_reason": "back in range"})
             history.append(inc)
             closed.append(g)
+    # An incident that is no longer flagged but never reads "ok" again (the
+    # placement went sparse, or no deploy is judgeable during a long red
+    # gate) would stay open forever and mute every later alert for that
+    # placement. Expire it once it has not been re-flagged for a full
+    # judging span (max_window_h + anchor_max_age_h).
+    stale_h = float(cfg.get("max_window_h", DEFAULTS["max_window_h"])) + \
+        float(cfg.get("anchor_max_age_h", DEFAULTS["anchor_max_age_h"]))
+    for g in list(opened):
+        if g in (result.get("flagged") or []):
+            continue
+        seen = _parse_iso(opened[g].get("last_seen") or opened[g].get("opened_at"))
+        if seen is None or (now - seen).total_seconds() / 3600 >= stale_h:
+            inc = opened.pop(g)
+            status = (result.get("placements") or {}).get(g, {}).get("status") or "not evaluated"
+            inc.update({"closed_at": _iso(now),
+                        "closed_reason": f"expired: not re-flagged for {stale_h:g} h (now {status})"})
+            history.append(inc)
+            closed.append(g)
     unannounced = [g for g, inc in opened.items() if not inc.get("alerted_at")]
     delivered, detail = False, ""
     if unannounced and not dry_run:

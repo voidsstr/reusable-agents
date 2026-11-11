@@ -766,7 +766,10 @@ def run_placement_watch(site_name: str, profile: dict, *, dry_run: bool = False)
             err("  placement watch: no DB URL for this site; skipped")
             return None
         email = (load_site_yaml(profile).get("reporter") or {}).get("email") or {}
-        conn = psycopg2.connect(db_url, connect_timeout=15)
+        # statement_timeout: a hung series query never raises, so without it
+        # a slow DB would stall the whole daily tracker (the CLI sets the same).
+        conn = psycopg2.connect(db_url, connect_timeout=15,
+                                options="-c statement_timeout=120000")
         try:
             conn.set_session(readonly=True, autocommit=True)
             res = placement_watch.watch_site(site_name, conn=conn, cfg=cfg, email=email,
