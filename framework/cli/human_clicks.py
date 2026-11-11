@@ -12,6 +12,12 @@ Example (per-site values are arguments, never framework defaults):
 
 `--profile` applies the storage override `by_profile[<profile>]` from
 config/human-click-filter-config.json, exactly as the goal tracker does.
+
+`--config-file <doc.json>` evaluates a PROPOSED storage config doc instead of
+the stored one (same schema: schema_version / defaults / by_profile), so an
+override can be checked against prod before anyone writes it. `--group-by
+<col>` adds the human count split by a column (e.g. placement). The session
+is read-only: this CLI never writes.
 """
 from __future__ import annotations
 
@@ -21,6 +27,14 @@ import os
 import sys
 
 from framework.core import human_clicks
+
+
+def _load_config_file(path: str) -> dict:
+    with open(path) as f:
+        doc = json.load(f)
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path}: expected a JSON object (schema_version/defaults/by_profile)")
+    return doc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,8 +52,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="col=value (repeatable; comma-separate values for IN)")
     p.add_argument("--days", type=int, default=30)
     p.add_argument("--profile", default="")
-    p.add_argument("--no-storage", action="store_true",
-                   help="ignore the storage override doc")
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--no-storage", action="store_true",
+                     help="ignore the storage override doc")
+    src.add_argument("--config-file", default="",
+                     help="evaluate this JSON config doc instead of the stored one")
+    p.add_argument("--group-by", default="",
+                   help="also print the human count split by this column")
     p.add_argument("--json", action="store_true")
     a = p.parse_args(argv)
 
@@ -56,27 +75,48 @@ def main(argv: list[str] | None = None) -> int:
     for m in a.match:
         col, _, val = m.partition("=")
         match[col] = val.split(",") if "," in val else val
-    spec = human_clicks.resolve_spec(spec_in, profile=a.profile,
-                                     config={} if a.no_storage else None)
+    if a.config_file:
+        config = _load_config_file(a.config_file)
+    else:
+        config = {} if a.no_storage else None
+    spec = human_clicks.resolve_spec(spec_in, profile=a.profile, config=config)
 
     import psycopg2
     conn = psycopg2.connect(dsn, connect_timeout=15)
+    by: dict = {}
     try:
+        conn.set_session(readonly=True)
         bd = human_clicks.breakdown(conn, spec, table=a.table,
                                     window_days=a.days, match=match)
+        if a.group_by:
+            by = human_clicks.human_counts_by(conn, spec, table=a.table,
+                                              group_col=a.group_by,
+                                              window_days=a.days, match=match)
     finally:
         conn.close()
+    config_source = (a.config_file or ("none (--no-storage)" if a.no_storage
+                                       else human_clicks.CONFIG_KEY))
     if a.json:
-        print(json.dumps({"table": a.table, "days": a.days, "match": match,
-                          "stale_thresholds": human_clicks.stale_thresholds(spec),
-                          "breakdown": bd}, indent=2))
+        out = {"table": a.table, "days": a.days, "match": match,
+               "profile": a.profile, "config": config_source,
+               "stale_thresholds": human_clicks.stale_thresholds(spec),
+               "version_floors": human_clicks.version_floors(spec),
+               "breakdown": bd}
+        if a.group_by:
+            out[f"human_by_{a.group_by}"] = by
+        print(json.dumps(out, indent=2))
     else:
         total = bd.get("_total", 0)
         print(f"{a.table} last {a.days}d {match or ''}: "
-              f"{bd.get(human_clicks.VERDICT_HUMAN, 0)} verified human of {total}")
+              f"{bd.get(human_clicks.VERDICT_HUMAN, 0)} verified human of {total}"
+              f"  (config: {config_source}{', profile ' + a.profile if a.profile else ''})")
         for k, v in sorted(bd.items(), key=lambda kv: -kv[1]):
             if k != "_total":
                 print(f"  {k:<18} {v}")
+        if a.group_by:
+            print(f"human by {a.group_by}:")
+            for k, v in list(by.items())[:25]:
+                print(f"  {k or '(none)':<30} {v}")
     return 0
 
 
