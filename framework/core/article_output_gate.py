@@ -749,6 +749,9 @@ class GateDecision:
     # Set (to traffic_gate.affiliate_clicks.label) when verified affiliate
     # clicks were read; batch_hits[] then carry `affiliate_clicks`.
     click_label: str = ""
+    # Verified clicks summed over EVERY prior-batch article (hits and
+    # sub-threshold misses alike); only meaningful when click_label is set.
+    batch_affiliate_clicks: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -764,8 +767,10 @@ class GateDecision:
             "output_gate_prior_batch_hits": float(len(self.batch_hits)),
         }
         if self.click_label:
+            # All prior-batch articles, not only hits: with min_clicks > 1 a
+            # sub-threshold article still earned clicks.
             out["output_gate_prior_batch_affiliate_clicks"] = float(
-                sum(int(h.get("affiliate_clicks") or 0) for h in self.batch_hits))
+                self.batch_affiliate_clicks)
         return out
 
     def prompt_block(self) -> str:
@@ -1101,6 +1106,8 @@ def _evaluate(*, storage, agent_id: str, site_id: str,
     click_label = str(ac.get("label") or "affiliate clicks")
     if click_by_slug is not None:
         base["click_label"] = click_label
+        base["batch_affiliate_clicks"] = sum(
+            int(click_by_slug.get(a["slug"], 0) or 0) for a in batch)
     hits = []
     for a in batch:
         impr = (gsc_by_slug or {}).get(a["slug"], 0)

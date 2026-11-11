@@ -451,6 +451,23 @@ def test_min_clicks_and_closed_reason(storage):
     assert not d.allowed
 
 
+def test_click_metric_counts_sub_threshold_articles(storage):
+    # min_clicks 3: a2 (5) is a hit, a1 (2) is not, yet the metric reports
+    # every click the prior batch earned.
+    cfg = gate._deep_merge(CLICKS, {"traffic_gate": {"affiliate_clicks": {"min_clicks": 3}}})
+    conn = _ClickConn(batch=["a1", "a2"], click_rows=[("human", "/reviews/a1", 2),
+                                                      ("human", "/reviews/a2", 5)])
+    d = _eval(storage, conn, site_cfg=cfg)
+    assert d.allowed and [h["slug"] for h in d.batch_hits] == ["a2"]
+    assert d.batch_affiliate_clicks == 7
+    assert d.metrics()["output_gate_prior_batch_affiliate_clicks"] == 7.0
+    # Closed gate: no hits, the clicks are still reported.
+    conn = _ClickConn(batch=["a1"], click_rows=[("human", "/reviews/a1", 2)])
+    d = _eval(storage, conn, site_cfg=cfg)
+    assert not d.allowed and d.batch_hits == []
+    assert d.metrics()["output_gate_prior_batch_affiliate_clicks"] == 2.0
+
+
 def test_clicks_alone_are_enough_data(storage):
     # No GSC export, AI table unreadable: before, cap-only. With clicks
     # readable the gate still judges the batch.
