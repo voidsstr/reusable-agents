@@ -42,7 +42,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # After agents/ consolidation: this file is at agents/catalog-audit-agent/,
 # so the repo root is THREE levels up.
@@ -331,6 +331,274 @@ CONVERTERS = {
 
 
 # ---------------------------------------------------------------------------
+# Remedy guards (SHOP-20, shop audit 2026-11-11)
+#
+# The catalog audit deactivated kitchen_products 61595 on 10-01 for a missing
+# image; three days later it became a guide's #1 pick and drew 16 verified
+# clicks / 30 d while invisible on the shop. Two guards, both per site and
+# both OFF unless configured (storage config/catalog-audit-config.json
+# by_site.<site>, or the site.yaml `catalog_audit:` block):
+#
+#   protect_set        rows people use: the site's `sql` (e.g. products a
+#                      published article links, featured products) plus rows
+#                      with >=1 framework-verified human click in
+#                      `human_clicks.window_days`. A destructive remedy
+#                      (deactivate, NULL a column) never targets them: their
+#                      ids leave the rec and are reported for an image
+#                      refresh / relink / a person instead. Every run also
+#                      HEAD-checks each protected row's image first.
+#   pending_migrations a row that already has an unapplied migration for the
+#                      same criterion is not re-flagged (one recipe had 12
+#                      identical copies queued behind a stalled deploy).
+# ---------------------------------------------------------------------------
+
+CATALOG_AUDIT_CONFIG_KEY = "config/catalog-audit-config.json"
+
+GUARD_DEFAULTS: dict = {
+    "protect_set": {
+        "enabled": False,
+        "dsn_env": "",
+        # Tables whose rows the protect set holds. A rec is guarded when its
+        # migration template targets one of them, or (no template) when its
+        # criterion starts with one of criteria_prefixes.
+        "tables": [],
+        "criteria_prefixes": [],
+        # Trusted site SQL: first column the row id, second its image URL
+        # (optional), third a reason label (optional). May use
+        # %(clicked_ids)s (text[] of ids with a verified human click).
+        "sql": "",
+        "human_clicks": {"table": "", "spec": {}, "match": {}, "group_col": "",
+                         "window_days": 30, "profile": ""},
+        "image_check": {"enabled": True, "max": 1500, "timeout_s": 10, "workers": 16},
+        "statement_timeout_ms": 60000,
+    },
+    "pending_migrations": {
+        "enabled": False,
+        "dir": "",
+        "dsn_env": "",
+        "applied_sql": "",
+        "max_age_days": 60,
+    },
+}
+
+_DESTRUCTIVE_RE = None
+
+
+def _deep_merge(base: dict, over: Any) -> dict:
+    out = json.loads(json.dumps(base))
+    for k, v in (over or {}).items() if isinstance(over, dict) else []:
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def resolve_guard_config(site_id: str, *, site_block: Any = None,
+                         file_cfg: Any = None, storage=None) -> dict:
+    """GUARD_DEFAULTS <- site.yaml `catalog_audit` <- storage defaults <-
+    storage by_site[site_id]. `file_cfg` skips the storage read (tests)."""
+    if file_cfg is None:
+        try:
+            from framework.core.storage import get_storage
+            file_cfg = (storage or get_storage()).read_json(CATALOG_AUDIT_CONFIG_KEY) or {}
+        except Exception:
+            file_cfg = {}
+    if not isinstance(file_cfg, dict):
+        file_cfg = {}
+    cfg = _deep_merge(GUARD_DEFAULTS, site_block)
+    cfg = _deep_merge(cfg, file_cfg.get("defaults"))
+    return _deep_merge(cfg, (file_cfg.get("by_site") or {}).get(site_id))
+
+
+def is_destructive_sql(sql: str) -> bool:
+    """A remedy that deactivates a row or blanks a column."""
+    import re
+    global _DESTRUCTIVE_RE
+    if _DESTRUCTIVE_RE is None:
+        _DESTRUCTIVE_RE = re.compile(
+            r"is_active\s*=\s*false|=\s*null\b|\bdelete\s+from\b", re.I)
+    body = "\n".join(l for l in (sql or "").splitlines() if not l.strip().startswith("--"))
+    return bool(_DESTRUCTIVE_RE.search(body))
+
+
+def rec_is_guarded(rec: dict, protect: dict) -> bool:
+    """Does the protect set apply to this rec's rows?"""
+    tmpl = rec.get("migration_template") or {}
+    if tmpl:
+        return (tmpl.get("table") in set(protect.get("tables") or [])
+                and is_destructive_sql(tmpl.get("sql") or ""))
+    crit = str(rec.get("check_id") or rec.get("category") or "")
+    return any(crit.startswith(p) for p in protect.get("criteria_prefixes") or [] if p)
+
+
+def drop_ref_ids(rec: dict, drop: set) -> dict:
+    """The rec without the given ref_ids (evidence, template SQL and URLs
+    rebuilt). Returns the rec unchanged when nothing is dropped."""
+    ids = [i for i in rec.get("ref_ids") or [] if str(i) not in drop]
+    if len(ids) == len(rec.get("ref_ids") or []):
+        return rec
+    out = dict(rec)
+    out["ref_ids"] = ids
+    out["evidence"] = [e for e in rec.get("evidence") or []
+                       if str(e.get("ref_id")) not in drop]
+    tmpl = rec.get("migration_template")
+    if tmpl:
+        out["migration_template"] = {**tmpl, "sql_with_ids": tmpl["sql"].replace(
+            "{ids}", ", ".join(ids))}
+    if rec.get("affected_urls"):
+        out["affected_urls"] = [u for u in rec["affected_urls"]
+                                if u.rstrip("/").rsplit("/", 1)[-1] not in drop]
+    out["rationale"] = (rec.get("rationale") or "") + (
+        " %d row(s) left out by the remedy guards (protected or already pending)."
+        % (len(rec.get("ref_ids") or []) - len(ids)))
+    return out
+
+
+def apply_guards(recs: list[dict], *, protected: dict, pending: dict,
+                 protect_cfg: Optional[dict] = None) -> tuple[list, list, int]:
+    """-> (recs, blocked, pending_dropped).
+
+    protected: {row id: reason}; pending: {criterion: {row ids}};
+    protect_cfg: the protect_set block (tables, criteria_prefixes). A guarded
+    rec loses its protected ids (each reported in `blocked`); every rec loses
+    ids already pending for its criterion. Recs left with no ids are dropped."""
+    out, blocked, dropped = [], [], 0
+    for rec in recs:
+        crit = str(rec.get("check_id") or rec.get("category") or "")
+        drop = {str(i) for i in rec.get("ref_ids") or []} & set(pending.get(crit) or ())
+        dropped += len(drop)
+        if protected and rec_is_guarded(rec, protect_cfg or {}):
+            for i in rec.get("ref_ids") or []:
+                if str(i) in protected and str(i) not in drop:
+                    blocked.append({"id": str(i), "criterion": crit,
+                                    "reason": protected[str(i)],
+                                    "remedy_instead": "refresh the image from the "
+                                    "Amazon listing, then relink; a person decides "
+                                    "if neither works. Never deactivate or blank it."})
+                    drop.add(str(i))
+        rec = drop_ref_ids(rec, drop)
+        if rec.get("ref_ids"):
+            out.append(rec)
+    return out, blocked, dropped
+
+
+def check_images(rows: list[tuple[str, str]], *, timeout_s: float = 10,
+                 workers: int = 16, opener=None) -> dict:
+    """HEAD each (id, url); GET a byte range when HEAD is refused.
+    -> {"dead": [{id, url, status}], "missing": [ids], "checked": n,
+        "unknown": n}. 404/410 or a non-image content type are dead; network
+    errors are unknown (never dead), so an outage cannot mass-flag rows."""
+    import concurrent.futures as cf
+    import urllib.error
+    import urllib.request
+
+    ua = {"User-Agent": "Mozilla/5.0 (compatible; catalog-audit-agent/1.0)"}
+    op = opener or urllib.request.build_opener()
+
+    def one(item):
+        rid, url = item
+        for method, extra in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
+            try:
+                req = urllib.request.Request(url, headers={**ua, **extra}, method=method)
+                with op.open(req, timeout=timeout_s) as r:
+                    ct = (r.headers.get("Content-Type") or "").lower()
+                    if ct and not ct.startswith("image/") and "octet-stream" not in ct:
+                        return rid, url, "dead", "content-type %s" % ct[:40]
+                    return rid, url, "ok", r.status
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 410):
+                    return rid, url, "dead", e.code
+                if method == "HEAD" and e.code in (403, 405, 501):
+                    continue
+                return rid, url, "unknown", e.code
+            except Exception as e:  # noqa: BLE001 -- network: unknown, not dead
+                return rid, url, "unknown", str(e)[:60]
+        return rid, url, "unknown", "no answer"
+
+    out = {"dead": [], "missing": [], "checked": 0, "unknown": 0}
+    todo = []
+    for rid, url in rows:
+        if not url or not str(url).startswith(("http://", "https://")):
+            out["missing"].append(str(rid))
+        else:
+            todo.append((str(rid), str(url)))
+    with cf.ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
+        for rid, url, verdict, detail in ex.map(one, todo):
+            out["checked"] += 1
+            if verdict == "dead":
+                out["dead"].append({"id": rid, "url": url, "status": detail})
+            elif verdict == "unknown":
+                out["unknown"] += 1
+    return out
+
+
+def load_protect_set(conn, protect: dict, *, storage=None) -> dict:
+    """{row id: {"image": url|None, "reason": str}} from the site SQL plus
+    rows with a verified human click (framework human_clicks)."""
+    clicked: list[str] = []
+    hc = protect.get("human_clicks") or {}
+    if hc.get("table") and hc.get("group_col"):
+        from framework.core import human_clicks
+        spec = human_clicks.resolve_spec(hc.get("spec") or {}, profile=hc.get("profile") or "",
+                                         storage=storage)
+        counts = human_clicks.human_counts_by(
+            conn, spec, table=hc["table"], group_col=hc["group_col"],
+            window_days=int(hc.get("window_days") or 30), match=hc.get("match") or None)
+        clicked = [k for k, n in counts.items() if k and n > 0]
+        conn.rollback()
+    out: dict = {}
+    sql = protect.get("sql") or ""
+    if sql:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s" % int(protect.get("statement_timeout_ms") or 60000))
+            cur.execute(sql, {"clicked_ids": clicked})
+            for row in cur.fetchall():
+                rid = str(row[0])
+                out[rid] = {"image": row[1] if len(row) > 1 else None,
+                            "reason": str(row[2]) if len(row) > 2 and row[2] else "protected"}
+        conn.rollback()
+    for rid in clicked:
+        out.setdefault(str(rid), {"image": None, "reason": "clicked"})
+    return out
+
+
+PENDING_FILENAME_RE = r"_catalog-audit-(?:rec\d+-)?(?P<crit>[a-z0-9][a-z0-9-]*)\.sql$"
+
+
+def pending_migration_ids(mig_dir: str, applied: set, max_age_days: int = 60,
+                          filename_regex: str = PENDING_FILENAME_RE) -> dict:
+    """{criterion: {row ids}} named (`id IN (...)`) in this agent's migration
+    files that are on disk but not applied. The criterion comes from the file
+    name (<ts>_catalog-audit[-recNNN]-<criterion>.sql); files older than
+    max_age_days are ignored."""
+    import re
+    import time
+    out: dict = {}
+    d = Path(mig_dir)
+    if not d.is_dir():
+        return out
+    name_re = re.compile(filename_regex)
+    cutoff = time.time() - max(1, int(max_age_days)) * 86400
+    for f in d.glob("*.sql"):
+        if f.name in applied:
+            continue
+        m = name_re.search(f.name)
+        if not m:
+            continue
+        try:
+            if f.stat().st_mtime < cutoff:
+                continue
+            text = f.read_text(errors="replace")
+        except OSError:
+            continue
+        for mm in re.finditer(r"\bid\s+IN\s*\(([^)]*)\)", text, re.I):
+            out.setdefault(m.group("crit"), set()).update(
+                x.strip().strip("'\"") for x in mm.group(1).split(",") if x.strip())
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Audit input loaders — read the file the audit script wrote
 # ---------------------------------------------------------------------------
 
@@ -490,10 +758,12 @@ class CatalogAuditAgent(AgentBase):
         # ── 3. Convert to recs ─────────────────────────────────────────────
         self.status("converting findings → recs", progress=0.55, current_action="convert")
         recs = CONVERTERS[fmt](findings_doc, max_recs=int(audit.get("max_recs", 30)))
+        recs, guard_metrics = self._apply_remedy_guards(recs)
         if not recs:
             return RunResult(status="success",
                               summary="audit found 0 actionable issues — clean run",
-                              metrics={"recs_total": 0})
+                              metrics={"recs_total": 0, "recs_critical": 0,
+                                       **guard_metrics})
         recs = sorted(recs, key=lambda r: (
             {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(r["severity"], 9),
             -r["confidence"],
@@ -623,6 +893,7 @@ class CatalogAuditAgent(AgentBase):
                 "recs_high": sum(1 for r in recs if r["severity"] == "high"),
                 "applied_responses": len(applied),
                 "auto_dispatched": len(dispatched),
+                **guard_metrics,
             },
             next_state={
                 "last_run_ts": self.run_ts,
@@ -630,6 +901,89 @@ class CatalogAuditAgent(AgentBase):
                 "site_id": cfg.site_id,
             },
         )
+
+    def _apply_remedy_guards(self, recs: list[dict]) -> tuple[list[dict], dict]:
+        """Protect set + pending-migration dedup (see GUARD_DEFAULTS). Both
+        off unless configured; any failure leaves the recs as they were and
+        is logged, except that a configured protect set that cannot be read
+        drops every guarded rec this run (never deactivate blind)."""
+        gcfg = resolve_guard_config(self.cfg.site_id, site_block=self.cfg.get("catalog_audit"),
+                                    storage=self.storage)
+        protect, pend = gcfg["protect_set"], gcfg["pending_migrations"]
+        metrics: dict = {}
+        protected: dict = {}
+        if protect.get("enabled"):
+            try:
+                import psycopg2
+                conn = psycopg2.connect(os.environ[protect["dsn_env"]], connect_timeout=15)
+                try:
+                    conn.set_session(readonly=True)
+                    protected = load_protect_set(conn, protect, storage=self.storage)
+                finally:
+                    conn.close()
+            except Exception as e:
+                self.decide("error", f"protect set unreadable, guarded recs held this run: {e}"[:300])
+                kept = [r for r in recs if not rec_is_guarded(r, protect)]
+                metrics["protected_remedies_blocked"] = float(len(recs) - len(kept))
+                recs = kept
+                protect = {**protect, "enabled": False}
+            metrics["protect_set_size"] = float(len(protected))
+            ic = protect.get("image_check") or {}
+            if protected and ic.get("enabled", True):
+                rows = [(rid, v.get("image")) for rid, v in protected.items()
+                        if v.get("reason") != "clicked" or v.get("image")]
+                rows = rows[:int(ic.get("max") or 1500)]
+                res = check_images(rows, timeout_s=float(ic.get("timeout_s") or 10),
+                                   workers=int(ic.get("workers") or 16))
+                metrics.update({"protect_set_images_checked": float(res["checked"]),
+                                "protect_set_images_dead": float(len(res["dead"])),
+                                "protect_set_images_missing": float(len(res["missing"]))})
+                self._save_artifact("protect-set-images.json", {
+                    "run_ts": self.run_ts, "checked": res["checked"],
+                    "unknown": res["unknown"], "dead": res["dead"],
+                    "missing": [{"id": i, "reason": protected[i]["reason"]}
+                                for i in res["missing"]]})
+                if res["dead"] or res["missing"]:
+                    self.decide("observation",
+                                f"protect set: {len(res['dead'])} dead and "
+                                f"{len(res['missing'])} missing image(s) on rows people use; "
+                                f"these need an image refresh, never deactivation",
+                                evidence={"dead": [d["id"] for d in res["dead"]][:50],
+                                          "missing": res["missing"][:50]})
+        pending: dict = {}
+        if pend.get("enabled") and pend.get("dir"):
+            try:
+                applied: set = set()
+                if pend.get("applied_sql") and (pend.get("dsn_env") or protect.get("dsn_env")):
+                    import psycopg2
+                    conn = psycopg2.connect(os.environ[pend.get("dsn_env") or protect["dsn_env"]],
+                                            connect_timeout=15)
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(pend["applied_sql"])
+                            applied = {str(r[0]) for r in cur.fetchall()}
+                    finally:
+                        conn.close()
+                pending = pending_migration_ids(
+                    pend["dir"], applied, int(pend.get("max_age_days") or 60),
+                    pend.get("filename_regex") or PENDING_FILENAME_RE)
+            except Exception as e:
+                self.decide("observation", f"pending-migration scan failed: {e}"[:300])
+        if protected or pending:
+            recs, blocked, dropped = apply_guards(
+                recs, protected={k: v["reason"] for k, v in protected.items()},
+                pending=pending, protect_cfg=protect)
+            metrics["protected_remedies_blocked"] = metrics.get(
+                "protected_remedies_blocked", 0.0) + float(len(blocked))
+            metrics["pending_migration_dupes_dropped"] = float(dropped)
+            if blocked:
+                self._save_artifact("protected-rows.json", {
+                    "run_ts": self.run_ts, "blocked": blocked})
+                self.decide("observation",
+                            f"remedy guard: {len(blocked)} protected row(s) kept out of "
+                            f"deactivate/blank remedies",
+                            evidence={"ids": [b["id"] for b in blocked][:50]})
+        return recs, metrics
 
     def _write_auto_queue(self, *, request_id: str, recs: list[dict]) -> None:
         """Direct-dispatch the rec batch to the implementer via

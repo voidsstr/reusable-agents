@@ -50,6 +50,24 @@
       "directives": [
         "Dedupe findings already queued or shipped so recs_total reflects genuinely open issues"
       ]
+    },
+    {
+      "id": "goal-protect-set-images-healthy",
+      "title": "Every product people click or a guide links has a working image",
+      "description": "SHOP-20 (2026-11-11). Rows in the site's protect set (published-article links, verified-human clicks in 30 days, featured) are HEAD-checked every run before any random sample; a dead or missing image there costs product-page quality and once led to a #1 guide pick being deactivated. Off until the site configures protect_set in config/catalog-audit-config.json.",
+      "target_metric": "protect_set_images_dead",
+      "metric": {
+        "name": "protect_set_images_dead",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "rows"
+      },
+      "directives": [
+        "Never deactivate or blank a protect-set row; route it to an image refresh, then a relink, then a person",
+        "HEAD-check every protect-set image each run before the random sample",
+        "Do not re-flag a row that already has an unapplied migration for the same criterion"
+      ]
     }
   ]
 }
