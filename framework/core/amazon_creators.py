@@ -115,6 +115,7 @@ else ``unattributed``).
 from __future__ import annotations
 
 import copy
+import http.client
 import json
 import logging
 import os
@@ -134,6 +135,16 @@ TOKEN_ENDPOINT = "https://api.amazon.com/auth/o2/token"
 TOKEN_SCOPE = "creatorsapi::default"
 DEFAULT_HOST = "creatorsapi.amazon"
 DEFAULT_MARKETPLACE = "www.amazon.com"
+
+# The LWA token request is retried on network trouble, sleeping these many
+# seconds before each retry (so 4 attempts in all). 2026-11-11: a site's 11:12Z
+# price-verifier run died on ONE TLS handshake timeout to
+# api.amazon.com, while the hydration agent reached the same API 3 minutes
+# later. Every priority product priced in that slot then went past the 24h
+# display gate (~3.8k pages without a price or Offer for ~6h). An HTTP 4xx is
+# a real answer (bad credentials, bad scope) and fails fast; a 5xx is
+# Amazon-side trouble and is retried like a network error.
+TOKEN_RETRY_BACKOFF_S: tuple[float, ...] = (3.0, 10.0, 30.0)
 
 # getItems accepts at most 10 ASINs per call (same ceiling PA-API had).
 MAX_ITEMS_PER_CALL = 10
@@ -478,6 +489,11 @@ class AmazonCreatorsClient:
         The 60s skew matters: tokens live an hour and a batch hydration run
         can straddle the boundary, so refreshing exactly at expiry would
         fail mid-run under clock skew.
+
+        Network-level failures (URLError, socket timeouts, other OSError,
+        a truncated HTTP response) and HTTP 5xx are retried with the
+        TOKEN_RETRY_BACKOFF_S sleeps; HTTP 4xx raises at once. Only when
+        every attempt failed does CreatorsUnavailable surface.
         """
         with self._lock:
             now = time.time()
@@ -489,20 +505,41 @@ class AmazonCreatorsClient:
                 "client_secret": self.cfg.client_secret,
                 "scope": TOKEN_SCOPE,
             }).encode()
-            req = urllib.request.Request(
-                TOKEN_ENDPOINT, data=body,
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode())
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode()[:300]
-                raise CreatorsUnavailable(
-                    f"LWA token request failed HTTP {e.code}: {detail}"
-                ) from e
-            except Exception as e:
-                raise CreatorsUnavailable(f"LWA token request failed: {e}") from e
+            backoff = tuple(TOKEN_RETRY_BACKOFF_S)
+            attempt = 0
+            while True:
+                req = urllib.request.Request(
+                    TOKEN_ENDPOINT, data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = json.loads(resp.read().decode())
+                except urllib.error.HTTPError as e:
+                    # HTTPError subclasses URLError/OSError: it must be
+                    # handled before the network clause below.
+                    detail = e.read().decode()[:300]
+                    if e.code < 500 or attempt >= len(backoff):
+                        raise CreatorsUnavailable(
+                            f"LWA token request failed HTTP {e.code}: {detail}"
+                        ) from e
+                    err: Exception = e
+                except (urllib.error.URLError, socket.timeout, TimeoutError,
+                        OSError, http.client.HTTPException) as e:
+                    if attempt >= len(backoff):
+                        raise CreatorsUnavailable(
+                            f"LWA token request failed after {attempt + 1} "
+                            f"attempt(s): {e}") from e
+                    err = e
+                except Exception as e:
+                    raise CreatorsUnavailable(f"LWA token request failed: {e}") from e
+                else:
+                    break
+                log.warning("amazon_creators: LWA token attempt %d failed (%s); "
+                            "retrying in %.0fs", attempt + 1, str(err)[:160],
+                            backoff[attempt])
+                time.sleep(backoff[attempt])
+                attempt += 1
             tok = data.get("access_token")
             if not tok:
                 raise CreatorsUnavailable(f"LWA returned no access_token: {data}")

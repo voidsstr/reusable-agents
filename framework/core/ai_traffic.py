@@ -282,21 +282,31 @@ def build_landed_paths_sql(cfg: dict, *, prefixes: Sequence[str] = (),
         spoof_filter = ("\n      WHERE is_referral OR ip IS NULL"
                         " OR ip NOT IN (SELECT ip FROM spoof)")
 
+    # Ties on score are broken by the most recent hit, then path. Most rows
+    # tie: on one reference site 4,071 of 5,642 answer-time /product/ pages score
+    # exactly 1, and a `path` tie-break made any cap (LIMIT, or a caller's
+    # own) keep the alphabetically-first ASINs. That systematically dropped
+    # the NEWEST products (B0DW... onward): 1,335 answer-time ASINs cut from
+    # the price verifier's AI arm, 503 of them still >24h stale after a
+    # successful run (2026-11-11). Recency means a cap drops the oldest.
     sql = f"""
     WITH hits AS MATERIALIZED (
        SELECT split_part(split_part(l.{path}, '?', 1), '#', 1) AS path,
               (l.{kind} = ANY(%(ref_kinds)s)) AS is_referral,
-              {ip_sel} AS ip
+              {ip_sel} AS ip,
+              l.{ts} AS hit_ts
          FROM {t} l
         WHERE {" AND ".join(where)}
      ){spoof_cte}
     SELECT path,
            COUNT(*) FILTER (WHERE is_referral)     AS referrals,
-           COUNT(*) FILTER (WHERE NOT is_referral) AS fetches
+           COUNT(*) FILTER (WHERE NOT is_referral) AS fetches,
+           MAX(hit_ts)                             AS last_hit
       FROM hits{spoof_filter}
      GROUP BY path
      ORDER BY COUNT(*) FILTER (WHERE is_referral) * %(rw)s
-            + COUNT(*) FILTER (WHERE NOT is_referral) * %(fw)s DESC, path
+            + COUNT(*) FILTER (WHERE NOT is_referral) * %(fw)s DESC,
+              MAX(hit_ts) DESC NULLS LAST, path
      LIMIT %(limit)s
     """
     return sql, params
@@ -310,6 +320,28 @@ def normalize_path(path: str) -> str:
     return p or "/"
 
 
+def _recency_key(ts: Any) -> float:
+    """Sort key for a row's most recent hit: newer first, unknown last.
+
+    Accepts a datetime (psycopg2), an epoch number or an ISO string; rows
+    without one (older callers' fakes, a NULL) sort after every dated row.
+    """
+    if ts is None:
+        return float("inf")
+    if isinstance(ts, (int, float)):
+        return -float(ts)
+    if isinstance(ts, str):
+        try:
+            from datetime import datetime
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return float("inf")
+    try:
+        return -float(ts.timestamp())
+    except Exception:
+        return float("inf")
+
+
 def landed_paths(conn, *, cfg: Optional[dict] = None,
                  prefixes: Sequence[str] = (), limit: int = 200) -> list[dict]:
     """Paths AI assistants used, best first.
@@ -318,7 +350,10 @@ def landed_paths(conn, *, cfg: Optional[dict] = None,
     ``referral_days``, live fetches over ``fetch_days`` (spoof-filtered),
     score = referrals * referral_weight + fetches * fetch_weight. Paths are
     normalized (no query string / trailing slash) and merged after
-    normalization. Raises on DB errors; callers treat the signal as optional.
+    normalization. Equal scores are ordered by the most recent hit (newest
+    first), then path, so a caller's cap drops the oldest pages rather than
+    the alphabetically-last ones. Raises on DB errors; callers treat the
+    signal as optional.
     """
     cfg = resolve_columns(conn, cfg if cfg is not None else config())
     sql, params = build_landed_paths_sql(cfg, prefixes=prefixes)
@@ -329,22 +364,26 @@ def landed_paths(conn, *, cfg: Optional[dict] = None,
         cur.execute(sql, params)
         rows = cur.fetchall()
     merged: dict[str, dict] = {}
+    recency: dict[str, float] = {}
     for r in rows:
         if isinstance(r, dict):
             p, ref, fet = r["path"], r["referrals"], r["fetches"]
+            last = r.get("last_hit")
         else:
             p, ref, fet = r[0], r[1], r[2]
+            last = r[3] if len(r) > 3 else None
         key = normalize_path(str(p or ""))
         m = merged.setdefault(key, {"path": key, "referrals": 0, "fetches": 0})
         m["referrals"] += int(ref or 0)
         m["fetches"] += int(fet or 0)
+        recency[key] = min(recency.get(key, float("inf")), _recency_key(last))
     rw = float(cfg.get("referral_weight") or 0)
     fw = float(cfg.get("fetch_weight") or 0)
     out = []
     for m in merged.values():
         m["score"] = m["referrals"] * rw + m["fetches"] * fw
         out.append(m)
-    out.sort(key=lambda m: (-m["score"], m["path"]))
+    out.sort(key=lambda m: (-m["score"], recency.get(m["path"], float("inf")), m["path"]))
     return out[:limit]
 
 
