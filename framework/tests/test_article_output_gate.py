@@ -490,15 +490,22 @@ def test_click_filter_resolves_with_the_agent_profile(storage):
     assert "_per_ip_day > 3" in sql
 
 
-def test_affiliate_clicks_by_slug_maps_urls_and_prefixes():
+def test_affiliate_clicks_by_slug_maps_urls_and_prefixes(storage, monkeypatch):
+    # Hermetic: the click-filter config comes from the fixture storage, never
+    # from the process default backend (Azure when secrets.env is sourced).
+    from framework.core import storage as storage_mod
+    default_backend_calls = []
+    monkeypatch.setattr(storage_mod, "get_storage",
+                        lambda *a, **k: default_backend_calls.append(a) or storage)
     conn = _ClickConn(click_rows=[("human", "https://s.test/reviews/A1?x=1", 2),
                                   ("human", "/reviews/a1/", 1), ("human", "/blog/b", 5),
                                   ("human", "", 4), ("ua-bot", "/reviews/z", 9)])
     ac = CLICKS["traffic_gate"]["affiliate_clicks"]
     out = gate.affiliate_clicks_by_slug(conn, ac, days=30, prefixes=["/reviews/"],
-                                        storage=None)
+                                        storage=storage)
     assert out == {"a1": 3}
-    assert gate.affiliate_clicks_by_slug(conn, ac, days=30)["b"] == 5
+    assert gate.affiliate_clicks_by_slug(conn, ac, days=30, storage=storage)["b"] == 5
+    assert default_backend_calls == []
 
 
 # ── Canonical holiday ids + per-occasion caps by id (plan A02 / A01) ──
@@ -635,3 +642,54 @@ def test_storage_calendar_alias_reaches_select_for_queue(storage):
     kept, _ = gate.select_for_queue([{"slug": "p", "tags": ["holiday:doorbusters"]}], d)
     assert [p["slug"] for p in kept] == ["p"]
     assert "_occasions" not in d.to_dict()
+
+
+def test_format_lane_drops_capped_occasion_proposals(storage):
+    # Every NOW/IMMINENT occasion is at its cap: only lane proposals qualify,
+    # whatever spelling the capped occasion's tag uses.
+    conn = _Conn(batch=["a1"], occ={"black-friday": 10, "thanksgiving": 2})
+    d = _eval(storage, conn, today=BF_DAY, site_cfg=LANES)
+    assert d.mode == "format-lane" and d.require_holiday_ids == []
+    assert set(d.priority_holiday_ids) == {"black-friday", "thanksgiving"}
+    props = [{"slug": "bf-exact", "tags": ["holiday:black-friday"]},
+             {"slug": "bf-alias", "tags": ["holiday:black-friday-cyber-monday"]},
+             {"slug": "tg-2026", "tags": ["holiday:thanksgiving-2026"]},
+             {"slug": "pair", "tags": ["lane:x-or-y"]}]
+    kept, dropped = gate.select_for_queue(props, d)
+    assert [p["slug"] for p in kept] == ["pair"]
+    assert {p["slug"] for p in dropped} == {"bf-exact", "bf-alias", "tg-2026"}
+    # A capped-occasion piece that also carries an open lane tag is a lane piece.
+    both = {"slug": "bf-lane", "tags": ["holiday:black-friday", "lane:x-or-y"]}
+    kept, _ = gate.select_for_queue([both, props[3]], d)
+    assert [p["slug"] for p in kept] == ["bf-lane"]
+    block = d.prompt_block()
+    assert "Holiday-tagged proposals go first" not in block
+    assert "Already at their seasonal cap" in block
+    assert "black-friday" in block and "lane tags above" in block
+
+
+def test_restricted_selection_never_falls_back_to_priority_ids():
+    # The reviewer's probe: a bare format-lane decision with capped
+    # priority occasions. Exact, alias and year-suffixed tags all lose.
+    d = gate.GateDecision(True, 1, "probe", "format-lane",
+                          priority_holiday_ids=["black-friday", "thanksgiving"],
+                          require_holiday_ids=[], lane_ids=["ai-hardware"],
+                          lane_room={"ai-hardware": 1}, audience="tech")
+    for tag in ("holiday:black-friday", "holiday:black-friday-cyber-monday",
+                "holiday:thanksgiving-2026"):
+        kept, _ = gate.select_for_queue(
+            [{"slug": "h", "tags": [tag]}, {"slug": "lane", "tags": ["lane:ai-hardware"]}], d)
+        assert [p["slug"] for p in kept] == ["lane"], tag
+
+
+def test_seasonal_override_keeps_open_occasion_and_drops_capped_one(storage):
+    conn = _Conn(batch=["a1"], occ={"black-friday": 1, "thanksgiving": 2})
+    d = _eval(storage, conn, today=BF_DAY)
+    assert d.mode == "seasonal-override" and d.require_holiday_ids == ["black-friday"]
+    props = [{"slug": "tg", "tags": ["holiday:thanksgiving-2026"]},
+             {"slug": "bf", "tags": ["holiday:cyber-monday"]}]
+    kept, _ = gate.select_for_queue(props, d)
+    assert [p["slug"] for p in kept] == ["bf"]
+    block = d.prompt_block()
+    assert "Holiday-tagged proposals go first" in block
+    assert "Already at their seasonal cap, so not written: proposals for thanksgiving." in block

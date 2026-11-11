@@ -803,8 +803,20 @@ class GateDecision:
                                f"formats: {', '.join(self.lane_ids)}")
             lines.append(
                 "The traffic gate is closed for evergreen topics. Only "
-                + " or ".join(allowed) + " will be written. Holiday-tagged "
-                "proposals go first. Carry the tag in `tags`.")
+                + " or ".join(allowed) + " will be written. "
+                + ("Holiday-tagged proposals go first. "
+                   if self.require_holiday_ids else "")
+                + "Carry the tag in `tags`.")
+            # NOW/IMMINENT occasions whose seasonal-override cap is spent:
+            # select_for_queue() drops a proposal tagged only for them.
+            capped = [h for h in self.priority_holiday_ids
+                      if h not in self.require_holiday_ids]
+            if capped:
+                lines.append(
+                    "Already at their seasonal cap, so not written: proposals "
+                    f"for {', '.join(capped)}"
+                    + (" unless they also carry one of the lane tags above."
+                       if self.lane_ids else "."))
         elif self.priority_holiday_ids:
             lines.append(
                 "A seasonal deal occasion is NOW/IMMINENT "
@@ -1258,15 +1270,22 @@ def select_for_queue(proposals: Sequence[dict], decision: GateDecision
 
     Proposals tagged for a NOW/IMMINENT occasion move to the front, keeping
     LLM order otherwise. Under a seasonal override or format lane only
-    tagged proposals are eligible: holiday-tagged first, then lane-tagged
-    up to each lane's remaining room. Holiday tags are matched by calendar
-    id, so an alias such as ``holiday:black-friday-cyber-monday`` qualifies
-    for ``black-friday``."""
+    tagged proposals are eligible: those tagged for an occasion in
+    ``require_holiday_ids`` (the occasions with override room left) first,
+    then lane-tagged up to each lane's remaining room. A proposal tagged
+    only for an occasion whose cap is spent is dropped; in format-lane
+    mode every occasion is spent and only lane proposals qualify. Holiday
+    tags are matched by calendar id, so an alias such as
+    ``holiday:black-friday-cyber-monday`` qualifies for ``black-friday``."""
     if not decision.allowed:
         return [], list(proposals or [])
     props = list(proposals or [])
-    want = set(decision.require_holiday_ids or decision.priority_holiday_ids or [])
     restricted = bool(decision.require_holiday_ids or decision.lane_ids)
+    # priority_holiday_ids lists every NOW/IMMINENT occasion, capped ones
+    # included: it only orders an open gate and must never widen a
+    # restricted one (that let capped-occasion proposals take lane slots).
+    want = set((decision.require_holiday_ids if restricted
+                else decision.priority_holiday_ids) or [])
     canon = _canonicalizer(getattr(decision, "audience", "") or None,
                            getattr(decision, "_occasions", None))
     hol = {id(p): _canonical_holiday_ids(p, canon) for p in props} if want else {}

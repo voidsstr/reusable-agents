@@ -115,7 +115,7 @@ def test_scores_feature_what_sells_first():
              _art("y-nov-gpu", ["holiday:black-friday-cyber-monday"], day=8)]
     scores = {"z-nov-prebuilt": 7, "a-sept-3": 2, "y-nov-gpu": 2, "a-sept-0": 0}
     stats = _run(_Conn(arts), today=BF_DAY, max_features=4, scores=scores, dry_run=True)
-    # clicks desc, then newest, then slug; then the hour rotation fills the rest
+    # clicks desc, then newest, then slug; zero-click candidates fill the rest
     assert stats["promoted"][:3] == ["z-nov-prebuilt", "y-nov-gpu", "a-sept-3"]
     assert len(stats["promoted"]) == 4 and stats["ranked_by"] == "verified clicks"
     assert stats["scores_of_picks"]["z-nov-prebuilt"] == 7.0
@@ -223,3 +223,179 @@ def test_unsafe_identifiers_are_refused():
     import pytest
     with pytest.raises(ValueError):
         _run(_Conn([]), today=BF_DAY, articles_table="x; drop table y")
+
+
+# ── Review fixes: recency tail, evergreen ownership (2026-11-11) ──
+
+class _FlakyStorage:
+    """Wraps a storage; the first `fail_writes` write_json calls raise."""
+
+    def __init__(self, inner, fail_writes=1):
+        self.inner, self.fail_writes, self.writes = inner, fail_writes, 0
+
+    def read_json(self, key):
+        return self.inner.read_json(key)
+
+    def write_json(self, key, obj, **kw):
+        self.writes += 1
+        if self.writes <= self.fail_writes:
+            raise OSError("blob write failed")
+        return self.inner.write_json(key, obj, **kw)
+
+
+def _state(storage, prof):
+    doc = storage.read_json(fr.STATE_KEY_TMPL.format(profile=prof))
+    return None if doc is None else doc["evergreen"]
+
+
+def _flags(arts):
+    return {a["slug"]: a["featured"] for a in arts}
+
+
+def test_zero_click_candidates_follow_recency_not_the_hour_cursor(storage):
+    arts = [_art("a-old", ["holiday:black-friday"], day=1),
+            _art("b-new", ["holiday:black-friday"], day=10),
+            _art("c-mid", ["holiday:bfcm"], day=5),
+            _art("d-sells", ["holiday:black-friday"], day=2),
+            _art("e-one-click", ["holiday:black-friday"], day=3)]
+    scores = {"d-sells": 5, "e-one-click": 1}
+    for hours in (1, 5, 7):                       # different hour cursors
+        stats = _run(_Conn(arts), today=BF_DAY, max_features=4, scores=scores,
+                     rotate_every_hours=hours, dry_run=True)
+        assert stats["promoted"] == ["d-sells", "e-one-click", "b-new", "c-mid"]
+    # Below score_source.min_score a click count ranks as zero (by recency).
+    src = {"table": "outbound_clicks", "group_col": "source_page",
+           "spec": {"time_col": "clicked_at", "referer_col": "source_page"},
+           "match": {"target": "amazon"}, "path_prefixes": ["/reviews/"], "min_score": 2}
+    rows = [("human", "/reviews/d-sells", 5), ("human", "/reviews/e-one-click", 1)]
+    stats = _run(_Conn(arts, click_rows=rows), today=BF_DAY, max_features=4,
+                 score_source=src, storage=storage, profile="p", dry_run=True)
+    assert stats["promoted"] == ["d-sells", "b-new", "c-mid", "e-one-click"]
+
+
+def test_evergreen_claim_failure_keeps_new_picks_down(storage):
+    # Reviewer scenario: the state write fails. Before, the picks went up
+    # unrecorded and were pinned for good; now they are not promoted.
+    prof = "site-a-article-proposal-agent"
+    arts = [_art("strix-review", ["mini-pc"]), _art("monitors-guide", ["monitors"]),
+            _art("pinned-guide", ["gpu"], featured=True),
+            _art("halloween-a", ["holiday:halloween"], featured=True)]
+    conn = _Conn(arts)
+    eg = {"enabled": True, "max_features": 3}
+    scores = {"strix-review": 16, "monitors-guide": 11}
+    stats = _run(conn, today=IDLE_DAY, scores=scores, evergreen_fallback=eg,
+                 storage=_FlakyStorage(storage), profile=prof)
+    assert stats["promoted"] == [] and stats["evergreen_state"].startswith("claim not saved")
+    assert stats["demoted"] == ["halloween-a"]          # holiday rotation still ran
+    assert _flags(arts) == {"strix-review": False, "monitors-guide": False,
+                            "pinned-guide": True, "halloween-a": False}
+    assert _state(storage, prof) is None
+    # Next run, the picks are no longer winners: nothing is stuck featured.
+    stats = _run(conn, today=IDLE_DAY, scores={"pinned-guide": 2},
+                 evergreen_fallback=eg, storage=storage, profile=prof)
+    assert stats["demoted"] == [] and stats["untouched_pinned"] == 1
+    # With storage healthy the claim is saved before the picks go up.
+    stats = _run(conn, today=IDLE_DAY, scores=scores, evergreen_fallback=eg,
+                 storage=storage, profile=prof)
+    assert stats["promoted"] == ["strix-review", "monitors-guide"]
+    assert _state(storage, prof) == ["strix-review", "monitors-guide"]
+
+
+def test_evergreen_trim_failure_is_pruned_next_run(storage):
+    prof = "p"
+    arts = [_art("strix-review", ["mini-pc"]), _art("monitors-guide", ["monitors"])]
+    conn = _Conn(arts)
+    eg = {"enabled": True}
+    _run(conn, today=IDLE_DAY, scores={"strix-review": 16, "monitors-guide": 11},
+         evergreen_fallback=eg, storage=storage, profile=prof)
+    assert _state(storage, prof) == ["strix-review", "monitors-guide"]
+    # monitors-guide loses its slot; the trim write fails: a superset remains.
+    stats = _run(conn, today=IDLE_DAY, scores={"strix-review": 16},
+                 evergreen_fallback=eg, storage=_FlakyStorage(storage), profile=prof)
+    assert stats["demoted"] == ["monitors-guide"]
+    assert stats["evergreen_state"].startswith("state not trimmed")
+    assert _state(storage, prof) == ["strix-review", "monitors-guide"]
+    # The released slug is no longer featured, so the next run drops it.
+    stats = _run(conn, today=IDLE_DAY, scores={"strix-review": 16},
+                 evergreen_fallback=eg, storage=storage, profile=prof)
+    assert stats["demoted"] == [] and stats["promoted"] == []
+    assert _state(storage, prof) == ["strix-review"]
+
+
+def test_disabling_evergreen_releases_its_own_picks_only(storage):
+    prof = "p"
+    for idle_kw in ({}, {"demote_when_idle": False}):
+        storage.write_json(fr.STATE_KEY_TMPL.format(profile=prof), {"evergreen": []})
+        arts = [_art("strix-review", ["mini-pc"]), _art("monitors-guide", ["monitors"]),
+                _art("pinned-guide", ["gpu"], featured=True)]
+        conn = _Conn(arts)
+        _run(conn, today=IDLE_DAY, scores={"strix-review": 16, "monitors-guide": 11},
+             evergreen_fallback={"enabled": True}, storage=storage, profile=prof)
+        assert _state(storage, prof) == ["strix-review", "monitors-guide"]
+        stats = _run(conn, today=IDLE_DAY, evergreen_fallback={"enabled": False},
+                     storage=storage, profile=prof, **idle_kw)
+        assert sorted(stats["demoted"]) == ["monitors-guide", "strix-review"]
+        assert stats["evergreen"].startswith("off: releasing 2")
+        assert stats["untouched_pinned"] == 1
+        assert _flags(arts) == {"strix-review": False, "monitors-guide": False,
+                                "pinned-guide": True}
+        assert _state(storage, prof) == []
+        # Nothing left to release: back to the cheap early return when idle.
+        conn.queries.clear()
+        _run(conn, today=IDLE_DAY, storage=storage, profile=prof, demote_when_idle=False)
+        assert conn.queries == []
+
+
+def test_unreadable_scores_hold_evergreen_picks(storage):
+    prof = "p"
+    arts = [_art("strix-review", ["mini-pc"]), _art("pinned-guide", ["gpu"], featured=True)]
+    conn = _Conn(arts)
+    eg = {"enabled": True}
+    _run(conn, today=IDLE_DAY, scores={"strix-review": 16}, evergreen_fallback=eg,
+         storage=storage, profile=prof)
+    assert _state(storage, prof) == ["strix-review"]
+    # The score source fails: hold, neither promote nor release.
+    stats = _run(conn, today=IDLE_DAY, score_source={"table": None},
+                 evergreen_fallback=eg, storage=storage, profile=prof)
+    assert stats["scores"].startswith("unavailable")
+    assert stats["evergreen"].startswith("held") and stats["demoted"] == []
+    assert stats["untouched_pinned"] == 1 and _state(storage, prof) == ["strix-review"]
+    assert _flags(arts)["strix-review"] is True
+    # No score source configured at all: it can never run, so it releases.
+    stats = _run(conn, today=IDLE_DAY, evergreen_fallback=eg, storage=storage, profile=prof)
+    assert stats["evergreen"] == "skipped: no verified-click scores"
+    assert stats["demoted"] == ["strix-review"] and _state(storage, prof) == []
+
+
+def test_demote_when_idle_off_with_evergreen_keeps_stale_holiday_features(storage):
+    arts = [_art("halloween-a", ["holiday:halloween"], featured=True),
+            _art("strix-review", ["mini-pc"])]
+    conn = _Conn(arts)
+    stats = _run(conn, today=IDLE_DAY, demote_when_idle=False, scores={"strix-review": 5},
+                 evergreen_fallback={"enabled": True}, storage=storage, profile="p")
+    assert stats["demoted"] == [] and stats["promoted"] == ["strix-review"]
+    assert _flags(arts) == {"halloween-a": True, "strix-review": True}
+
+
+def test_evergreen_state_is_written_only_when_ownership_changes(storage):
+    prof = "p"
+    arts = [_art("strix-review", ["mini-pc"]), _art("monitors-guide", ["monitors"]),
+            _art("desk-guide", ["desks"])]
+    conn = _Conn(arts)
+    eg = {"enabled": True, "max_features": 3}
+    counting = _FlakyStorage(storage, fail_writes=0)
+    _run(conn, today=IDLE_DAY, scores={"strix-review": 16}, evergreen_fallback=eg,
+         storage=counting, profile=prof)
+    assert counting.writes == 1                       # the claim, no trim
+    # A new pick ranked first: one claim write; the order change alone is no write.
+    _run(conn, today=IDLE_DAY, scores={"strix-review": 16, "monitors-guide": 20},
+         evergreen_fallback=eg, storage=counting, profile=prof)
+    assert counting.writes == 2
+    assert sorted(_state(storage, prof)) == ["monitors-guide", "strix-review"]
+    _run(conn, today=IDLE_DAY, scores={"strix-review": 30, "monitors-guide": 20},
+         evergreen_fallback=eg, storage=counting, profile=prof)
+    assert counting.writes == 2
+    # A consumer that passes storage but never enables evergreen never writes.
+    _run(_Conn([_art("halloween-a", ["holiday:halloween"], featured=True)]),
+         today=IDLE_DAY, storage=counting, profile="other-agent")
+    assert counting.writes == 2

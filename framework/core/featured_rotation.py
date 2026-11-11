@@ -22,36 +22,47 @@ Strategy:
        - For each NOW/IMMINENT occasion, queries `editorial_articles`
          for rows tagged `holiday:<id>`, status='published'
        - Picks up to N winners. With a score map (verified affiliate
-         clicks, see `score_source`), the best-selling candidates take the
-         slots first, then the newest; without one, a stable hour-of-day
-         cursor rotates through the candidates by slug.
+         clicks, see `score_source`), candidates are ranked by clicks,
+         then recency (newest first), then slug, across every active
+         occasion; scores below `min_score` count as zero. Without one, a
+         stable hour-of-day cursor rotates through each occasion's
+         candidates by slug, NOW occasions first.
        - UPDATEs `featured = true` for winners, `featured = false` for
          articles whose holiday tags all point to OUT-OF-WINDOW occasions
          (so January's Christmas piece doesn't stay featured in May).
          This demotion also runs on days with no active occasion
          (`demote_when_idle`, default on): until 2026-11-11 the function
          returned early on such days, and two Halloween pieces stayed
-         featured for 11 days.
+         featured for 11 days. `demote_when_idle=False` keeps stale
+         holiday features on idle days, as before.
 
   3. Articles with no holiday tags AND `featured = true` are
      untouched — operator-pinned manual features keep their slot. The one
      exception is an article this module itself promoted through
      `evergreen_fallback`; it remembers those in agent storage and
-     demotes them when they stop winning.
+     demotes them when they stop winning or the fallback is switched off.
 
 `score_source` (optional, per site): {table, spec, match, group_col,
 window_days (30), path_prefixes, min_score (1)} — the same shape as the
 output gate's `traffic_gate.affiliate_clicks`. Clicks per article page come
 from framework.core.human_clicks; pages map to slugs under `path_prefixes`.
-A candidate with at least `min_score` clicks is featured before any
-zero-click one, ordered by clicks, then recency, then slug.
 
 `evergreen_fallback` (optional): {enabled, max_features, min_score}. When
 the holiday candidates leave slots empty (or no occasion is active), the
 best-selling articles that carry no holiday tag fill them, up to
 `max_features` features from this module in total. Needs a score map plus
 `storage` and `profile` (the agent id), so the module can remember what it
-promoted; without them it is skipped.
+promoted (agents/<profile>/state/featured-rotation.json); without them it
+is skipped. Ownership rules:
+  - the claim is saved BEFORE the promoting UPDATE; if that save fails
+    the new picks are not promoted this run (nothing unowned goes up);
+  - the state is read whenever storage + profile are given, so switching
+    the fallback off (or removing its score source) releases its picks;
+  - when the scores are temporarily unreadable its picks are held as they
+    are (no promotion, no release) until the next readable run;
+  - a recorded slug that is no longer featured, or now carries a holiday
+    tag, is dropped from the state, so a stale record never captures an
+    article an operator features later.
 
 Sites consume via:
 
@@ -113,12 +124,26 @@ def _ts(row: Mapping) -> float:
         return 0.0
 
 
-def _read_state(storage, profile: str) -> dict:
+def _read_owned(storage, profile: str) -> list[str]:
+    """Slugs this module promoted through evergreen_fallback ([] when none
+    or unreadable). An unreadable state can only make the module treat its
+    own picks as operator pins for a run, never demote a real pin."""
     try:
         doc = storage.read_json(STATE_KEY_TMPL.format(profile=profile))
     except Exception:
         doc = None
-    return doc if isinstance(doc, dict) else {}
+    if not isinstance(doc, dict):
+        return []
+    return list(dict.fromkeys(str(s) for s in doc.get("evergreen") or [] if s))
+
+
+def _write_owned(storage, profile: str, slugs: list[str]) -> None:
+    storage.write_json(STATE_KEY_TMPL.format(profile=profile), {
+        "schema_version": "1",
+        "evergreen": list(slugs),
+        "at": datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="seconds"),
+    })
 
 
 def cycle_homepage_features(dsn: str,
@@ -147,10 +172,13 @@ def cycle_homepage_features(dsn: str,
     candidates for that occasion.
 
     `scores` ({slug: verified clicks}) or `score_source` (computed here,
-    see the module docstring) order the candidates by what sells. Without
-    either, the old slug-ordered hour rotation applies. `storage` applies
-    config/seasonal-calendar.json and holds the evergreen state under
-    `profile`. `conn` lets the caller pass an open connection (left open).
+    see the module docstring) order the candidates by what sells, then by
+    recency. Without either, the old slug-ordered hour rotation applies.
+    `storage` applies config/seasonal-calendar.json and, with `profile`,
+    holds the evergreen ownership state. `demote_when_idle` only governs
+    stale holiday features on a day with no active occasion; evergreen
+    picks follow their own rules. `conn` lets the caller pass an open
+    connection (left open).
     """
     today = today or datetime.date.today()
     occasions = load_occasions(storage)
@@ -179,7 +207,12 @@ def cycle_homepage_features(dsn: str,
         "dry_run": dry_run,
     }
 
-    if not active_ids and not demote_when_idle and not eg_on:
+    # What evergreen_fallback promoted on earlier runs. Read whenever it can
+    # be, so those picks are released even once the fallback is off.
+    track = storage is not None and bool(profile)
+    stored = _read_owned(storage, profile) if track else []
+
+    if not active_ids and not demote_when_idle and not eg_on and not stored:
         log.info("no active occasions today — leaving featured flags alone")
         return stats
 
@@ -216,10 +249,14 @@ def cycle_homepage_features(dsn: str,
             rows = cur.fetchall()
 
         score_map: dict[str, float] = {}
+        # True when the score map can be trusted, even if empty (given, or
+        # read OK); False when there are none or the read failed.
+        scores_ok = False
         min_score = 1.0
         if scores:
             score_map = {str(k).strip().lower(): float(v)
                          for k, v in scores.items() if v}
+            scores_ok = True
             stats["scores"] = f"given: {len(score_map)} slug(s)"
         elif src_on:
             try:
@@ -228,6 +265,7 @@ def cycle_homepage_features(dsn: str,
                     conn, src, days=int(src.get("window_days", 30)),
                     prefixes=list(src.get("path_prefixes") or ()),
                     profile=profile, storage=storage).items()}
+                scores_ok = True
                 stats["scores"] = f"ok: {len(score_map)} article(s) with clicks"
             except Exception as e:  # rotation still runs, by slug
                 score_map = {}
@@ -236,6 +274,9 @@ def cycle_homepage_features(dsn: str,
                     conn.rollback()
                 except Exception:
                     pass
+        elif scores is not None:
+            scores_ok = True            # an explicit empty map: nothing sells
+            stats["scores"] = "given: 0 slug(s)"
         if src_on:
             try:
                 min_score = float(src.get("min_score", 1))
@@ -263,8 +304,13 @@ def cycle_homepage_features(dsn: str,
         for oid in active_order:
             stats["candidates_by_occasion"][oid] = len(candidates_by_occ[oid])
         if score_map:
-            # What sells first: every active-occasion candidate with clicks,
-            # best first, regardless of which occasion it belongs to.
+            # What sells first, then the newest, across every active
+            # occasion. Below min_score a click count is noise: it ranks
+            # as zero, by recency.
+            def ranked_score(r: Mapping) -> float:
+                s = score(r)
+                return s if s >= min_score else 0.0
+
             seen: set[str] = set()
             pool: list[dict] = []
             for oid in active_order:
@@ -272,65 +318,79 @@ def cycle_homepage_features(dsn: str,
                     if r["slug"] not in seen:
                         seen.add(r["slug"])
                         pool.append(r)
-            pool.sort(key=lambda r: (-score(r), -_ts(r), r["slug"]))
-            for r in pool:
+            pool.sort(key=lambda r: (-ranked_score(r), -_ts(r), r["slug"]))
+            targeted = [r["slug"] for r in pool[:max(0, int(max_features))]]
+            stats["ranked_by"] = "verified clicks"
+        else:
+            # Rotate-by-hour through each occasion's candidates (stable slug
+            # order), NOW occasions first.
+            for oid in active_order:
                 if len(targeted) >= max_features:
                     break
-                if score(r) >= min_score:
-                    targeted.append(r["slug"])
-            stats["ranked_by"] = "verified clicks"
-        # Remaining slots: rotate-by-hour through each occasion's candidates
-        # (stable slug order), NOW occasions first.
-        for oid in active_order:
-            if len(targeted) >= max_features:
-                break
-            cands = sorted((c for c in candidates_by_occ[oid]
-                            if c["slug"] not in targeted),
-                           key=lambda c: c["slug"])
-            if not cands:
-                continue
-            n = len(cands)
-            for i in range(min(max_features - len(targeted), n)):
-                targeted.append(cands[(cursor + i) % n]["slug"])
+                cands = sorted((c for c in candidates_by_occ[oid]
+                                if c["slug"] not in targeted),
+                               key=lambda c: c["slug"])
+                if not cands:
+                    continue
+                n = len(cands)
+                for i in range(min(max_features - len(targeted), n)):
+                    targeted.append(cands[(cursor + i) % n]["slug"])
 
-        # Evergreen winners fill what the occasions left empty.
-        owned_prev: set[str] = set()
+        # Evergreen ownership. `owned`: recorded picks that are still
+        # featured with no holiday tag (anything else is no longer ours to
+        # manage). `keep`: owned picks that stay featured this run.
+        featured_untagged = {f["slug"] for f in currently_featured
+                             if not f["holiday_ids"]}
+        owned = [s for s in stored if s in featured_untagged]
         eg_picks: list[str] = []
-        if eg_on:
-            if not score_map:
-                stats["evergreen"] = "skipped: no verified-click scores"
-            elif storage is None or not profile:
-                stats["evergreen"] = ("skipped: needs storage + profile to "
-                                      "remember what it promoted")
-            else:
-                owned_prev = set(_read_state(storage, profile).get("evergreen") or [])
-                try:
-                    eg_max = min(int(max_features),
-                                 int(eg.get("max_features", max_features)))
-                    eg_min = float(eg.get("min_score", min_score))
-                except (TypeError, ValueError):
-                    eg_max, eg_min = int(max_features), min_score
-                ranked = sorted((r for r in untagged
-                                 if r["slug"] not in targeted and score(r) >= eg_min),
-                                key=lambda r: (-score(r), -_ts(r), r["slug"]))
-                for r in ranked:
-                    if len(targeted) + len(eg_picks) >= eg_max:
-                        break
-                    eg_picks.append(r["slug"])
-                stats["evergreen"] = eg_picks
+        keep: set[str] = set()
+        eg_active = False
+        if eg_on and not scores_ok and not src_on:
+            stats["evergreen"] = "skipped: no verified-click scores"
+        elif eg_on and not track:
+            stats["evergreen"] = ("skipped: needs storage + profile to "
+                                  "remember what it promoted")
+        elif eg_on and not scores_ok:
+            # Transient: the score source failed. Neither promote nor
+            # release on a missing signal; next readable run decides.
+            keep = set(owned)
+            stats["evergreen"] = (f"held: verified-click scores unavailable; "
+                                  f"{len(owned)} pick(s) kept")
+        elif eg_on:
+            eg_active = True
+            try:
+                eg_max = min(int(max_features),
+                             int(eg.get("max_features", max_features)))
+                eg_min = float(eg.get("min_score", min_score))
+            except (TypeError, ValueError):
+                eg_max, eg_min = int(max_features), min_score
+            ranked = sorted((r for r in untagged
+                             if r["slug"] not in targeted and score(r) >= eg_min),
+                            key=lambda r: (-score(r), -_ts(r), r["slug"]))
+            for r in ranked:
+                if len(targeted) + len(eg_picks) >= eg_max:
+                    break
+                eg_picks.append(r["slug"])
+            keep = set(eg_picks)
+            stats["evergreen"] = eg_picks
+        elif owned:
+            stats["evergreen"] = f"off: releasing {len(owned)} pick(s) it promoted"
 
         # Demote: any currently-featured article whose holiday tags ALL
-        # point to OUT-OF-WINDOW occasions (i.e. seasonal stale), and any
-        # evergreen pick of ours that lost its slot. Operator-pinned
-        # articles (featured=true with NO holiday tags) are not touched.
+        # point to OUT-OF-WINDOW occasions (i.e. seasonal stale), unless it
+        # is an idle day and demote_when_idle is off; and any evergreen pick
+        # of ours that is not kept. Operator-pinned articles (featured=true
+        # with NO holiday tags, not ours) are not touched.
+        demote_stale = bool(active_ids) or demote_when_idle
         to_demote: list[str] = []
         for f in currently_featured:
             if f["holiday_ids"]:
                 if f["holiday_ids"] & active_ids:
                     continue  # still on-window
-                to_demote.append(f["slug"])
-            elif f["slug"] in owned_prev:
-                if f["slug"] not in eg_picks:
+                if demote_stale:
+                    to_demote.append(f["slug"])
+            elif f["slug"] in owned:
+                if f["slug"] not in keep:
                     to_demote.append(f["slug"])  # our evergreen pick, slot lost
             else:
                 stats["untouched_pinned"] += 1  # operator-pinned, leave alone
@@ -339,10 +399,14 @@ def cycle_homepage_features(dsn: str,
         currently_featured_slugs = {f["slug"] for f in currently_featured}
         to_promote = [s for s in targeted + eg_picks
                       if s not in currently_featured_slugs]
-        # Evergreen slugs this module owns from now on: the ones it promotes
-        # now plus the ones it already owned. An article an operator had
-        # featured is never claimed, so it is never demoted by this module.
-        owned_new = [s for s in eg_picks if s in to_promote or s in owned_prev]
+        # Evergreen slugs this module owns after this run: the ones it
+        # promotes now plus the owned ones it keeps. An article an operator
+        # had featured is never claimed, so it is never demoted by this
+        # module.
+        if eg_active:
+            owned_new = [s for s in eg_picks if s in to_promote or s in owned]
+        else:
+            owned_new = [s for s in owned if s in keep]
         if score_map:
             stats["scores_of_picks"] = {s: score_map.get(s.lower(), 0.0)
                                         for s in targeted + eg_picks}
@@ -352,6 +416,25 @@ def cycle_homepage_features(dsn: str,
 
         if dry_run:
             return stats
+
+        # Claim before promoting: if the claim cannot be saved, the new
+        # evergreen picks stay down this run rather than go up unowned
+        # (an unowned feature looks like an operator pin forever).
+        new_claims = [s for s in owned_new if s not in stored]
+        if track and new_claims:
+            claim = list(dict.fromkeys(stored + owned_new))
+            try:
+                _write_owned(storage, profile, claim)
+                stored = claim
+            except Exception as e:
+                log.warning("featured rotation: evergreen claim not saved "
+                            "(%s); not promoting %s", e, new_claims)
+                to_promote = [s for s in to_promote if s not in new_claims]
+                owned_new = [s for s in owned_new if s not in new_claims]
+                stats["promoted"] = to_promote
+                stats["evergreen_state"] = (
+                    f"claim not saved ({type(e).__name__}); new evergreen "
+                    "picks not promoted")
 
         if to_promote or to_demote:
             with conn.cursor() as cur:
@@ -368,14 +451,18 @@ def cycle_homepage_features(dsn: str,
                         (to_demote,),
                     )
             conn.commit()
-        if eg_on and storage is not None and profile and score_map \
-                and set(owned_new) != owned_prev:
-            storage.write_json(STATE_KEY_TMPL.format(profile=profile), {
-                "schema_version": "1",
-                "evergreen": owned_new,
-                "at": datetime.datetime.now(datetime.timezone.utc)
-                .isoformat(timespec="seconds"),
-            })
+        # Trim the record to what is ours now (order is not meaningful). If
+        # this write fails the record keeps a superset; those slugs are no
+        # longer featured, so the next run drops them (see `owned`).
+        if track and set(stored) != set(owned_new):
+            try:
+                _write_owned(storage, profile, owned_new)
+            except Exception as e:
+                log.warning("featured rotation: evergreen state not trimmed "
+                            "(%s); next run retries", e)
+                stats.setdefault("evergreen_state",
+                                 f"state not trimmed ({type(e).__name__}); "
+                                 "next run retries")
     except Exception:
         try:
             conn.rollback()
