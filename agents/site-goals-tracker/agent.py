@@ -732,6 +732,9 @@ def main() -> None:
     for k, v in sorted(metrics.items()):
         err(f"      {k:<45} = {v}")
 
+    # 2b. Did a recent deploy cost verified clicks on a money placement?
+    run_placement_watch(site_name, profile, dry_run=args.no_write)
+
     if args.no_write:
         return
 
@@ -740,6 +743,42 @@ def main() -> None:
         metric_helper.record_many(agent_id, metrics, run_ts=args.run_ts,
                                    note="auto-collected via site-goals-tracker")
         err(f"  ✓ recorded to {agent_id}")
+
+
+def run_placement_watch(site_name: str, profile: dict, *, dry_run: bool = False) -> Optional[dict]:
+    """Placement-level conversion watch (framework/core/placement_watch.py).
+
+    Compares verified-human clicks per money placement in the 24-48 h after
+    the newest judgeable deploy (the deployer's gate-state log) with the same
+    hours on the 7 days before; a real drop opens one incident and sends one
+    email to the site's reporter.email. The click table, placements and
+    thresholds are VALUES in storage config/placement-watch-config.json: a
+    site with no entry there is skipped. --no-write evaluates without
+    recording or emailing. Never fails the tracker."""
+    try:
+        from framework.core import placement_watch
+        cfg = placement_watch.site_config(site_name)
+        if not cfg:
+            err(f"  placement watch: no entry for this site in {placement_watch.CONFIG_KEY}; skipped")
+            return None
+        db_url = os.environ.get(profile["db_env"]) or _db_fallback(profile)
+        if not db_url:
+            err("  placement watch: no DB URL for this site; skipped")
+            return None
+        email = (load_site_yaml(profile).get("reporter") or {}).get("email") or {}
+        conn = psycopg2.connect(db_url, connect_timeout=15)
+        try:
+            conn.set_session(readonly=True, autocommit=True)
+            res = placement_watch.watch_site(site_name, conn=conn, cfg=cfg, email=email,
+                                             profile=profile.get("agent_id", ""), dry_run=dry_run)
+        finally:
+            conn.close()
+        for line in placement_watch.summary_lines(res):
+            err(f"  placement watch: {line}")
+        return res
+    except Exception as e:
+        err(f"  placement watch failed (non-fatal): {e}")
+        return None
 
 
 # --- per-site config (site.yaml) ---
