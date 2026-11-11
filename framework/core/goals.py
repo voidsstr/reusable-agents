@@ -106,6 +106,24 @@ def reopen_on_regression(agent_id: str, storage: Optional[StorageBackend] = None
     return cfg.get("reopen_on_regression") is True
 
 
+DEFAULT_PROGRESS_HISTORY_MAX = 500
+
+
+def progress_history_cap(storage: Optional[StorageBackend] = None,
+                         config: Optional[dict] = None) -> int:
+    """Max progress_history points kept inside active.json (older points live in
+    agents/<id>/goals/progress/<goal>.jsonl). config/goals-config.json key
+    `progress_history_max`; 0 or a negative value means unlimited."""
+    try:
+        cfg = load_goals_config(storage) if config is None else config
+        raw = cfg.get("progress_history_max", DEFAULT_PROGRESS_HISTORY_MAX) \
+            if isinstance(cfg, dict) else DEFAULT_PROGRESS_HISTORY_MAX
+        n = int(raw)
+    except Exception:  # noqa: BLE001 - malformed config never breaks recording
+        n = DEFAULT_PROGRESS_HISTORY_MAX
+    return n if n > 0 else 0
+
+
 def lazy_reopen_default(agent_id: str,
                         storage: Optional[StorageBackend] = None) -> Callable[[], bool]:
     """A zero-arg callable that reads the fleet default once, on first use.
@@ -453,9 +471,22 @@ def record_goal_progress(
         if g["id"] != goal_id:
             continue
         now = _now()
-        g.setdefault("progress_history", []).append({
-            "ts": now, "value": value, "run_ts": run_ts, "note": note,
-        })
+        entry = {"ts": now, "value": value, "run_ts": run_ts, "note": note}
+        hist = g.setdefault("progress_history", [])
+        hist.append(entry)
+        # The full history goes to an append-only log (server-side append, no
+        # read-modify-write); active.json keeps only the newest points. An
+        # uncapped list made every run re-download and re-upload the whole doc:
+        # one 1-minute agent's active.json reached 65.8 MB and cost ~430 GB/day
+        # of blob egress (2026-11-11).
+        try:
+            s.append_jsonl(f"agents/{agent_id}/goals/progress/{goal_id}.jsonl", entry)
+        except Exception as e:  # noqa: BLE001 - the in-doc point is still kept
+            print(f"[goals] progress log append failed for {agent_id}/{goal_id}: {e}",
+                  file=sys.stderr)
+        cap = progress_history_cap(storage=s)
+        if cap and len(hist) > cap:
+            del hist[:len(hist) - cap]
         m = g.setdefault("metric", {})
         m["current"] = value
         if accomplished is True:
