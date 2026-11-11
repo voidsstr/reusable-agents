@@ -102,10 +102,15 @@ class ShelfAuditAgent(AgentBase):
         """Return the ASINs a visitor can actually reach."""
         origin = cfg["origin"]
         depth = int(cfg.get("max_depth", 3))
+        # crawl_skip_path_regex: never enqueue the site's click-out route
+        # (it logs a click and 302s to a tagged Amazon URL); probe_headers:
+        # a header the site can use to skip click logging for our requests.
         pages = shelf.crawl(origin, max_depth=depth,
                             per_depth=tuple(cfg.get("per_depth",
                                                     [None, 400, 500, 500])),
-                            seeds=cfg.get("seeds") or ())
+                            seeds=cfg.get("seeds") or (),
+                            skip_path_regex=cfg.get("crawl_skip_path_regex") or None,
+                            headers=cfg.get("probe_headers") or None)
         asins = {a for m in pages.values() for a in m["asins"]}
         self.decide("observation",
                     "crawled %d pages to depth %d; %d pages carried products; "
@@ -115,7 +120,7 @@ class ShelfAuditAgent(AgentBase):
         api_slugs: dict[str, dict] = {}
         eps = cfg.get("api_endpoints") or []
         if eps:
-            api_slugs = shelf.crawl_api_surface(eps)
+            api_slugs = shelf.crawl_api_surface(eps, headers=cfg.get("probe_headers") or None)
             self.decide("observation",
                         "collected %d products from %d API shelf endpoints"
                         % (len(api_slugs), len(eps)))
@@ -166,10 +171,12 @@ class ShelfAuditAgent(AgentBase):
         pages = answer_picks.audit_pages(
             conn, apc, warn=lambda m: self.decide("observation", m))
 
+        hdrs = answer_picks.probe_headers(cfg)
+
         def fetch_json(url):
             try:
                 with urllib.request.urlopen(urllib.request.Request(
-                        url, headers=answer_picks.UA), timeout=25) as r:
+                        url, headers=hdrs), timeout=25) as r:
                     return json.loads(r.read().decode("utf-8", "replace"))
             except Exception:
                 return {}
@@ -185,20 +192,56 @@ class ShelfAuditAgent(AgentBase):
                 own = next((r for r in rows if r.get("role") == "self"), None)
                 return own, [r for r in rows if r.get("role") != "self"]
 
+        swap_lookup = None
+        swap_q = (apc.get("swap") or {}).get("query")
+        if conn is not None and (apc.get("swap") or {}).get("enabled") and swap_q:
+            def swap_lookup(slug, page):
+                with conn.cursor() as cur:
+                    cur.execute(swap_q, {"slug": slug, "page": page})
+                    cols = [c[0] for c in cur.description]
+                    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                conn.rollback()
+                return rows
+
+        # A held page (framework page_hold) is still checked and reported, but
+        # its fixes go to the person-review rec, never the dispatched one.
+        from framework.core import page_hold
+        held = page_hold.held_paths(page_hold.holds_from_site_config(cfg))
+
         state_key = f"agents/{self.agent_id}/answer-pick-strikes.json"
         try:
             state = self.storage.read_json(state_key) or {}
         except Exception:
             state = {}
+        now = datetime.now(timezone.utc)
         try:
             res = answer_picks.run_check(
                 apc, origin=cfg["origin"], pages=pages, state=state,
-                now=datetime.now(timezone.utc), fetch_json=fetch_json,
-                lookup=lookup, same_picture=shelf.same_picture)
+                now=now, fetch_json=fetch_json,
+                probe_fn=lambda u: answer_picks.probe(u, headers=hdrs),
+                lookup=lookup, same_picture=shelf.same_picture,
+                swap_lookup=swap_lookup)
         finally:
             if conn is not None:
                 conn.close()
+        # Person-review picks that sat past escalate_after_hours/runs go to
+        # KTLO once (marked in the strike state before it is saved).
+        esc = answer_picks.escalations(res, apc, now, held_pages=held)
         self.storage.write_json(state_key, res["state"])
+        if esc:
+            self.decide("escalation",
+                        "%d dead answer pick(s) still wait on a person past %sh: %s" % (
+                            len(esc), apc.get("escalate_after_hours", 24),
+                            "; ".join("%s on %s (%sh)" % (e["href"], ", ".join(e["pages"] or []),
+                                                         e["age_h"]) for e in esc)[:900]))
+            self._save_artifact("answer-pick-escalations.json",
+                                {"run_ts": self.run_ts, "escalations": esc})
+            try:
+                self.storage.write_json(
+                    f"agents/{self.agent_id}/escalations/answer-picks.json",
+                    {"run_ts": self.run_ts, "escalations": esc})
+            except Exception as e:
+                self.decide("observation", "escalation write failed: %s" % str(e)[:120])
         self.decide("observation",
                     "answer picks: %d checked on %d pages; %d broken now, %d "
                     "confirmed (second strike, or first strike in a fast window)" % (
@@ -206,12 +249,15 @@ class ShelfAuditAgent(AgentBase):
                         len(res["confirmed"])))
         summary = {k: res[k] for k in ("pages", "picks_checked", "broken_now",
                                        "confirmed", "pages_without_picks")}
+        checked = res["picks_checked"]
+        summary["slot_health_pct"] = round(
+            100.0 * (checked - len(res["broken_now"])) / checked, 1) if checked else None
+        summary["review_max_age_h"] = answer_picks.review_max_age_h(res, now, held_pages=held)
+        summary["swaps"] = sum(1 for r in res["confirmed"] if r.get("action") == "swap")
+        summary["escalated"] = len(esc)
         self._save_artifact("answer-picks.json", summary)
-        # A held page (framework page_hold) is still checked and reported, but
-        # its fixes go to the person-review rec, never the dispatched one.
-        from framework.core import page_hold
-        held = page_hold.held_paths(page_hold.holds_from_site_config(cfg))
-        return answer_picks.to_recs(res, self.run_ts, held_pages=held), summary
+        return answer_picks.to_recs(res, self.run_ts, held_pages=held,
+                                    dispatch_kind=apc.get("rec_dispatch_kind") or ""), summary
 
     def run(self) -> RunResult:
         cfg = self._cfg()
@@ -232,16 +278,24 @@ class ShelfAuditAgent(AgentBase):
 
         self.status("loading shelf rows from db", progress=0.3,
                     current_action="db")
-        rows = self._shelf_rows(cfg, asins, slugs)
+        # verify_priority ASINs are looked up even when the crawl did not
+        # surface them (a clicked product off the category grids).
+        priority = self._verify_priority(cfg)
+        rows = self._shelf_rows(cfg, sorted(set(asins) | priority), slugs)
         by_asin = {r["asin"]: r for r in rows if r.get("asin")}
         targets = sorted(by_asin)
         cap = int(cfg.get("max_verify_per_run", 400))
-        if len(targets) > cap:
-            # Oldest-priced first so successive runs sweep the whole shelf.
-            targets.sort(key=lambda a: str(by_asin[a].get("price_updated_at") or ""))
-            self.decide("observation",
-                        "shelf has %d verifiable products; capping this run at "
-                        "%d (stalest first)" % (len(targets), cap))
+        if len(targets) > cap or priority:
+            # Priority ASINs (verify_priority: clicked products, money-guide
+            # picks) first, then oldest-priced first so successive runs sweep
+            # the whole shelf.
+            targets.sort(key=lambda a: (a not in priority,
+                                        str(by_asin[a].get("price_updated_at") or "")))
+            if len(targets) > cap:
+                self.decide("observation",
+                            "shelf has %d verifiable products; capping this run at "
+                            "%d (%d priority ASINs first, then stalest)"
+                            % (len(targets), cap, len(priority & set(targets))))
             targets = targets[:cap]
 
         self.status("verifying against the amazon api", progress=0.45,
@@ -262,7 +316,20 @@ class ShelfAuditAgent(AgentBase):
                                  "title": (by_asin[a].get("title") or "")[:90],
                                  "issues": issues})
 
-        recs = pick_recs + self._to_recs(findings, aerrs, cfg)
+        # Price drift / out-of-stock on a priority ASIN is a re-price job, not
+        # a code rec: publish those ASINs for the price refresher's
+        # storage_list tier (verify_priority.publish_key) and keep them out of
+        # the catalog recs.
+        repriced = self._publish_priority_findings(cfg, priority, findings)
+        rec_findings = findings
+        if repriced:
+            rec_findings = [
+                f if f["asin"] not in repriced else {
+                    **f, "issues": [i for i in f["issues"]
+                                    if not i.startswith(("price_drift", "out_of_stock"))]}
+                for f in findings]
+            rec_findings = [f for f in rec_findings if f["issues"]]
+        recs = pick_recs + self._to_recs(rec_findings, aerrs, cfg)
         # NO producer-history dedup here, deliberately. That filter exists so a
         # PROPOSAL agent does not pitch the same article twice; this is a
         # MONITOR, and its rec titles ("N shelf products: image mismatch") have
@@ -300,7 +367,84 @@ class ShelfAuditAgent(AgentBase):
                      "amazon_unreachable": len(aerrs),
                      "answer_picks_checked": pick_summary.get("picks_checked", 0),
                      "answer_picks_broken_now": len(pick_summary.get("broken_now") or {}),
-                     "answer_picks_confirmed_dead": len(pick_summary.get("confirmed") or [])})
+                     "answer_picks_confirmed_dead": len(pick_summary.get("confirmed") or []),
+                     "answer_picks_swapped": pick_summary.get("swaps", 0),
+                     "answer_picks_escalated": pick_summary.get("escalated", 0),
+                     "answer_picks_review_max_age_h": pick_summary.get("review_max_age_h", 0.0),
+                     "money_guide_slot_health_pct": pick_summary.get("slot_health_pct")
+                     if pick_summary.get("slot_health_pct") is not None else 0.0,
+                     "priority_asins_verified": len(priority & set(targets)),
+                     "priority_findings_to_reprice": len(repriced)})
+
+    def _verify_priority(self, cfg) -> set[str]:
+        """ASINs to verify before the stalest-first sweep (opt-in
+        `verify_priority.enabled`), from either or both of:
+          demand: a framework price_refresh_priority site config (groups of
+                  kind human_clicks / sql / ...); every member ASIN counts, so
+                  "clicked by a verified human in 30 days" means what the
+                  goal tracker means by it.
+          query:  a site SELECT whose first column is an ASIN.
+        Any failure is logged and contributes nothing."""
+        vp = cfg.get("verify_priority") or {}
+        if not vp.get("enabled") or not (vp.get("query") or vp.get("demand")):
+            return set()
+        out: set[str] = set()
+        try:
+            import psycopg2
+            cn = psycopg2.connect(os.environ[cfg["dsn_env"]], connect_timeout=15)
+        except Exception as e:
+            self.decide("observation", "verify_priority DB connect failed: %s" % str(e)[:160])
+            return set()
+        try:
+            if vp.get("demand"):
+                try:
+                    from framework.core import price_refresh_priority as prp
+                    pcfg = prp.resolve_config(agent_id=self.agent_id,
+                                              site=cfg.get("site_id", ""),
+                                              site_cfg={**vp["demand"], "enabled": True},
+                                              storage=self.storage)
+                    tiers = prp.collect_tiers(cn, pcfg, storage=self.storage)
+                    for name, err in tiers.errors.items():
+                        self.decide("observation", "verify_priority group %s empty: %s"
+                                    % (name, err[:160]))
+                    out |= set(tiers.members)
+                except Exception as e:
+                    self.decide("observation", "verify_priority demand failed: %s" % str(e)[:160])
+                try:
+                    cn.rollback()
+                except Exception:
+                    pass
+            if vp.get("query"):
+                try:
+                    with cn.cursor() as cur:
+                        cur.execute("SET statement_timeout = 60000")
+                        cur.execute(vp["query"])
+                        out |= {str(r[0]) for r in cur.fetchall() if r and r[0]}
+                except Exception as e:
+                    self.decide("observation", "verify_priority query failed: %s" % str(e)[:160])
+        finally:
+            cn.close()
+        self.decide("observation", "verify_priority: %d ASINs go first" % len(out))
+        return out
+
+    def _publish_priority_findings(self, cfg, priority: set, findings: list) -> set[str]:
+        """Priority ASINs with price drift or out of stock on Amazon, written
+        as {"asins": [...]} to `verify_priority.publish_key` (a
+        price_refresh_priority storage_list group). Returns the ASINs only
+        when published, so they leave the code recs only when the refresher
+        can see them."""
+        key = (cfg.get("verify_priority") or {}).get("publish_key")
+        if not (priority and key):
+            return set()
+        hits = sorted({f["asin"] for f in findings if f["asin"] in priority and any(
+            i.startswith(("price_drift", "out_of_stock")) for i in f["issues"])})
+        try:
+            self.storage.write_json(key, {"asins": hits, "run_ts": self.run_ts,
+                                          "source": self.agent_id})
+        except Exception as e:
+            self.decide("observation", "verify_priority publish failed: %s" % str(e)[:120])
+            return set()
+        return set(hits)
 
     def _to_recs(self, findings, aerrs, cfg) -> list[dict]:
         recs = []
@@ -388,10 +532,24 @@ class ShelfAuditAgent(AgentBase):
         eligible = [r for r in pick_recs if r.get("tier") == "lever"]
         if not eligible:
             return "only person-review picks"
+        run_dir = self._rundir
+        if any(r.get("dispatch_kind") for r in eligible):
+            # The implementer derives the batch's dispatch kind from EVERY rec
+            # in the run dir's recommendations.json (run.sh / dispatch
+            # .dispatch_kind_for), so the shelf's catalog recs would turn an
+            # article-refresh batch back into a deploying "seo" one. The pick
+            # recs dispatch from their own run dir.
+            run_dir = self._rundir.parent / ("%s-answer-picks" % self.run_ts)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "recommendations.json").write_text(json.dumps({
+                "schema_version": "1", "site": cfg.get("site_id", ""),
+                "agent": self.agent_id, "agent_id": self.agent_id,
+                "run_ts": self.run_ts, "summary": "dead answer picks",
+                "recommendations": eligible}, indent=2))
         try:
             from framework.core import dispatch as _d
             handle = _d.gated_dispatch_now(
-                agent=self, agent_id=self.agent_id, run_dir=str(self._rundir),
+                agent=self, agent_id=self.agent_id, run_dir=str(run_dir),
                 rec_ids=[r["id"] for r in eligible], action="implement",
                 site=cfg.get("site_id", ""), subject_tag="shelf-audit")
             return "dispatched" if handle is not None else "awaiting approval"

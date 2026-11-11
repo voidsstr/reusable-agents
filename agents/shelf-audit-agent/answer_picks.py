@@ -169,14 +169,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def probe(url: str, timeout: int = 20, max_hops: int = 3) -> dict:
+def probe_headers(cfg: Optional[dict]) -> dict:
+    """UA plus the site's `probe_headers` (top-level site config, e.g. a
+    header the site reads to skip click logging for our own probes)."""
+    h = dict(UA)
+    for k, v in ((cfg or {}).get("probe_headers") or {}).items():
+        if k and v is not None:
+            h[str(k)] = str(v)
+    return h
+
+
+def probe(url: str, timeout: int = 20, max_hops: int = 3,
+          headers: Optional[dict] = None) -> dict:
     """{status, location}. Same-host redirects are followed; the first
     off-host Location is returned unfollowed."""
     opener = urllib.request.build_opener(_NoRedirect)
     host = urllib.parse.urlparse(url).netloc
+    hdrs = headers or UA
     for _ in range(max_hops + 1):
         try:
-            r = opener.open(urllib.request.Request(url, headers=UA), timeout=timeout)
+            r = opener.open(urllib.request.Request(url, headers=hdrs), timeout=timeout)
             return {"status": r.status, "location": ""}
         except urllib.error.HTTPError as e:
             loc = e.headers.get("Location", "") if e.headers else ""
@@ -215,12 +227,13 @@ def apply_strikes(state: dict, broken: dict[str, dict], healthy: set[str],
             except ValueError:
                 first = now
             new[href] = {**prev, **info, "first_seen": prev["first_seen"],
-                         "last_seen": now.isoformat()}
+                         "last_seen": now.isoformat(),
+                         "runs_seen": int(prev.get("runs_seen") or 1) + 1}
             if now - first >= timedelta(hours=gap_hours):
                 confirmed.append(href)
         else:
             new[href] = {**info, "first_seen": now.isoformat(),
-                         "last_seen": now.isoformat()}
+                         "last_seen": now.isoformat(), "runs_seen": 1}
     return new, confirmed
 
 
@@ -280,11 +293,49 @@ def choose_remedy(broken_row: Optional[dict], candidates: list[dict],
 
 # ---------- fast windows ----------
 
-def active_fast_window(cfg: dict, now: datetime) -> Optional[dict]:
-    """The `fast_windows` entry whose [start, end] dates (inclusive, UTC)
-    contain `now`, else None. Bad dates are ignored."""
+def calendar_fast_windows(cfg: dict, now: datetime, occasions=None) -> list[dict]:
+    """Fast windows derived from framework seasonal_calendar retail-deal
+    occasions (opt-in: `fast_windows_from_calendar: {enabled: true,
+    audience, lead_days, trail_days, one_strike_actions}`), so a deal window
+    is not hand-kept per site. Each occasion of kind retail-deal for the
+    audience becomes [start - lead_days, end + trail_days] for this year and
+    last (a window spilling into January)."""
+    block = cfg.get("fast_windows_from_calendar") or {}
+    if not block.get("enabled"):
+        return []
+    try:
+        from framework.core import seasonal_calendar as sc
+    except Exception:
+        return []
+    audience = block.get("audience")
+    lead = timedelta(days=max(0, int(block.get("lead_days", 0))))
+    trail = timedelta(days=max(0, int(block.get("trail_days", 0))))
+    acts = list(block.get("one_strike_actions") or ["relink"])
+    pool = occasions if occasions is not None else sc.load_occasions()
+    today = now.astimezone(timezone.utc).date()
+    out = []
+    for occ in pool:
+        if occ.kind != sc.RETAIL_DEAL_KIND:
+            continue
+        if audience and occ.audience not in ("general", audience):
+            continue
+        for year in (today.year - 1, today.year):
+            w = sc.event_window(occ, year)
+            if w is None:
+                continue
+            out.append({"start": (w.start - lead).isoformat(),
+                        "end": (w.end + trail).isoformat(),
+                        "one_strike_actions": acts, "occasion": occ.id})
+    return out
+
+
+def active_fast_window(cfg: dict, now: datetime, occasions=None) -> Optional[dict]:
+    """The `fast_windows` entry (hand-kept, then calendar-derived) whose
+    [start, end] dates (inclusive, UTC) contain `now`, else None. Bad dates
+    are ignored."""
     day = now.astimezone(timezone.utc).date().isoformat()
-    for w in cfg.get("fast_windows") or []:
+    windows = list(cfg.get("fast_windows") or []) + calendar_fast_windows(cfg, now, occasions)
+    for w in windows:
         start, end = str(w.get("start") or ""), str(w.get("end") or "")
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or \
                 not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
@@ -294,17 +345,170 @@ def active_fast_window(cfg: dict, now: datetime) -> Optional[dict]:
     return None
 
 
+# ---------- swap to a reviewed in-stock product (opt-in: `swap`) ----------
+#
+# A dead pick with no in-stock row of the SAME product used to end as
+# "unlink" (an untracked raw Amazon search button) or "review" (waits on a
+# person; 8 such picks, oldest 17 days, on 2026-11-11). With `swap.enabled`
+# the engine first offers a DIFFERENT product the page already links and
+# reviews: same type (the site's `swap.query` decides, e.g. same category),
+# in stock, freshly priced, not already another pick on the page, and backed
+# by a sentence on the page (the evidence the implementer's model checks
+# against the slot label in place of a human approval). A person-approved
+# entry in `approved_alternates[<page>][<label>]` wins when it is buyable.
+
+_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+_LABEL_STOP = {"best", "for", "the", "and", "pick", "overall", "of", "a", "an"}
+
+
+def _kind_words(title: str) -> set:
+    return {t for t in _tokens(title) if len(t) >= 4 and t.isalpha()}
+
+
+def evidence_sentence(body: str, slug: str, max_len: int = 300) -> str:
+    """The first sentence/line of `body` (markdown) that links the product's
+    slug (/k/<slug> or /kitchen/<slug>), with links reduced to their text."""
+    if not body or not slug:
+        return ""
+    needles = ("/k/%s" % slug, "/kitchen/%s" % slug)
+    for part in _SENT_SPLIT.split(body):
+        low = part.lower()
+        if any(n in low for n in needles):
+            text = _LINK_RE.sub(lambda m: m.group(1), part).strip(" #*-|>\t")
+            text = re.sub(r"\s+", " ", text)
+            if text:
+                return text[:max_len]
+    return ""
+
+
+def _price(c: dict):
+    v = c.get("price_cents")
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def choose_swap(*, page: str, label: str, broken_slug: str, candidates: list[dict],
+                body: str, used_slugs: Iterable[str], approved: Optional[dict] = None,
+                require_evidence: bool = True, broken_title: str = "",
+                min_title_overlap: int = 1) -> Optional[dict]:
+    """A swap remedy {action: swap, replacement, replacement_title, evidence,
+    reason} or None. `candidates` are the site query's rows (slug, title,
+    price_cents, ...), already in stock and priced per the site's rules.
+
+    Same TYPE: unless a person approved it, a candidate must share at least
+    `min_title_overlap` product words (letters only, 4+ chars) with the dead
+    pick's title, so a category-mate accessory (a descaler on an espresso
+    guide) is never offered for a machine slot. 0 turns the check off."""
+    used = {u for u in used_slugs if u} | {broken_slug}
+    pool = [c for c in candidates if c.get("slug") and c["slug"] not in used
+            and _price(c) is not None and _price(c) > 0]
+    if not pool:
+        return None
+    by_slug = {c["slug"]: c for c in pool}
+    page_alts = ((approved or {}).get(page.rstrip("/")) or {}) if isinstance(approved, dict) else {}
+    for alt in (page_alts.get(label) or []) if isinstance(page_alts, dict) else []:
+        c = by_slug.get((alt or {}).get("product_slug") or "")
+        if c:
+            return {"action": "swap", "replacement": c["slug"],
+                    "replacement_title": c.get("title"),
+                    "evidence": str(alt.get("evidence") or "")[:300]
+                                or evidence_sentence(body, c["slug"]),
+                    "approved_by": alt.get("approved_by"),
+                    "reason": "person-approved alternate for this slot, in stock and priced"}
+    kind_words = _kind_words(broken_title)
+    if min_title_overlap > 0 and kind_words:
+        pool = [c for c in pool
+                if len(kind_words & _kind_words(c.get("title") or "")) >= min_title_overlap]
+    scored = []
+    want = {t for t in _tokens(label) if t not in _LABEL_STOP and len(t) > 2}
+    budget = bool(want & {"budget", "value", "cheap", "affordable", "under"})
+    premium = bool(want & {"premium", "splurge", "luxury", "upgrade"})
+    for c in pool:
+        ev = evidence_sentence(body, c["slug"])
+        if require_evidence and not ev:
+            continue
+        overlap = len(want & set(_tokens(ev))) if ev else 0
+        price = _price(c)
+        order = price if budget else (-price if premium else 0)
+        scored.append((-overlap, order, c["slug"], c, ev))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: t[:3])
+    _o, _p, _s, c, ev = scored[0]
+    return {"action": "swap", "replacement": c["slug"],
+            "replacement_title": c.get("title"), "evidence": ev,
+            "reason": "no in-stock row of the same product; the page already reviews "
+                      "this in-stock, priced product of the same type (evidence quoted)"}
+
+
+# ---------- review escalation ----------
+
+def _age_hours(iso: str, now: datetime) -> float:
+    try:
+        return max(0.0, (now - datetime.fromisoformat(iso)).total_seconds() / 3600.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _waits_on_person(r: dict, held: set) -> bool:
+    return r.get("action") == "review" or any(
+        (p or "").rstrip("/") in held for p in (r.get("pages") or []))
+
+
+def escalations(result: dict, cfg: dict, now: datetime,
+                held_pages: Iterable[str] = ()) -> list[dict]:
+    """Person-review picks (action review, or any fix on a held page) older
+    than `escalate_after_hours` (default 24) or seen on `escalate_after_runs`
+    runs (default 2), not escalated before. Marks them in result['state'] so
+    each href escalates once; a href that recovers is dropped from state and
+    may escalate again if it dies again."""
+    held = {p.rstrip("/") for p in held_pages}
+    hours = float(cfg.get("escalate_after_hours", 24))
+    runs = int(cfg.get("escalate_after_runs", 2))
+    out = []
+    state = result.get("state") or {}
+    for r in result.get("confirmed") or []:
+        if not _waits_on_person(r, held) or r["href"] not in state:
+            continue
+        st = state[r["href"]]
+        if st.get("escalated_at"):
+            continue
+        age = _age_hours(st.get("first_seen") or "", now)
+        if age >= hours or int(st.get("runs_seen") or 0) >= runs:
+            st["escalated_at"] = now.isoformat()
+            out.append({"href": r["href"], "pages": r.get("pages"), "label": r.get("label"),
+                        "age_h": round(age, 1), "runs_seen": st.get("runs_seen"),
+                        "reason": r.get("reason")})
+    return out
+
+
+def review_max_age_h(result: dict, now: datetime, held_pages: Iterable[str] = ()) -> float:
+    """Age (hours since first strike) of the oldest confirmed pick that waits
+    on a person (review, or any fix on a held page)."""
+    held = {p.rstrip("/") for p in held_pages}
+    state = result.get("state") or {}
+    ages = [_age_hours((state.get(r["href"]) or {}).get("first_seen") or "", now)
+            for r in result.get("confirmed") or [] if _waits_on_person(r, held)]
+    return round(max(ages), 1) if ages else 0.0
+
+
 # ---------- orchestration ----------
 
 def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
               now: datetime, fetch_json: Callable[[str], dict],
               probe_fn: Callable[[str], dict] = probe,
               lookup: Optional[Callable[[str], tuple]] = None,
-              same_picture: Optional[Callable[[str, str], tuple]] = None) -> dict:
+              same_picture: Optional[Callable[[str, str], tuple]] = None,
+              swap_lookup: Optional[Callable[[str, str], list]] = None,
+              occasions=None) -> dict:
     """Pure-ish core: everything with I/O is injected so it unit-tests.
 
     lookup(slug) -> (broken_row|None, [candidate rows]); rows carry
-    slug/title/image."""
+    slug/title/image. swap_lookup(pick_slug, page_slug) -> [rows with
+    slug/title/price_cents] (only used with `swap.enabled`)."""
     expect = cfg.get("expect_location") or DEFAULT_EXPECT
     prefix = cfg.get("path_prefix") or "/"
     endpoint = cfg["picks_endpoint"]
@@ -312,8 +516,16 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
     healthy: set[str] = set()
     checked = 0
     page_errors = []
+    swap = cfg.get("swap") or {}
+    body_key = swap.get("body_key") or "body_md"
+    bodies: dict[str, str] = {}
+    used: dict[str, set] = {}
+
+    def page_slug(path):
+        return path[len(prefix):] if path.startswith(prefix) else path.lstrip("/")
+
     for path in pages:
-        slug = path[len(prefix):] if path.startswith(prefix) else path.lstrip("/")
+        slug = page_slug(path)
         doc = fetch_json(endpoint.replace("{slug}", slug))
         picks = extract_pick_hrefs(doc, cfg.get("picks_key", "answer_picks"),
                                    cfg.get("parts_key", "parts"),
@@ -321,6 +533,9 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
         if not picks:
             page_errors.append(path)
             continue
+        if swap.get("enabled"):
+            bodies[path] = str((doc or {}).get(body_key) or "")
+            used[path] = {pick_slug(p["href"]) for p in picks}
         for p in picks:
             checked += 1
             res = probe_fn(urllib.parse.urljoin(origin, p["href"]))
@@ -335,19 +550,43 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
     new_state, confirmed = apply_strikes(state, broken, healthy, now,
                                          float(cfg.get("strike_gap_hours", 8)))
     def remedy(href):
+        """Same-product relink first; then (swap.enabled) a reviewed in-stock
+        product of the same type; the unlink/review verdict only after both."""
+        row = None
         if not (lookup and same_picture):
-            return {"action": "review", "reason": "no replacement lookup configured"}
-        try:
-            row, cands = lookup(pick_slug(href))
-            return choose_remedy(row, cands, same_picture)
-        except Exception as e:
-            return {"action": "review", "reason": "lookup failed: %s" % str(e)[:80]}
+            rem = {"action": "review", "reason": "no replacement lookup configured"}
+        else:
+            try:
+                row, cands = lookup(pick_slug(href))
+                rem = choose_remedy(row, cands, same_picture)
+            except Exception as e:
+                rem = {"action": "review", "reason": "lookup failed: %s" % str(e)[:80]}
+        if rem["action"] == "relink" or not swap.get("enabled") or swap_lookup is None:
+            return rem
+        info = broken.get(href) or {}
+        for path in info.get("pages") or []:
+            try:
+                cands = swap_lookup(pick_slug(href), page_slug(path)) or []
+                sw = choose_swap(page=path, label=info.get("label") or "",
+                                 broken_slug=pick_slug(href), candidates=cands,
+                                 body=bodies.get(path, ""), used_slugs=used.get(path, ()),
+                                 approved=cfg.get("approved_alternates"),
+                                 require_evidence=swap.get("require_evidence", True) is not False,
+                                 broken_title=(row or {}).get("title") or info.get("name") or "",
+                                 min_title_overlap=int(swap.get("min_title_overlap", 1)))
+            except Exception as e:
+                rem = {**rem, "swap_error": str(e)[:80]}
+                continue
+            if sw:
+                return {**sw, "swap_page": path, "prior_action": rem["action"],
+                        "prior_reason": rem.get("reason")}
+        return rem
 
     remedies = []
     for href in confirmed:
         remedies.append({"href": href, "slug": pick_slug(href), **new_state[href],
                          **remedy(href), "strikes": 2})
-    window = active_fast_window(cfg, now)
+    window = active_fast_window(cfg, now, occasions)
     if window:
         one_strike = set(window.get("one_strike_actions") or ["relink"])
         for href in broken:
@@ -362,12 +601,18 @@ def run_check(cfg: dict, *, origin: str, pages: list[str], state: dict,
             "state": new_state, "fast_window": window}
 
 
-def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = ()) -> list[dict]:
+AUTO_ACTIONS = ("relink", "swap", "unlink")
+
+
+def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = (),
+            dispatch_kind: str = "") -> list[dict]:
     """One rec for the dispatchable fixes, one for the ones a person decides.
 
     `held_pages` (framework page_hold): a fix on a held page is still
     reported, but in the person-review rec, never the dispatched one, even a
-    same-product relink."""
+    same-product relink. `dispatch_kind` (config `rec_dispatch_kind`, e.g.
+    article-refresh: a DB-only body edit the implementer ships without the
+    deployer) is stamped on the dispatchable rec."""
     recs = []
     held = {p.rstrip("/") for p in held_pages}
 
@@ -376,13 +621,15 @@ def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = ()) -> list[d
 
     auto, manual = [], []
     for r in result["confirmed"]:
-        if r["action"] in ("relink", "unlink") and not on_hold(r):
+        if r["action"] in AUTO_ACTIONS and not on_hold(r):
             auto.append(r)
-        elif r["action"] in ("relink", "unlink", "review"):
+        elif r["action"] in AUTO_ACTIONS + ("review",):
             manual.append({**r, "held": True} if on_hold(r) else r)
 
     def line(r):
         tgt = (" -> /k/%s" % r["replacement"]) if r.get("replacement") else ""
+        if r.get("evidence"):
+            tgt += ' (page evidence: "%s")' % r["evidence"][:200]
         return "%s%s [%s] %s on %s (now %s %s)%s" % (
             "PAGE ON HOLD, proposed " if r.get("held") else "",
             r["action"].upper(), r.get("label") or "pick", r["href"],
@@ -403,6 +650,13 @@ def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = ()) -> list[d
             "fix": "In each listed page's article body (editorial_articles.body_md), "
                    "RELINK: replace the /k/<slug> link with the /k/<replacement> slug "
                    "given (same product: same title numbers and same listing photo). "
+                   + ("SWAP: the same product is not buyable, so the slot moves to a "
+                      "DIFFERENT in-stock product the page already reviews. First check "
+                      "that the quoted page evidence supports the slot label; if it "
+                      "does, point the pick's /k/ link (and its product name in the pick "
+                      "line) at /k/<replacement> and keep the label; if it does not, "
+                      "leave that pick unchanged and say so in the summary. "
+                      if any(r["action"] == "swap" for r in auto) else "") +
                    "UNLINK: no in-stock row exists; keep the product name as plain "
                    "text and remove the link, and if it was the page's #1 pick, say "
                    "so in the summary rather than promoting another product. Write "
@@ -411,6 +665,8 @@ def to_recs(result: dict, run_ts: str, held_pages: Iterable[str] = ()) -> list[d
                                "reaching a buyable product page.",
             "answer_picks": auto,
         })
+        if dispatch_kind:
+            recs[-1]["dispatch_kind"] = dispatch_kind
     if manual:
         recs.append({
             "id": "shelf-%s-answer-pick-review" % run_ts,

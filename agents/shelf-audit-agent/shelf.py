@@ -26,10 +26,45 @@ IMAGE_THRESHOLD = 12
 PRICE_TOLERANCE = 0.02
 
 
-def fetch(url: str, timeout: int = 25) -> str:
+class _SameHostRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only when it stays on the requesting host.
+
+    An off-host Location is refused (urllib raises HTTPError, fetch() returns
+    ""). A site's click-out route (aisleprompt /k/<slug>) answers every
+    request with a 302 to a TAGGED Amazon URL and logs a click; following it
+    from a crawler sends self-generated invalid traffic under the site's
+    affiliate tag (123 such redirects/24h measured 2026-11-11)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlparse(req.full_url).netloc.lower()
+        new = urllib.parse.urlparse(urllib.parse.urljoin(req.full_url, newurl)).netloc.lower()
+        if new and new != old:
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_SameHostRedirects)
+
+
+def request_headers(extra: dict | None = None) -> dict:
+    """UA plus a site's `probe_headers` (site config): a header the site can
+    use to skip click logging and analytics for our own requests."""
+    h = dict(UA)
+    for k, v in (extra or {}).items():
+        if k and v is not None:
+            h[str(k)] = str(v)
+    return h
+
+
+def fetch(url: str, timeout: int = 25, headers: dict | None = None) -> str:
+    """GET one page. Same-host redirects are followed, off-host ones are
+    not (see _SameHostRedirects)."""
     try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        req = urllib.request.Request(url, headers=request_headers(headers))
+        with _OPENER.open(req, timeout=timeout) as r:
+            if urllib.parse.urlparse(r.geturl()).netloc.lower() != \
+                    urllib.parse.urlparse(url).netloc.lower():
+                return ""
             ct = r.headers.get("Content-Type", "")
             if "text/html" not in ct and "json" not in ct:
                 return ""
@@ -38,19 +73,36 @@ def fetch(url: str, timeout: int = 25) -> str:
         return ""
 
 
+def skip_path(url: str, skip_re) -> bool:
+    """True when the URL's path matches the site's `crawl_skip_path_regex`."""
+    if not skip_re:
+        return False
+    pat = skip_re if hasattr(skip_re, "search") else re.compile(skip_re)
+    return bool(pat.search(urllib.parse.urlparse(url).path or "/"))
+
+
 def crawl(origin: str, max_depth: int = 3, per_depth=(None, 400, 500, 500),
-          seeds=(), workers: int = 16) -> dict:
+          seeds=(), workers: int = 16, skip_path_regex: str | None = None,
+          headers: dict | None = None, fetch_fn=None) -> dict:
     """BFS the site with a PER-DEPTH budget.
 
     A single global page cap is wrong: specpicks' homepage alone links 408
     pages, so a 400-page global budget was spent entirely at depth 1 and
     depths 2-3 were never visited (measured 2026-08-26). Budgeting per depth
     is what makes "3 levels deep" mean anything.
+
+    `skip_path_regex` (site config `crawl_skip_path_regex`): links whose path
+    matches are never enqueued or fetched — a site's affiliate click-out
+    route, which logs a click and redirects off-site on every request.
+    `headers` (site config `probe_headers`) go on every request.
     """
+    skip_re = re.compile(skip_path_regex) if skip_path_regex else None
+    get = fetch_fn or (lambda u: fetch(u, headers=headers))
     seen: set[str] = set()
     out: dict[str, dict] = {}
     taken: collections.Counter = collections.Counter()
-    q = collections.deque([(origin, 0)] + [(s, 1) for s in seeds])
+    q = collections.deque([(origin, 0)] + [(s, 1) for s in seeds
+                                           if not skip_path(s, skip_re)])
     host = urllib.parse.urlparse(origin).netloc
 
     while q:
@@ -68,7 +120,7 @@ def crawl(origin: str, max_depth: int = 3, per_depth=(None, 400, 500, 500),
         if not batch:
             break
         with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            for (u, d), html in zip(batch, ex.map(lambda x: fetch(x[0]), batch)):
+            for (u, d), html in zip(batch, ex.map(lambda x: get(x[0]), batch)):
                 if not html:
                     continue
                 out[u] = {"depth": d, "asins": sorted(set(ASIN_RE.findall(html)))}
@@ -77,6 +129,8 @@ def crawl(origin: str, max_depth: int = 3, per_depth=(None, 400, 500, 500),
                         nu = urllib.parse.urljoin(u, h)
                         p = urllib.parse.urlparse(nu)
                         if p.netloc == host and p.scheme in ("http", "https"):
+                            if skip_path(nu, skip_re):
+                                continue
                             nu = f"{p.scheme}://{p.netloc}{p.path.rstrip('/')}"
                             if nu not in seen:
                                 q.append((nu, d + 1))
@@ -84,7 +138,7 @@ def crawl(origin: str, max_depth: int = 3, per_depth=(None, 400, 500, 500),
 
 
 def crawl_api_surface(endpoints: list[str], slug_key: str = "slug",
-                      workers: int = 12) -> dict:
+                      workers: int = 12, headers: dict | None = None) -> dict:
     """Collect products from JSON endpoints for CLIENT-RENDERED shelves.
 
     aisleprompt renders its kitchen shelves in the browser: crawling 982 of
@@ -96,8 +150,8 @@ def crawl_api_surface(endpoints: list[str], slug_key: str = "slug",
 
     def get(u):
         try:
-            with urllib.request.urlopen(urllib.request.Request(u, headers=UA),
-                                        timeout=25) as r:
+            with _OPENER.open(urllib.request.Request(u, headers=request_headers(headers)),
+                              timeout=25) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         except Exception:
             return {}
