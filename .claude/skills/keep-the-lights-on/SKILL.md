@@ -62,6 +62,14 @@ The config (wherever it resolves) defines:
 - `cadence:` — healthy / degraded / improvement second-intervals.
 - `improvement_every_hours:` — how often to spend an LLM improvement cycle.
 - `standing_incidents:` — open items that need operator go-ahead.
+- `catalog_health:` — `checks:` (bounded `SELECT count(*)` probes, §5c; a
+  check may bind the §5f money set with `params:` and name an `owner_class`)
+  and `agent_metric_checks:` (bounds on an owner's own `RunResult.metrics`).
+- `conversion:` — the money path (§5f): verified-human click spec + profile,
+  templates, money placements, money set, floors, goals, definition drift,
+  config reads, the money-page probe, and `owners:` (one owner per outcome).
+- `shop_rollout:` — the staged rollout of buy-box recs (§5f): state key,
+  template paths, the 48 h spacing, and an optional operator `freeze`.
 
 To onboard a NEW system: copy `systems/_example.yaml` into the site's OWN
 repo as `keep-the-lights-on.yaml`, edit the values, add a line to
@@ -166,13 +174,18 @@ lengthen the cadence.
    - `curl` homepage + sample URL → HTTP code.
    - Pool: count authenticated profiles in `claude-pool/state.json`.
    - Opus deferral probe (newest article-author `deferred.json` age).
+   - If the config has `conversion:` / `shop_rollout:`: the §5f fields
+     (`conversion`, `agent_metrics`, `placement_watch`, `shop_rollout`,
+     `routes`). Same sweep, about 1 s per site from the hourly cache.
 3. **Classify** the system state:
    - **GREEN** — all critical agents ok (idle-between-cron is fine, not a
      failure), sites 200, volume > 0 over 24h, ≥1 pool profile, no NEW
      failed unit (excluding `known_excluded`).
    - **DEGRADED** — a fixable problem: a critical agent failed, queue
      jammed, one pool profile dead but others alive, volume dropped hard
-     but not zero, a stuck scope/defer.
+     but not zero, a stuck scope/defer — or **the site serves but the money
+     leaks** (any §5f DEGRADED condition: floor, sustained drop, placement
+     incident, dead money pick, unreadable config, definition drift).
    - **DOWN** — site homepage non-200 twice running, OR 24h volume = 0
      on a site that normally publishes, OR all pool profiles dead.
    - **BLOCKED** — a problem you cannot safely auto-fix (needs a
@@ -258,7 +271,9 @@ cycle, tied to a metric — "a change that doesn't move a goal didn't
 happen."
 
 Procedure:
-1. **Pick a lever.** Open the agents' goals (`GET /api/agents/<id>/goals`
+1. **Pick a lever.** A §5f floor breach or sustained drop outranks every
+   other goal in the improvement window: start there. Otherwise open the
+   agents' goals (`GET /api/agents/<id>/goals`
    or the Goals tab) + the growth metric from config. Find a **stalled**
    goal (big gap, flat recent progress) that maps to the North Star
    (bias to user-facing site metrics: indexed pages, organic clicks,
@@ -323,6 +338,18 @@ in state; add `TESTS <n> passed` to the tick box. Cheap, done.
    - **Can't safely fix** (needs a deploy/decision/credential): ESCALATE
      (§6) with the failing test + error, de-duped.
 2. Record the failure + resolution in state.
+
+**Shop buy-box spec (when the config has `conversion:`).** The daily prod
+@smoke run includes a prod-safe "shop buy box" spec at 390x844 and 1366x768,
+sending the probe header and blocking the click-redirect path, amazon.com and
+analytics. It asserts:
+- the converting guide's first Amazon button is within the first 700 px on mobile;
+- the primary button is Amazon on a product page that also has another retailer;
+- the sticky buy button is not covered (`elementFromPoint`);
+- an out-of-stock product page shows a priced alternative.
+
+The structural assertions also belong in the site's gate suite. Fresh-price
+assertions run in prod only, because gate fixtures have stale prices.
 
 **Coverage-depth mandate (improvement-cycle lever):** the suite must cover
 ALL functionality in depth. On an improvement cycle — or whenever a new
@@ -507,6 +534,183 @@ transport note below). Fix what is emitting, not the transport.
 
 ---
 
+## 5f. Conversion & shop health — watch the money, then adjust (every tick)
+
+If the config has a `conversion:` block, the money path is part of keeping the
+lights on. A site can serve 200s, publish on schedule and hold every catalog
+bound while its buy buttons stop earning. On 2026-11-11 one reference site's
+tick was GREEN while its verified-human Amazon clicks were down 42% week over
+week, its converting guides were down 56%, and every Amazon-click goal read
+"accomplished". Nothing in §2–§5e looked at clicks.
+
+**Layer A (pure code; the host-local sweep `~/.reusable-agents/ktlo-work/sweep.py`
+emits it per system).** All of it is read-only: SELECT-only sessions, storage
+reads, read-only git. The only write is the cache at `conversion.watch.cache`,
+which lives under `~/.reusable-agents/ktlo-work/` and never in /tmp.
+
+1. **Verified-human clicks.** Count them with `framework/core/human_clicks.py`,
+   using the spec and profile in `conversion.clicks`. These must be the same
+   ones the site's goal tracker uses. The profile overrides come from storage
+   `config/human-click-filter-config.json`, so KTLO, the goals and the
+   strategist all count the same thing.
+   - Every tick: totals d1, d7, prev7, d30, plus the non-human clicks still
+     forwarded with the affiliate tag (`forwarded_24h`).
+   - Each full pass (`watch.full_every_minutes`, cached): counts per template
+     (`conversion.templates`, first regex wins) and per money placement
+     (`conversion.money_placements`). The full pass also builds the **money
+     set**: pages and products with at least `money_set.min_clicks` verified
+     clicks. Catalog checks bind it as `params: [money_products | money_pages |
+     money_slugs]`.
+   - Never rank, justify or monitor money work with a weaker click view, raw
+     GA4 sessions or GSC clicks. `conversion.definition_drift` lists the weaker
+     views agents still read, and names those readers.
+2. **Placement watch.** `framework/core/placement_watch.py` runs after every
+   gated deploy and daily from the goal tracker. It opens one incident per money
+   placement whose verified clicks fell after a deploy, in storage
+   `framework/placement-watch/<system>.json` (`open` and `last_run`). The sweep
+   maps each open incident back to a template through
+   `money_placements.<name>.placement_watch`. The watch's own config is
+   `config/placement-watch-config.json`; list it in `conversion.config_reads`
+   so an archived doc is caught (§11.I).
+3. **Goals.** For each `conversion.goals` entry, read that agent's goals
+   (`GET /api/agents/<id>/goals`, or storage `agents/<id>/goals/active.json`).
+   Compare the recorded value with the live count named by `live`. The sweep
+   flags `value-drift` (more than 25% apart), `accomplished-not-steering`
+   (an accomplished goal steers nothing, and doubly so when the live value is
+   below target), and an archived or missing doc. The owners' `goals:` lists in
+   `conversion.owners` are the goals each fix must move.
+4. **Shop correctness.** The money-set-bound checks in `catalog_health.checks`
+   (picks on converting guides that point at inactive or unpriced products,
+   priced share of those picks, stale prices on clicked products, the trending
+   rail's freshness, and so on), plus `catalog_health.agent_metric_checks`. The
+   latter read an owner's own `RunResult.metrics` from its `run-index.json`
+   (`sustain_runs`, `max_age_hours`), so KTLO reads what agents already measure
+   instead of re-deriving it.
+5. **Money-page probe.** Fetch the top `probe_money_pages.top` money pages the
+   way a reader would, sending the probe header, and count CTA links and
+   search-fallback CTAs. Fetch SSR pages only. Never fetch an API that bumps a
+   counter (for example `/api/blog/:slug`). Never fetch a click-redirect path
+   (`/k/`, `/r/`): each request logs a click and forwards a tagged redirect.
+
+**DEGRADED when any of these holds:**
+- a `floors` breach (these floors hold even while a goal reads accomplished);
+- a drop on `watch.sustain_passes` consecutive full passes (`drops_sustained`);
+- a post-deploy regression, or an open placement_watch incident;
+- a breached check that has an `owner_class`, or a breached agent-metric check;
+- a required `config_reads` doc that is not ok;
+- a bad money-page probe;
+- suspect share above `watch.max_suspect_share_pct`;
+- a `definition_drift` breach.
+
+"The site serves, but the money leaks" counts as DEGRADED.
+
+**Route each breach to its OWNER, never to yourself.** The sweep's `routes`
+list maps each breach to a failure class, and each class to
+`conversion.owners.<class>`: `{agent, action, rec_kind?, knobs?, goals?}`.
+Make at most ONE adjustment per class per pass, and use only the owner's
+declared `action`:
+
+| action | What KTLO does |
+|---|---|
+| `trigger` | Start the owner once (`systemctl --user start agent-<id>.service`, or `POST /api/agents/<id>/trigger`). Then read its next run. |
+| `knob` | Read the owner's own throttle and quota metrics first. Then move ONE named knob ONE step and trigger once. Never move a knob outside `knobs`. |
+| `rec` | Dispatch ONE rec of `rec_kind` that names the owner. Write a `recommendations.json` whose top-level `agent_id` is the owner, so the kind and priority mapping match, in a KTLO run dir under `~/.reusable-agents/ktlo-work/dispatch/<system>/<run_ts>/`, then call `framework.core.dispatch.dispatch_now`. The deploy-gate hold applies; never bypass it. DB-only kinds (`article-refresh`, `catalog-audit`) are not blocked by a red gate. |
+| `escalate` | Email once per signature (§6 de-dupe), then keep watching. |
+
+Class-specific rules:
+- **measurement.** Rewrite an archived config from its last known content
+  (§11.I). Re-run the tracker once on value-drift. Re-open a goal whose live
+  value fell below target. Never change a target or the click filter without
+  escalating, unless the config already marks the template `suspect`.
+- **pick-dead.** Read the shelf audit's answer-picks output. File one
+  article-refresh rec per page. The remedy order is: relink, then swap to an
+  in-stock product the page reviews, then unlink last. Escalate only after two
+  implementer deferrals.
+- **price-stale.** Read the scraper's or verifier's throttle metrics, then move
+  one knob step and trigger once.
+- **template-drop or placement-drop.** Read `post_deploy` and placement_watch
+  first.
+  - If a deploy caused it: pause money-surface code kinds in storage
+    `config/implementer-allowed-dispatch-kinds.json` (record `previous` and a
+    reason in `_history`), dispatch a revert rec naming the commit, and escalate
+    with the evidence.
+  - Otherwise, split the drop. Sessions down means traffic-led
+    (`owners.traffic-drop`). Clicks per session down means conversion-led
+    (`owners.conversion-drop`).
+- **rail or money-page-gone.** File a pi rec; it needs a green gate. Escalate
+  if the gate has been red for more than 24 h.
+- **forwarded-bots.** Fix our own crawler through its owner. Escalate the
+  redirect handler once. Never block traffic or change affiliate tagging as an
+  auto-fix.
+
+**Close the loop.** Record each adjustment and its before-value in
+`improvements.json`. Re-check after the owner's next two runs, or three full
+passes. Revert any knob that did not move its metric. "A change that doesn't
+move a goal didn't happen" applies to KTLO's own nudges too.
+
+### Staged rollout of buy-box recs (`shop_rollout:` in the config)
+
+Buy-box and money-surface changes ship ONE AT A TIME PER TEMPLATE, so
+placement_watch and lever outcomes can attribute each one. In 2026-11
+agents stacked 180 commits on one reference site's build, 61 of them on price,
+CTA or hero surfaces, and nothing could say which one cost clicks.
+
+- **State.** `agents/keep-the-lights-on/<system>/shop-rollout.json` (or
+  `shop_rollout.state_key`) holds an ordered `queue`. Each item has `id`,
+  `templates`, `owner_agent`, `dispatch_kind`, `depends_on` (queue ids),
+  `external_prereqs` (`{id, done, done_when}`), `requires_gate_green`,
+  `not_before`, `deadline`, `status`, and the `rec` body.
+- **Status flow.** `queued` → `dispatched` (`rec_id`, `request_id`,
+  `dispatched_at`) → `shipped` (`commit`) → `deployed` (`deployed_at`,
+  `deploy_tag`) → `verified` or `reverted`. An item can also be `skipped` or
+  `expired`. Append every transition to the item's `history`.
+- **Eligibility.** The sweep's `shop_rollout` block computes it; the tick
+  dispatches and writes the state. An item is eligible only when ALL of these
+  hold:
+  - for every template it touches:
+    - no other change to that template deployed in the last
+      `min_hours_between_template_deploys` (default 48). The sweep checks this
+      by read-only `git diff` of each recent deploy (the deployer's gate-state
+      deploy log) over `shop_rollout.templates.<t>.paths`, plus rollout items
+      `deployed_at`.
+    - no undeployed change to it on HEAD. It would share the next deploy:
+      **never two changes to one template in one deploy**
+      (`max_changes_per_template_per_deploy: 1`).
+    - no rollout item for it in flight.
+    - no open placement_watch incident on a money placement of that template.
+  - Its `depends_on` items are deployed.
+  - Its `external_prereqs` are done. Flip `done: true` only after checking
+    `done_when` yourself.
+  - The gate is green (`require_gate_green`).
+  - It is inside `not_before` / `deadline`.
+  - No `shop_rollout.freeze` window (`{start, end, reason}`) is active.
+    Freezes are operator-approved; put them in the site config, never in the
+    state.
+- **Per tick.** Dispatch at most `max_dispatch_per_tick` items (`dispatch_now`),
+  one per template, through the owner, as in the `rec` row above.
+- **After deploy.** Set `deployed_at` from the gate-state deploy log. After
+  placement_watch has judged that deploy (24–48 h), mark the item `verified` if
+  its placements read ok, or file the revert and mark it `reverted` if they
+  regressed.
+- **Deadlines.** An item that reaches `deadline_risk` (72 h before its deadline)
+  while still queued behind its lane: escalate once so the operator can reorder.
+  Never reorder the queue yourself.
+- **Shared files.** Paths shared by every template (a monolith server or SSR
+  renderer) are deliberately not template paths. The item's own deploy still
+  blocks its template for the window.
+
+**Box lines (§7).**
+- `CONVERSION d7=<n> (prev7 <n>, <±%>) d30=<n> · <top money placement> d7=<n> · floors <ok|list> · drops <none|list> · post-deploy <tag ok|regressed>`
+- `SHOP picks-dead=<n> · money-priced=<pct>% · probe <ok|path:n fallbacks> · rail <f>/8 fresh <d>/8 distinct · fwd-bots 24h=<n> · goals <ok|n flagged> · config <ok|ARCHIVED> · watch <0|n open>`
+- `ROLLOUT <next id → template | waiting: reason> · in-flight <ids> · freeze <none|until>`
+
+Onboard a new site by config alone: copy the commented `conversion:`,
+`catalog_health.checks[].params` / `owner_class`, `agent_metric_checks` and
+`shop_rollout:` blocks from `systems/_example.yaml`. If a needed knob is
+missing, add it there and to the sweep, never as a branch in this runbook.
+
+---
+
 ## 6. Escalation — email + in-session (when BLOCKED or DOWN-unrecovered)
 
 Escalate when: you can't safely auto-fix; a fix needs a credential or an
@@ -603,6 +807,9 @@ truncated to fit.
 | SITE     homepage <code> · sample <code>                                                   |
 | VOLUME   <site>: +1h=<n> +24h=<N>  (growth-metric note if known)                            |
 | CATALOG  <ok | check-name=<value> breached bound, action taken>                             |
+| CONVERSION d7=<n> (prev7 <n>, <±%>) d30=<n> · <top placement> d7=<n> · floors · drops · post-deploy |
+| SHOP     picks-dead · money-priced% · probe · rail fresh/distinct · fwd-bots · goals · config · watch |
+| ROLLOUT  <next id → template | waiting: reason> · in-flight <ids> · freeze <none|until>          |
 | POOL     <k>/<total> profiles alive                                                        |
 | ACTION   <auto-fix taken | improvement shipped | none>                                     |
 | ESCALATE <email sent to <owner> / none> <in-session note>                                  |
@@ -647,8 +854,10 @@ fresh session resumes from the incident file).
 State lives in `agents/keep-the-lights-on/<system>/` in framework storage
 (via `framework.core.storage.get_storage()`): `incidents.json` (open +
 resolved, with signatures + email timestamps), `improvements.json` (the
-trail of shipped changes + metrics), and `last_tick.json` (last cadence /
-class / improvement-window time). A resumed session reads these first so
+trail of shipped changes + metrics, including every §5f adjustment and its
+before-value), `last_tick.json` (last cadence / class / improvement-window
+time), and `shop-rollout.json` (the §5f staged-rollout queue and its
+transitions). A resumed session reads these first so
 it never double-alerts or repeats an improvement. This is what lets the
 skill genuinely "keep the lights on" across restarts, not just within one
 session.
@@ -796,6 +1005,18 @@ fill inactive rows. Repair by pausing the timer, running
 `REFILL_INCLUDE_INACTIVE=1 REFILL_TIME_BUDGET_S=240 bash run.sh` in passes (the
 wrapper kills the script at 280 s), then reactivating only rows that now have an
 image.
+
+**I. Storage doc archived by the 120-day lifecycle rule.** Signature: the
+sweep's `config_reads` (or a goal check) shows `ARCHIVED-or-unreadable`, or a
+doc reads null while `exists()` is true; the log shows `BlobArchived`. Effect:
+readers such as `human_clicks.load_config()` and `placement_watch.load_config()`
+return `{}` and silently fall back to defaults. If the click filter is
+archived, goal counts jump about 5x; if the placement-watch config is archived,
+nothing is watched. Fix: rewrite the doc from its last known content (git, the
+`improvements.json` trail, or its `_note`/`_history`), re-read it to confirm,
+and escalate the lifecycle exemption once (operator: storage lifecycle policy).
+Seen 2026-11-11 on `config/priority-config.json`, a conversion optimizer's
+goals doc and a goal tracker's run-index.
 
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.

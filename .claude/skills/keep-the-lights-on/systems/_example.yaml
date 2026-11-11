@@ -90,6 +90,117 @@ cadence:
 # ── Improvement cadence ──
 improvement_every_hours: 8   # one focused lever per cycle
 
+# ── Catalog health (SKILL §5c) — bounded SELECT count(*) probes every tick ──
+# A check may bind the §5f money set with `params:` (money_products,
+# money_pages, money_slugs; the SQL then writes %% for a literal %) and name an
+# `owner_class` so a breach routes to conversion.owners.<class>. A check whose
+# params are empty reports [null, "skip:no-money-set"].
+catalog_health:
+  checks:
+    - name: listings_fresh_24h
+      db: <site>
+      sql: "select count(*) from <listings_table> where fetched_at > now() - interval '24 hours'"
+      expect_min: 1
+      note: "0 = the price refresh is dead; find the owning agent and read why"
+    # - name: money_guide_picks_dead          # picks on converting pages -> inactive/unpriced products
+    #   db: <site>
+    #   params: [money_slugs]
+    #   sql: "select count(*) from ... where a.slug = any(%(money_slugs)s::text[]) ..."
+    #   expect_max: 0
+    #   owner_class: pick-dead
+    # - name: money_products_fresh_price_pct   # clicked products that can show a price now
+    #   db: <site>
+    #   params: [money_products]
+    #   sql: "select ... where p.id = any(%(money_products)s::int[])"
+    #   expect_min: 90
+    #   owner_class: price-stale
+  # Bounds on an owner's own RunResult.metrics (agents/<agent>/run-index.json).
+  # agent_metric_checks:
+  #   - name: answer_picks_confirmed_dead
+  #     agent: <site>-shelf-audit-agent
+  #     metric: answer_picks_confirmed_dead
+  #     expect_max: 0
+  #     sustain_runs: 2          # must fail on this many newest runs
+  #     max_age_hours: 10        # flags a producer that stopped running
+  #     owner_class: pick-dead
+
+# ── Conversion & shop health (SKILL §5f) — the money path, every tick ──
+# Omit the block for a site with no affiliate/checkout clicks. All values are
+# the SITE's; the runbook and the sweep stay generic.
+# conversion:
+#   clicks:                       # SAME spec + profile as the site's goal tracker
+#     db: <site>
+#     table: <click_table>
+#     spec: {time_col: <col>, referer_col: <col>, bot_flag_col: <col>}   # human_clicks spec
+#     profile: <site>-site-goals-tracker   # overrides from storage config/human-click-filter-config.json
+#     match: {<col>: <value>}     # e.g. the retailer whose clicks earn
+#     page_col: <col>             # page URL/path; templates match its path
+#     product_col: <col>          # feeds money_products
+#     placement_col: null         # CTA placement column, when the site records one
+#   templates:                    # page types, first regex wins; suspect: shown, never money
+#     - {name: guide,   path_regex: '^/guides/'}
+#     - {name: product, path_regex: '^/product/'}
+#   money_placements:             # where the earning buy buttons live
+#     # with placement_col: raw values grouped as in storage config/placement-watch-config.json
+#     pdp-hero: {values: [pdp-hero], template: product, placement_watch: pdp-hero}
+#     # without it: one per template
+#     guide:    {template: guide, placement_watch: <watch group name>}
+#   money_set: {window_days: 30, min_clicks: 2, max_pages: 25, max_products: 150, slug_path_regex: '^/guides/([^/?#]+)$'}
+#   watch:
+#     full_every_minutes: 60      # templates/placements/money set; totals every tick
+#     cache: ~/.reusable-agents/ktlo-work/conversion-<site>.json   # never /tmp
+#     drop_pct: 30                # d7 vs prev7...
+#     min_prev7: 15               # ...on series with enough clicks
+#     sustain_passes: 2           # a drop must hold this many full passes
+#     post_deploy_hours: 24
+#     placements: []              # money placements watched for drops (empty = all)
+#     max_suspect_share_pct: 15
+#   probe_money_pages:            # SSR pages only; never counter-bumping APIs or click redirects
+#     top: 3
+#     headers: {x-<site>-probe: ktlo-money-page}
+#     cta_regex: 'href="/go/[^"]+"'
+#     min_cta_links: 3
+#     fallback_regex: 'search\?q='
+#     fallback_max: 0             # null = gauge only
+#   floors:                       # KTLO's own; hold even while a goal reads accomplished
+#     total_d7: 0
+#     templates: {guide: {d7: 0}}
+#     placements: {pdp-hero: {d7: 0}}
+#   goals:                        # goal docs these clicks feed; live: d1|d7|d30|null
+#     - {agent: <site>-site-goals-tracker, goal: goal-amazon-clicks-30d, live: d30}
+#   definition_drift:             # weaker click views agents still read
+#     - {name: <view>_d30, sql: "select count(*) from <view> where ...", compare_to: d30, max_ratio: 1.5, readers: [<agent-id>]}
+#   forwarded: {exclude_ua_regex: '<our own probe UA>'}
+#   owners:                       # ONE owner per outcome; action: trigger | knob | rec | escalate
+#     measurement:       {agent: <site>-site-goals-tracker, action: trigger, goals: [goal-amazon-clicks-30d]}
+#     conversion-drop:   {agent: <site>-conversion-optimizer, action: rec, rec_kind: seo}
+#     placement-drop:    {agent: <site>-conversion-optimizer, action: rec, rec_kind: seo, pause_kinds_on_regression: true}
+#     pick-dead:         {agent: <site>-shelf-audit-agent, action: rec, rec_kind: article-refresh}
+#     price-stale:       {agent: <site>-<price-refresher>, action: knob, knobs: [<ENV_KNOB>]}
+#     catalog-integrity: {agent: <site>-catalog-audit-agent, action: rec, rec_kind: catalog-audit}
+#     rail:              {agent: <site>-progressive-improvement-agent, action: rec, rec_kind: pi}
+#     money-page-gone:   {agent: <site>-progressive-improvement-agent, action: rec, rec_kind: pi}
+#     traffic-drop:      {agent: <site>-seo-opportunity-agent, action: trigger}
+#     template-drop:     {agent: <site>-user-growth-strategist, action: trigger}
+#     forwarded-bots:    {action: escalate}
+#   config_reads:                 # storage docs the money path depends on (120-day archive rule, §11.I)
+#     - {key: config/human-click-filter-config.json, require: true}
+#     - {key: config/placement-watch-config.json, require: true}
+
+# ── Staged rollout of buy-box recs (SKILL §5f) ──
+# shop_rollout:
+#   enabled: true
+#   state_key: agents/keep-the-lights-on/<site>/shop-rollout.json   # ordered queue (KTLO state)
+#   repo: /home/voidsstr/development/<site>    # read-only git: which deploys touched a template
+#   min_hours_between_template_deploys: 48
+#   max_changes_per_template_per_deploy: 1
+#   max_dispatch_per_tick: 1
+#   require_gate_green: true
+#   freeze: null                 # {start: <ISO>, end: <ISO>, reason: "..."} — operator-approved
+#   templates:                   # files that render each template (not files shared by all)
+#     guide:   {paths: [src/pages/GuidePage.tsx]}
+#     product: {paths: [src/pages/ProductPage.tsx]}
+
 # ── Functional verification (Playwright/e2e against PROD) ── (see SKILL §5b)
 # Full suite against the LIVE site >= once/day AND after any prod change.
 # Running tests is pure shell (no LLM tokens); LLM only triages/patches a
@@ -110,6 +221,7 @@ functional_tests:
     - catalog / listing pages
     - navigation (desktop + mobile)
     - affiliate / conversion CTAs
+    - buy box (top pick above the fold, primary + sticky button uncovered) — when conversion: is set
     - sitemap + robots
 
 # ── Standing incidents (operator-gated — do NOT action without go-ahead) ──

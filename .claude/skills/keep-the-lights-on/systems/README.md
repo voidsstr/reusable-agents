@@ -20,7 +20,11 @@ repo) → convention (`<repo>/keep-the-lights-on.yaml`) → `systems/<name>.yaml
 2. Edit it: `system`, `growth`, `agents` (FULL roster — critical +
    supporting; every site-prefixed agent in scope), `db`, `urls`,
    `owner_email`, `known_excluded`, `cadence`, `improvement_every_hours`,
-   `standing_incidents`.
+   `standing_incidents`. For a site with affiliate or checkout clicks, also
+   `catalog_health` (with money-set `params:` and `owner_class`),
+   `agent_metric_checks`, `conversion` and `shop_rollout` (SKILL §5f): the
+   commented blocks in `_example.yaml` onboard the money-path watch by config
+   alone.
 3. Add a `systems.<name>` entry to `registry.yaml` here.
 4. Commit the config **in the site repo** (main-first) and the registry
    entry here.
