@@ -219,6 +219,30 @@ REAL_UAS = [
 ]
 
 
+# The floor a deployment turns on in storage (A18): off in DEFAULT_SPEC.
+FLOOR = {"stale_browser": {"min_versions": {"safari": "17.3"}}}
+
+
+def _floor_spec(extra=None):
+    return hc.resolve_spec(hc._merge(FLOOR, extra or {}), config={})
+
+
+def test_safari_floor_is_off_by_default():
+    spec = hc.resolve_spec({}, config={})
+    assert hc.version_floors(spec) == {}
+    sql, _ = hc.build_breakdown_query(spec, table="clicks", window_days=30,
+                                      today=date(2026, 11, 11))
+    assert "string_to_array" not in sql
+    for ua in SAFARI_FLEET_UAS:
+        assert _py_floor_verdict(spec, ua) is False
+
+
+def test_safari_floor_from_storage_defaults(storage):
+    storage.write_json(hc.CONFIG_KEY, {"defaults": FLOOR})
+    assert hc.version_floors(hc.resolve_spec({}, storage=storage)) == {"safari": [17, 3]}
+    assert hc.version_floors(hc.resolve_spec({}, profile="any", storage=storage)) == {"safari": [17, 3]}
+
+
 def _py_floor_verdict(spec, ua):
     """Python mirror of the SQL min_versions predicate (ARE ~ Python re here)."""
     sb = spec["stale_browser"]
@@ -233,7 +257,7 @@ def _py_floor_verdict(spec, ua):
 
 
 def test_version_floors_parse_and_disable():
-    spec = hc.resolve_spec({}, config={})
+    spec = _floor_spec()
     assert hc.version_floors(spec) == {"safari": [17, 3]}
     spec["stale_browser"]["min_versions"] = {"safari": "x.1", "other": "", "e": "120"}
     assert hc.version_floors(spec) == {"e": [120]}
@@ -254,7 +278,7 @@ def test_safari_floor_is_storage_tunable(storage):
 
 
 def test_safari_floor_sql_shape():
-    spec = hc.resolve_spec({"referer_col": "referer", "bot_flag_col": "is_bot"}, config={})
+    spec = _floor_spec({"referer_col": "referer", "bot_flag_col": "is_bot"})
     sql, params = hc.build_breakdown_query(spec, table="clicks", window_days=30,
                                            match={"source": "amazon"},
                                            today=date(2026, 11, 11))
@@ -272,7 +296,9 @@ def test_safari_floor_sql_shape():
 
 
 def test_disabling_the_floor_restores_the_anchor_only_rule():
-    spec = hc.resolve_spec({"stale_browser": {"min_versions": {"safari": ""}}}, config={})
+    assert "string_to_array" in hc.build_breakdown_query(
+        _floor_spec(), table="clicks", window_days=30, today=date(2026, 11, 11))[0]
+    spec = _floor_spec({"stale_browser": {"min_versions": {"safari": ""}}})
     sql, params = hc.build_breakdown_query(spec, table="clicks", window_days=30,
                                            today=date(2026, 11, 11))
     assert "string_to_array" not in sql
@@ -282,18 +308,18 @@ def test_disabling_the_floor_restores_the_anchor_only_rule():
 
 @pytest.mark.parametrize("ua", SAFARI_FLEET_UAS)
 def test_safari_fleet_strings_are_stale(ua):
-    assert _py_floor_verdict(hc.resolve_spec({}, config={}), ua) is True
+    assert _py_floor_verdict(_floor_spec(), ua) is True
 
 
 @pytest.mark.parametrize("ua", REAL_UAS)
 def test_real_and_other_engine_uas_pass(ua):
-    assert _py_floor_verdict(hc.resolve_spec({}, config={}), ua) is False
+    assert _py_floor_verdict(_floor_spec(), ua) is False
 
 
 def test_raising_floor_catches_monterey_only_when_asked():
     ua = REAL_UAS[2]   # Safari 17.6, macOS Monterey's final release
-    assert _py_floor_verdict(hc.resolve_spec({}, config={}), ua) is False
-    raised = hc.resolve_spec({"stale_browser": {"min_versions": {"safari": "18.0"}}}, config={})
+    assert _py_floor_verdict(_floor_spec(), ua) is False
+    raised = _floor_spec({"stale_browser": {"min_versions": {"safari": "18.0"}}})
     assert _py_floor_verdict(raised, ua) is True
 
 
@@ -636,3 +662,31 @@ def test_add_engagement_without_sessions_says_unavailable_not_zero():
     assert attr["by_template"][0]["engaged_sessions_30d"] == 300
     assert attr["by_template"][0]["clicks_per_100_engaged"] == 3.0
     assert hc.add_engagement_from_report({"error": "x"}, rep) == {"error": "x"}
+
+
+def test_before_after_flags_placement_names_that_match_nothing():
+    now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+    pivot = now - timedelta(days=10)
+    rows = [
+        {"t": _ts(13, now), "path": "/k/a", "group": "kitchen-hero"},
+        {"t": _ts(9, now), "path": "/k/a", "group": "kitchen-hero"},
+        {"t": _ts(30, now), "path": "/k/b", "group": "answer-pick"},   # outside window, still seen
+    ]
+    unmatched = hc.before_after(rows, pivot=pivot, pages=["/k/a"], groups=["answer-picks"], now=now)
+    assert unmatched["groups_matched"] is False
+    assert (unmatched["pages_before"], unmatched["pages_after"]) == (1, 1)
+    seen = hc.before_after(rows, pivot=pivot, pages=["/k/a"], groups=["answer-pick"], now=now)
+    assert seen["groups_matched"] is True and (seen["before"], seen["after"]) == (0, 0)
+    # no groups filter: no key
+    assert "groups_matched" not in hc.before_after(rows, pivot=pivot, pages=["/k/a"], now=now)
+
+
+def test_attribution_block_tells_the_llm_to_use_recorded_placements():
+    attr = {"definition": "d", "group_col": "placement", "templates": [],
+            "totals": {"d7": 1, "prev7": 1, "d30": 1, "wow_pct": 0},
+            "by_template": [], "by_group": [{"group": "pdp-hero", "d7": 1, "d14": 1,
+                                             "d30": 1, "prev7": 0, "wow_pct": None}],
+            "rows": [], "rising_pages": []}
+    block = hc.attribution_prompt_block(attr)
+    assert "use these exact values in RECS_JSON `placements`" in block
+    assert "pdp-hero" in block

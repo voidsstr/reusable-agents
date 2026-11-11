@@ -246,7 +246,7 @@ def persist_run(
 #
 #   shipped_levers()                 the ledger (state + live_since per lever)
 #   human_clicks.lever_outcomes()    attaches clicks before/after live_since
-#   lever_verdict()                  too-early / new-surface / lift / no-lift
+#   lever_verdict()                  too-early / new-surface / placement-unmatched / lift / no-lift
 #   shipped_levers_prompt_block()    "SHIPPED LEVERS (14d): do not re-propose"
 #   shipped_levers_section()         that block plus the deploy-gate and
 #                                    held-pages lines, for a growth brief
@@ -280,7 +280,10 @@ SHIPPED_LEVER_RULE = (
     "after 7 days live did not move verified-human clicks: do not re-propose "
     "it or a variation of it; pick a different surface. `new-surface` means "
     "it added a buy block on pages with nothing to compare against; judge it "
-    "by its own clicks. Proposals that match a shipped lever (or one deferred "
+    "by its own clicks. `placement-unmatched` means its placement names match "
+    "no recorded value, so it could not be measured: not evidence either way; "
+    "use the exact placement values listed under CONVERSION ATTRIBUTION. "
+    "Proposals that match a shipped lever (or one deferred "
     f"in the last {DEFERRED_HOLD_HOURS} hours) are dropped in code and their "
     "slot goes to your next dispatchable Amazon-click recommendation."
 )
@@ -465,9 +468,20 @@ def shipped_levers(storage, agent_id: str, *, days: int = LEDGER_DAYS,
     return ledger
 
 
+def _placements_unmatched(outcome: Mapping) -> bool:
+    """True when a placement-filtered outcome's names matched nothing: the
+    explicit groups_matched=False from human_clicks.before_after, or (older
+    outcomes without the key) zero placement clicks on both sides."""
+    gm = outcome.get("groups_matched")
+    if gm is not None:
+        return not gm
+    return not int(outcome.get("before") or 0) and not int(outcome.get("after") or 0)
+
+
 def lever_verdict(outcome: Optional[dict], *, min_days: float = LEVER_OUTCOME_DAYS,
                   min_gain: int = 2) -> str:
-    """n/a / unscoped / too-early / new-surface / lift / no-lift for a
+    """n/a / unscoped / too-early / new-surface / placement-unmatched / lift /
+    no-lift for a
     human_clicks.before_after() result.
 
     lift = at least `min_gain` more clicks on the lever's pages/placements in
@@ -481,7 +495,13 @@ def lever_verdict(outcome: Optional[dict], *, min_days: float = LEVER_OUTCOME_DA
     judged on its pages' clicks across all placements (`pages_before` /
     `pages_after`): those clicks may only have moved off another buy block on
     the same pages. With no pages recorded either there is nothing to compare
-    against: new-surface."""
+    against: new-surface.
+
+    A lever whose placement names match no recorded value at all
+    (outcome.groups_matched is False; or, for outcomes without that key, no
+    placement clicks on either side) has meaningless placement counts: it is
+    judged on its pages alone, or is `placement-unmatched` when it recorded
+    no pages. It is never no-lift on the strength of a name mismatch."""
     if not outcome:
         return "n/a"
     if not outcome.get("scoped"):
@@ -490,14 +510,16 @@ def lever_verdict(outcome: Optional[dict], *, min_days: float = LEVER_OUTCOME_DA
         return "too-early"
     b, a = int(outcome.get("before") or 0), int(outcome.get("after") or 0)
     sb, sa = int(outcome.get("site_before") or 0), int(outcome.get("site_after") or 0)
-    if a - b < min_gain:
-        return "no-lift"
-    if b == 0 and outcome.get("pages_before") is not None:
+    if outcome.get("pages_before") is not None and _placements_unmatched(outcome):
+        if not outcome.get("pages_scoped"):
+            return "placement-unmatched"
+        b, a = int(outcome.get("pages_before") or 0), int(outcome.get("pages_after") or 0)
+    elif a - b >= min_gain and b == 0 and outcome.get("pages_before") is not None:
         if not outcome.get("pages_scoped"):
             return "new-surface"
         b, a = int(outcome.get("pages_before") or 0), int(outcome.get("pages_after") or 0)
-        if a - b < min_gain:
-            return "no-lift"
+    if a - b < min_gain:
+        return "no-lift"
     if sb:
         if b and (a / b) <= (sa / sb):
             return "no-lift"
@@ -558,7 +580,12 @@ def shipped_levers_prompt_block(ledger: list[dict], *, days: int = LEDGER_DAYS,
                 no_lift += 1
             if o.get("scoped"):
                 pages = ""
-                if not o.get("before") and o.get("pages_before") is not None and o.get("pages_scoped"):
+                if o.get("pages_before") is not None and _placements_unmatched(o):
+                    pages = (" (placement names match no recorded value: "
+                             + (f"judged on its pages, all placements: before={o.get('pages_before')}"
+                                f" after={o.get('pages_after')})" if o.get("pages_scoped")
+                                else "not measurable)"))
+                elif not o.get("before") and o.get("pages_before") is not None and o.get("pages_scoped"):
                     pages = (f" (none on these placements before: judged on its pages, all "
                              f"placements: before={o.get('pages_before')} after={o.get('pages_after')})")
                 bits.append(f"clicks {o.get('days', LEVER_OUTCOME_DAYS)}d before={o.get('before')}"

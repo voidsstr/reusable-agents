@@ -35,7 +35,8 @@ first match names the row's verdict so the breakdown is auditable):
   stale-browser      Chromium or Firefox major version more than
                      `slack_majors` behind the estimated current release,
                      or a Safari `Version/<major>.<minor>` below its
-                     `min_versions` floor (default 17.3). Real browsers
+                     `min_versions` floor (off by default; set
+                     {"safari": "17.3"} in storage config). Real browsers
                      auto-update; a hard-coded UA string in a scraper does
                      not. Browsers that legitimately lag (Samsung Internet,
                      UC, …) are exempt. A device that cannot update past an
@@ -249,9 +250,12 @@ DEFAULT_SPEC: dict[str, Any] = {
         # 120-125 / Firefox 121-128 strings the anchors already catch:
         # measured 2026-11-11, six Safari 17.0-17.2 strings at exactly one
         # click per IP were 348 of 681 "human" clicks on one deployment, and
-        # 0 of 1,351 on the other. Raise it, or blank it ("") for one
-        # consumer, in storage config: no code change.
-        "min_versions": {"safari": "17.3"},
+        # 0 of 1,351 on the other. OFF by default (behaviour-preserving):
+        # a deployment turns it on in storage config, e.g.
+        #   defaults.stale_browser.min_versions = {"safari": "17.3"}
+        # and blanks it ("") for one consumer under by_profile. The engine
+        # regexes below are inert until a floor is set.
+        "min_versions": {},
         # How each engine's version is read: exactly ONE capture group of
         # digits (anchors) or digits and dots (min_versions). Data, so a
         # deployment can add an engine. Merged over _ENGINE_UA_PATTERN.
@@ -947,7 +951,11 @@ def before_after(rows: Iterable[Mapping], *, pivot: Any, days: int = 7,
     pages_after (the page filter alone, every group; the site counts when no
     page filter is given) and pages_scoped: a lever that ADDS a placement
     has 0 clicks there before, so rec_memory.lever_verdict judges it on its
-    pages' clicks across all placements instead."""
+    pages' clicks across all placements instead. groups_matched says whether
+    ANY row in `rows` (any time, any page) carries one of the `groups`
+    values: False means the lever's placement names match nothing recorded
+    (an LLM-written name that differs from the stored values), so its
+    placement counts are meaningless rather than zero."""
     pv = _as_utc(pivot)
     now = _as_utc(now) or datetime.now(timezone.utc)
     page_ok = _like_matcher(pages, as_path=True)
@@ -956,12 +964,16 @@ def before_after(rows: Iterable[Mapping], *, pivot: Any, days: int = 7,
            "days": int(days), "after_days": 0.0,
            "scoped": bool(page_ok or grp_ok)}
     if grp_ok is not None:
-        out.update({"pages_before": 0, "pages_after": 0, "pages_scoped": page_ok is not None})
+        out.update({"pages_before": 0, "pages_after": 0, "pages_scoped": page_ok is not None,
+                    "groups_matched": False})
     if pv is None:
         return out
     start, end = pv - timedelta(days=days), min(pv + timedelta(days=days), now)
     out["after_days"] = round(max(0.0, (end - pv).total_seconds() / 86400.0), 2)
     for r in rows:
+        if (grp_ok is not None and not out["groups_matched"]
+                and grp_ok(str(r.get("group") or ""))):
+            out["groups_matched"] = True
         t = _as_utc(r.get("t"))
         if t is None or t < start or t >= end:
             continue
@@ -1242,7 +1254,8 @@ def attribution_prompt_block(attribution: Optional[Mapping], *, max_rows: int = 
                     f" per100={r.get('clicks_per_100_engaged')}")
         lines.append(f"  {r.get('template')}: {_w(r)}{rate}")
     if grp and a.get("by_group"):
-        lines.append(f"By {grp}:")
+        lines.append(f"By {grp} (use these exact values in RECS_JSON `placements`; "
+                     f"a name not listed here cannot be measured):")
         for r in a["by_group"][:max_rows]:
             lines.append(f"  {r.get('group') or '(none)'}: {_w(r)}")
     if grp:

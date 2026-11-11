@@ -35,7 +35,9 @@ appears in the rec's URL fields or text, or when one of its URL fields holds a
 guide). That over-matches on purpose: a rec that only links TO a held page is
 deferred too, and a person can release it by setting `hold_override: true` on
 the rec. Missing a real edit is the failure this exists to stop; an extra
-deferral costs one look.
+deferral costs one look. A bare `*` (prefix "/") in a URL field covers every
+page, so such a rec is deferred whenever any hold is active: deliberately,
+since a site-wide change can edit the held page too.
 """
 from __future__ import annotations
 

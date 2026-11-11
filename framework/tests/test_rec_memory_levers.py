@@ -463,3 +463,34 @@ def test_shipped_levers_section_lists_held_pages():
     assert held.startswith("HELD PAGES") and "/blog/best-a (needs a person; until 2099-01-01)" in held
     assert block == rm.shipped_levers_prompt_block([])[:50]
     assert "HELD PAGES" not in rm.shipped_levers_section([], {}, [])
+
+
+def test_unmatched_placement_names_never_read_as_no_lift():
+    def o(before, after, pb, pa, matched, pages_scoped=True, sb=100, sa=100):
+        out = {**_outcome(before, after, sb, sa), "pages_before": pb, "pages_after": pa,
+               "pages_scoped": pages_scoped}
+        if matched is not None:
+            out["groups_matched"] = matched
+        return out
+    # the reviewer's repro: names match nothing, pages gained -> judged on pages
+    assert rm.lever_verdict(o(0, 0, 3, 20, False)) == "lift"
+    assert rm.lever_verdict(o(0, 0, 3, 20, None)) == "lift"        # outcome without the key
+    # pages did not gain: an honest no-lift on the pages
+    assert rm.lever_verdict(o(0, 0, 40, 41, False)) == "no-lift"
+    # names match nothing and no pages recorded: not measurable
+    assert rm.lever_verdict(o(0, 0, 0, 0, False, pages_scoped=False)) == "placement-unmatched"
+    # a recorded placement that really got nothing stays no-lift
+    assert rm.lever_verdict(o(0, 0, 3, 20, True)) == "no-lift"
+    assert rm.lever_verdict(o(0, 1, 40, 52, True)) == "no-lift"
+    ledger = [{"id": "g-u", "title": "Answer strip", "state": "live",
+               "live_since": (NOW - timedelta(days=8)).isoformat(), "placements": ["answer-picks"],
+               "target_urls": ["/k/a"], "outcome": o(0, 0, 3, 20, False)}]
+    block = rm.shipped_levers_prompt_block(ledger, now=NOW)
+    assert "placement names match no recorded value" in block and "verdict=lift" in block
+    ledger[0]["target_urls"] = []
+    ledger[0]["outcome"] = o(0, 0, 0, 0, False, pages_scoped=False)
+    block = rm.shipped_levers_prompt_block(ledger, now=NOW)
+    assert "not measurable" in block and "verdict=placement-unmatched" in block
+    assert "placement-unmatched" in rm.SHIPPED_LEVER_RULE
+    m = rm.ledger_metrics([{**ledger[0]}])
+    assert "shipped_levers_no_lift_14d" not in m and "shipped_levers_lift_14d" not in m
