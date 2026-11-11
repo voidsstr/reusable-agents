@@ -180,3 +180,81 @@ def test_format_date_range():
     assert sc.format_date_range(dt.date(2026, 11, 27), dt.date(2026, 11, 27)) == "November 27, 2026"
     assert sc.format_date_range(dt.date(2026, 11, 27), dt.date(2026, 12, 1)) == "November 27 – December 1, 2026"
     assert sc.format_date_range(dt.date(2026, 12, 25), dt.date(2027, 1, 3)) == "December 25, 2026 – January 3, 2027"
+
+
+# ---- canonical occasion ids (plan A02: holiday:black-friday-cyber-monday)
+
+def test_canonical_occasion_id_exact_alias_prefix():
+    c = sc.canonicalizer(warn=False)
+    assert c("black-friday") == "black-friday"
+    assert c("holiday:black-friday-cyber-monday") == "black-friday"
+    assert c("cyber-monday") == c("bfcm") == c("Holiday:Black Friday") == "black-friday"
+    assert c("july-4") == c("4th-of-july") == "july-4th"
+    # hyphen-prefix: year suffixes and longer phrasings, longest id wins
+    assert c("labor-day-2026") == "labor-day"
+    assert c("back-to-school-2026") == "back-to-school"
+    assert c("new-years-eve-party") == "new-years-eve"
+    assert c("black-friday-kitchen-deals") == "black-friday-kitchen"
+    # not a hyphen boundary, not known
+    assert c("labor-dayz") is None
+    for raw in ("none", "evergreen-2026", "summer-grilling-2026", "", None, "holiday:"):
+        assert c(raw) is None, raw
+
+
+def test_canonical_occasion_id_respects_audience():
+    # cyber-monday is an alias of the tech Black Friday occasion only.
+    assert sc.canonical_occasion_id("cyber-monday", "tech", warn=False) == "black-friday"
+    assert sc.canonical_occasion_id("cyber-monday", "food", warn=False) is None
+    assert sc.canonical_occasion_id("black-friday-kitchen-deals", "tech",
+                                    warn=False) == "black-friday"
+    assert sc.canonical_occasion_ids(["holiday:bfcm", "black-friday", "none",
+                                      "thanksgiving"], "tech", warn=False) == \
+        ["black-friday", "thanksgiving"]
+
+
+def test_ambiguous_alias_falls_back_to_prefix_rule():
+    occs = (sc.Occasion(id="sale-a", label="A", month_day="11-01", aliases=("big-sale",)),
+            sc.Occasion(id="sale-b", label="B", month_day="11-02", aliases=("big-sale",)),
+            sc.Occasion(id="big", label="Big", month_day="11-03"))
+    assert sc.canonical_occasion_id("big-sale", occasions=occs, warn=False) == "big"
+    assert sc.canonical_occasion_id("big-sale", occasions=occs[:2], warn=False) is None
+
+
+def test_unknown_id_warns_once(caplog):
+    sc._WARNED_UNKNOWN.discard("zz-unknown-occasion")
+    with caplog.at_level("WARNING"):
+        c = sc.canonicalizer()
+        assert c("zz-unknown-occasion") is None and c("zz-unknown-occasion") is None
+        assert sc.canonical_occasion_id("zz-unknown-occasion") is None
+    assert sum("zz-unknown-occasion" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_storage_aliases_extend_defaults(storage):
+    storage.write_json(sc.CONFIG_KEY, {
+        "aliases": {"black-friday": ["Doorbusters", "bfcm"], "no-such-id": ["x"]},
+        "occasions": [{"id": "launch-x", "label": "Launch X", "month_day": "10-01",
+                       "audience": "tech", "aliases": "launch-x-day"}],
+    })
+    occs = {o.id: o for o in sc.load_occasions(storage)}
+    bf = occs["black-friday"]
+    assert bf.aliases == ("black-friday-cyber-monday", "cyber-monday", "bfcm", "doorbusters")
+    assert occs["launch-x"].aliases == ("launch-x-day",)   # a lone string is one alias
+    assert sc.canonical_occasion_id("doorbusters", storage=storage) == "black-friday"
+    assert sc.canonical_occasion_id("launch-x-day", storage=storage) == "launch-x"
+    assert sc.canonical_occasion_id("doorbusters", warn=False) is None   # defaults only
+
+
+def test_event_state_accepts_alias_tags():
+    assert sc.event_state("holiday:black-friday-cyber-monday", dt.date(2026, 11, 28)) == "during"
+    assert sc.event_state("holiday:4th-of-july", dt.date(2026, 7, 4)) == "during"
+    assert sc.event_state("holiday:none", dt.date(2026, 11, 28)) is None
+
+
+def test_seeded_aliases():
+    assert set(_occ("black-friday").aliases) >= {"black-friday-cyber-monday",
+                                                 "cyber-monday", "bfcm"}
+    assert _occ("black-friday-kitchen").aliases == ()
+    ids = {o.id for o in sc.DEFAULT_OCCASIONS}
+    # An alias must never shadow a real id.
+    for o in sc.DEFAULT_OCCASIONS:
+        assert not (set(o.aliases) & ids), o.id

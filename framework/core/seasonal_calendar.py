@@ -51,6 +51,15 @@ Sites consume two functions:
   event's strict window (no NOW slack), for pages that must stop saying
   "buy now" once a sale is over. `recently_ended()` and `next_occasion()`
   drive the post-event refresh (agents/event-refresh-agent).
+- `canonical_occasion_id(raw, audience)` → the calendar id a written
+  holiday id stands for. Proposers do not always copy the id verbatim: on
+  2026-11-08..10 one wrote `holiday:black-friday-cyber-monday` on three
+  Black Friday roundups, and every exact-id consumer (the output gate's
+  seasonal override, featured rotation) dropped them. Resolution: an exact
+  id, else an `Occasion.aliases` entry (extendable per deployment via
+  `aliases` in config/seasonal-calendar.json), else the calendar id the raw
+  id extends at a hyphen (`labor-day-2026` → `labor-day`). Unknown ids
+  return None. `canonicalizer()` builds the same lookup once for a loop.
 
 Refer to test_seasonal_calendar.py for the calibration cases.
 """
@@ -58,11 +67,14 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import logging
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 CONFIG_KEY = "config/seasonal-calendar.json"
+
+log = logging.getLogger(__name__)
 
 # Occasion.kind for retail sales with a hard end date (see Occasion.kind).
 RETAIL_DEAL_KIND = "retail-deal"
@@ -108,6 +120,11 @@ class Occasion:
     # recently_ended()), and next_occasion(kind=...) picks the next sale
     # as the re-angle target. Empty = a holiday or season.
     kind: str = ""
+    # Other ids that articles and proposals carry for this occasion
+    # (`black-friday-cyber-monday` for `black-friday`). canonical_occasion_id()
+    # maps them to `id`. Lowercase kebab-case. Deployments add more via
+    # `aliases` in config/seasonal-calendar.json (see load_occasions()).
+    aliases: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +252,8 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
         bucket_hints=("seasonal-occasion", "meal-planning"),
         link_categories=("grills", "outdoor-serveware", "coolers"),
         length_days=3,
+        # july-4 and 4th-of-july are on published articles (2026-11 audit).
+        aliases=("july-4", "4th-of-july", "fourth-of-july", "independence-day"),
     ),
     Occasion(
         id="labor-day",
@@ -315,6 +334,9 @@ DEFAULT_OCCASIONS: tuple[Occasion, ...] = (
         length_days=4,
         guidance=_DEAL_GUIDANCE,
         kind=RETAIL_DEAL_KIND,
+        # The window already runs through Cyber Monday. A proposer wrote
+        # holiday:black-friday-cyber-monday on three roundups (2026-11-08..10).
+        aliases=("black-friday-cyber-monday", "cyber-monday", "bfcm"),
     ),
     Occasion(
         id="black-friday-kitchen",
@@ -507,7 +529,14 @@ def resolve_date(occasion: Occasion, year: int) -> datetime.date | None:
 # Storage overrides (config/seasonal-calendar.json)
 # ---------------------------------------------------------------------------
 
-_TUPLE_FIELDS = ("recipe_keywords", "bucket_hints", "link_categories")
+_TUPLE_FIELDS = ("recipe_keywords", "bucket_hints", "link_categories", "aliases")
+
+
+def _as_tuple(v: Any) -> tuple:
+    """A JSON list as a tuple; a lone string is one item, not its letters."""
+    if isinstance(v, str):
+        return (v,) if v else ()
+    return tuple(v or ())
 
 
 def _occasion_from_dict(d: dict) -> Optional[Occasion]:
@@ -518,7 +547,10 @@ def _occasion_from_dict(d: dict) -> Optional[Occasion]:
     kw.setdefault("label", kw["id"])
     for f in _TUPLE_FIELDS:
         if f in kw:
-            kw[f] = tuple(kw[f] or ())
+            kw[f] = _as_tuple(kw[f])
+    if "aliases" in kw:
+        kw["aliases"] = tuple(a for a in (_normalize_occasion_id(x)
+                                          for x in kw["aliases"]) if a)
     if "year_dates" in kw:
         yd = kw["year_dates"]
         if isinstance(yd, dict):
@@ -540,6 +572,7 @@ def load_occasions(storage=None, *,
         "date_overrides": {"prime-big-deal-days": {"2027": "10-12"}},
         "occasions": [{"id": "...", "label": "...", "month_day": "...",
                        "audience": "tech", ...}],   # add, or replace by id
+        "aliases": {"black-friday": ["bf-deals"]},  # added to the occasion's own
         "disabled": ["super-bowl"]
       }
     Any read/parse failure returns `base` unchanged. The calendar must never
@@ -565,8 +598,109 @@ def load_occasions(storage=None, *,
         merged = dict(occ.year_dates)
         merged.update({str(y): str(md) for y, md in years.items()})
         by_id[oid] = dataclasses.replace(occ, year_dates=tuple(merged.items()))
+    aliases_cfg = cfg.get("aliases")
+    for oid, extra in (aliases_cfg.items() if isinstance(aliases_cfg, dict) else ()):
+        occ = by_id.get(oid)
+        if occ is None:
+            continue
+        added = [a for a in (_normalize_occasion_id(x) for x in _as_tuple(extra)) if a]
+        by_id[oid] = dataclasses.replace(
+            occ, aliases=tuple(dict.fromkeys([*occ.aliases, *added])))
     disabled = set(cfg.get("disabled") or [])
     return tuple(o for o in by_id.values() if o.id not in disabled)
+
+
+# ---------------------------------------------------------------------------
+# Canonical occasion ids (aliases + hyphen-prefix)
+# ---------------------------------------------------------------------------
+
+_WARNED_UNKNOWN: set[str] = set()
+
+
+def _normalize_occasion_id(raw: Any) -> str:
+    """'Holiday:Black Friday ' -> 'black-friday' (prefix dropped, lowercased,
+    spaces/underscores to hyphens)."""
+    s = str(raw if raw is not None else "").strip().lower()
+    if s.startswith("holiday:"):
+        s = s[len("holiday:"):]
+    return re.sub(r"[\s_]+", "-", s.strip()).strip("-")
+
+
+def canonicalizer(audience: Optional[str] = None, *,
+                  occasions: Sequence[Occasion] | None = None,
+                  storage=None,
+                  warn: bool = True) -> Callable[[Any], Optional[str]]:
+    """Build ``raw id -> calendar id | None`` once, for use in a loop.
+
+    Resolution, first match wins:
+      1. the raw id is a calendar id;
+      2. it is an alias (``Occasion.aliases``) of exactly one occasion;
+      3. it extends a calendar id at a hyphen (``black-friday-2026`` ->
+         ``black-friday``). When several ids match, the longest wins
+         (``new-years-eve-party`` -> ``new-years-eve``, not ``new-years``).
+    Anything else is unknown: None, logged once per id per process when
+    `warn` is set.
+
+    `audience` limits the candidates to that audience's occasions plus the
+    "general" ones, as active_signal() does; None considers every occasion.
+    `occasions` wins over `storage` (config/seasonal-calendar.json, see
+    load_occasions()); with neither, DEFAULT_OCCASIONS.
+    """
+    pool = list(occasions if occasions is not None else load_occasions(storage))
+    if audience:
+        pool = [o for o in pool if o.audience in ("general", audience)]
+    by_norm: dict[str, str] = {}
+    for o in pool:
+        by_norm.setdefault(_normalize_occasion_id(o.id), o.id)
+    alias_hits: dict[str, set[str]] = {}
+    for o in pool:
+        for a in o.aliases or ():
+            na = _normalize_occasion_id(a)
+            if na:
+                alias_hits.setdefault(na, set()).add(o.id)
+
+    def canon(raw: Any) -> Optional[str]:
+        oid = _normalize_occasion_id(raw)
+        if not oid:
+            return None
+        if oid in by_norm:
+            return by_norm[oid]
+        hits = alias_hits.get(oid) or set()
+        if len(hits) == 1:
+            return next(iter(hits))
+        prefixed = [n for n in by_norm if oid.startswith(n + "-")]
+        if prefixed:
+            return by_norm[max(prefixed, key=len)]
+        if warn and oid not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(oid)
+            log.warning("seasonal_calendar: holiday id %r is not a calendar id, "
+                        "alias or id prefix; dropped", oid)
+        return None
+
+    return canon
+
+
+def canonical_occasion_id(raw: Any, audience: Optional[str] = None, *,
+                          occasions: Sequence[Occasion] | None = None,
+                          storage=None, warn: bool = True) -> Optional[str]:
+    """The calendar id a written holiday id stands for, or None when the
+    calendar does not know it. `raw` may carry the ``holiday:`` prefix. See
+    canonicalizer() for the rules; build one canonicalizer for a loop."""
+    return canonicalizer(audience, occasions=occasions, storage=storage,
+                         warn=warn)(raw)
+
+
+def canonical_occasion_ids(raws: Iterable[Any], audience: Optional[str] = None, *,
+                           occasions: Sequence[Occasion] | None = None,
+                           storage=None, warn: bool = True) -> list[str]:
+    """Calendar ids for `raws`, first-seen order, unknown ids dropped."""
+    canon = canonicalizer(audience, occasions=occasions, storage=storage, warn=warn)
+    out: list[str] = []
+    for r in raws or ():
+        c = canon(r)
+        if c and c not in out:
+            out.append(c)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -730,11 +864,10 @@ def _coerce_occasion(occasion, occasions: Sequence[Occasion] | None,
                      storage) -> Optional[Occasion]:
     if isinstance(occasion, Occasion):
         return occasion
-    oid = str(occasion or "").strip()
-    if oid.startswith("holiday:"):
-        oid = oid[len("holiday:"):]
     pool = occasions if occasions is not None else load_occasions(storage)
-    return next((o for o in pool if o.id == oid), None)
+    # Aliases resolve too: holiday:black-friday-cyber-monday is Black Friday.
+    oid = canonical_occasion_id(occasion, occasions=pool, warn=False)
+    return next((o for o in pool if o.id == oid), None) if oid else None
 
 
 def current_window(occasion, today: datetime.date | None = None, *,

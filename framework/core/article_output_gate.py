@@ -57,6 +57,28 @@ drops our own traffic: private / loopback addresses, the
 rows whose ``ip_verified`` is false, and an optional user-agent regex for
 internal refreshers.
 
+**Affiliate-click evidence** (``traffic_gate.affiliate_clicks``, off by
+default). A prior-batch article also counts as a hit when it earned at
+least ``min_clicks`` verified-human affiliate clicks over
+``lookback_days + 1`` days. The count comes from ``framework.core.
+human_clicks`` (``resolve_spec(spec, profile=<agent id>)`` +
+``human_counts_by``), the same definition of "a person clicked a buy link"
+the goal trackers use, so an operator filter in config/human-click-filter-
+config.json applies here too. Why (2026-11): one site's GSC gave the gate 0
+hits on 14 straight days while its recent Black Friday roundups earned 9
+verified Amazon clicks. When the source is on, ``batch_hits[]`` carry
+``affiliate_clicks`` and the prompt block names the click winners first.
+
+**Canonical holiday ids.** Every holiday id the gate reads (proposal tags,
+ledger entries, ``holiday:<id>`` tags in the articles table,
+``max_per_occasion_by_id`` keys) goes through
+``seasonal_calendar.canonicalizer()``, so ``holiday:black-friday-cyber-
+monday`` is Black Friday. Before 2026-11-11 the override matched ids
+exactly and silently dropped three correctly targeted roundups. Unknown ids
+are dropped with a warning. ``max_per_occasion_by_id`` sets one occasion's
+cap (``{"black-friday": {"max_per_occasion": 20, "until": "2026-12-01"}}``),
+so a deal season can be raised without raising every occasion.
+
 CONFIG (primitive + config + extension point)
 ---------------------------------------------
 Resolution order (later wins, dicts deep-merge):
@@ -158,6 +180,22 @@ DEFAULTS: dict[str, Any] = {
         # Count distinct visitor IPs per path, not rows: a refresher hitting
         # the page right after a real visitor must not turn 1 into 2.
         "ai_visit_distinct_ips": True,
+        # Verified-human affiliate clicks as a third kind of hit (see
+        # "Affiliate-click evidence" above). Per-site values in site.yaml:
+        # `table` (click log), `spec` (framework.core.human_clicks column
+        # spec), `match` (e.g. {"target": "amazon"}), `group_col` (the
+        # column holding the page the click came from; a path or full URL,
+        # mapped to a slug with article_path_prefixes). `label` names the
+        # clicks in the prompt block and reasons.
+        "affiliate_clicks": {
+            "enabled": False,
+            "table": None,
+            "spec": {},
+            "match": {},
+            "group_col": None,
+            "min_clicks": 1,
+            "label": "Amazon clicks",
+        },
     },
     "seasonal_override": {
         "enabled": True,
@@ -170,6 +208,13 @@ DEFAULTS: dict[str, Any] = {
         # every day: 7 Prime Big Deal Days pieces per site into a domain
         # earning no impressions.
         "max_per_occasion": 2,
+        # Per-occasion override of max_per_occasion, keyed by occasion id
+        # (aliases accepted): {"black-friday": 20}, or dated
+        # {"black-friday": {"max_per_occasion": 20, "until": "2026-12-01"}}
+        # (applies through `until`, inclusive; the day after, the default
+        # cap applies again with no config change). None / negative =
+        # unlimited for that occasion. Malformed entries are ignored.
+        "max_per_occasion_by_id": {},
         "occasion_count_days": 60,
         "tags_column": "tags",
     },
@@ -503,16 +548,64 @@ def read_ai_visits(conn, *, table: str, kinds: Sequence[str],
         return out
 
 
+def read_affiliate_clicks(conn, ac: dict, *, days: int, profile: str = "",
+                          storage=None) -> dict[str, int]:
+    """``group_col`` value (the page a click came from) → verified-human
+    affiliate clicks over `days`. `ac` is a ``traffic_gate.affiliate_clicks``
+    block: ``table``, ``spec`` (framework.core.human_clicks column spec),
+    ``match``, ``group_col``. The spec resolves with ``profile`` (the
+    consumer's agent id), so config/human-click-filter-config.json
+    ``defaults`` and ``by_profile[<profile>]`` apply."""
+    from . import human_clicks
+    table = str(ac.get("table") or "")
+    group_col = str(ac.get("group_col") or "")
+    if not table or not group_col:
+        raise ValueError("affiliate_clicks needs `table` and `group_col`")
+    spec = human_clicks.resolve_spec(ac.get("spec") or {}, profile=profile,
+                                     storage=storage)
+    return human_clicks.human_counts_by(conn, spec, table=table,
+                                        group_col=group_col,
+                                        window_days=int(days),
+                                        match=ac.get("match") or None)
+
+
+def affiliate_clicks_by_slug(conn, ac: dict, *, days: int,
+                             prefixes: Sequence[str] = (), profile: str = "",
+                             storage=None) -> dict[str, int]:
+    """Article slug → verified-human affiliate clicks from its page over
+    `days` (see :func:`read_affiliate_clicks`). Pages outside `prefixes`
+    are skipped; query strings and trailing slashes are ignored. Shared
+    with framework.core.featured_rotation (``score_source``)."""
+    out: dict[str, int] = {}
+    for value, n in read_affiliate_clicks(conn, ac, days=days, profile=profile,
+                                          storage=storage).items():
+        sl = slug_from_path(value, prefixes)
+        if sl and n:
+            out[sl] = out.get(sl, 0) + int(n)
+    return out
+
+
 def read_occasion_counts(conn, *, table: str, tags_column: str,
                          holiday_ids: Sequence[str], days: int,
-                         prefix: str = "holiday") -> dict[str, int]:
+                         prefix: str = "holiday",
+                         canonical=None) -> dict[str, int]:
     """holiday id → articles tagged ``holiday:<id>`` created in the last
     `days` days (any status but archived, so scheduled pieces count).
-    ``prefix="lane"`` counts ``lane:<id>`` tags instead."""
+    ``prefix="lane"`` counts ``lane:<id>`` tags instead.
+
+    `canonical` (a ``seasonal_calendar.canonicalizer()``) makes holiday
+    counts alias-aware: every ``holiday:*`` tag in the window is mapped to
+    its calendar id, so an article tagged ``holiday:black-friday-cyber-
+    monday`` counts toward ``black-friday``. Without it, tags must match
+    exactly."""
     ids = [str(h).strip().lower() for h in holiday_ids if h]
     if not ids:
         return {}
     col = _ident(tags_column)
+    if canonical is not None and prefix == "holiday":
+        return _read_canonical_occasion_counts(conn, table=table, col=col,
+                                               ids=ids, days=days,
+                                               canonical=canonical)
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT lower(t) AS tag, COUNT(DISTINCT a.slug) AS n "
@@ -532,11 +625,48 @@ def read_occasion_counts(conn, *, table: str, tags_column: str,
         return out
 
 
+def _read_canonical_occasion_counts(conn, *, table: str, col: str,
+                                    ids: list[str], days: int,
+                                    canonical) -> dict[str, int]:
+    """Alias-aware :func:`read_occasion_counts`. One row per distinct
+    ``holiday:*`` tag in the window: (tag, distinct articles, their slugs).
+    Slugs make the per-occasion count exact when one article carries two
+    spellings of the same occasion; a row without them adds its count."""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT lower(t) AS tag, COUNT(DISTINCT a.slug) AS n, "
+            f"       array_agg(DISTINCT a.slug) AS slugs "
+            f"  FROM {_ident(table)} a, unnest(a.{col}) AS t "
+            " WHERE lower(t) LIKE %s "
+            "   AND COALESCE(a.status, '') <> 'archived' "
+            "   AND COALESCE(a.created_at, a.published_at) >= NOW() - make_interval(days => %s) "
+            " GROUP BY 1",
+            ("holiday:%", int(days)))
+        slugs: dict[str, set] = {h: set() for h in ids}
+        extra: dict[str, int] = {h: 0 for h in ids}
+        for r in cur.fetchall():
+            if isinstance(r, dict):
+                tag, n, sl = r.get("tag"), r.get("n"), r.get("slugs")
+            else:
+                tag, n = r[0], r[1]
+                sl = r[2] if len(r) > 2 else None
+            h = canonical(str(tag).split(":", 1)[-1])
+            if h not in slugs:
+                continue
+            if sl is None:
+                extra[h] += int(n or 0)
+            else:
+                slugs[h].update(str(s) for s in sl if s)
+        return {h: len(slugs[h]) + extra[h] for h in ids}
+
+
 def ledger_occasion_counts(ledger: dict, holiday_ids: Sequence[str], days: int,
                            now: Optional[_dt.datetime] = None,
-                           key: str = "holiday_ids") -> dict[str, int]:
+                           key: str = "holiday_ids",
+                           canonical=None) -> dict[str, int]:
     """holiday id → proposals the ledger recorded for it in the last `days`.
-    ``key="lane_ids"`` counts format lanes instead."""
+    ``key="lane_ids"`` counts format lanes instead. `canonical` maps
+    recorded holiday ids (older entries may hold an alias) to calendar ids."""
     n = _now(now)
     cutoff = n - _dt.timedelta(days=max(1, int(days)))
     ids = [str(h).strip().lower() for h in holiday_ids if h]
@@ -547,9 +677,49 @@ def ledger_occasion_counts(ledger: dict, holiday_ids: Sequence[str], days: int,
             continue
         for h in b.get(key) or []:
             h = str(h).strip().lower()
+            if canonical is not None:
+                h = canonical(h) or h
             if h in out:
                 out[h] += 1
     return out
+
+
+def occasion_caps(so: dict, holiday_ids: Sequence[str], *,
+                  today: Optional[_dt.date] = None,
+                  canonical=None) -> dict[str, Optional[int]]:
+    """holiday id → seasonal-override cap for it (None = unlimited).
+
+    ``max_per_occasion`` is the default; ``max_per_occasion_by_id`` replaces
+    it per occasion, as an int or as ``{"max_per_occasion": N, "until":
+    "YYYY-MM-DD"}`` (through `until`, inclusive). Keys may be aliases
+    (`canonical`). A negative or null cap means unlimited. A malformed
+    by-id entry is ignored; a malformed default raises, as it always has."""
+    def _cap(v):
+        if v is None:
+            return None
+        v = int(v)
+        return None if v < 0 else v
+
+    default = _cap(so.get("max_per_occasion"))
+    today = today or _dt.date.today()
+    by_id: dict[str, Optional[int]] = {}
+    raw = so.get("max_per_occasion_by_id")
+    for k, v in (raw.items() if isinstance(raw, dict) else ()):
+        key = (canonical(k) if canonical is not None else None) or \
+            str(k).strip().lower().removeprefix("holiday:")
+        try:
+            if isinstance(v, dict):
+                if "max_per_occasion" not in v:
+                    continue
+                until = v.get("until")
+                if until is not None and today > _dt.date.fromisoformat(str(until)):
+                    continue
+                by_id[key] = _cap(v.get("max_per_occasion"))
+            else:
+                by_id[key] = _cap(v)
+        except (TypeError, ValueError):
+            continue
+    return {h: (by_id[h] if h in by_id else default) for h in holiday_ids}
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +743,12 @@ class GateDecision:
     lane_ids: list = field(default_factory=list)       # open format lanes
     lane_room: dict = field(default_factory=dict)      # lane id -> slots left
     lane_counts: dict = field(default_factory=dict)
+    # Seasonal audience the decision was made for; select_for_queue()
+    # resolves proposal holiday ids against it.
+    audience: str = ""
+    # Set (to traffic_gate.affiliate_clicks.label) when verified affiliate
+    # clicks were read; batch_hits[] then carry `affiliate_clicks`.
+    click_label: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -580,13 +756,17 @@ class GateDecision:
     def metrics(self) -> dict:
         """Flat numeric metrics for RunResult.metrics (goal auto-tracking
         resolves flat keys only)."""
-        return {
+        out = {
             "output_gate_allowed": 1.0 if self.allowed else 0.0,
             "output_gate_slots": float(min(self.slots, 999)),
             "output_gate_queued_today": float(self.queued_today),
             "output_gate_prior_batch": float(self.batch_size),
             "output_gate_prior_batch_hits": float(len(self.batch_hits)),
         }
+        if self.click_label:
+            out["output_gate_prior_batch_affiliate_clicks"] = float(
+                sum(int(h.get("affiliate_clicks") or 0) for h in self.batch_hits))
+        return out
 
     def prompt_block(self) -> str:
         """Tell the proposer LLM how many proposals will actually be
@@ -601,7 +781,14 @@ class GateDecision:
             "most likely to earn search impressions, an AI-assistant "
             "citation, and a real Amazon purchase.",
         ]
-        if self.batch_hits:
+        if self.batch_hits and self.click_label:
+            winners = ", ".join(_hit_with_counts(h, self.click_label)
+                                for h in self.batch_hits[:8])
+            lines.append(
+                "Recent articles that earned impressions, AI visits or "
+                f"{self.click_label} (build on these topics and formats; "
+                f"most {self.click_label} first): {winners}")
+        elif self.batch_hits:
             winners = ", ".join(h["slug"] for h in self.batch_hits[:8])
             lines.append(
                 "Recent articles that DID earn impressions or AI visits (build "
@@ -625,6 +812,42 @@ class GateDecision:
                 "RECENTLY PUBLISHED articles already covers it, the first "
                 "proposal must target it and carry `holiday:<id>` in `tags`.")
         return "\n".join(lines) + "\n"
+
+
+def _hit_with_counts(h: dict, click_label: str) -> str:
+    """'slug (Amazon clicks: 7; AI visits: 1)' — non-zero counts only."""
+    parts = [f"{label}: {int(h.get(k) or 0)}"
+             for k, label in (("affiliate_clicks", click_label),
+                              ("ai_visits", "AI visits"),
+                              ("impressions", "impressions"))
+             if int(h.get(k) or 0)]
+    return f"{h['slug']} ({'; '.join(parts)})" if parts else str(h["slug"])
+
+
+def _calendar(storage):
+    """Occasions with the storage calendar config applied; the defaults when
+    the calendar or the config is unreadable."""
+    try:
+        from . import seasonal_calendar
+    except Exception:
+        return None
+    try:
+        return seasonal_calendar.load_occasions(storage)
+    except Exception:
+        return seasonal_calendar.DEFAULT_OCCASIONS
+
+
+def _canonicalizer(audience: Optional[str] = None, occasions=None,
+                   warn: bool = True):
+    """seasonal_calendar.canonicalizer(); a plain lowercase/strip when the
+    calendar module is unavailable."""
+    try:
+        from . import seasonal_calendar
+        return seasonal_calendar.canonicalizer(audience or None,
+                                               occasions=occasions, warn=warn)
+    except Exception:
+        return lambda raw: (str(raw or "").strip().lower()
+                            .removeprefix("holiday:") or None)
 
 
 def _lane_config(cfg: dict,
@@ -657,14 +880,19 @@ def _lane_config(cfg: dict,
 
 
 def active_holiday_ids(audience: str, windows: Iterable[str],
-                       today: Optional[_dt.date] = None) -> list[str]:
+                       today: Optional[_dt.date] = None,
+                       occasions=None) -> list[str]:
+    """Calendar ids of the occasions in `windows` today. `occasions` (from
+    seasonal_calendar.load_occasions(storage)) applies the storage calendar
+    config; None uses the defaults."""
     try:
         from . import seasonal_calendar
     except Exception:
         return []
     wanted = set(windows or ())
     return [a.occasion.id
-            for a in seasonal_calendar.active_signal(today, audience=audience)
+            for a in seasonal_calendar.active_signal(today, audience=audience,
+                                                     occasions=occasions)
             if a.window in wanted]
 
 
@@ -676,6 +904,21 @@ def evaluate(*, storage, agent_id: str, site_id: str,
              today: Optional[_dt.date] = None,
              conn=None) -> GateDecision:
     """Decide whether this run may queue proposals, and how many."""
+    occasions = _calendar(storage) if audience else None
+    decision = _evaluate(storage=storage, agent_id=agent_id, site_id=site_id,
+                         dsn=dsn, site_cfg=site_cfg, audience=audience,
+                         now=now, today=today, conn=conn, occasions=occasions)
+    decision.audience = audience or ""
+    # Not a dataclass field (stays out of to_dict()): the calendar, with the
+    # storage aliases, that select_for_queue() resolves proposal tags against.
+    decision._occasions = occasions
+    return decision
+
+
+def _evaluate(*, storage, agent_id: str, site_id: str,
+              dsn: Optional[str], site_cfg: Optional[dict],
+              audience: Optional[str], now: Optional[_dt.datetime],
+              today: Optional[_dt.date], conn, occasions) -> GateDecision:
     cfg = resolve_config(storage, agent_id, site_cfg)
     if not cfg.get("enabled", True):
         return GateDecision(True, UNLIMITED, "output gate disabled", "disabled")
@@ -688,7 +931,11 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     so = cfg.get("seasonal_override") or {}
     holiday_ids: list[str] = []
     if audience and so.get("enabled", True):
-        holiday_ids = active_holiday_ids(audience, so.get("windows") or (), today)
+        holiday_ids = active_holiday_ids(audience, so.get("windows") or (), today,
+                                         occasions=occasions)
+    # Aliases in DB tags / ledger entries / cap keys resolve to calendar ids.
+    # Quiet: those tags are history, warned about when they were proposed.
+    canon = _canonicalizer(audience, occasions, warn=False)
 
     base = dict(cap=cap, queued_today=already,
                 priority_holiday_ids=list(holiday_ids))
@@ -705,8 +952,8 @@ def evaluate(*, storage, agent_id: str, site_id: str,
 
     sources: dict[str, str] = {}
     prefixes = list(tg.get("article_path_prefixes") or [])
-    occ_cap = so.get("max_per_occasion")
-    occ_cap = int(occ_cap) if occ_cap is not None and int(occ_cap) >= 0 else None
+    occ_caps = occasion_caps(so, holiday_ids, today=today, canonical=canon)
+    any_occ_cap = any(c is not None for c in occ_caps.values())
     occ_days = int(so.get("occasion_count_days") or 60)
     db_occ: Optional[dict[str, int]] = None
     lanes = _lane_config(cfg, today)
@@ -714,6 +961,9 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     own_conn = False
     batch: Optional[list[dict]] = None
     ai_by_slug: Optional[dict[str, int]] = None
+    ac = tg.get("affiliate_clicks") or {}
+    ac_on = bool(ac.get("enabled"))
+    click_by_slug: Optional[dict[str, int]] = None
     try:
         if conn is None and dsn:
             conn = _connect(dsn)
@@ -744,6 +994,19 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                 sources["ai_visits"] = f"unavailable: {type(e).__name__}: {e}"[:200]
                 try: conn.rollback()
                 except Exception: pass
+            if ac_on:
+                try:
+                    click_by_slug = affiliate_clicks_by_slug(
+                        conn, ac, days=int(tg.get("lookback_days", 14)) + 1,
+                        prefixes=prefixes, profile=agent_id, storage=storage)
+                    sources["affiliate_clicks"] = (
+                        f"ok: {sum(click_by_slug.values())} verified click(s) on "
+                        f"{len(click_by_slug)} article page(s)")
+                except Exception as e:
+                    click_by_slug = None
+                    sources["affiliate_clicks"] = f"unavailable: {type(e).__name__}: {e}"[:200]
+                    try: conn.rollback()
+                    except Exception: pass
             if lanes:
                 try:
                     db_lanes = {}
@@ -758,12 +1021,12 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                     sources["lane_counts"] = f"unavailable: {type(e).__name__}: {e}"[:200]
                     try: conn.rollback()
                     except Exception: pass
-            if holiday_ids and occ_cap is not None:
+            if holiday_ids and any_occ_cap:
                 try:
                     db_occ = read_occasion_counts(
                         conn, table=tg.get("articles_table", "editorial_articles"),
                         tags_column=str(so.get("tags_column") or "tags"),
-                        holiday_ids=holiday_ids, days=occ_days)
+                        holiday_ids=holiday_ids, days=occ_days, canonical=canon)
                     sources["occasion_counts"] = f"ok: {db_occ}"
                 except Exception as e:
                     sources["occasion_counts"] = f"unavailable: {type(e).__name__}: {e}"[:200]
@@ -772,9 +1035,13 @@ def evaluate(*, storage, agent_id: str, site_id: str,
         else:
             sources["prior_batch"] = "unavailable: no DSN"
             sources["ai_visits"] = "unavailable: no DSN"
+            if ac_on:
+                sources["affiliate_clicks"] = "unavailable: no DSN"
     except Exception as e:
         sources.setdefault("prior_batch", f"unavailable: connect failed: {e}"[:200])
         sources.setdefault("ai_visits", f"unavailable: connect failed: {e}"[:200])
+        if ac_on:
+            sources.setdefault("affiliate_clicks", f"unavailable: connect failed: {e}"[:200])
     finally:
         if own_conn and conn is not None:
             try: conn.close()
@@ -807,27 +1074,45 @@ def evaluate(*, storage, agent_id: str, site_id: str,
                             f"no articles published {tg.get('min_age_days')}-"
                             f"{tg.get('lookback_days')}d ago; probe batch allowed",
                             "cap+traffic", **base)
-    if gsc_by_slug is None and ai_by_slug is None:
+    if gsc_by_slug is None and ai_by_slug is None and click_by_slug is None:
         return GateDecision(True, slots,
                             "traffic data unavailable (no fresh GSC export, "
-                            "AI-visit table unreadable); cap only",
+                            "AI-visit table unreadable"
+                            + (", affiliate clicks unreadable" if ac_on else "")
+                            + "); cap only",
                             "cap-only", **base)
 
     min_impr = int(tg.get("min_impressions", 1))
     min_ai = int(tg.get("min_ai_visits", 1))
+    # At least 1: "0 clicks" would make every prior article a hit.
+    min_clicks = max(1, int(ac.get("min_clicks", 1) or 1))
+    click_label = str(ac.get("label") or "affiliate clicks")
+    if click_by_slug is not None:
+        base["click_label"] = click_label
     hits = []
     for a in batch:
         impr = (gsc_by_slug or {}).get(a["slug"], 0)
         ai = (ai_by_slug or {}).get(a["slug"], 0)
+        clicks = (click_by_slug or {}).get(a["slug"], 0)
         if (gsc_by_slug is not None and impr >= min_impr) or \
-                (ai_by_slug is not None and ai >= min_ai):
-            hits.append({"slug": a["slug"], "impressions": impr,
-                         "ai_visits": ai})
+                (ai_by_slug is not None and ai >= min_ai) or \
+                (click_by_slug is not None and clicks >= min_clicks):
+            hit = {"slug": a["slug"], "impressions": impr, "ai_visits": ai}
+            if click_by_slug is not None:
+                hit["affiliate_clicks"] = clicks
+            hits.append(hit)
+    if click_by_slug is not None:
+        # Click winners first (the prompt block shows the first 8); stable,
+        # so ties keep newest-first.
+        hits.sort(key=lambda h: (-h["affiliate_clicks"], -h["ai_visits"],
+                                 -h["impressions"]))
     base["batch_hits"] = hits
     if hits:
+        what = (f"impressions, AI visits or {click_label}"
+                if click_by_slug is not None else "impressions or AI visits")
         return GateDecision(True, slots,
                             f"traffic gate open: {len(hits)}/{len(batch)} prior "
-                            "article(s) earned impressions or AI visits",
+                            f"article(s) earned {what}",
                             "cap+traffic", **base)
     open_lanes: list[str] = []
     lane_room: dict[str, int] = {}
@@ -848,17 +1133,20 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     if holiday_ids or open_lanes:
         open_ids, note = list(holiday_ids), ""
         holiday_room = UNLIMITED
-        if holiday_ids and occ_cap is not None:
-            led = ledger_occasion_counts(ledger, holiday_ids, occ_days, now)
+        if holiday_ids and any_occ_cap:
+            led = ledger_occasion_counts(ledger, holiday_ids, occ_days, now,
+                                         canonical=canon)
             counts = {h: max((db_occ or {}).get(h, 0), led.get(h, 0))
                       for h in holiday_ids}
             base["occasion_counts"] = counts
-            open_ids = [h for h in holiday_ids if counts[h] < occ_cap]
-            full = [f"{h} {counts[h]}/{occ_cap}" for h in holiday_ids
-                    if counts[h] >= occ_cap]
+            open_ids = [h for h in holiday_ids
+                        if occ_caps[h] is None or counts[h] < occ_caps[h]]
+            full = [f"{h} {counts[h]}/{occ_caps[h]}" for h in holiday_ids
+                    if occ_caps[h] is not None and counts[h] >= occ_caps[h]]
             if full:
                 note = f"; per-occasion cap reached for {', '.join(full)}"
-            holiday_room = sum(occ_cap - counts[h] for h in open_ids)
+            holiday_room = (UNLIMITED if any(occ_caps[h] is None for h in open_ids)
+                            else sum(occ_caps[h] - counts[h] for h in open_ids))
         if not open_ids:
             holiday_room = 0
         if open_ids or open_lanes:
@@ -885,7 +1173,10 @@ def evaluate(*, storage, agent_id: str, site_id: str,
     return GateDecision(False, 0,
                         f"traffic gate closed: 0/{len(batch)} articles published "
                         f"{tg.get('min_age_days')}-{tg.get('lookback_days')}d ago "
-                        "earned a GSC impression or an AI/search visit",
+                        + (f"earned a GSC impression, an AI/search visit or "
+                           f"{min_clicks}+ verified {click_label}"
+                           if click_by_slug is not None else
+                           "earned a GSC impression or an AI/search visit"),
                         "cap+traffic", **base)
 
 
@@ -893,7 +1184,9 @@ def evaluate(*, storage, agent_id: str, site_id: str,
 # Post-LLM selection
 # ---------------------------------------------------------------------------
 
-def proposal_holiday_ids(p: dict) -> set[str]:
+def _raw_proposal_holiday_ids(p: dict) -> set[str]:
+    """Holiday ids as written: ``holiday:<id>`` tags plus the ``holiday`` /
+    ``occasion_id`` / ``holiday_id`` keys."""
     out: set[str] = set()
     for t in p.get("tags") or []:
         t = str(t).strip().lower()
@@ -904,6 +1197,20 @@ def proposal_holiday_ids(p: dict) -> set[str]:
         if v:
             out.add(str(v).strip().lower().removeprefix("holiday:"))
     return out
+
+
+def _canonical_holiday_ids(p: dict, canon) -> set[str]:
+    return {c for c in (canon(r) for r in _raw_proposal_holiday_ids(p)) if c}
+
+
+def proposal_holiday_ids(p: dict, *, audience: Optional[str] = None,
+                         occasions=None) -> set[str]:
+    """Calendar ids of the occasions a proposal targets. Aliases resolve
+    (``holiday:black-friday-cyber-monday`` -> ``black-friday``, see
+    seasonal_calendar.canonicalizer); ids the calendar does not know are
+    dropped with a warning. `audience` limits the candidate occasions as
+    active_signal() does; `occasions` applies a storage calendar."""
+    return _canonical_holiday_ids(p, _canonicalizer(audience, occasions))
 
 
 def proposal_lane_ids(p: dict) -> set[str]:
@@ -929,13 +1236,17 @@ def lane_ids_for(proposals: Iterable[dict]) -> list[str]:
     return out
 
 
-def holiday_ids_for(proposals: Iterable[dict]) -> list[str]:
-    """One holiday id per proposal that carries one (first id when a
-    proposal has several) — the ``holiday_ids`` value for
-    :func:`record_batch`."""
+def holiday_ids_for(proposals: Iterable[dict], *,
+                    audience: Optional[str] = None,
+                    occasions=None) -> list[str]:
+    """One calendar id per proposal that carries a known one (the first
+    when a proposal has several) — the ``holiday_ids`` value for
+    :func:`record_batch`. Aliases resolve; unknown ids are left out, as
+    they could never count toward an occasion's cap."""
+    canon = _canonicalizer(audience, occasions)
     out = []
     for p in proposals or ():
-        ids = sorted(proposal_holiday_ids(p))
+        ids = sorted(_canonical_holiday_ids(p, canon))
         if ids:
             out.append(ids[0])
     return out
@@ -948,18 +1259,23 @@ def select_for_queue(proposals: Sequence[dict], decision: GateDecision
     Proposals tagged for a NOW/IMMINENT occasion move to the front, keeping
     LLM order otherwise. Under a seasonal override or format lane only
     tagged proposals are eligible: holiday-tagged first, then lane-tagged
-    up to each lane's remaining room."""
+    up to each lane's remaining room. Holiday tags are matched by calendar
+    id, so an alias such as ``holiday:black-friday-cyber-monday`` qualifies
+    for ``black-friday``."""
     if not decision.allowed:
         return [], list(proposals or [])
     props = list(proposals or [])
     want = set(decision.require_holiday_ids or decision.priority_holiday_ids or [])
     restricted = bool(decision.require_holiday_ids or decision.lane_ids)
+    canon = _canonicalizer(getattr(decision, "audience", "") or None,
+                           getattr(decision, "_occasions", None))
+    hol = {id(p): _canonical_holiday_ids(p, canon) for p in props} if want else {}
     if restricted:
-        tagged = [p for p in props if proposal_holiday_ids(p) & want]
+        tagged = [p for p in props if hol.get(id(p), set()) & want]
         room = dict(decision.lane_room or {})
         laned = []
         for p in props:
-            if proposal_holiday_ids(p) & want:
+            if hol.get(id(p), set()) & want:
                 continue
             hit = sorted(l for l in proposal_lane_ids(p) if room.get(l, 0) > 0)
             if hit:
@@ -967,8 +1283,8 @@ def select_for_queue(proposals: Sequence[dict], decision: GateDecision
                 laned.append(p)
         props = tagged + laned
     elif want:
-        tagged = [p for p in props if proposal_holiday_ids(p) & want]
-        rest = [p for p in props if not (proposal_holiday_ids(p) & want)]
+        tagged = [p for p in props if hol[id(p)] & want]
+        rest = [p for p in props if not (hol[id(p)] & want)]
         props = tagged + rest
     kept = props[:decision.slots]
     kept_ids = {id(p) for p in kept}

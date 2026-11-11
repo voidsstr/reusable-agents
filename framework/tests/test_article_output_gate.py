@@ -366,3 +366,272 @@ def test_lanes_do_not_restrict_open_traffic_gate(storage):
     assert d.mode == "cap+traffic" and d.lane_ids == []
     kept, _ = gate.select_for_queue([{"slug": "evergreen"}], d)
     assert [p["slug"] for p in kept] == ["evergreen"]
+
+
+# ── Affiliate-click evidence (traffic_gate.affiliate_clicks, plan A09) ──
+
+class _ClickCur(_Cur):
+    """_Cur plus the human_clicks breakdown query on the click table."""
+
+    def execute(self, sql, params=None):
+        if "WITH w AS (" in sql and "outbound_clicks" in sql:
+            if self.conn.fail_clicks:
+                raise RuntimeError("no such table")
+            self.conn.click_queries.append((sql, params))
+            self.rows = list(self.conn.click_rows)
+            return
+        super().execute(sql, params)
+
+
+class _ClickConn(_Conn):
+    def __init__(self, *a, click_rows=(), fail_clicks=False, **kw):
+        super().__init__(*a, **kw)
+        self.click_rows = list(click_rows)
+        self.fail_clicks = fail_clicks
+        self.click_queries = []
+
+    def cursor(self):
+        return _ClickCur(self)
+
+
+CLICKS = {"traffic_gate": {
+    "article_path_prefixes": ["/reviews/"],
+    "affiliate_clicks": {
+        "enabled": True, "table": "outbound_clicks",
+        "spec": {"time_col": "clicked_at", "referer_col": "source_page",
+                 "country_col": "country", "bot_flag_col": "is_bot"},
+        "match": {"target": "amazon", "via": "beacon"},
+        "group_col": "source_page"}}}
+
+
+def test_affiliate_clicks_off_by_default_changes_nothing(storage):
+    conn = _ClickConn(batch=["a1"], click_rows=[("human", "/reviews/a1", 5)])
+    d = _eval(storage, conn)
+    assert not d.allowed and d.mode == "cap+traffic"
+    assert conn.click_queries == [] and "affiliate_clicks" not in d.sources
+    assert d.click_label == "" and "output_gate_prior_batch_affiliate_clicks" not in d.metrics()
+    assert "earned a GSC impression or an AI/search visit" in d.reason
+    assert gate.DEFAULTS["traffic_gate"]["affiliate_clicks"]["enabled"] is False
+    # Old prompt wording when the source is off.
+    d = _eval(storage, _ClickConn(batch=["a1"], ai={"/reviews/a1": 1}))
+    assert "DID earn impressions or AI visits" in d.prompt_block()
+    assert "affiliate_clicks" not in d.batch_hits[0]
+
+
+def test_verified_click_opens_the_gate(storage):
+    rows = [("human", "/reviews/a2", 7), ("site-flagged-bot", "/reviews/a1", 90),
+            ("human", "/reviews/a1?utm_source=x", 1), ("human", "/product/B0X", 4),
+            ("velocity", "/reviews/a3", 30)]
+    conn = _ClickConn(batch=["a1", "a2", "a3"], click_rows=rows)
+    d = _eval(storage, conn, site_cfg=CLICKS)
+    assert d.allowed and d.mode == "cap+traffic"
+    assert "impressions, AI visits or Amazon clicks" in d.reason
+    # Click winners first; only human rows count; /product/ is outside the prefixes.
+    assert [(h["slug"], h["affiliate_clicks"]) for h in d.batch_hits] == [("a2", 7), ("a1", 1)]
+    assert d.sources["affiliate_clicks"].startswith("ok: 8 verified click(s) on 2")
+    assert d.metrics()["output_gate_prior_batch_affiliate_clicks"] == 8.0
+    block = d.prompt_block()
+    assert "earned impressions, AI visits or Amazon clicks" in block
+    assert "a2 (Amazon clicks: 7)" in block and "a1 (Amazon clicks: 1)" in block
+    # One human_clicks query: window = lookback_days + 1, the configured match.
+    sql, params = conn.click_queries[-1]
+    assert "FROM outbound_clicks" in sql and "source_page AS _grp" in sql
+    assert params[-3:] == [15, "amazon", "beacon"]
+
+
+def test_min_clicks_and_closed_reason(storage):
+    cfg = gate._deep_merge(CLICKS, {"traffic_gate": {"affiliate_clicks": {"min_clicks": 2}}})
+    d = _eval(storage, _ClickConn(batch=["a1"], click_rows=[("human", "/reviews/a1", 1)]),
+              site_cfg=cfg)
+    assert not d.allowed
+    assert "2+ verified Amazon clicks" in d.reason
+    # min_clicks 0 would open the gate for everything; it is floored at 1.
+    cfg0 = gate._deep_merge(CLICKS, {"traffic_gate": {"affiliate_clicks": {"min_clicks": 0}}})
+    d = _eval(storage, _ClickConn(batch=["a1"]), site_cfg=cfg0)
+    assert not d.allowed
+
+
+def test_clicks_alone_are_enough_data(storage):
+    # No GSC export, AI table unreadable: before, cap-only. With clicks
+    # readable the gate still judges the batch.
+    d = _eval(storage, _ClickConn(batch=["a1"], fail_ai=True), site_cfg=CLICKS)
+    assert d.mode == "cap+traffic" and not d.allowed
+    d = _eval(storage, _ClickConn(batch=["a1"], fail_ai=True,
+                                  click_rows=[("human", "https://x.test/reviews/a1/", 2)]),
+              site_cfg=CLICKS)
+    assert d.allowed and d.batch_hits[0]["affiliate_clicks"] == 2
+
+
+def test_click_source_failure_is_reported_not_fatal(storage):
+    d = _eval(storage, _ClickConn(batch=["a1"], ai={"/reviews/a1": 1}, fail_clicks=True),
+              site_cfg=CLICKS)
+    assert d.allowed and d.sources["affiliate_clicks"].startswith("unavailable")
+    assert d.click_label == "" and "affiliate_clicks" not in d.batch_hits[0]
+    d = _eval(storage, _ClickConn(batch=["a1"], fail_ai=True, fail_clicks=True),
+              site_cfg=CLICKS)
+    assert d.mode == "cap-only" and "affiliate clicks unreadable" in d.reason
+    bad = gate._deep_merge(CLICKS, {"traffic_gate": {"affiliate_clicks": {"table": None}}})
+    d = _eval(storage, _ClickConn(batch=["a1"]), site_cfg=bad)
+    assert d.sources["affiliate_clicks"].startswith("unavailable: ValueError")
+    d = gate.evaluate(storage=storage, agent_id="z", site_id="site-a", dsn=None,
+                      now=NOW, today=QUIET_DAY, site_cfg=CLICKS)
+    assert d.sources["affiliate_clicks"] == "unavailable: no DSN"
+
+
+def test_click_filter_resolves_with_the_agent_profile(storage):
+    from framework.core import human_clicks
+    storage.write_json(human_clicks.CONFIG_KEY, {
+        "defaults": {"extra_bot_ua_terms": ["Version/17.0 Safari/"]},
+        "by_profile": {"site-a-article-proposal-agent": {"max_clicks_per_ip_day": 3}}})
+    conn = _ClickConn(batch=["a1"])
+    _eval(storage, conn, site_cfg=CLICKS)
+    sql, params = conn.click_queries[-1]
+    assert any("Version/17\\.0\\ Safari/" in str(p) for p in params)
+    assert "_per_ip_day > 3" in sql
+
+
+def test_affiliate_clicks_by_slug_maps_urls_and_prefixes():
+    conn = _ClickConn(click_rows=[("human", "https://s.test/reviews/A1?x=1", 2),
+                                  ("human", "/reviews/a1/", 1), ("human", "/blog/b", 5),
+                                  ("human", "", 4), ("ua-bot", "/reviews/z", 9)])
+    ac = CLICKS["traffic_gate"]["affiliate_clicks"]
+    out = gate.affiliate_clicks_by_slug(conn, ac, days=30, prefixes=["/reviews/"],
+                                        storage=None)
+    assert out == {"a1": 3}
+    assert gate.affiliate_clicks_by_slug(conn, ac, days=30)["b"] == 5
+
+
+# ── Canonical holiday ids + per-occasion caps by id (plan A02 / A01) ──
+
+BF_DAY = dt.date(2026, 11, 13)   # black-friday + thanksgiving IMMINENT (tech)
+
+
+def test_alias_tagged_proposal_survives_seasonal_override(storage):
+    conn = _Conn(batch=["a1"], occ={"black-friday": 1})
+    d = _eval(storage, conn, today=BF_DAY)
+    assert d.mode == "seasonal-override" and d.audience == "tech"
+    assert set(d.require_holiday_ids) == {"black-friday", "thanksgiving"}
+    props = [{"slug": "evergreen", "tags": ["gpu"]},
+             {"slug": "bf", "tags": ["holiday:black-friday-cyber-monday"]}]
+    kept, dropped = gate.select_for_queue(props, d)
+    assert [p["slug"] for p in kept] == ["bf"]
+    assert gate.proposal_holiday_ids(props[1]) == {"black-friday"}
+    assert gate.holiday_ids_for(props + [{"tags": ["holiday:bfcm"]},
+                                         {"tags": ["holiday:none"]}]) == \
+        ["black-friday", "black-friday"]
+    assert gate.proposal_holiday_ids({"holiday": "Black Friday"}) == {"black-friday"}
+    assert gate.proposal_holiday_ids({"tags": ["holiday:labor-day-2026"]}) == {"labor-day"}
+
+
+def test_unknown_holiday_ids_are_dropped_with_a_warning(caplog):
+    from framework.core import seasonal_calendar as sc
+    sc._WARNED_UNKNOWN.discard("zz-not-a-holiday")
+    with caplog.at_level("WARNING"):
+        assert gate.proposal_holiday_ids({"tags": ["holiday:zz-not-a-holiday"]}) == set()
+        gate.proposal_holiday_ids({"tags": ["holiday:zz-not-a-holiday"]})
+    assert sum("zz-not-a-holiday" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_occasion_counts_include_alias_tags(storage):
+    # 7 exact + 3 alias-tagged Black Friday articles: 10 against the cap.
+    conn = _Conn(batch=["a1"], occ={"black-friday": 7, "black-friday-cyber-monday": 3})
+    d = _eval(storage, conn, today=BF_DAY)
+    assert d.occasion_counts["black-friday"] == 10
+    assert "black-friday 10/2" in d.reason and d.require_holiday_ids == ["thanksgiving"]
+    sql, params = conn.occ_queries[-1]
+    assert "LIKE %s" in sql and params[0] == "holiday:%"
+
+
+def test_canonical_occasion_count_is_exact_with_slugs():
+    from framework.core import seasonal_calendar as sc
+
+    class _SlugCur(_Cur):
+        def execute(self, sql, params=None):
+            self.rows = [("holiday:black-friday", 2, ["a", "b"]),
+                         ("holiday:cyber-monday", 2, ["b", "c"]),
+                         ("holiday:thanksgiving", 1, ["t"]), ("holiday:none", 5, list("vwxyz"))]
+
+    class _SlugConn(_Conn):
+        def cursor(self):
+            return _SlugCur(self)
+
+    out = gate.read_occasion_counts(_SlugConn(), table="editorial_articles", tags_column="tags",
+                                    holiday_ids=["black-friday", "thanksgiving"], days=60,
+                                    canonical=sc.canonicalizer("tech", warn=False))
+    assert out == {"black-friday": 3, "thanksgiving": 1}
+
+
+def test_ledger_alias_entries_count_toward_the_occasion(storage):
+    # An older ledger entry may hold the alias the proposer wrote.
+    gate.record_batch(storage, "site-a-article-proposal-agent", slugs=["x", "y"],
+                      holiday_ids=["black-friday-cyber-monday", "black-friday"],
+                      now=NOW - dt.timedelta(days=2))
+    d = _eval(storage, _Conn(batch=["a1"]), today=BF_DAY)
+    assert d.occasion_counts["black-friday"] == 2
+
+
+def test_max_per_occasion_by_id_raises_one_occasion_only(storage):
+    conn = _Conn(batch=["a1"], occ={"black-friday": 7, "black-friday-cyber-monday": 3,
+                                    "thanksgiving": 2})
+    cfg = {"seasonal_override": {"max_per_occasion_by_id": {
+        "black-friday": {"max_per_occasion": 20, "until": "2026-12-01"}}}}
+    d = _eval(storage, conn, today=BF_DAY, site_cfg=cfg)
+    assert d.allowed and d.mode == "seasonal-override"
+    assert d.require_holiday_ids == ["black-friday"]          # thanksgiving 2/2 stays shut
+    assert "thanksgiving 2/2" in d.reason and d.occasion_counts["black-friday"] == 10
+    assert d.slots == 1                                       # daily cap still 1
+    # Expired: the default cap of 2 applies again, no config change.
+    late = {"seasonal_override": {"max_per_occasion_by_id": {
+        "black-friday": {"max_per_occasion": 20, "until": "2026-11-12"}}}}
+    d = _eval(storage, conn, today=BF_DAY, site_cfg=late)
+    assert not d.allowed and "black-friday 10/2" in d.reason
+
+
+def test_occasion_caps_parsing():
+    canon = __import__("framework.core.seasonal_calendar", fromlist=["x"]).canonicalizer(warn=False)
+    so = {"max_per_occasion": 2, "max_per_occasion_by_id": {
+        "cyber-monday": 20,                                   # alias key
+        "thanksgiving": None,                                 # unlimited
+        "christmas": {"until": "2026-12-31"},                 # malformed: ignored
+        "halloween": {"max_per_occasion": "x"},               # malformed: ignored
+        "labor-day": -1}}                                     # unlimited
+    caps = gate.occasion_caps(so, ["black-friday", "thanksgiving", "christmas",
+                                   "halloween", "labor-day", "easter"],
+                              today=BF_DAY, canonical=canon)
+    assert caps == {"black-friday": 20, "thanksgiving": None, "christmas": 2,
+                    "halloween": 2, "labor-day": None, "easter": 2}
+    assert gate.occasion_caps({"max_per_occasion": None}, ["x"]) == {"x": None}
+
+
+def test_unlimited_by_id_occasion_opens_without_room_math(storage):
+    conn = _Conn(batch=["a1"], occ={"black-friday": 40})
+    cfg = {"max_proposals_per_day": 2,
+           "seasonal_override": {"max_per_occasion_by_id": {"black-friday": None}}}
+    d = _eval(storage, conn, today=BF_DAY, site_cfg=cfg)
+    assert d.allowed and "black-friday" in d.require_holiday_ids and d.slots == 2
+
+
+def test_operator_storage_override_for_one_agent(storage):
+    # The 2026-11-12 shape (plan A01): one agent raised, everyone else on defaults.
+    storage.write_json(gate.CONFIG_KEY, {
+        "schema_version": "1",
+        "by_agent_id": {"site-a-article-proposal-agent": {
+            "max_proposals_per_day": 1, "traffic_gate": {"enabled": True},
+            "seasonal_override": {"max_per_occasion_by_id": {
+                "black-friday": {"max_per_occasion": 20, "until": "2026-12-01"}}}}}})
+    conn = _Conn(batch=["a1"], occ={"black-friday": 10})
+    d = _eval(storage, conn, today=BF_DAY)
+    assert d.allowed and "black-friday" in d.require_holiday_ids and d.slots == 1
+    other = gate.evaluate(storage=storage, agent_id="site-b-article-proposal-agent",
+                          site_id="site-b", conn=conn, now=NOW, today=BF_DAY,
+                          audience="tech")
+    assert "black-friday" not in other.require_holiday_ids
+
+
+def test_storage_calendar_alias_reaches_select_for_queue(storage):
+    from framework.core import seasonal_calendar as sc
+    storage.write_json(sc.CONFIG_KEY, {"aliases": {"black-friday": ["doorbusters"]}})
+    d = _eval(storage, _Conn(batch=["a1"]), today=BF_DAY)
+    kept, _ = gate.select_for_queue([{"slug": "p", "tags": ["holiday:doorbusters"]}], d)
+    assert [p["slug"] for p in kept] == ["p"]
+    assert "_occasions" not in d.to_dict()
