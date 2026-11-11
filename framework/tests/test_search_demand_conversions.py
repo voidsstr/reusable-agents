@@ -152,6 +152,60 @@ def test_steering_share_counts_recent_articles_in_top_clusters(sda):
     assert m["conversion_top5_cluster_share_7d_pct"] == 50.0
 
 
+def test_share_metric_counts_the_clusters_the_block_names(sda):
+    pages = _w({"/reviews/best-monitor-2026": 40, "/reviews/llm-rig-2026": 1}, {}, {})
+    cw, m = _summary(sda, page_counts=pages)
+    assert sda.TOP_CLUSTERS_FOR_SHARE == sda.demand_signal.WHAT_SELLS_TOP_CLUSTERS
+    block = sda.demand_signal.build_conversion_block({"conversion_winners": cw})
+    rule = next(l for l in block.splitlines() if l.startswith("RULE: "))
+    assert rule.startswith("RULE: WHAT SELLS clusters: Monitors. ")
+    # LLM (1 click on 2 articles) is not a lane, in the block or the metric
+    assert "  - LLM" not in block
+    assert m["conversion_top5_cluster_share_7d_pct"] == 50.0
+
+
+def test_template_yield_counts_only_published_article_paths(sda):
+    # /reviews/legacy-guide matches other-article's pattern but is not a
+    # published article (e.g. a legacy table): its clicks stay in the template
+    # totals and out of the per-article yield.
+    pages = _w({"/reviews/llm-rig-2026": 1, "/reviews/legacy-guide": 11}, {}, {})
+    cw, m = _summary(sda, page_counts=pages)
+    t = {r["template"]: r for r in cw["templates"]}["other-article"]
+    assert (t["clicks"], t["pages"]) == (12, 2)
+    assert (t["articles"], t["article_clicks"]) == (3, 1)
+    assert t["clicks_per_100"] == 33.3                     # 1 / 3, not 12 / 3
+    assert m["conversion_article_clicks_30d"] == 1
+    best = {r["template"]: r for r in _summary(sda)[0]["templates"]}["best-x-article"]
+    assert best["article_clicks"] == best["clicks"] == 6
+
+
+def test_inactive_products_keep_their_clicks_but_lose_the_link(sda):
+    meta = {"B01": {"key": "B01", "title": "Monitor A", "category": "monitors", "price": 300,
+                    "link": "/product/B01", "active": False},
+            "B02": {"key": "B02", "title": "Cable", "category": "accessories", "price": None,
+                    "link": "/product/B02", "active": True}}
+    cw, _ = _summary(sda, product_meta=meta)
+    p = {r["key"]: r for r in cw["products"]}
+    assert p["B01"]["active"] is False and "link" not in p["B01"] and p["B01"]["clicks"] == 12
+    assert p["B02"]["link"] == "/product/B02" and "active" not in p["B02"]
+    cats = {r["category"]: r for r in cw["categories"]}
+    assert (cats["monitors"]["clicks"], cats["monitors"]["value"]) == (12, 3600.0)
+    assert sda._inactive(False) and sda._inactive("f") and sda._inactive(0)
+    assert not (sda._inactive(None) or sda._inactive(True) or sda._inactive("t"))
+    block = sda.demand_signal.build_conversion_block({"conversion_winners": cw})
+    assert "Monitor A" not in block
+    assert "  - Cable [accessories] /product/B02: 5 clicks (7d 1 vs 3)" in block
+
+
+def test_payload_caps_default_above_the_render_caps(sda):
+    pages = _w({f"/product/P{i:03d}": 100 - i for i in range(80)}, {}, {})
+    prods = _w({f"P{i:03d}": 100 - i for i in range(80)}, {}, {})
+    cw, _ = _summary(sda, page_counts=pages, product_counts=prods, product_meta={})
+    assert len(cw["products"]) == sda.DEFAULT_TOP_PRODUCTS == 50
+    assert len(cw["pages"]) == sda.DEFAULT_TOP_PAGES == 25
+    assert cw["products"][0]["key"] == "P000"
+
+
 def test_no_published_at_means_no_dated_metrics(sda):
     undated = [{"slug": a["slug"], "title": a["title"]} for a in ARTICLES]
     _, m = _summary(sda, articles=undated)
@@ -326,6 +380,38 @@ def test_collector_failure_degrades_to_a_warning(sda, fake_db, monkeypatch):
     assert fake_db["conn"].closed is True
 
 
+@pytest.mark.parametrize("over, at_over, needle", [
+    ({"templates": [{"name": "bad-tpl", "pattern": "["}]}, {}, "bad templates regex 'bad-tpl'"),
+    ({}, {"clusters": [{"name": "Bad", "pattern": "("}]}, "bad clusters regex 'Bad'"),
+    ({"top_pages": "many"}, {}, "invalid literal for int()"),
+    ({"statement_timeout_ms": "soon"}, {}, "invalid literal for int()"),
+])
+def test_bad_config_degrades_to_a_warning_before_connecting(sda, fake_db, monkeypatch,
+                                                            over, at_over, needle):
+    monkeypatch.setenv("SITE_DSN", "postgresql://fake")
+    cfg = _cfg({**BLOCK, **over})
+    cfg["data_sources"]["ai_traffic"].update(at_over)
+    dec = []
+    assert sda.SearchDemandAgent._conversion_winners(_agent(dec), cfg) is None
+    assert dec[-1][0] == "warning" and needle in dec[-1][1]
+    assert "signal ships without WHAT SELLS" in dec[-1][1]
+    assert fake_db["conn"] is None                 # failed before any DB work
+
+
+def test_non_mapping_block_degrades_to_a_warning(sda, fake_db, monkeypatch):
+    monkeypatch.setenv("SITE_DSN", "postgresql://fake")
+    dec = []
+    assert sda.SearchDemandAgent._conversion_winners(_agent(dec), _cfg("yes")) is None
+    assert dec[-1][0] == "warning" and fake_db["conn"] is None
+
+
+def test_collector_passes_the_blocks_payload_caps(sda, fake_db, monkeypatch):
+    monkeypatch.setenv("SITE_DSN", "postgresql://fake")
+    cw, _ = sda.SearchDemandAgent._conversion_winners(
+        _agent([]), _cfg({**BLOCK, "top_products": 1, "top_pages": 1}))
+    assert [p["key"] for p in cw["products"]] == ["B01"] and len(cw["pages"]) == 1
+
+
 # ── run(): the block reaches the published signal, metrics and summary ───────
 
 def test_run_publishes_conversion_winners(sda, monkeypatch, tmp_path):
@@ -358,3 +444,38 @@ def test_run_publishes_conversion_winners(sda, monkeypatch, tmp_path):
     result = sda.SearchDemandAgent.run(fake)
     assert "conversion_winners" not in written["payload"]
     assert "what_sells" not in result.summary and "conversion_clicks_30d" not in result.metrics
+
+
+def test_run_still_publishes_when_the_what_sells_config_is_broken(sda, fake_db, monkeypatch,
+                                                                  tmp_path):
+    """A typo in the click block (here a template regex) costs WHAT SELLS
+    only: run() still writes the GSC/GA4/AI signal and succeeds."""
+    cfg_path = tmp_path / "site.yaml"
+    cfg_path.write_text(
+        "site_id: site\ndata_sources:\n  gsc: {site_url: 'sc-domain:x'}\n"
+        "  ga4: {property_id: '1'}\n"
+        "  affiliate_clicks: {dsn_env: SITE_DSN, table: t, page_col: source_page,\n"
+        "                     templates: [{name: bad-tpl, pattern: '['}]}\n"
+        "auth: {oauth_file: '/dev/null'}\n")
+    monkeypatch.setenv("SEARCH_DEMAND_CONFIG", str(cfg_path))
+    monkeypatch.setenv("SITE_DSN", "postgresql://fake")
+    monkeypatch.setattr(sda, "_mint_token", lambda f: "ya29.fake")
+    written = {}
+    monkeypatch.setattr(sda.demand_signal, "write_demand",
+                        lambda storage, site, payload: written.update(site=site, payload=payload)
+                        or "framework/demand-signal/site.json")
+    dec = []
+    fake = types.SimpleNamespace(
+        agent_id="site-search-demand-agent", storage=None,
+        status=lambda *a, **k: None, decide=lambda kind, msg, **kw: dec.append((kind, msg)),
+        _pull_gsc=lambda token, url: [], _pull_ga4=lambda token, pid: [],
+        _pull_ga4_template_totals=lambda token, pid, t: {},
+        _pull_ga4_top_paths=lambda *a, **k: [], _resolve_vs_pairs=lambda dsn, p: [],
+        _category_vocab=lambda dsn: [], _steered_published_7d=lambda dsn, s: 0,
+        _ai_assistant_demand=lambda cfg: None)
+    fake._conversion_winners = lambda cfg: sda.SearchDemandAgent._conversion_winners(fake, cfg)
+    result = sda.SearchDemandAgent.run(fake)
+    assert result.status == "success"
+    assert written["site"] == "site" and "conversion_winners" not in written["payload"]
+    assert any(k == "warning" and "bad templates regex 'bad-tpl'" in m for k, m in dec)
+    assert fake_db["conn"] is None

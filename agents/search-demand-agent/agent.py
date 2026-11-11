@@ -71,13 +71,18 @@ count; the storage config's by_profile[<AGENT_ID>] overrides apply) and
 publishes ``conversion_winners`` (30d, last 7d vs the 7d before):
 
   total / templates / pages   clicks per page (template = first `templates`
-                              regex match; `articles` + `clicks_per_100` for
-                              templates that published articles map to)
+                              regex match; `articles`, `article_clicks` and
+                              `clicks_per_100` for templates that published
+                              articles map to — the yield counts only clicks
+                              on published-article paths)
   clusters                    article topic clusters, clicks per 100 published
                               articles (ai_traffic.cluster_yield)
   products / categories       clicks per product key, resolved by
                               products_query (key, title, category[, price]
-                              [, link = the internal path to cite])
+                              [, link = the internal path to cite, NULL when
+                              the site would not link it][, active = false
+                              for an inactive catalog row: kept in the
+                              category totals, never linked or listed])
   placements                  clicks per on-page slot
 
     data_sources:
@@ -92,12 +97,16 @@ publishes ``conversion_winners`` (30d, last 7d vs the 7d before):
         placement_col: placement          # optional
         category_col: category_slug       # optional; else categories via products_query
         products_query: "SELECT ... AS key, ... AS title, ... AS category,
-                         ... AS price FROM ... WHERE ... = ANY(%(keys)s)"
+                         ... AS price, ... AS link, ... AS active
+                         FROM ... WHERE ... = ANY(%(keys)s)"
         templates: [{name, pattern}]      # default: the top-level templates
         articles_query / article_path_template / clusters
                                           # default: data_sources.ai_traffic's;
                                           # a published_at column enables the
                                           # steering-share and new-article metrics
+        top_pages: 25                     # payload caps (the block shows 6);
+        top_products: 50                  # conversion_clicks() reads the payload
+        top_categories: 10
 """
 from __future__ import annotations
 
@@ -172,7 +181,14 @@ CONVERSION_TREND_DAYS = 7
 # window, trend, 2×trend: "prev7" = clicks(2×trend) − clicks(trend)
 _CONVERSION_WINDOWS = (CONVERSION_WINDOW_DAYS, CONVERSION_TREND_DAYS,
                        2 * CONVERSION_TREND_DAYS)
-TOP_CLUSTERS_FOR_SHARE = 5
+# The steering-share metric counts the same clusters the block names as WHAT
+# SELLS clusters (demand_signal.top_conversion_clusters' default).
+TOP_CLUSTERS_FOR_SHARE = demand_signal.WHAT_SELLS_TOP_CLUSTERS
+# Payload caps. The block renders 6 rows per facet; deterministic consumers
+# (conversion_clicks) read the payload, so it carries a longer tail.
+DEFAULT_TOP_PAGES = 25
+DEFAULT_TOP_PRODUCTS = 50
+DEFAULT_TOP_CATEGORIES = 10
 
 
 def _template_classifier(templates: list[dict]):
@@ -228,6 +244,12 @@ def _price(v) -> float | None:
     return round(f, 2) if f > 0 else None
 
 
+def _inactive(v) -> bool:
+    """products_query's optional `active` column says the catalog row is
+    inactive (False / 'f' / 0). None or absent means unknown, not inactive."""
+    return v is not None and str(v).strip().lower() in ("false", "f", "0", "no")
+
+
 def _published_within(ts, now: datetime, days: int) -> bool:
     if ts in (None, ""):
         return False
@@ -251,15 +273,18 @@ def summarize_conversions(*, page_counts: dict, product_counts: dict | None = No
                           templates: list[dict] | None = None,
                           page_path_template: str = "{value}",
                           label: str = "affiliate", definition: str = "",
-                          top_pages: int = 12, top_products: int = 12,
-                          top_categories: int = 10,
+                          top_pages: int = DEFAULT_TOP_PAGES,
+                          top_products: int = DEFAULT_TOP_PRODUCTS,
+                          top_categories: int = DEFAULT_TOP_CATEGORIES,
                           now: datetime | None = None) -> tuple[dict, dict]:
     """Aggregate verified-human click counts into (conversion_winners, metrics).
 
     Every ``*_counts`` argument is ``{window_days: {group value: clicks}}`` for
     the windows in ``_CONVERSION_WINDOWS``, as human_clicks.human_counts_by
     returns them. `page_counts` must cover every click (NULL pages as ""):
-    the totals are its sums. Pure: no DB, no storage.
+    the totals are its sums. `product_meta` rows come from products_query
+    (key, title, category, optional price / link / active). Pure: no DB, no
+    storage.
     """
     from framework.core import ai_traffic
     now = now or datetime.now(timezone.utc)
@@ -278,9 +303,15 @@ def summarize_conversions(*, page_counts: dict, product_counts: dict | None = No
             if slug:
                 p = ai_traffic.normalize_path(article_path_template.replace("{slug}", slug))
                 art_paths[p] = a
+    # A template's yield divides the clicks on its PUBLISHED-ARTICLE paths by
+    # its published articles; its pattern may also match other pages (e.g.
+    # a legacy article table), whose clicks stay in the template totals only.
     tpl_articles: dict[str, int] = defaultdict(int)
+    tpl_art_clicks: dict[str, int] = defaultdict(int)
     for p in art_paths:
-        tpl_articles[classify(p)] += 1
+        name = classify(p)
+        tpl_articles[name] += 1
+        tpl_art_clicks[name] += pages[p][0] if p in pages else 0
 
     tpl: dict[str, list[int]] = {}
     for p, v in pages.items():
@@ -295,7 +326,8 @@ def summarize_conversions(*, page_counts: dict, product_counts: dict | None = No
         row = {"template": name, **_trend_row(agg[:3]), "pages": agg[3]}
         if tpl_articles.get(name):
             row["articles"] = tpl_articles[name]
-            row["clicks_per_100"] = round(agg[0] * 100.0 / tpl_articles[name], 1)
+            row["article_clicks"] = tpl_art_clicks[name]
+            row["clicks_per_100"] = round(tpl_art_clicks[name] * 100.0 / tpl_articles[name], 1)
         templates_out.append(row)
     templates_out.sort(key=lambda r: (-r["clicks"], -r.get("articles", 0), r["template"]))
 
@@ -325,7 +357,11 @@ def summarize_conversions(*, page_counts: dict, product_counts: dict | None = No
                "category": m.get("category") or None, **_trend_row(v)}
         if _price(m.get("price")):
             row["price"] = _price(m.get("price"))
-        if m.get("link"):
+        # An inactive catalog row keeps its clicks (here and in the category
+        # aggregate below) but never a link: the site no longer serves it.
+        if _inactive(m.get("active")):
+            row["active"] = False
+        elif m.get("link"):
             row["link"] = str(m["link"])
         products_out.append(row)
 
@@ -395,6 +431,20 @@ def summarize_conversions(*, page_counts: dict, product_counts: dict | None = No
                 metrics["conversion_top5_cluster_share_7d_pct"] = round(
                     100.0 * sum(per.get(n, 0) for n in top) / len(recent), 1)
     return cw, metrics
+
+
+def _check_conversion_patterns(templates: list, clusters: list) -> None:
+    """Compile the click-page templates and cluster regexes the way
+    summarize_conversions will (templates as-is, clusters case-insensitive),
+    so a typo fails before any DB work, with the entry named."""
+    for kind, rows, flags in (("templates", templates, 0), ("clusters", clusters, re.I)):
+        for r in rows or []:
+            if not r.get("name") or (kind == "templates" and not r.get("pattern")):
+                continue
+            try:
+                re.compile(str(r.get("pattern") or "(?!)"), flags)
+            except re.error as e:
+                raise ValueError(f"bad {kind} regex {r.get('name')!r}: {e}") from None
 
 
 def _conversion_definition(table: str, match: dict | None, profile: str) -> str:
@@ -683,101 +733,110 @@ class SearchDemandAgent(AgentBase):
     def _conversion_winners(self, cfg: dict) -> tuple[dict, dict] | None:
         """data_sources.affiliate_clicks → (payload["conversion_winners"],
         run metrics); see the module docstring. Optional: returns None, with a
-        warning decision, on any failure — the rest of the signal still ships.
+        warning decision, on ANY failure (a bad config value or regex included,
+        checked before connecting), so the rest of the signal still ships.
         Read-only session; every statement under a statement_timeout."""
-        ds = cfg.get("data_sources") or {}
-        block = ds.get("affiliate_clicks") or {}
-        if not block or block.get("enabled") is False:
-            return None
-        table = block.get("table")
-        page_col = block.get("page_col") or block.get("group_col")
-        if not table or not page_col:
-            self.decide("warning", "affiliate_clicks skipped: needs table and page_col")
-            return None
-        dsn_env = block.get("dsn_env") or (ds.get("db") or {}).get("dsn_env") or "DATABASE_URL"
-        dsn = os.environ.get(dsn_env, "")
-        if not dsn:
-            self.decide("warning", f"affiliate_clicks skipped: ${dsn_env} not set")
-            return None
         try:
-            import psycopg2
-            from psycopg2.extras import RealDictCursor
-            from framework.core import human_clicks
-        except Exception as e:
-            self.decide("warning", f"affiliate_clicks skipped: {e}")
-            return None
-        at = ds.get("ai_traffic") or {}
-        profile = str(block.get("profile") or self.agent_id)
-        spec = human_clicks.resolve_spec(block.get("spec") or {}, profile=profile)
-        match = dict(block.get("match") or {}) or None
-        timeout_ms = int(block.get("statement_timeout_ms") or 30000)
-        articles_query = block.get("articles_query") or at.get("articles_query")
-        conn = None
-        try:
-            conn = psycopg2.connect(dsn, connect_timeout=15)
-            conn.set_session(readonly=True)
+            ds = cfg.get("data_sources") or {}
+            block = ds.get("affiliate_clicks") or {}
+            if not block or block.get("enabled") is False:
+                return None
+            table = block.get("table")
+            page_col = block.get("page_col") or block.get("group_col")
+            if not table or not page_col:
+                self.decide("warning", "affiliate_clicks skipped: needs table and page_col")
+                return None
+            dsn_env = (block.get("dsn_env") or (ds.get("db") or {}).get("dsn_env")
+                       or "DATABASE_URL")
+            dsn = os.environ.get(dsn_env, "")
+            if not dsn:
+                self.decide("warning", f"affiliate_clicks skipped: ${dsn_env} not set")
+                return None
+            try:
+                import psycopg2
+                from psycopg2.extras import RealDictCursor
+                from framework.core import human_clicks
+            except Exception as e:
+                self.decide("warning", f"affiliate_clicks skipped: {e}")
+                return None
+            # Parse every config value before connecting: a typo costs one
+            # warning, not DB work and never the rest of the signal.
+            at = ds.get("ai_traffic") or {}
+            profile = str(block.get("profile") or self.agent_id)
+            spec = human_clicks.resolve_spec(block.get("spec") or {}, profile=profile)
+            match = dict(block.get("match") or {}) or None
+            timeout_ms = int(block.get("statement_timeout_ms") or 30000)
+            max_lookup = int(block.get("max_product_lookup") or 5000)
+            caps = {"top_pages": int(block.get("top_pages") or DEFAULT_TOP_PAGES),
+                    "top_products": int(block.get("top_products") or DEFAULT_TOP_PRODUCTS),
+                    "top_categories": int(block.get("top_categories")
+                                          or DEFAULT_TOP_CATEGORIES)}
+            templates = block.get("templates") or cfg.get("templates") or []
+            clusters = block.get("clusters") or at.get("clusters") or []
+            _check_conversion_patterns(templates, clusters)
+            articles_query = block.get("articles_query") or at.get("articles_query")
+            conn = None
+            try:
+                conn = psycopg2.connect(dsn, connect_timeout=15)
+                conn.set_session(readonly=True)
 
-            def timeout(cur) -> None:
-                cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
+                def timeout(cur) -> None:
+                    cur.execute(f"SET LOCAL statement_timeout = {timeout_ms}")
 
-            def counts_by(col) -> dict:
-                if not col:
-                    return {}
-                out = {}
-                for win in _CONVERSION_WINDOWS:
-                    with conn.cursor() as cur:
+                def counts_by(col) -> dict:
+                    if not col:
+                        return {}
+                    out = {}
+                    for win in _CONVERSION_WINDOWS:
+                        with conn.cursor() as cur:
+                            timeout(cur)
+                        out[win] = human_clicks.human_counts_by(
+                            conn, spec, table=table, group_col=col, window_days=win,
+                            match=match)
+                        conn.rollback()
+                    return out
+
+                page_counts = counts_by(page_col)
+                product_counts = counts_by(block.get("product_col"))
+                placement_counts = counts_by(block.get("placement_col"))
+                category_counts = counts_by(block.get("category_col"))
+                meta: dict = {}
+                keys = [k for k in (product_counts.get(CONVERSION_WINDOW_DAYS) or {}) if k]
+                keys = keys[:max_lookup]
+                if block.get("products_query") and keys:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         timeout(cur)
-                    out[win] = human_clicks.human_counts_by(
-                        conn, spec, table=table, group_col=col, window_days=win,
-                        match=match)
+                        cur.execute(block["products_query"], {"keys": keys})
+                        for r in cur.fetchall():
+                            meta.setdefault(str(r.get("key")), dict(r))
                     conn.rollback()
-                return out
-
-            page_counts = counts_by(page_col)
-            product_counts = counts_by(block.get("product_col"))
-            placement_counts = counts_by(block.get("placement_col"))
-            category_counts = counts_by(block.get("category_col"))
-            meta: dict = {}
-            keys = [k for k in (product_counts.get(CONVERSION_WINDOW_DAYS) or {}) if k]
-            keys = keys[:int(block.get("max_product_lookup") or 5000)]
-            if block.get("products_query") and keys:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    timeout(cur)
-                    cur.execute(block["products_query"], {"keys": keys})
-                    for r in cur.fetchall():
-                        meta.setdefault(str(r.get("key")), dict(r))
-                conn.rollback()
-            articles: list[dict] = []
-            if articles_query:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    timeout(cur)
-                    cur.execute(articles_query)
-                    articles = [dict(r) for r in cur.fetchall()]
-                conn.rollback()
+                articles: list[dict] = []
+                if articles_query:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        timeout(cur)
+                        cur.execute(articles_query)
+                        articles = [dict(r) for r in cur.fetchall()]
+                    conn.rollback()
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            return summarize_conversions(
+                page_counts=page_counts, product_counts=product_counts,
+                placement_counts=placement_counts, category_counts=category_counts,
+                product_meta=meta, articles=articles, clusters=clusters,
+                article_path_template=str(block.get("article_path_template")
+                                          or at.get("article_path_template") or ""),
+                templates=templates,
+                page_path_template=str(block.get("page_path_template") or "{value}"),
+                label=str(block.get("label") or "affiliate"),
+                definition=_conversion_definition(table, match, profile), **caps)
         except Exception as e:
             self.decide("warning", f"affiliate_clicks failed ({str(e)[:160]}); "
                                    "signal ships without WHAT SELLS")
             return None
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        return summarize_conversions(
-            page_counts=page_counts, product_counts=product_counts,
-            placement_counts=placement_counts, category_counts=category_counts,
-            product_meta=meta, articles=articles,
-            clusters=block.get("clusters") or at.get("clusters") or [],
-            article_path_template=str(block.get("article_path_template")
-                                      or at.get("article_path_template") or ""),
-            templates=block.get("templates") or cfg.get("templates") or [],
-            page_path_template=str(block.get("page_path_template") or "{value}"),
-            label=str(block.get("label") or "affiliate"),
-            definition=_conversion_definition(table, match, profile),
-            top_pages=int(block.get("top_pages") or 12),
-            top_products=int(block.get("top_products") or 12),
-            top_categories=int(block.get("top_categories") or 10))
 
     # ---- the run ---------------------------------------------------------
     def run(self) -> RunResult:

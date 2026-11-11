@@ -85,9 +85,17 @@ def test_what_sells_leads_the_block_with_the_rule():
     lines = ds.build_prompt_block(SIG).splitlines()
     assert lines[0].startswith("WHAT SELLS (verified-human Amazon clicks, 30d; "
                                "last 7d vs prior 7d): 1,351 clicks, 7d 769 vs 435")
-    rule = next(i for i, l in enumerate(lines) if l.startswith("RULE: a proposal that extends "
-                                                                "a WHAT SELLS cluster"))
-    assert "AI-citation-only lane" in lines[rule] and "link the converting page or product" in lines[rule]
+    rule = next(i for i, l in enumerate(lines) if l.startswith("RULE: "))
+    # The RULE names exactly the qualifying clusters (the metric's set) ...
+    assert lines[rule].startswith("RULE: WHAT SELLS clusters: Monitors · Builds. Within the "
+                                  "topics this prompt allows, a proposal that extends a WHAT "
+                                  "SELLS cluster or a product category listed above ranks above "
+                                  "an AI-citation-only lane")
+    assert ds.top_conversion_clusters(SIG) == ["Monitors", "Builds"]
+    assert "link the converting page or product" in lines[rule]
+    # ... and defers to the consumer's own scope (an operator's BLOCKED list).
+    assert lines[rule].endswith("A BLOCKED or do-not-propose list elsewhere in this prompt "
+                                "still wins over this rule.")
     proven = next(i for i, l in enumerate(lines) if l.startswith("PROVEN SEARCH DEMAND"))
     ai = next(i for i, l in enumerate(lines) if l.startswith("AI ASSISTANT DEMAND"))
     assert rule < proven < ai
@@ -130,24 +138,104 @@ def test_product_line_cites_link_and_never_a_price():
     assert "[monitors] B0FBF7FCZW: 11 clicks" in ds.build_conversion_block(no_link)
 
 
-def test_conversion_clusters_rank_by_yield_and_flag_small_samples():
-    lines = ds.build_conversion_block(SIG, max_clusters=3).splitlines()
-    head = next(l for l in lines if l.startswith("Article topic clusters"))
-    assert "(site average 5.7)" in head   # 121 clicks / 2135 articles = 5.67
-    mon = next(i for i, l in enumerate(lines) if "- Monitors: 22.8/100" in l)
-    bld = next(i for i, l in enumerate(lines) if "- Builds: 18.7/100" in l)
-    llm = next(i for i, l in enumerate(lines) if "- LLM: 4.6/100" in l)
-    assert mon < bld < llm
-    assert lines[mon] == "  - Monitors: 22.8/100 (21 clicks, 7d 21, 92 articles)"
+def test_what_sells_clusters_are_the_metric_set_and_below_average_is_split_out():
+    lines = ds.build_conversion_block(SIG).splitlines()
+    head = next(i for i, l in enumerate(lines) if l.startswith("WHAT SELLS clusters ("))
+    # 121 clicks / 2135 articles = 5.67
+    assert "at or above the site average of 5.7" in lines[head]
+    assert lines[head + 1] == "  - Monitors: 22.8/100 (21 clicks, 7d 21, 92 articles)"
+    assert lines[head + 2] == "  - Builds: 18.7/100 (56 clicks, 7d 16, 299 articles)"
+    listed = [l.split(":")[0].strip("- ").strip() for l in lines[head + 1:]
+              if l.startswith("  - ")][:2]
+    assert listed == ds.top_conversion_clusters(SIG)
+    # A judged cluster below the site average (LLM 4.6) is never in the WHAT
+    # SELLS list, even with more clicks than a listed one; it is on its own
+    # line that says it is not a WHAT SELLS lane.
+    assert not any(l.startswith("  - LLM") for l in lines)
+    assert lines[head + 3] == ("  Below the site average (not WHAT SELLS lanes): LLM 4.6/100 "
+                               "(807 articles) · other 0.6/100 (531 articles) · Retro 0.5/100 "
+                               "(403 articles)")
+    # 2 clicks on 3 articles: shown as unproven, never as a lane
+    assert lines[head + 4] == ("  Too few articles and clicks to judge yet: Tiny 66.7/100 "
+                               "(2 clicks, 3 articles)")
     one = {"conversion_winners": {**CW, "pages": [{**CW["pages"][0], "clicks": 1}]}}
     assert "[build-price-ladder]: 1 click (7d 1 vs 0)" in ds.build_conversion_block(one)
-    below = next(l for l in lines if l.strip().startswith("Below those:"))
-    assert "other 0.6/100 (531 articles)" in below and "Retro 0.5/100 (403 articles)" in below
-    # 2 clicks on 3 articles: listed after every judged cluster, flagged
-    full = ds.build_conversion_block(SIG, max_clusters=10).splitlines()
-    tiny = next(i for i, l in enumerate(full) if "- Tiny:" in l)
-    assert "too few articles and clicks to judge" in full[tiny]
-    assert tiny > next(i for i, l in enumerate(full) if "- Retro:" in l)
+
+
+def test_cluster_cap_moves_the_rest_off_the_what_sells_list_and_out_of_the_rule():
+    lines = ds.build_conversion_block(SIG, max_clusters=1).splitlines()
+    head = next(i for i, l in enumerate(lines) if l.startswith("WHAT SELLS clusters ("))
+    assert lines[head + 1].startswith("  - Monitors:")
+    # Builds is above the average but past the cap: "not WHAT SELLS lanes"
+    # without claiming it is below the average.
+    assert lines[head + 2].startswith("  Not WHAT SELLS lanes: Builds 18.7/100 (299 articles)")
+    assert next(l for l in lines if l.startswith("RULE: ")).startswith(
+        "RULE: WHAT SELLS clusters: Monitors. Within")
+
+
+def test_rule_separates_cluster_names_that_contain_commas():
+    cw = {**CW, "clusters": [
+        {"cluster": "Knives, prep & storage", "articles": 25, "clicks": 75, "d7": 10,
+         "clicks_per_100": 300.0},
+        {"cluster": "Coffee", "articles": 8, "clicks": 68, "d7": 7, "clicks_per_100": 850.0},
+        {"cluster": "Recipes", "articles": 210, "clicks": 0, "d7": 0, "clicks_per_100": 0.0}]}
+    rule = next(l for l in ds.build_conversion_block({"conversion_winners": cw}).splitlines()
+                if l.startswith("RULE: "))
+    assert rule.startswith("RULE: WHAT SELLS clusters: Coffee · Knives, prep & storage. Within")
+
+
+def test_no_qualifying_cluster_names_none_in_the_rule():
+    weak = {"conversion_winners": {**CW, "clusters": [
+        {"cluster": "LLM", "articles": 807, "clicks": 37, "d7": 22, "clicks_per_100": 4.6},
+        {"cluster": "other", "articles": 531, "clicks": 60, "d7": 0, "clicks_per_100": 11.3},
+        {"cluster": "Tiny", "articles": 3, "clicks": 2, "d7": 0, "clicks_per_100": 66.7}]}}
+    lines = ds.build_conversion_block(weak).splitlines()
+    assert ds.top_conversion_clusters(weak) == []
+    assert any("none sells at or above the average on enough articles or clicks to judge, so "
+               "no cluster is a WHAT SELLS lane yet." in l for l in lines)
+    assert not any(l.startswith("WHAT SELLS clusters (") for l in lines)
+    # "other" sits above the average, so the line does not say "below"
+    assert "  Not WHAT SELLS lanes: other 11.3/100 (531 articles) · LLM 4.6/100 (807 articles)" \
+        in lines
+    rule = next(l for l in lines if l.startswith("RULE: "))
+    assert rule.startswith("RULE: Within the topics this prompt allows")
+    unclicked = {"conversion_winners": {**CW, "clusters": [
+        {"cluster": "LLM", "articles": 807, "clicks": 0, "d7": 0, "clicks_per_100": 0}]}}
+    assert "Article topic clusters: no published article earned a verified click in 30d, so no " \
+           "cluster is a WHAT SELLS lane yet." in ds.build_conversion_block(unclicked)
+
+
+def test_template_yield_says_when_some_clicks_are_not_on_published_articles():
+    cw = {**CW, "templates": [
+        {"template": "other-article", "clicks": 50, "d7": 26, "prev7": 11, "pages": 18,
+         "articles": 1568, "article_clicks": 36, "clicks_per_100": 2.3},
+        {"template": "best-x-article", "clicks": 83, "d7": 50, "prev7": 26, "pages": 46,
+         "articles": 791, "article_clicks": 83, "clicks_per_100": 10.5}]}
+    block = ds.build_conversion_block({"conversion_winners": cw})
+    assert ("  - other-article: 50 clicks (7d 26 vs 11) from 18 pages; 2.3 per 100 of 1,568 "
+            "published articles (36 of the clicks are on them)") in block
+    assert block.count("of the clicks are on them") == 1     # equal counts say nothing extra
+
+
+def test_products_list_skips_inactive_and_unresolved_rows():
+    rows = [
+        {"key": "61595", "title": "Slow Cooker", "category": "small-appliances", "active": False,
+         "clicks": 16, "d7": 0, "prev7": 3},
+        {"key": "99999", "title": "", "category": None, "clicks": 9, "d7": 1, "prev7": 1},
+        {"key": "962", "title": "Coffee Maker", "category": "small-appliances",
+         "link": "/k/coffee-maker", "clicks": 19, "d7": 4, "prev7": 8},
+        {"key": "B0X", "title": "", "category": None, "link": "/product/B0X", "clicks": 2,
+         "d7": 0, "prev7": 0}]
+    block = ds.build_conversion_block({"conversion_winners": {**CW, "products": rows}})
+    prods = [l for l in block.splitlines()
+             if l.startswith("  - ") and ("/k/" in l or "/product/B0X" in l
+                                          or "Slow Cooker" in l or "99999" in l)]
+    assert prods == ["  - Coffee Maker [small-appliances] /k/coffee-maker: 19 clicks (7d 4 vs 8)",
+                     "  - B0X /product/B0X: 2 clicks (7d 0 vs 0)"]
+    # the facet helper still reports the inactive product's clicks
+    assert ds.conversion_clicks({"conversion_winners": {"products": rows}}, "products")["61595"] == 16
+    only_inactive = {"conversion_winners": {**CW, "products": rows[:2]}}
+    assert "Top converting products" not in ds.build_conversion_block(only_inactive)
 
 
 def test_conversion_clicks_by_facet():

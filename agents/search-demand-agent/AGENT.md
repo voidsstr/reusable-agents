@@ -83,12 +83,18 @@ LLM.
     - totals: sums over the page facet, NULL pages included;
     - pages: normalized paths, classified by the block's `templates` (else
       the top-level list);
-    - template yields: `clicks_per_100` over published articles;
+    - template yields: `clicks_per_100` = clicks on the template's
+      published-article paths (`article_clicks`) per 100 published
+      articles; clicks on other pages its pattern matches (e.g. a legacy
+      article table) stay in the template totals only;
     - clusters: `ai_traffic.cluster_yield` over `articles_query`;
-    - products: resolved by `products_query`;
+    - products: resolved by `products_query`. A row with `active` false
+      keeps its clicks (product and category totals) but gets no `link`;
     - categories: from the products, or from `category_col`.
 
-    A failure logs a `warning` and the signal ships without it.
+    Any failure logs a `warning` and the signal ships without it. That
+    includes a bad config value or regex: every value is parsed and every
+    template / cluster regex compiled before connecting.
 12. **Publish**: `demand_signal.write_demand(storage, site_id, payload)`
     writes `framework/demand-signal/<site_id>.json` and adds `site` and
     `generated_at`.
@@ -131,19 +137,28 @@ LLM.
   `conversion_winners`, with keys `label`, `window_days`, `trend_days`,
   `definition` and `total` `{d30, d7, prev7}`, plus these lists:
   - `templates`: `{template, clicks, d7, prev7, pages, articles,
-    clicks_per_100}`;
+    article_clicks, clicks_per_100}`;
   - `placements`: `{placement, clicks, d7, prev7}`;
   - `clusters`: `{cluster, articles, clicks, d7, clicks_per_100}`;
   - `categories`: `{category, clicks, d7, prev7, products, value}`;
-  - `products`: `{key, title, category, price, link, clicks, d7, prev7}`;
+  - `products`: `{key, title, category, price, link, active, clicks, d7,
+    prev7}` (`active: false` only for an inactive catalog row);
   - `pages`: `{path, template, clicks, d7, prev7}`.
 
   `build_prompt_block` renders it FIRST as **WHAT SELLS (verified-human
-  <label> clicks, 30d; last 7d vs prior 7d)**, with this rule: a proposal
-  that extends a WHAT SELLS cluster or category ranks above an
-  AI-citation-only lane and must link the converting page or product. The
-  block never shows a per-product price, so authors don't quote a stale
-  one. `template_winners` is relabelled "GA4 views (includes crawlers)".
+  <label> clicks, 30d; last 7d vs prior 7d)**. Its "WHAT SELLS clusters"
+  are exactly `demand_signal.top_conversion_clusters(sig)`: at least one
+  click, 10+ articles or 10+ clicks, a yield at or above the site average,
+  at most `WHAT_SELLS_TOP_CLUSTERS` (5). Judged clusters below the average
+  go on a separate "not WHAT SELLS lanes" line. The closing RULE names
+  those clusters: within the topics the consumer's prompt allows, a
+  proposal that extends one of them or a listed product category ranks
+  above an AI-citation-only lane and must link the converting page or
+  product. A BLOCKED or do-not-propose list in the consumer's prompt still
+  wins. The block never shows a per-product price, so authors don't quote
+  a stale one, and never lists an inactive product (`active: false`) or
+  one the catalog lookup did not resolve. `template_winners` is relabelled
+  "GA4 views (includes crawlers)".
   Consumers ignore a signal older than 72h (`DEFAULT_MAX_AGE_HOURS`).
 - **Decisions**: `info` "demand signal written to …", plus `warning`s for
   GA4, vocabulary or template-total failures.
@@ -169,9 +184,10 @@ LLM.
     the last 30d.
   - `conversion_recent_articles_7d`.
   - `conversion_top5_cluster_share_7d_pct`: share of the last 7 days'
-    articles that fall in a top-5 WHAT SELLS cluster, i.e. clicks per 100
-    at or above the site average (`demand_signal.top_conversion_clusters`).
-    It is omitted when no cluster qualifies.
+    articles that fall in a WHAT SELLS cluster, the same set the block
+    lists and its RULE names (`demand_signal.top_conversion_clusters`,
+    top `WHAT_SELLS_TOP_CLUSTERS` = 5). It is omitted when no cluster
+    qualifies.
 
 ## Goals & metrics
 
@@ -201,7 +217,7 @@ Env vars:
 | `auth.oauth_file` | required | Google OAuth refresh-token file |
 | `templates[]` | `[]` | ordered `{name, pattern[, prefix]}`, where the first regex match wins. `prefix` sets the GA4 total filter explicitly |
 | `min_impressions` | 20 | ceiling for the adaptive floor |
-| `data_sources.affiliate_clicks` | none (off) | WHAT SELLS. Keys: `label` (merchant name in the title, default `affiliate`), `dsn_env` (default `data_sources.db.dsn_env`), `table`, `spec` (human_clicks columns; storage `by_profile[<AGENT_ID>]` overrides apply, or set `profile`), `match` (`{col: value}`; a list means IN), `page_col` (alias `group_col`; a path or full-URL column), `page_path_template` (`{value}`), optional `product_col` / `placement_col` / `category_col`, `products_query` (`key, title, category[, price][, link]` for `%(keys)s`; price is used only for the aggregate category value), `templates[]` (click-page classifier, default the top-level `templates`), `articles_query` / `article_path_template` / `clusters` (default `data_sources.ai_traffic`'s; a `published_at` column enables the dated metrics), `top_pages` 12, `top_products` 12, `top_categories` 10, `max_product_lookup` 5000, `statement_timeout_ms` 30000. Any failure logs a warning and the signal ships without the block. |
+| `data_sources.affiliate_clicks` | none (off) | WHAT SELLS. Keys: `label` (merchant name in the title, default `affiliate`), `dsn_env` (default `data_sources.db.dsn_env`), `table`, `spec` (human_clicks columns; storage `by_profile[<AGENT_ID>]` overrides apply, or set `profile`), `match` (`{col: value}`; a list means IN), `page_col` (alias `group_col`; a path or full-URL column), `page_path_template` (`{value}`), optional `product_col` / `placement_col` / `category_col`, `products_query` (`key, title, category[, price][, link][, active]` for `%(keys)s`; price is used only for the aggregate category value; return `link` only for a row the site would link and `active` false for an inactive row, which is then never listed or linked; gate `category` on the site's category-confidence rule if it has one), `templates[]` (click-page classifier, default the top-level `templates`), `articles_query` / `article_path_template` / `clusters` (default `data_sources.ai_traffic`'s; a `published_at` column enables the dated metrics), `top_pages` 25, `top_products` 50, `top_categories` 10 (payload caps; the block renders 6 rows each, `conversion_clicks()` reads the payload, so raise them for a deterministic ranker), `max_product_lookup` 5000, `statement_timeout_ms` 30000. Any failure, a bad value or regex included, logs a warning and the signal ships without the block. |
 | `data_sources.ai_traffic` | none (off) | AI-assistant demand. Keys: `dsn_env` (default `data_sources.db.dsn_env`), `config` (overrides for `ai_traffic.DEFAULTS`, e.g. `referral_sources`, `live_fetch_sources`), `articles_query` (`slug, title` of published articles), `article_path_template` (`/reviews/{slug}`), `clusters[]` (`{name, pattern}`; regex on "slug title", first match wins), `product_prefix`, `product_key_regex`, `products_query` (`key, title, category` for `%(keys)s`; double any literal `%`), `top_products` (15). Any failure logs a warning and the signal ships without the block. |
 
 ## Short-circuit & idempotency
@@ -245,7 +261,7 @@ exactly the block authors inject.
 | warning `category vocab unavailable` | DSN env unset or DB unreachable | check the DSN env named in `data_sources.db.dsn_env` |
 | `topics_emitted` = 0 | no GSC/GA4 evidence matched the vocabulary | check `gsc_rows` / `ga4_rows` in the run metrics |
 | Authors not steered | signal older than 72h (producer dead) → `read_demand` returns None | check the instance timer and last run |
-| warning `affiliate_clicks failed …` / no WHAT SELLS block | click-table name, column (`spec`, `page_col`, …) or `products_query` wrong, or the DSN env is unset. A window with 0 human clicks renders no block by design | run the instance once with `AGENT_FORCE_RUN=1`; compare `conversion_clicks_30d` with `python3 -m framework.cli.human_clicks` for the same table, spec and match |
+| warning `affiliate_clicks failed …` / no WHAT SELLS block | click-table name, column (`spec`, `page_col`, …) or `products_query` wrong, a bad `templates` / `clusters` regex (`bad templates regex '<name>'`) or non-integer cap, or the DSN env is unset. A window with 0 human clicks renders no block by design | run the instance once with `AGENT_FORCE_RUN=1`; compare `conversion_clicks_30d` with `python3 -m framework.cli.human_clicks` for the same table, spec and match |
 
 ## Related agents
 
