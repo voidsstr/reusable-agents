@@ -979,8 +979,21 @@ def build_prompt(recs: list[dict], repo_path: Path, site: str,
                     resolve_minima as _resolve_minima,
                 )
                 # Per-site minima from config/article-link-guard-config.json
-                # (framework-first — no site literals here).
-                _m = _resolve_minima(r.get("agent_id") or proposal.get("site") or "")
+                # (framework-first — no site literals here). The storage copy
+                # is laid over the repo default, the same config run.sh's
+                # INSERT gate reads, so the directive states the contract the
+                # gate enforces (incl. the bucket's direct-buy-link minimum,
+                # which render_link_directive derives from proposal.bucket).
+                try:
+                    from framework.core.storage import get_storage as _gs
+                    _guard_store = _gs()
+                except (Exception, SystemExit):  # unknown STORAGE_BACKEND raises SystemExit
+                    _guard_store = None
+                # Proposer recs carry neither agent_id nor proposal.site, so
+                # fall back to this dispatch's site — without it the site's
+                # block (kitchen roots, buy-link minima) never applied.
+                _m = _resolve_minima(r.get("agent_id") or proposal.get("site") or site or "",
+                                     _guard_store)
                 link_directive_text = _link_directive(
                     proposal,
                     min_recipes=_m["min_recipes"],

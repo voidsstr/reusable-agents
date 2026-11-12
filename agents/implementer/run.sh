@@ -2213,6 +2213,34 @@ def _reflow_inline_pipe_tables(s: str) -> tuple[str, int]:
         _fix, s)
     return out, n
 
+_GUARD_STORE: list = []
+
+
+def _guard_site_hint(rec: dict, proposal: dict) -> str:
+    """The hint the link-guard config is keyed by. Proposer recs carry
+    neither `agent_id` nor `proposal.site` (checked 2026-11-12), so without
+    this dispatch's source agent / site the hint was "" and the guard ran on
+    the config's default block — never the site's own knobs."""
+    for v in (rec.get("agent_id"), proposal.get("site"), source_agent, site):
+        if v and str(v).strip() not in ("", "?"):
+            return str(v).strip()
+    return ""
+
+
+def _guard_storage():
+    """Storage backend for the link-guard config (its storage copy is laid
+    over the repo default — article_link_guard.merge_guard_config), created
+    once per insert step. None when no backend is reachable: the repo
+    default then applies on its own."""
+    if not _GUARD_STORE:
+        try:
+            from framework.core.storage import get_storage as _gs
+            _GUARD_STORE.append(_gs())
+        except (Exception, SystemExit):  # unknown STORAGE_BACKEND raises SystemExit
+            _GUARD_STORE.append(None)
+    return _GUARD_STORE[0]
+
+
 for rid, body_p, meta_p in pairs:
     try:
         body_md = body_p.read_text()
@@ -2256,7 +2284,7 @@ for rid, body_p, meta_p in pairs:
             )
             _rec_ks = recs_doc.get(rid) or {}
             _prop_ks = _rec_ks.get("proposal") or _rec_ks.get("article_proposal") or {}
-            _ks_min = _rm_ks(_rec_ks.get("agent_id") or _prop_ks.get("site") or "") or {}
+            _ks_min = _rm_ks(_guard_site_hint(_rec_ks, _prop_ks), _guard_storage()) or {}
             _ks_cfg = _ks_min.get("kitchen_slug_check")
             if _ks_cfg:
                 _ks_resolve = kitchen_slug_resolver_from_db(conn, body_md, _ks_cfg)
@@ -2288,28 +2316,38 @@ for rid, body_p, meta_p in pairs:
         # internal-link equity, no conversion path). Aisleprompt
         # defaults: 5 recipe links + 2 kitchen-category links.
         # Specpicks: 0/0 (no recipes/, kitchen recs surfaced via PDP).
+        # DIRECT BUY LINKS (2026-11-12 review): monetized buckets (and gift /
+        # checklist titles) also need N distinct buy links — a /kitchen/
+        # product-page link counts as a kitchen link but is not a buy
+        # button, and seven guides shipped with none. The minimum is picked
+        # by the article's bucket + title from the same config
+        # (min_buy_links_for).
         try:
-            from framework.core.article_link_guard import verify_body
+            from framework.core.article_link_guard import (
+                resolve_minima, verify_body_with_config)
             _rec_for_guard = recs_doc.get(rid) or {}
             _proposal_for_guard = (_rec_for_guard.get("proposal")
                                    or _rec_for_guard.get("article_proposal")
                                    or {})
-            _site_hint = (_rec_for_guard.get("agent_id") or
-                          _proposal_for_guard.get("site") or "")
+            _site_hint = _guard_site_hint(_rec_for_guard, _proposal_for_guard)
+            _guard_bucket = str(_proposal_for_guard.get("bucket")
+                                or _proposal_for_guard.get("category") or "")
             # Per-site minima come from config (framework-first) — see
-            # config/article-link-guard-config.json; storage copy overrides.
-            from framework.core.article_link_guard import resolve_minima
-            _minima = resolve_minima(_site_hint)
-            _audit = verify_body(body_md, _proposal_for_guard,
-                                  min_recipes=_minima["min_recipes"],
-                                  min_kits=_minima["min_kits"],
-                                  min_products=_minima["min_products"],
-                                  kitchen_roots=_minima.get("kitchen_roots"))
+            # config/article-link-guard-config.json; the storage copy is
+            # laid over the repo default.
+            _minima = resolve_minima(_site_hint, _guard_storage())
+            _audit = verify_body_with_config(
+                body_md, _proposal_for_guard, _minima,
+                bucket=[str(_proposal_for_guard.get("bucket") or ""),
+                        str(_proposal_for_guard.get("category") or "")],
+                title=str(_proposal_for_guard.get("title") or ""))
             if not _audit.passes:
                 errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
                                     f"(recipes={_audit.recipe_links}, "
                                     f"kitchen={_audit.kitchen_links}, "
                                     f"products={_audit.product_links}, "
+                                    f"buy={_audit.buy_links}, "
+                                    f"bucket={_guard_bucket or '?'}, "
                                     f"matched={_audit.matched_expected_recipes}"
                                     f"/{_audit.expected_recipe_total} expected) "
                                     f"— refusing INSERT; re-queue with addendum"))
@@ -2317,6 +2355,8 @@ for rid, body_p, meta_p in pairs:
                       f"recipes={_audit.recipe_links}/{_audit.min_recipes} "
                       f"kits={_audit.kitchen_links}/{_audit.min_kits} "
                       f"products={_audit.product_links}/{_audit.min_products} "
+                      f"buy={_audit.buy_links}/{_audit.min_buy_links} "
+                      f"bucket={_guard_bucket or '?'} "
                       f"— SKIP",
                       file=sys.stderr)
                 continue
@@ -2634,7 +2674,7 @@ for rid, row_id, slug in inserted_ids:
 - Backend that wrote body_md: {backend}
 
 ## Live URL
-{LIVE_URL}
+{{LIVE_URL}}
 """.replace("{LIVE_URL}", _live_url(site, slug)))
 
 print(f"[article-insert] applied={len(inserted_ids)} errors={len(errors)}")
@@ -2736,6 +2776,24 @@ SHIP_EOF
             echo "[implementer] claude exited rc=$rc" >&2
             rm -f "$PROMPT_FILE"
             exit $rc
+        fi
+        # ── Link-guard sweep, report only (2026-11-12 article review) ──
+        # The Opus author INSERTs its own rows (written_by='claude-cli'), so
+        # the wrapper's INSERT-time link guard above never sees them: none
+        # of the 54 articles published 2026-10-13..11-12 went through the
+        # wrapper INSERT, and seven guides shipped with zero buy links. ARTICLE_AUTHOR.md has the
+        # author run `framework/cli/article_link_guard.py check` before its
+        # INSERT; this re-checks what was just written and logs every row
+        # that still falls short (the site-consistency audit reports it
+        # too). Read-only — it never edits or unpublishes a row.
+        _LG_SITE="${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_SITE:-}}"
+        if [ "$DISPATCH_KIND" = "article-author" ] && [ -n "${DATABASE_URL:-}" ] \
+                && [ -n "$_LG_SITE" ]; then
+            DATABASE_URL="$DATABASE_URL" \
+                PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                python3 -m framework.cli.article_link_guard sweep \
+                --site "$_LG_SITE" --since-hours 6 \
+                2>&1 | sed 's/^/[link-guard] /' >&2 || true
         fi
         rm -f "$PROMPT_FILE"
         ;;

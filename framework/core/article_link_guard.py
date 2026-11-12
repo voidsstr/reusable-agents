@@ -33,6 +33,12 @@ It rejects:
   - `[Anchor](recipes/<slug>)` (no leading slash → renders inside /blog)
   - bare `<slug>` mentions without a markdown link
 
+Direct buy links are counted separately (`buy_link_patterns`, default the
+`/k/<slug>` click-out): a crawlable product-page link names a product but is
+not a buy button, so a monetized bucket can require N of them on top of the
+kitchen minimum (`min_buy_links`, `min_buy_links_by_bucket`,
+`min_buy_links_by_title` — see `min_buy_links_for`).
+
 The guard is a thin layer — it doesn't try to resolve slug ↔ catalog
 ids (that's `resolve-article-links.py`'s job). It just measures
 "does the article actually link out, yes/no, how many."
@@ -71,6 +77,20 @@ DEFAULT_KITCHEN_ROOTS: tuple[str, ...] = ("/k/",)
 # resolves both, so it never 404s.
 DEFAULT_KITCHEN_LINK_TEMPLATE = "{site_root}/k/{slug}"
 
+# What counts as a DIRECT buy link when a site sets no `buy_link_patterns`:
+# the `/k/<slug>` affiliate click-out. Patterns are regexes searched against
+# the link target — the path for a relative or own-host link, the full URL for
+# any other host — so a site whose buy button is a retailer URL can list
+# e.g. r"amazon\.[a-z.]+/dp/" without a code change.
+DEFAULT_BUY_LINK_PATTERNS: tuple[str, ...] = (r"^/k/[A-Za-z0-9][A-Za-z0-9-]*",)
+
+# Any markdown link (not an image), tolerating one level of brackets inside
+# the anchor text ("[FLUX.2 [klein] model card](https://...)").
+_MD_LINK_RE = re.compile(
+    r"(?<!!)\[(?:[^\[\]\n]|\[[^\[\]\n]*\])+\]"
+    r"\((?P<url>[^)\s]+)(?:\s+\"[^\"]*\")?\)"
+)
+
 
 @dataclasses.dataclass
 class LinkAuditResult:
@@ -85,6 +105,8 @@ class LinkAuditResult:
     min_recipes: int
     min_kits: int
     min_products: int = 0
+    buy_links: int = 0
+    min_buy_links: int = 0
 
     @property
     def total_internal_links(self) -> int:
@@ -95,7 +117,8 @@ class LinkAuditResult:
     def passes(self) -> bool:
         return (self.recipe_links >= self.min_recipes
                 and self.kitchen_links >= self.min_kits
-                and self.product_links >= self.min_products)
+                and self.product_links >= self.min_products
+                and self.buy_links >= self.min_buy_links)
 
     def failure_reason(self) -> str:
         if self.recipe_links < self.min_recipes:
@@ -107,6 +130,10 @@ class LinkAuditResult:
         if self.product_links < self.min_products:
             return (f"only {self.product_links} /product/ links "
                     f"(min {self.min_products})")
+        if self.buy_links < self.min_buy_links:
+            return (f"only {self.buy_links} direct buy links "
+                    f"(min {self.min_buy_links}) — every named product needs "
+                    f"its own buy link, a product-page link is not one")
         return ""
 
 
@@ -136,19 +163,105 @@ def _expected_kitchen(proposal: dict) -> list[str]:
     return out
 
 
+def buy_link_targets(body_md: str,
+                     patterns: Iterable[str] | None = None,
+                     own_hosts: Iterable[str] | None = None) -> set[str]:
+    """Distinct direct buy links in `body_md`.
+
+    A link's target is matched against `patterns` (default
+    `DEFAULT_BUY_LINK_PATTERNS`): a relative link, or an absolute one on a host
+    in `own_hosts`, is matched by its path; any other link by its full URL, so
+    another site's `/k/` path never counts. Distinct by target without its
+    query or fragment — "Check price" and the product name pointing at the
+    same click-out are one buy link. An invalid pattern is skipped.
+    """
+    if isinstance(patterns, str):     # one pattern given bare in config
+        patterns = [patterns]
+    pats = []
+    for p in (patterns if patterns else DEFAULT_BUY_LINK_PATTERNS):
+        try:
+            if p:
+                pats.append(re.compile(p, re.I))
+        except re.error:
+            continue
+    hosts = {str(h).lower() for h in (own_hosts or [])}
+    found: set[str] = set()
+    for m in _MD_LINK_RE.finditer(body_md or ""):
+        url = m.group("url").strip("<>")
+        hm = re.match(r"^https?://([^/?#]+)(.*)$", url, re.I)
+        target = (hm.group(2) or "/") if (hm and hm.group(1).lower() in hosts) else url
+        if any(p.search(target) for p in pats):
+            found.add(re.split(r"[?#]", target, maxsplit=1)[0].rstrip("/").lower())
+    return found
+
+
+def _as_int(v) -> int:
+    try:
+        return max(int(v or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def min_buy_links_for(cfg: dict | None, *, bucket: "str | Iterable[str]" = "",
+                      title: str = "") -> int:
+    """The direct-buy-link minimum for one article, from the site's guard
+    config (`resolve_minima()`):
+
+      min_buy_links            — the site's default (0 when unset);
+      min_buy_links_by_bucket  — {bucket: n}; a listed bucket REPLACES the
+                                 default (so 0 exempts a bucket);
+      min_buy_links_by_title   — {title regex: n}; every pattern that matches
+                                 the title RAISES the minimum to at least n.
+                                 Gift and checklist pages ride several
+                                 buckets, so they are caught by title.
+
+    `bucket` may be several names (a row's `bucket` and `category` can
+    differ: a gift guide proposed as seasonal-occasion was stored with
+    category buying-guide); the highest listed minimum among them applies.
+    Bucket keys and title patterns are case-insensitive. A bad regex in the
+    config is skipped rather than taking the guard down.
+    """
+    cfg = cfg or {}
+    n = _as_int(cfg.get("min_buy_links"))
+    raw_bucket = cfg.get("min_buy_links_by_bucket")
+    raw_title = cfg.get("min_buy_links_by_title")
+    by_bucket = {str(k).strip().lower(): v
+                 for k, v in (raw_bucket if isinstance(raw_bucket, dict) else {}).items()}
+    names = [bucket] if isinstance(bucket, str) else list(bucket or [])
+    listed = [by_bucket[b] for b in (str(x or "").strip().lower() for x in names)
+              if b and b in by_bucket]
+    if listed:
+        n = max(_as_int(v) for v in listed)
+    t = str(title or "")
+    for pat, m in (raw_title if isinstance(raw_title, dict) else {}).items():
+        try:
+            if pat and t and re.search(pat, t, re.I):
+                n = max(n, _as_int(m))
+        except re.error:
+            continue
+    return n
+
+
 def verify_body(body_md: str,
                 proposal: dict,
                 *,
                 min_recipes: int = 5,
                 min_kits: int = 2,
                 min_products: int = 0,
-                kitchen_roots: Iterable[str] | None = None) -> LinkAuditResult:
+                kitchen_roots: Iterable[str] | None = None,
+                min_buy_links: int = 0,
+                buy_link_patterns: Iterable[str] | None = None,
+                own_hosts: Iterable[str] | None = None) -> LinkAuditResult:
     """Audit `body_md` against the proposal's expected slug lists.
 
     `kitchen_roots` — path roots whose links count as kitchen links
     (default `DEFAULT_KITCHEN_ROOTS`). A site whose category/product pages
     are crawlable (e.g. `/kitchen/category/`, `/kitchen/`) lists them so an
     article linking the crawlable page satisfies the contract.
+
+    `min_buy_links` / `buy_link_patterns` / `own_hosts` — the direct-buy-link
+    minimum (see `buy_link_targets`, `min_buy_links_for`). 0 by default, so a
+    caller that passes nothing keeps the old verdict.
     """
     found = _count_by_root(body_md or "")
     recipes = found.get("/recipes/", set())
@@ -183,6 +296,38 @@ def verify_body(body_md: str,
         min_recipes=min_recipes,
         min_kits=min_kits,
         min_products=min_products,
+        buy_links=len(buy_link_targets(body_md, buy_link_patterns, own_hosts)),
+        min_buy_links=_as_int(min_buy_links),
+    )
+
+
+def verify_body_with_config(body_md: str,
+                            proposal: dict | None,
+                            cfg: dict | None,
+                            *,
+                            bucket: "str | Iterable[str] | None" = None,
+                            title: str | None = None) -> LinkAuditResult:
+    """`verify_body` with every minimum taken from the site's resolved guard
+    config (`resolve_minima()`), so the implementer's INSERT gate, the
+    author's pre-INSERT self-check and any sweep apply the same contract.
+
+    `bucket` / `title` default to the proposal's `bucket` + `category` and
+    `title`; they select the direct-buy-link minimum (`min_buy_links_for`).
+    """
+    cfg = cfg or {}
+    proposal = proposal or {}
+    b = bucket if bucket is not None else [str(proposal.get("bucket") or ""),
+                                           str(proposal.get("category") or "")]
+    t = title if title is not None else str(proposal.get("title") or "")
+    return verify_body(
+        body_md, proposal,
+        min_recipes=_as_int(cfg.get("min_recipes")),
+        min_kits=_as_int(cfg.get("min_kits")),
+        min_products=_as_int(cfg.get("min_products")),
+        kitchen_roots=cfg.get("kitchen_roots"),
+        min_buy_links=min_buy_links_for(cfg, bucket=b, title=t),
+        buy_link_patterns=cfg.get("buy_link_patterns"),
+        own_hosts=site_hosts_from_root(cfg.get("site_root") or ""),
     )
 
 
@@ -449,7 +594,8 @@ def render_link_directive(proposal: dict,
                           min_kits: int = 2,
                           min_products: int = 0,
                           site_root: str = "https://aisleprompt.com",
-                          link_cfg: dict | None = None) -> str:
+                          link_cfg: dict | None = None,
+                          min_buy_links: int | None = None) -> str:
     """Returns a directive block the implementer can paste into its
     aider/claude prompt. The directive lists every expected slug and
     explains the inline-link contract.
@@ -469,19 +615,29 @@ def render_link_directive(proposal: dict,
                                   must mark it rel="sponsored nofollow");
                                   omit to not ask for one
       kitchen_link_template     — the legacy unsplit list (default /k/)
+
+    `min_buy_links` — the direct-buy-link minimum; None derives it from
+    `link_cfg` and the proposal's bucket + title (`min_buy_links_for`). When
+    it is above 0 the directive adds a DIRECT BUY LINKS block in the shape of
+    `buy_link_template` (falling back to `kitchen_buy_template`).
     """
     cfg = link_cfg or {}
     recipes: list[str] = proposal.get("expected_recipe_slugs") or []
     kits: list[str] = proposal.get("expected_kitchen_slugs") or []
     products: list[str] = (proposal.get("expected_product_asins")
                              or proposal.get("expected_asins") or [])
+    min_buy = (_as_int(min_buy_links) if min_buy_links is not None else min_buy_links_for(
+        cfg, bucket=[str(proposal.get("bucket") or ""), str(proposal.get("category") or "")],
+        title=str(proposal.get("title") or "")))
+    buy_clause = (f", and {min_buy} distinct direct buy links" if min_buy else "")
     lines: list[str] = [
         "INLINE-LINK CONTRACT (HARD REQUIREMENT — verified after exit):",
         f"  The wrapper counts /recipes/ + kitchen + /product/ markdown "
         f"links in your output. It rejects the article (EDIT INCOMPLETE) "
         f"if the body contains fewer than {min_recipes} distinct "
-        f"/recipes/ links, {min_kits} distinct kitchen links, and "
-        f"{min_products} distinct /product/ links — the article will "
+        f"/recipes/ links, {min_kits} distinct kitchen links, "
+        + ("" if min_buy else "and ")
+        + f"{min_products} distinct /product/ links{buy_clause} — the article will "
         f"NOT be inserted, the proposal will be re-queued, and you'll "
         f"be asked to do this work again. Better to put the links in "
         f"once.",
@@ -533,6 +689,28 @@ def render_link_directive(proposal: dict,
         for s in kits[:10]:
             lines.append(f"    [Name]({_tpl('kitchen_link_template', DEFAULT_KITCHEN_LINK_TEMPLATE, s)})")
         lines.append("")
+    if min_buy > 0:
+        # 2026-11-12 review: gift guides and a checklist named every product
+        # through its product page and shipped with zero buy buttons.
+        buy_tpl = cfg.get("buy_link_template") or cfg.get("kitchen_buy_template") or ""
+        buy_slugs = [s for s in (kit_prods or kits) if isinstance(s, str) and s][:10]
+        lines.append(f"  DIRECT BUY LINKS — at least {min_buy} distinct (HARD REQUIREMENT "
+                     f"for this article's bucket/title). Give EVERY product you name as "
+                     f"a pick, gift or checklist item its own buy link, next to its name "
+                     f"or in its row of the picks table:")
+        if buy_tpl:
+            for s in (buy_slugs or ["<product-slug>"]):
+                lines.append(f"    [Check price]({buy_tpl.format(site_root=site_root, slug=s)})")
+        else:
+            pats = ", ".join(cfg.get("buy_link_patterns") or DEFAULT_BUY_LINK_PATTERNS)
+            lines.append(f"    (a buy link is a link whose target matches: {pats})")
+        prod_tpl = cfg.get("kitchen_product_template") or ""
+        page_shape = (prod_tpl.format(site_root=site_root, slug="<slug>")
+                      if prod_tpl else "the product's own page")
+        lines.append(f"    A product-page link ({page_shape}) names the product but is "
+                     f"NOT a buy link: keep it on the name AND add the buy link. Use "
+                     f"only the product slugs listed above, never a raw retailer URL.")
+        lines.append("")
     if min_products > 0:
         lines.append(f"  PRODUCTS TO LINK — wrap named hardware SKUs "
                      f"(GPUs, CPUs, monitors, controllers, kits) in "
@@ -566,12 +744,16 @@ def render_link_directive(proposal: dict,
 def render_failure_addendum(audit: LinkAuditResult) -> str:
     """Used when the wrapper re-prompts the LLM after a failed verify.
     Explains what was missing so the model fixes the exact gap."""
+    buy = (f", and {audit.buy_links}/{audit.min_buy_links} required direct buy "
+           f"links (one per named product — a product-page link is not one)"
+           if audit.min_buy_links else "")
     return (
         "INLINE-LINK CONTRACT — VIOLATED. You wrote "
         f"{audit.recipe_links}/{audit.min_recipes} required /recipes/ "
         f"links, {audit.kitchen_links}/{audit.min_kits} required "
-        f"kitchen links, and {audit.product_links}/{audit.min_products} "
-        f"required /product/ links. The article is NOT shippable in "
+        f"kitchen links, " + ("" if buy else "and ")
+        + f"{audit.product_links}/{audit.min_products} "
+        f"required /product/ links{buy}. The article is NOT shippable in "
         f"this state. Add additional inline links to the body using "
         f"the expected slugs / ASINs already provided; do not delete "
         f"any existing prose. After adding the links, save the file "
@@ -581,9 +763,10 @@ def render_failure_addendum(audit: LinkAuditResult) -> str:
 
 # ── Per-site minima resolution ─────────────────────────────────────────────
 # The minima are per-deployment VALUES, so they live in config, not code
-# (framework-first). Resolution: storage config → repo default file → zeros
-# (with a stderr warning, because silently-disabled enforcement is how the
-# 881 zero-product-link specpicks articles happened).
+# (framework-first). Resolution: repo default file, with the storage copy laid
+# over it block by block → zeros when neither is readable (with a stderr
+# warning, because silently-disabled enforcement is how the 881
+# zero-product-link specpicks articles happened).
 import json as _json
 import sys as _sys
 from pathlib import Path as _Path
@@ -592,28 +775,67 @@ _REPO_CONFIG = _Path(__file__).resolve().parents[2] / "config" / "article-link-g
 _CONFIG_KEY = "config/article-link-guard-config.json"
 
 
+def merge_guard_config(base: dict | None, over: dict | None) -> dict:
+    """Lay `over` (the storage copy) on `base` (the repo default).
+
+    Top-level keys replace, except `default` and `sites`, which merge per
+    block: a site block in `over` updates only the keys it names. An older
+    storage copy therefore cannot silently drop a knob added to the repo
+    default since (2026-11-12: the live copy predated `kitchen_slug_check`,
+    `known_routes` and the buy-link knobs). To switch a knob off from
+    storage, set it to 0 / [] / null rather than deleting it.
+    """
+    base = base or {}
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if k == "default" and isinstance(v, dict):
+            out["default"] = {**(base.get("default") or {}), **v}
+        elif k == "sites" and isinstance(v, dict):
+            sites = {sk: dict(sv or {}) for sk, sv in (base.get("sites") or {}).items()}
+            for sk, sv in v.items():
+                sites[sk] = {**sites.get(sk, {}), **(sv or {})}
+            out["sites"] = sites
+        else:
+            out[k] = v
+    return out
+
+
+def load_guard_config(storage=None) -> dict | None:
+    """The repo default overlaid with the storage copy (`merge_guard_config`);
+    None when neither is readable."""
+    repo = stored = None
+    try:
+        repo = _json.loads(_REPO_CONFIG.read_text())
+    except Exception as e:
+        _sys.stderr.write(f"[link-guard] repo default unreadable ({e})\n")
+    if storage is not None:
+        try:
+            stored = storage.read_json(_CONFIG_KEY) or None
+        except Exception:
+            stored = None
+    if repo is None and stored is None:
+        return None
+    return merge_guard_config(repo, stored)
+
+
 def resolve_minima(site_hint: str, storage=None) -> dict:
     """Return the site's guard config: {min_recipes, min_kits, min_products,
-    site_root} plus the optional kitchen knobs (kitchen_roots,
-    kitchen_*_template) that `verify_body` / `render_link_directive` read.
+    site_root} plus the optional knobs that `verify_body` /
+    `verify_body_with_config` / `render_link_directive` read: kitchen
+    (kitchen_roots, kitchen_*_template, kitchen_slug_check) and direct buy
+    links (min_buy_links, min_buy_links_by_bucket, min_buy_links_by_title,
+    buy_link_patterns, buy_link_template).
 
     `site_hint` is whatever the caller has — a per-site agent_id
     ("specpicks-article-proposal-agent") or a bare site name; matching is
-    by substring against the config's `sites` keys.
+    by substring against the config's `sites` keys. `storage` (optional)
+    supplies the storage copy, laid over the repo default.
     """
-    cfg = None
-    if storage is not None:
-        try:
-            cfg = storage.read_json(_CONFIG_KEY) or None
-        except Exception:
-            cfg = None
+    cfg = load_guard_config(storage)
     if cfg is None:
-        try:
-            cfg = _json.loads(_REPO_CONFIG.read_text())
-        except Exception as e:
-            _sys.stderr.write(f"[link-guard] config unreadable ({e}); minima default to 0 — FIX THIS\n")
-            return {"min_recipes": 0, "min_kits": 0, "min_products": 0,
-                    "site_root": ""}
+        _sys.stderr.write("[link-guard] config unreadable; minima default to 0 — FIX THIS\n")
+        return {"min_recipes": 0, "min_kits": 0, "min_products": 0,
+                "site_root": ""}
     vals = dict(cfg.get("default") or {})
     hint = (site_hint or "").lower()
     for key, over in (cfg.get("sites") or {}).items():

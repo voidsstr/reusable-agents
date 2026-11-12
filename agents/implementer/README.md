@@ -110,11 +110,19 @@ auto-queue and the operator is emailed.
    returned rc=0. On the claude path, the article insert is whatever the
    `ARTICLE_AUTHOR.md` prompt tells Claude to do. The step INSERTs the
    article from `changes/<rec>.body.md` + `.meta.json` and runs the
-   `framework.core.article_link_guard` minima check. When `DATABASE_URL` is
-   set it then runs `resolve-article-links.py --apply` and
+   `framework.core.article_link_guard` minima check
+   (`verify_body_with_config`). That check includes the bucket's
+   direct-buy-link minimum. When `DATABASE_URL` is set it then runs
+   `resolve-article-links.py --apply` and
    `framework.cli.article_heading_repair` (strips leaked outline headings
    from bodies written in the last 6 h). `reconcile-shipped.py` runs either
    way.
+   - On the claude path, `ARTICLE_AUTHOR.md` has the author run
+     `framework/cli/article_link_guard.py check` before its own INSERT.
+   - After any `article-author` dispatch, `run.sh` runs
+     `article_link_guard.py sweep --since-hours 6`. The sweep is
+     report-only and logs each row that misses the link contract under
+     `[link-guard]`.
 7. **Deploy.** Skipped for `h2h`, `article-author`, `catalog-audit` and
    `IMPLEMENTER_SKIP_DEPLOY=1`. If HEAD did not change, it skips the deploy
    **and marks the batch's recs `deferred`** in the source
