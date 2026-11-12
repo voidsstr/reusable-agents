@@ -68,6 +68,24 @@
         "HEAD-check every protect-set image each run before the random sample",
         "Do not re-flag a row that already has an unapplied migration for the same criterion"
       ]
+    },
+    {
+      "id": "goal-applied-migrations-committed",
+      "title": "Every catalog-audit migration production ran is committed",
+      "description": "2026-11-12. A site's boot-time runner applies untracked migration files too: on 2026-11-11 a server started from a live checkout ran 57 catalog-audit migrations that no commit recorded, and 82 products went dark with no record in git. migrations_applied_uncommitted counts this agent's files that the database applied but git does not track (needs pending_migrations with applied_sql); the implementer's migration ledger (config/migration-ledger-config.json) commits them.",
+      "target_metric": "migrations_applied_uncommitted",
+      "metric": {
+        "name": "migrations_applied_uncommitted",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "files"
+      },
+      "directives": [
+        "Report applied-but-uncommitted and stranded migration files every run (migration-ledger.json)",
+        "Never deactivate a product because its brand and manufacturer differ, a spec differs, or the reason hedges; deactivate only when the reason plainly says the title or image is a different kind of product, and only the one row the finding is about",
+        "Rows in the protect set are report-only"
+      ]
     }
   ]
 }

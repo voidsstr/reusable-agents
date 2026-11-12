@@ -85,7 +85,11 @@ scheduled agents are the per-site instances listed below. Each one is a
    - `specpicks-image-csv`: this converter handles one rec per CSV row where
      `verdict == "mismatch"`. Each rec gets category `image-name-mismatch`,
      check `product-image-matches-name`, severity `high`, confidence 0.9 and
-     tier `review`. Rows with `unsure` or `match` are ignored.
+     tier `review`, names its row in `ref_ids`, and keeps the raw row under
+     `finding`. Rows with `unsure` or `match` are ignored. The image/name
+     rule then triages these recs (see below).
+   - After conversion, the image/name rule and then the remedy guards (protect
+     set, pending migrations) run. Both are described in the next section.
 4. **Rank and persist**. Recs are sorted by severity, then by confidence,
    and `assign_rec_ids()` numbers them.
    - **User replies.** Replies are applied to the previous run's local
@@ -121,6 +125,121 @@ scheduled agents are the per-site instances listed below. Each one is a
 7. It returns `RunResult(success)` with the metrics listed below and
    `next_state={last_run_ts, last_request_id, site_id}`.
 
+## Image/name rule and remedy guards
+
+Storage `config/catalog-audit-config.json` configures both, under `defaults`
+and `by_site.<site>`. A `catalog_audit:` block in the instance `site.yaml`
+works too. The precedence is `GUARD_DEFAULTS` < `site.yaml` < storage
+`defaults` < storage `by_site`.
+
+**Image/name rule** (`image_name_rule`, check `product-image-matches-name`).
+From 2026-10-16 to 11-12 every image/name "mismatch" became a deactivation.
+Most of them were normal marketplace patterns, and 82 products went dark,
+25 of them linked from published articles. Before a finding becomes a rec,
+the rule triages it:
+
+| Step | What it decides |
+|---|---|
+| row | The site's row the finding is about, read with `lookup_sql` (read-only). A key such as a slug can name several rows (specpicks: only `(site_id, asin)` is unique). Rows that share an id count as one product. Otherwise the finding's `id` CSV column (when the audit emits it), else its image URL, else its name must single out one product, or the row counts as unread |
+| basis | What the finding rests on. The classifier's `basis` CSV column wins when present. Otherwise the reason text decides: `identity` (a different-product phrase plus evidence from the listing's own description or image), `image`, `description` (the description is the odd one out: boilerplate, copied, contradicted by name and maker together, or another part of the listing agrees with the name), `attribution` (who makes it) or `attribute` (a spec, colour, size, lighting, closure, capacity or connector that the title and description disagree on, even when the reason calls them "different products") |
+| relation | `framework.core.brand_identity.relation(brand, manufacturer)` on that row. `same`, `alias` (parent company, former name, product line), `reseller` (renewed, refurbished, no-brand markers), `partner` (a chip or platform brand such as Intel or NVIDIA on a resold or partner-built part) and `unknown` are explained. `differs` is not |
+| remedy | `cleared` (no rec): an attribution finding whose relation is explained, or an attribution, attribute or description finding that only contrasts aliases of the listing's own maker (WD vs SanDisk). `deactivate`: the basis is in `deactivate_bases` (default `identity`, `image`), the row was read, and the reason neither hedges ("suggests", "typical", "appears to", "no clear", "if accurate") nor only contrasts one maker's aliases. `report`: everything else, including an image or identity finding inside one maker's family. A report rec is `review_required`, carries no template, and is never dispatched |
+
+The basis is read from free text, so it is a heuristic, and it errs toward
+`report`. Known limit: a reason that calls two products different without
+naming a spec dimension still counts as identity (for example "game cases"
+against "a disc organizer"). A `basis` column from the site's audit
+classifier removes the guesswork, and `deactivate_requires_explicit_basis:
+true` makes a stated basis a condition for deactivation.
+
+Brand != manufacturer alone ends at `report` at most, whatever
+`deactivate_bases` says. If the rows cannot be read, nothing from this check
+is deactivated that run. A deactivate rec names the one row id the finding
+is about (`id` column of `lookup_sql`) and carries `deactivate_template`
+when one is configured. Every rec the rule emits carries an `identity_rule`
+block.
+
+**Recs written before the rule.** Image/name recs without `identity_rule`
+are held by the framework rec contract (`framework/core/rec_contract.py`,
+rule `image-name-identity-rule`). The backlog dispatcher does not offer them,
+and the implementer defers them before any LLM path and marks them
+`review_required`. `python3 -m framework.cli.rec_contract sweep --agents
+'*-catalog-audit-agent' [--apply]` marks every open one in one pass. On
+2026-11-12 20:00Z the dry run found 200 open in 35 specpicks runs.
+
+**Brand aliases.** `brand_identity` overrides sit on top of the shared
+storage `config/brand-identity-config.json`, which every consumer of
+`framework/core/brand_identity.py` reads. `extra_*` lists (for example
+`extra_brand_groups`) accumulate across the layers (shared, storage
+`defaults`, storage `by_site`). A list key without `extra_` replaces the
+list.
+
+**Replay (2026-11-12 ~20:15Z, read-only).** The rule was run with the
+proposed specpicks config over every mismatch in the 115 CSVs on disk:
+475 findings on 351 slugs. 14 of those slugs name more than one product,
+and image or name singled out the row for 9 of them.
+
+| Remedy | Last finding per slug | Every finding |
+|---|---|---|
+| cleared | 192 | 260 |
+| report | 148 | 204 |
+| deactivate | 11 | 11 |
+
+The 74 untracked catalog-audit migrations in the specpicks checkout at that
+time (57 applied in production, 17 not) deactivate 136 products. Slug-keyed
+files count every product with that slug. 124 of those products have a
+finding on disk:
+
+| Under this rule | Products |
+|---|---|
+| cleared | 65 |
+| report | 53 (including 1 whose finding is about another product with the same slug) |
+| deactivate | 6: B081STD8DF, B0DGL624TC, B0F2N8LGTQ, B0FCBYSXQR, B0G2S8W1BF, B0GZKTW5BQ |
+
+None of the 6 is linked from an article, featured, or verified-clicked
+(B0DGL624TC has 5 raw, unverified clicks in 90 days). All 30 targets that
+are article-linked, featured or verified-clicked come out cleared (11),
+report (11) or have no finding on disk (8).
+
+**Protect set** (`protect_set`, SHOP-20). This is the set of rows people
+use: the site's `sql` (for example rows a published article links, or
+featured rows) plus rows with a framework-verified human click in
+`human_clicks.window_days`. A deactivate/blank remedy never targets them.
+They are reported in `protected-rows.json`, and an image/name finding on one
+comes back as a report rec. Every protected row's image is HEAD-checked each
+run. If the set cannot be read, guarded recs are held for the run.
+
+**Pending migrations** (`pending_migrations`). A row that already has an
+unapplied migration for the same criterion is not re-flagged. Files are read
+without their comments, so a commented-out line or a `-- rec-NNN` after a
+value names nothing. Settings:
+
+- `id_cols`: the columns that name a row, read from `<col> IN (...)`,
+  `<col> = <literal>` and tuple lists such as `(id, asin) IN ((...), ...)`.
+  Use `["asin"]` for a catalog keyed by a text id.
+- `key_cols` with `key_resolve_sql`: map a non-unique key such as a slug to
+  every row id that has it, because an UPDATE keyed by it hits them all.
+- `criterion`: assigns every matched file to one criterion when the file
+  names are hand-written.
+
+A protected row that an unapplied file already targets is reported, not
+dropped silently. Its file names appear in `protected-rows.json`
+(`pending_migrations_targeting_protected`, also a metric), so the file can
+be removed before a server starts from the checkout. The same scan reports
+this agent's migration files that git does not track, in
+`migration-ledger.json`:
+
+- `migrations_applied_uncommitted`: applied but never committed.
+- `migrations_stranded`: untracked and not applied.
+
+A server started from the checkout applies stranded files too. The
+implementer's migration ledger (`framework/core/migration_ledger.py`,
+storage `config/migration-ledger-config.json`) commits applied files and can
+quarantine stranded ones.
+
+**Artifacts:** `image-name-triage.json`, `protected-rows.json`,
+`protect-set-images.json`, `migration-ledger.json`.
+
 ## Inputs
 
 | Input | Where |
@@ -145,7 +264,19 @@ scheduled agents are the per-site instances listed below. Each one is a
 
 **`RunResult.metrics` keys:** `recs_total`, `recs_critical`, `recs_high`,
 `applied_responses`, `auto_dispatched`. A clean run emits only
-`recs_total`.
+`recs_total` and `recs_critical`, plus any rule and guard metrics. The
+rule and guard metrics, emitted when configured:
+
+- `image_name_findings`, `image_name_deactivate`, `image_name_report_only`,
+  `image_name_cleared`, `image_name_shared_keys` (findings whose key names
+  several rows)
+- `protect_set_size`, `protect_set_images_{checked,dead,missing}`,
+  `protected_remedies_blocked`
+- `pending_migration_dupes_dropped`, `pending_migrations_targeting_protected`
+- `migrations_applied_uncommitted`, `migrations_stranded`
+
+Report-only recs count in `recs_total`, but they are never dispatched:
+`_write_auto_queue` and the backlog dispatcher both skip `review_required`.
 
 ## Goals & metrics
 

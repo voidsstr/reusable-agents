@@ -62,6 +62,36 @@ audit script's `check` SQL (find it in
 items that fail a content quality check, and `column = NULL` for items
 where a backfill should regenerate the value.
 
+## Image/name recs (`check_id: product-image-matches-name`)
+
+The catalog-audit agent triages these before they reach you. Each rec
+carries an `identity_rule` block (`remedy`, `basis`, `relation`, `why`).
+Deactivation is sent only for a finding whose reason states, without
+hedging, that the title or image is a different kind of product than the
+listing's own content. A brand/maker disagreement, a spec difference
+(length, colour, lighting, size) or a contrast between one maker's own
+names is never sent for deactivation. Rows people use (the site's protect
+set) never are either.
+
+* A rec with NO `identity_rule` was written before this rule. The rec
+  contract holds it before you see it (framework/core/rec_contract.py).
+  If one reaches you anyway, change nothing and mark it deferred: its
+  outline may say to deactivate by slug, and a slug can name several
+  products.
+* A rec with a `migration_template`: write exactly
+  `migration_template.sql_with_ids` (it is scoped to the one row id in
+  `ref_ids`) and nothing else.
+* A rec without one: deactivate only the row in `ref_ids`, with an
+  idempotent UPDATE scoped to that id. Never write `WHERE slug = ...`.
+* Never deactivate a product because its brand and manufacturer fields
+  differ. Parent companies (WD and SanDisk, Imation and 3M), product lines
+  (Logitech G and Logitech for Creators), renewed or reseller brands
+  ("Amazon Renewed") and private-label OEMs are normal listing patterns.
+* A rec with `review_required: true` is report-only. It is not dispatched
+  automatically. If an operator dispatches one anyway, follow its
+  `implementation_outline`: fix the wrong field or refresh the image.
+  Never write a deactivation for it.
+
 ## Hard rules
 
 * Use ONLY the row IDs listed in `rec.evidence.ref_ids` — no blanket

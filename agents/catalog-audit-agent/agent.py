@@ -292,30 +292,63 @@ def _findings_to_recs_aisleprompt(findings_doc: dict, max_recs: int = 30) -> lis
     return recs[:max_recs]
 
 
+IMAGE_NAME_CHECK = "product-image-matches-name"
+
+
 def _findings_to_recs_specpicks_images(findings_doc: dict, max_recs: int = 30) -> list[dict]:
-    """Convert specpicks audit-product-images CSV → recs (one per mismatch)."""
+    """Convert an audit-product-images CSV → recs (one per mismatch).
+
+    Each rec keeps the raw finding under `finding` and names its row in
+    `ref_ids` (the CSV key, normally the slug), so the image/name rule
+    (apply_image_name_rule) can triage it and the remedy guards can see which
+    row it targets. Without `ref_ids` the guards dropped every such rec.
+
+    A slug is not always unique. When the CSV has an `id` column (the row id
+    recs and migrations use), the rule matches the finding to that row;
+    otherwise it matches on the image URL, then the name, and reports rather
+    than deactivates when that does not single out one row.
+
+    The outline written here never instructs a deactivation: until the rule
+    has triaged a rec (identity_rule), nothing in it may be acted on, and the
+    framework rec contract (framework/core/rec_contract.py) holds such a rec
+    if one ever reaches the dispatcher."""
     rows = findings_doc.get("rows", [])
     mismatches = [r for r in rows if r.get("verdict") == "mismatch"]
     recs: list[dict] = []
     for m in mismatches[:max_recs]:
+        key = str(m.get("slug") or "").strip()
         recs.append({
             "category": "image-name-mismatch",
-            "check_id": "product-image-matches-name",
+            "check_id": IMAGE_NAME_CHECK,
             "severity": "high",
             "confidence": 0.9,
             "tier": "review",
             "title": f"Image mismatch: {(m.get('name') or '')[:120]}",
             "rationale": (m.get("reason") or "")[:240],
             "evidence": [{
-                "ref_id": m.get("slug", ""),
+                "ref_id": key,
                 "snippet": f"image_url: {m.get('image_url','')[:160]}",
             }],
+            "ref_ids": [key] if key else [],
+            "finding": {
+                "key": key,
+                # Optional: the row id, when the audit emits it. It pins the
+                # finding to one row when the key (slug) is shared.
+                "id": str(m.get("id") or "").strip()[:128],
+                "name": (m.get("name") or "")[:300],
+                "reason": (m.get("reason") or "")[:600],
+                "image_url": (m.get("image_url") or "")[:500],
+                # Optional columns a classifier may emit; the rule prefers
+                # them over reading the free-text reason.
+                "basis": (m.get("basis") or "").strip().lower(),
+                "brand": (m.get("brand") or "").strip(),
+                "manufacturer": (m.get("manufacturer") or "").strip(),
+            },
             "implementation_outline": {
                 "approach": (
-                    "Either re-scrape the product image with a stricter "
-                    "brand/model filter, or deactivate the product (UPDATE "
-                    "products SET is_active=false WHERE slug=...). The exact "
-                    "SQL is logged at the bottom of the original audit run."
+                    "NOT TRIAGED. The image/name rule has not classified this "
+                    "finding (no identity_rule), so do not change any row for "
+                    "it: mark it deferred."
                 ),
             },
             "implemented": False,
@@ -378,6 +411,51 @@ GUARD_DEFAULTS: dict = {
         "dsn_env": "",
         "applied_sql": "",
         "max_age_days": 60,
+        # Columns whose `<col> IN (...)`, `<col> = '<v>'` or tuple
+        # `(<a>, <col>) IN ((...), ...)` name a row in a migration file
+        # (["asin"] for a catalog keyed by a text id). Comments are ignored,
+        # including a `-- rec-NNN` after a list value.
+        "id_cols": ["id"],
+        # Columns that name rows by a key that is not the row id (["slug"]).
+        # key_resolve_sql maps them to ids: trusted site SQL, read-only, bound
+        # %(keys)s (text[]), returning (key, id). An UPDATE keyed by a
+        # non-unique key hits every row that has it, so every id counts.
+        "key_cols": [],
+        "key_resolve_sql": "",
+        # When set, every matched file counts for this criterion instead of
+        # the one in its file name (hand-named files of a one-check site).
+        "criterion": "",
+    },
+    # The image/name check (IMAGE_NAME_CHECK). See apply_image_name_rule.
+    # Always on for that check: with no lookup configured nothing it flags
+    # can be deactivated, because the brand relation cannot be checked.
+    "image_name_rule": {
+        "dsn_env": "",
+        # Trusted site SQL, read-only, bound %(keys)s (text[] of finding keys).
+        # Named columns: key (the finding's key, e.g. slug), id (the row id
+        # recs and migrations use), title, brand, manufacturer, description,
+        # image_url. Missing columns are treated as empty.
+        "lookup_sql": "",
+        "statement_timeout_ms": 30000,
+        # Bases that may deactivate. identity = the title names a different
+        # product than the listing's own content; image = the image shows a
+        # different product. attribute (a spec disagreement between title and
+        # description) and attribution (who makes it) never do by default.
+        "deactivate_bases": ["identity", "image"],
+        "require_lookup_to_deactivate": True,
+        # True: only a basis the audit's classifier states (a `basis` CSV
+        # column) may deactivate. A basis read from the reason text is then
+        # report-only.
+        "deactivate_requires_explicit_basis": False,
+        # {table, action, sql (with {ids}), filename, quote_ids} for the
+        # deactivate remedy; empty = the implementer writes the SQL.
+        "deactivate_template": {},
+        "affected_url_template": "",
+        # framework.core.brand_identity.resolve() overrides
+        # (extra_brand_groups, extra_reseller_patterns, platform_brands...),
+        # on top of the shared storage config/brand-identity-config.json.
+        # extra_* lists accumulate across config layers.
+        "brand_identity": {},
     },
 }
 
@@ -385,10 +463,17 @@ _DESTRUCTIVE_RE = None
 
 
 def _deep_merge(base: dict, over: Any) -> dict:
+    """`over` on top of `base`: dicts merge, other values replace, except
+    `extra_*` lists, which accumulate across layers (so a by_site
+    `extra_brand_groups` adds to the defaults-level one instead of dropping
+    it). Replace a list outright with its non-extra key."""
     out = json.loads(json.dumps(base))
     for k, v in (over or {}).items() if isinstance(over, dict) else []:
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _deep_merge(out[k], v)
+        elif (str(k).startswith("extra_") and isinstance(v, list)
+              and isinstance(out.get(k), list)):
+            out[k] = out[k] + [x for x in json.loads(json.dumps(v)) if x not in out[k]]
         else:
             out[k] = v
     return out
@@ -423,13 +508,33 @@ def is_destructive_sql(sql: str) -> bool:
 
 
 def rec_is_guarded(rec: dict, protect: dict) -> bool:
-    """Does the protect set apply to this rec's rows?"""
+    """Does the protect set apply to this rec's rows? A report-only rec
+    (review_required) changes nothing, so it never is."""
+    if rec.get("review_required"):
+        return False
     tmpl = rec.get("migration_template") or {}
     if tmpl:
         return (tmpl.get("table") in set(protect.get("tables") or [])
                 and is_destructive_sql(tmpl.get("sql") or ""))
     crit = str(rec.get("check_id") or rec.get("category") or "")
     return any(crit.startswith(p) for p in protect.get("criteria_prefixes") or [] if p)
+
+
+_SAFE_TEXT_ID = None
+
+
+def render_ids(ids: list, tmpl: Optional[dict] = None) -> str:
+    """The `{ids}` substitution for a migration template. Numeric ids are
+    joined as-is (the long-standing behaviour); with `quote_ids` each id
+    becomes a SQL string literal, and an id that is not a plain token
+    (letters, digits, `_ . : -`) is left out rather than quoted."""
+    import re
+    global _SAFE_TEXT_ID
+    if not (tmpl or {}).get("quote_ids"):
+        return ", ".join(str(i) for i in ids)
+    if _SAFE_TEXT_ID is None:
+        _SAFE_TEXT_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+    return ", ".join("'%s'" % i for i in (str(x) for x in ids) if _SAFE_TEXT_ID.match(i))
 
 
 def drop_ref_ids(rec: dict, drop: set) -> dict:
@@ -445,7 +550,7 @@ def drop_ref_ids(rec: dict, drop: set) -> dict:
     tmpl = rec.get("migration_template")
     if tmpl:
         out["migration_template"] = {**tmpl, "sql_with_ids": tmpl["sql"].replace(
-            "{ids}", ", ".join(ids))}
+            "{ids}", render_ids(ids, tmpl))}
     if rec.get("affected_urls"):
         out["affected_urls"] = [u for u in rec["affected_urls"]
                                 if u.rstrip("/").rsplit("/", 1)[-1] not in drop]
@@ -456,27 +561,52 @@ def drop_ref_ids(rec: dict, drop: set) -> dict:
 
 
 def apply_guards(recs: list[dict], *, protected: dict, pending: dict,
-                 protect_cfg: Optional[dict] = None) -> tuple[list, list, int]:
+                 protect_cfg: Optional[dict] = None,
+                 pending_files: Optional[dict] = None) -> tuple[list, list, int]:
     """-> (recs, blocked, pending_dropped).
 
     protected: {row id: reason}; pending: {criterion: {row ids}};
-    protect_cfg: the protect_set block (tables, criteria_prefixes). A guarded
+    protect_cfg: the protect_set block (tables, criteria_prefixes);
+    pending_files: {criterion: {row id: [file names]}} (optional). A guarded
     rec loses its protected ids (each reported in `blocked`); every rec loses
-    ids already pending for its criterion. Recs left with no ids are dropped."""
+    ids already pending for its criterion. Recs left with no ids are dropped.
+
+    A protected row that an unapplied migration already targets is reported
+    in `blocked` too, with `pending_files`, instead of leaving silently as a
+    pending duplicate: that file would deactivate a row people use."""
     out, blocked, dropped = [], [], 0
     for rec in recs:
         crit = str(rec.get("check_id") or rec.get("category") or "")
+        if not rec.get("ref_ids"):
+            # Names no row, so there is nothing per-row to guard. It used to
+            # be dropped silently; now it passes, except that a destructive
+            # rec is held while a protect set is active (never deactivate
+            # blind).
+            if protected and rec_is_guarded(rec, protect_cfg or {}):
+                blocked.append({"id": "", "criterion": crit,
+                                "reason": "rec names no row ids",
+                                "remedy_instead": "re-run the audit so the rec names its rows"})
+            else:
+                out.append(rec)
+            continue
         drop = {str(i) for i in rec.get("ref_ids") or []} & set(pending.get(crit) or ())
         dropped += len(drop)
         if protected and rec_is_guarded(rec, protect_cfg or {}):
             for i in rec.get("ref_ids") or []:
-                if str(i) in protected and str(i) not in drop:
-                    blocked.append({"id": str(i), "criterion": crit,
-                                    "reason": protected[str(i)],
-                                    "remedy_instead": "refresh the image from the "
-                                    "Amazon listing, then relink; a person decides "
-                                    "if neither works. Never deactivate or blank it."})
-                    drop.add(str(i))
+                if str(i) not in protected:
+                    continue
+                entry = {"id": str(i), "criterion": crit, "reason": protected[str(i)],
+                         "remedy_instead": "refresh the image from the Amazon listing, "
+                         "then relink; a person decides if neither works. Never "
+                         "deactivate or blank it."}
+                if str(i) in drop:
+                    files = sorted(set(((pending_files or {}).get(crit) or {}).get(str(i)) or []))
+                    entry["pending_files"] = files
+                    entry["remedy_instead"] += (
+                        " An unapplied migration file already targets it; remove that "
+                        "file from the migrations dir before any server starts from it.")
+                blocked.append(entry)
+                drop.add(str(i))
         rec = drop_ref_ids(rec, drop)
         if rec.get("ref_ids"):
             out.append(rec)
@@ -566,25 +696,177 @@ def load_protect_set(conn, protect: dict, *, storage=None) -> dict:
 PENDING_FILENAME_RE = r"_catalog-audit-(?:rec\d+-)?(?P<crit>[a-z0-9][a-z0-9-]*)\.sql$"
 
 
-def pending_migration_ids(mig_dir: str, applied: set, max_age_days: int = 60,
-                          filename_regex: str = PENDING_FILENAME_RE) -> dict:
-    """{criterion: {row ids}} named (`id IN (...)`) in this agent's migration
-    files that are on disk but not applied. The criterion comes from the file
-    name (<ts>_catalog-audit[-recNNN]-<criterion>.sql); files older than
-    max_age_days are ignored."""
+def sql_strip_comments(text: str) -> str:
+    """SQL text without `--` line comments and `/* */` block comments,
+    leaving string literals intact (a `--` inside quotes is data)."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if text[j] == c:
+                    if j + 1 < n and text[j + 1] == c:   # '' / "" escape
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j            # keep the newline
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            out.append(" ")
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _sql_balanced(body: str, open_at: int) -> tuple[str, int]:
+    """(inside, index after the close) for the parenthesis at `open_at`,
+    skipping quoted text. ("", open_at) when it is not closed."""
+    depth, i, n = 0, open_at, len(body)
+    while i < n:
+        c = body[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n and not (body[j] == c and not (j + 1 < n and body[j + 1] == c)):
+                j += 2 if body[j] == c else 1
+            i = j + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return body[open_at + 1:i], i + 1
+        i += 1
+    return "", open_at
+
+
+def _sql_split_top(s: str) -> list[str]:
+    """Split on commas outside parentheses and quotes."""
+    parts, cur, depth, i, n = [], [], 0, 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n and not (s[j] == c and not (j + 1 < n and s[j + 1] == c)):
+                j += 2 if s[j] == c else 1
+            cur.append(s[i:j + 1])
+            i = j + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        if c == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    parts.append("".join(cur))
+    return [x.strip() for x in parts if x.strip()]
+
+
+def _sql_literal(v: str) -> Optional[str]:
+    """A SQL literal's value ('x', 'x'::text, 42), or None for anything
+    else (a column, an expression, a subquery)."""
+    import re
+    v = re.sub(r"::\s*[A-Za-z_][\w ]*(?:\[\])?\s*$", "", v.strip()).strip()
+    if len(v) >= 2 and v[0] == v[-1] == "'":
+        return v[1:-1].replace("''", "'")
+    return v if re.fullmatch(r"-?\d+", v) else None
+
+
+def sql_row_refs(sql: str, cols, *, weak=()) -> dict:
+    """{column: {values}} for the rows a migration names through `cols`:
+    `<col> IN (<literals>)`, `<col> = <literal>`, and tuple membership
+    `(<a>, <col>, ...) IN ((...), ...)`. Comments are dropped first, so a
+    commented-out line or a `-- rec-NNN` after a value names nothing.
+    `<col> NOT IN` and non-literal values (subqueries, columns) are ignored.
+    A `weak` column (a non-unique key such as a slug) is not read from a
+    tuple that also has another wanted column: the tuple then names one row
+    by that column, not every row that has the key."""
+    import re
+    want = {c.lower() for c in cols if c}
+    weak = {c.lower() for c in weak or () if c}
+    out: dict = {}
+    if not want:
+        return out
+    body = sql_strip_comments(sql or "")
+    names = "|".join(re.escape(c) for c in sorted(want, key=len, reverse=True))
+    # tuple IN first, so its parenthesised column list is not read below
+    tup_re = re.compile(r"\(\s*((?:[A-Za-z_][\w.]*\s*,\s*)+[A-Za-z_][\w.]*)\s*\)\s+IN\s*\(", re.I)
+    for m in tup_re.finditer(body):
+        tcols = [c.strip().rsplit(".", 1)[-1].lower() for c in m.group(1).split(",")]
+        inside, _ = _sql_balanced(body, m.end() - 1)
+        strong = {c for c in tcols if c in want and c not in weak}
+        read = {c for c in tcols if c in want and (c not in weak or not strong)}
+        for el in _sql_split_top(inside):
+            if not (el.startswith("(") and el.endswith(")")):
+                continue
+            vals = _sql_split_top(el[1:-1])
+            if len(vals) != len(tcols):
+                continue
+            for c, v in zip(tcols, vals):
+                lit = _sql_literal(v)
+                if c in read and lit:
+                    out.setdefault(c, set()).add(lit)
+    in_re = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)?(%s)\s+IN\s*\(" % names, re.I)
+    for m in in_re.finditer(body):
+        if re.search(r"\bNOT\s*$", body[max(0, m.start() - 8):m.start()], re.I):
+            continue
+        inside, _ = _sql_balanced(body, m.end() - 1)
+        for v in _sql_split_top(inside):
+            lit = _sql_literal(v)
+            if lit:
+                out.setdefault(m.group(1).lower(), set()).add(lit)
+    eq_re = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)?(%s)\s*=\s*('(?:[^']|'')*'|-?\d+)(?![\w.])"
+                       % names, re.I)
+    for m in eq_re.finditer(body):
+        lit = _sql_literal(m.group(2))
+        if lit:
+            out.setdefault(m.group(1).lower(), set()).add(lit)
+    return out
+
+
+def pending_migration_refs(mig_dir: str, applied: set, max_age_days: int = 60,
+                           filename_regex: str = PENDING_FILENAME_RE, *,
+                           id_cols=("id",), key_cols=(), criterion: str = "") -> dict:
+    """What this agent's migration files on disk, not applied, would touch.
+
+    -> {"ids": {criterion: {row ids}}, "keys": {criterion: {keys}},
+        "files": {criterion: {id or key: [file names]}}}
+
+    Rows are read with sql_row_refs (`id_cols` give row ids, `key_cols`
+    give keys such as a slug, for the caller to resolve). The criterion
+    comes from the file name (<ts>_catalog-audit[-recNNN]-<criterion>.sql)
+    unless `criterion` is set; files older than max_age_days are ignored."""
     import re
     import time
-    out: dict = {}
+    out: dict = {"ids": {}, "keys": {}, "files": {}}
     d = Path(mig_dir)
     if not d.is_dir():
         return out
     name_re = re.compile(filename_regex)
+    ids_c = [c.lower() for c in (id_cols or ("id",)) if c] or ["id"]
+    keys_c = [c.lower() for c in (key_cols or ()) if c and c.lower() not in ids_c]
     cutoff = time.time() - max(1, int(max_age_days)) * 86400
-    for f in d.glob("*.sql"):
+    for f in sorted(d.glob("*.sql")):
         if f.name in applied:
             continue
         m = name_re.search(f.name)
         if not m:
+            continue
+        crit = criterion or (m.groupdict().get("crit") or "")
+        if not crit:
             continue
         try:
             if f.stat().st_mtime < cutoff:
@@ -592,9 +874,435 @@ def pending_migration_ids(mig_dir: str, applied: set, max_age_days: int = 60,
             text = f.read_text(errors="replace")
         except OSError:
             continue
-        for mm in re.finditer(r"\bid\s+IN\s*\(([^)]*)\)", text, re.I):
-            out.setdefault(m.group("crit"), set()).update(
-                x.strip().strip("'\"") for x in mm.group(1).split(",") if x.strip())
+        refs = sql_row_refs(text, ids_c + keys_c, weak=keys_c)
+        for kind, cols in (("ids", ids_c), ("keys", keys_c)):
+            vals = set().union(*(refs.get(c, set()) for c in cols)) if cols else set()
+            if vals:
+                out[kind].setdefault(crit, set()).update(vals)
+                for v in vals:
+                    out["files"].setdefault(crit, {}).setdefault(v, []).append(f.name)
+    return out
+
+
+def pending_migration_ids(mig_dir: str, applied: set, max_age_days: int = 60,
+                          filename_regex: str = PENDING_FILENAME_RE, *,
+                          id_cols=("id",), criterion: str = "") -> dict:
+    """{criterion: {row ids}} named in this agent's migration files that are
+    on disk but not applied (pending_migration_refs, ids only)."""
+    return pending_migration_refs(mig_dir, applied, max_age_days, filename_regex,
+                                  id_cols=id_cols, criterion=criterion)["ids"]
+
+
+def resolve_pending_keys(conn, sql: str, refs: dict, *, timeout_ms: int = 30000) -> dict:
+    """Fold pending_migration_refs()["keys"] into its "ids" with the site's
+    key_resolve_sql (read-only; bound %(keys)s, returns (key, id)). Every
+    row that has a key counts: an UPDATE keyed by it hits them all."""
+    keys = sorted({k for ks in refs.get("keys", {}).values() for k in ks})
+    if not keys or not sql:
+        return refs
+    by_key: dict = {}
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = %d" % int(timeout_ms))
+        cur.execute(sql, {"keys": keys})
+        for row in cur.fetchall():
+            by_key.setdefault(str(row[0]), set()).add(str(row[1]))
+    conn.rollback()
+    for crit, ks in refs.get("keys", {}).items():
+        for k in ks:
+            for rid in by_key.get(k, ()):
+                refs["ids"].setdefault(crit, set()).add(rid)
+                refs["files"].setdefault(crit, {}).setdefault(rid, []).extend(
+                    refs["files"].get(crit, {}).get(k, []))
+    return refs
+
+
+# ---------------------------------------------------------------------------
+# Image/name rule (IMAGE_NAME_CHECK)
+#
+# The image/name audit asks a model whether a listing's name, manufacturer,
+# description and image URL describe one product. From 2026-10-16 to 11-12
+# every "mismatch" became a deactivation, and most of them were normal
+# marketplace patterns: a WD_BLACK SSD whose manufacturer is SanDisk, a
+# "Logitech for Creators" Blue Yeti described as "Logitech G", a Pentium 4
+# resold by a reseller, a private-label switch made by an OEM, a spec that
+# differs between title and description. 82 products went dark, 25 of them
+# linked from published articles.
+#
+# The rule triages each finding before it becomes a rec:
+#
+#   row          the site's row the finding is about, read with lookup_sql.
+#                Keys (slugs) are not always unique. Rows that share an id
+#                are one product; otherwise the finding's `id` column, else
+#                its image URL, else its name must single out one product,
+#                or the row counts as unread (never deactivated).
+#   basis        what the finding rests on. A classifier may say so in a
+#                `basis` column; otherwise it is read from the reason:
+#                  identity     the title names a different kind of product
+#                               than the listing's own content (description,
+#                               image), and the contrast is not a spec
+#                  image        the image shows a different product
+#                  description  the description is the odd one out
+#                               (boilerplate, copied, or contradicted by the
+#                               name and maker together, or part of the
+#                               listing agrees with the name)
+#                  attribution  who makes it (brand / manufacturer / maker)
+#                  attribute    a spec, colour, size, lighting, closure,
+#                               count or connector that the title and
+#                               description disagree on, even when the reason
+#                               calls them "different products"
+#   relation     framework.core.brand_identity.relation(brand, manufacturer)
+#                from the row: same / alias / reseller / partner / unknown
+#                are explained; differs is not.
+#
+#   remedy       cleared      not a defect: an attribution finding whose
+#                             names are explained, or an attribution /
+#                             attribute / description finding that only
+#                             contrasts one maker's aliases (WD vs SanDisk)
+#                deactivate   basis in deactivate_bases (identity, image),
+#                             the row was read, the reason does not hedge
+#                             ("suggests", "typical", "appears to", "no
+#                             clear", ...) and does not merely contrast one
+#                             maker's aliases. The remedy guards still keep
+#                             protected rows out.
+#                report       everything else: a review_required rec that is
+#                             never dispatched. brand != manufacturer alone
+#                             ends here at most.
+#
+# Reading the basis from free text is a heuristic, and it errs toward
+# report. A classifier `basis` column removes the guesswork, and
+# deactivate_requires_explicit_basis makes it a requirement.
+# ---------------------------------------------------------------------------
+
+_REASON_RX: dict = {}
+
+
+def _reason_rx() -> dict:
+    import re
+    if not _REASON_RX:
+        _REASON_RX.update({
+            # The model cannot open the image; "image URL" is a string it read.
+            "image": re.compile(
+                r"\b(?:image|photo|picture|thumbnail)s?\b(?!\s*url)|\bpictured\b|\bdepict", re.I),
+            # Evidence from the listing's own content, not from its maker field.
+            "listing": re.compile(
+                r"\b(?:description|listing|bullets?|specifications?)\b"
+                r"|\b(?:image|photo|picture)s?\b(?!\s*url)", re.I),
+            "identity": re.compile(
+                r"\b(?:different|distinct|separate|unrelated|another|wrong)\s+(?:products?|items?|"
+                r"devices?|product\s+(?:types?|categor(?:y|ies)|class(?:es)?)|"
+                r"(?:types?|kinds?)\s+of\s+(?:products?|items?|devices?))\b"
+                r"(?!\s+(?:variants?|lines?|versions?|editions?|revisions?|generations?|"
+                r"names?|naming|branding|skus?|family|families))"
+                r"|\b(?:totally|completely|entirely|wholly|fundamentally)\s+(?:different|unrelated)"
+                r"(?:\s+[\w-]+){0,3}?\s+(?:products?|items?|devices?|types?|categor(?:y|ies)|"
+                r"kinds?|hardware|media|goods)\b", re.I),
+            # The reason itself says the TITLE is corroborated and the
+            # description is the odd one out (boilerplate, copied from another
+            # listing, contradicted by name and maker together, or another part
+            # of the listing agrees with the name). The title and image
+            # shoppers see are then not shown to be wrong.
+            "description_odd": re.compile(
+                r"\b(?:generic|boilerplate|templated?|copied|copy[- ]?pasted?|placeholder)\b"
+                r"|\bname\s+and\s+(?:the\s+)?(?:manufacturer|brand|maker|image)\b"
+                r"|\b(?:manufacturer|brand|maker)\s+and\s+(?:the\s+)?(?:product\s+)?name\b"
+                r"|\b(?:agrees?\s+with|consistent\s+with|matches)\s+the\s+(?:product\s+)?"
+                r"(?:name|title)\b", re.I),
+            # A spec dimension as the point of contrast: the listing names the
+            # same kind of product with a different length, colour, lighting,
+            # size, capacity, closure... That is an attribute disagreement,
+            # whatever words ("different products") the reason uses.
+            # Words that are often part of a product's own name ("LED strip",
+            # "voltage regulator", "weight plate") are left out on purpose.
+            "spec": re.compile(
+                r"\b(?:lengths?|colou?r(?:s|ed|ways?)?|lighting|backlit|backlight(?:ing)?|"
+                r"rgb|closures?|zippers?|zippered|sizes?|sizing|dimensions?|"
+                r"capacit(?:y|ies)|resolution)\b", re.I),
+            "attribution": re.compile(
+                r"\b(?:manufacturer|manufactured|manufactures|brand(?:s|ed|ing)?|made\s+by|maker|"
+                r"publisher|developer|compan(?:y|ies)|vendor|oem|third[- ]party|aftermarket|"
+                r"reseller|retailer|integrator|distributor|sold\s+under|owner(?:ship)?|"
+                r"subsidiar\w*|licens\w*|counterfeit|clone|knock[- ]?off|rebrand\w*|"
+                r"entit(?:y|ies))\b", re.I),
+            # The auditor is not sure. A hedged finding never deactivates.
+            "hedge": re.compile(
+                r"\b(?:suggest(?:s|ed|ing|ive)?|typical(?:ly)?|expected|unclear|no\s+clear|"
+                r"not\s+clear(?:ly)?|appears?\s+to|seem(?:s|ingly)?|may\s+be|might|could\s+be|"
+                r"possibl[ey]|(?:un)?likely|probabl[ey]|perhaps|presumably|potentially|"
+                r"uncertain|ambiguous|if\s+(?:accurate|correct|true))\b", re.I),
+        })
+    return _REASON_RX
+
+
+_BASIS_ALIASES = {
+    "identity": "identity", "title": "identity", "product": "identity", "type": "identity",
+    "image": "image", "photo": "image",
+    "attribution": "attribution", "brand": "attribution", "manufacturer": "attribution",
+    "maker": "attribution",
+    "attribute": "attribute", "spec": "attribute", "specs": "attribute", "detail": "attribute",
+    "description": "description",
+}
+
+
+def classify_reason(reason: str, basis_hint: str = "") -> str:
+    """identity | image | description | attribution | attribute for one
+    finding. An explicit basis from the classifier wins; otherwise the reason
+    text decides. identity needs a different-product phrase AND evidence from
+    the listing's own content (its description or image), so "the
+    manufacturer is a different company" is attribution, not identity. A
+    reason that says the name is corroborated while the description is
+    boilerplate or copied is `description` (the description is wrong, not
+    the title or image). A reason whose contrast is a spec dimension (length,
+    colour, lighting, size, capacity, closure...) is `attribute`, even when it
+    calls the two "different products"."""
+    hint = _BASIS_ALIASES.get((basis_hint or "").strip().lower())
+    if hint:
+        return hint
+    rx = _reason_rx()
+    text = reason or ""
+    if rx["identity"].search(text) and rx["listing"].search(text):
+        if rx["description_odd"].search(text):
+            return "description"
+        if rx["spec"].search(text):
+            return "attribute"
+        return "image" if rx["image"].search(text) else "identity"
+    if rx["image"].search(text) and not rx["attribution"].search(text):
+        return "attribute" if rx["spec"].search(text) else "image"
+    if rx["attribution"].search(text):
+        return "attribution"
+    return "attribute"
+
+
+def _norm_text(t: Any) -> str:
+    return " ".join(str(t or "").split()).casefold()
+
+
+def pick_identity_row(finding: dict, rows: Any) -> tuple[Optional[dict], str]:
+    """The site row a finding is about. -> (row, "") or (None, why).
+
+    `rows` are the lookup rows for the finding's key (a list, or one dict).
+    Keys such as slugs are not always unique. Rows that share an id are one
+    product (the same id listed twice); among several products the
+    finding's `id` (when the audit emits it), else its image URL, else its
+    name must single out exactly one. Anything else is (None, why): the
+    caller treats the row as unread, which never deactivates."""
+    if isinstance(rows, dict):
+        rows = [rows]
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    if not rows:
+        return None, "no row has this key"
+    fid = str(finding.get("id") or "").strip()
+    if fid:
+        rows = [r for r in rows if str(r.get("id") or "") == fid]
+        if not rows:
+            return None, "row id %s is not among the rows with this key" % fid
+    img = str(finding.get("image_url") or "").strip()
+    name = _norm_text(finding.get("name"))
+    by_img = [r for r in rows if img and str(r.get("image_url") or "")[:500].strip() == img]
+    pool = by_img or rows
+    by_name = [r for r in pool if name and _norm_text(str(r.get("title") or "")[:300]) == name]
+    # Rows that share an id are one product (the same id under two catalogs):
+    # the best-matching one stands for it.
+    if len({str(r.get("id") or "") for r in rows}) == 1:
+        return (by_name or by_img or rows)[0], ""
+    if len({str(r.get("id") or "") for r in by_img}) == 1:
+        return (by_name or by_img)[0], ""
+    if len({str(r.get("id") or "") for r in by_name}) == 1:
+        return by_name[0], ""
+    n_ids = len({str(r.get("id") or "") for r in rows})
+    return None, ("%d products share this key and the finding's image and name do not single "
+                  "one out" % n_ids)
+
+
+def triage_image_name_finding(finding: dict, ident: Optional[dict], rule: dict, *,
+                              brand_cfg: Optional[dict] = None) -> dict:
+    """-> {"remedy": cleared|deactivate|report, "basis", "relation", "why"}.
+    `ident` is the site's row for the finding (pick_identity_row) or None.
+    `brand_cfg` is a resolved brand_identity config (resolved from
+    rule["brand_identity"] when omitted)."""
+    from framework.core import brand_identity as bi
+    bcfg = brand_cfg if brand_cfg is not None else bi.resolve(rule.get("brand_identity") or {})
+    reason = finding.get("reason") or ""
+    explicit = bool(_BASIS_ALIASES.get((finding.get("basis") or "").strip().lower()))
+    basis = classify_reason(reason, finding.get("basis") or "")
+    relation = None
+    if ident is not None:
+        relation = bi.relation(
+            ident.get("brand") or finding.get("brand") or "",
+            ident.get("manufacturer") or finding.get("manufacturer") or "",
+            title=ident.get("title") or finding.get("name") or "", cfg=bcfg)
+    out = {"basis": basis, "relation": relation}
+    # A reason that contrasts makers which are all aliases of this listing's
+    # own brand or manufacturer may be a naming confusion (WD_BLACK vs
+    # "SanDisk Optimus", Logitech G vs Logitech for Creators). "Contrasts" =
+    # two or more alias names, at least one of them not in the title, so a
+    # title phrase like "Lenovo Legion" alone does not count. For an
+    # attribution, attribute or description finding that settles it
+    # (cleared). An image or identity finding can still be a real wrong
+    # product inside one maker's family (an MX Master mouse on a G Pro
+    # keyboard listing), so it goes to a person: report, never deactivate.
+    if ident is not None and relation in ("same", "alias", "reseller", "partner"):
+        found = bi.makers_in_text(reason, bcfg)
+        own = (bi.groups_for(ident.get("brand") or "", bcfg)
+               | bi.groups_for(ident.get("manufacturer") or "", bcfg))
+        names = {n for v in found.values() for n in v}
+        title_makers = {n for v in bi.makers_in_text(
+            ident.get("title") or finding.get("name") or "", bcfg).values() for n in v}
+        if found and set(found) <= own and len(names) >= 2 and names - title_makers:
+            aliases = ", ".join(sorted(names))
+            if basis in ("attribution", "attribute", "description"):
+                return {**out, "remedy": "cleared",
+                        "why": "the reason only contrasts aliases of this listing's own maker (%s)"
+                               % aliases}
+            return {**out, "remedy": "report",
+                    "why": "the reason contrasts aliases of this listing's own maker (%s), so it "
+                           "may be a naming confusion; an %s finding inside one maker's family "
+                           "goes to a person, never a deactivation" % (aliases, basis)}
+    if basis == "attribution":
+        if relation is None:
+            return {**out, "remedy": "report",
+                    "why": "a brand/manufacturer finding, and the row could not be read "
+                           "to check how the two relate"}
+        if relation in bi.EXPLAINED:
+            return {**out, "remedy": "cleared",
+                    "why": "brand/manufacturer relation is %r, a normal listing pattern" % relation}
+        return {**out, "remedy": "report",
+                "why": "brand and manufacturer differ; that alone never deactivates a product"}
+    if basis in set(rule.get("deactivate_bases") or ()):
+        if ident is None and rule.get("require_lookup_to_deactivate", True):
+            return {**out, "remedy": "report",
+                    "why": "the row could not be read, so it is not deactivated blind"}
+        if rule.get("deactivate_requires_explicit_basis") and not explicit:
+            return {**out, "remedy": "report",
+                    "why": "the %s basis was read from the reason text, and this site "
+                           "deactivates only on a basis the audit states" % basis}
+        hedge = _reason_rx()["hedge"].search(reason)
+        if hedge:
+            return {**out, "remedy": "report",
+                    "why": "the auditor hedges (%r); a hedged finding never deactivates"
+                           % hedge.group(0)}
+        return {**out, "remedy": "deactivate",
+                "why": "the %s contradicts the product" % ("image" if basis == "image" else "title")}
+    return {**out, "remedy": "report",
+            "why": "basis %r is not one that deactivates (deactivate_bases=%s)"
+                   % (basis, ",".join(rule.get("deactivate_bases") or []) or "none")}
+
+
+def _report_only(rec: dict, why: str) -> dict:
+    """A rec a person reads and nothing dispatches: review_required, no
+    migration template, an outline that forbids deactivation."""
+    out = {k: v for k, v in rec.items() if k not in ("migration_template", "affected_urls")}
+    out.update({
+        "severity": "low", "confidence": 0.5, "tier": "review", "review_required": True,
+        "title": ("Review only: " + str(rec.get("title") or ""))[:160],
+        "rationale": ((rec.get("rationale") or "") + " Report only: " + why)[:600],
+        "implementation_outline": {"approach": (
+            "REPORT ONLY. Do not deactivate or blank this product: " + why + ". If a "
+            "field is wrong, fix that field (title, brand, manufacturer) or refresh the "
+            "image from the listing; otherwise mark the rec deferred.")},
+    })
+    return out
+
+
+def apply_image_name_rule(recs: list[dict], ident: dict, rule: dict, *,
+                          brand_cfg: Optional[dict] = None) -> tuple[list, list]:
+    """Triage every IMAGE_NAME_CHECK rec that carries a `finding`.
+    ident: {finding key: [rows]} from lookup_sql (a single row dict per key
+    is accepted too). -> (recs, triage rows).
+
+    cleared recs are dropped; report recs become review_required; deactivate
+    recs name the one row the finding is about (pick_identity_row) and, when
+    configured, carry the site's deactivate_template so the implementer writes
+    exactly that. Every rec that leaves carries an `identity_rule` block."""
+    from framework.core import brand_identity as bi
+    bcfg = brand_cfg if brand_cfg is not None else bi.resolve(rule.get("brand_identity") or {})
+    out: list[dict] = []
+    triage: list[dict] = []
+    tmpl = rule.get("deactivate_template") or {}
+    url_tmpl = rule.get("affected_url_template") or ""
+    for rec in recs:
+        f = rec.get("finding")
+        if rec.get("check_id") != IMAGE_NAME_CHECK or not isinstance(f, dict):
+            out.append(rec)
+            continue
+        key = str(f.get("key") or "")
+        rows = ident.get(key) if key else None
+        rows = [rows] if isinstance(rows, dict) else [r for r in rows or [] if isinstance(r, dict)]
+        row, unread_why = pick_identity_row(f, rows)
+        t = triage_image_name_finding(f, row, rule, brand_cfg=bcfg)
+        if row is None and rows and t["remedy"] != "cleared":
+            t = {**t, "why": t["why"] + " (" + unread_why + ")"}
+        rid = str((row or {}).get("id") or "")
+        if t["remedy"] == "deactivate" and row is None:
+            if rows:
+                # Several products have this key and none is singled out:
+                # never deactivate blind, whatever require_lookup_to_deactivate says.
+                t = {**t, "remedy": "report",
+                     "why": "no single row to scope a deactivation to (" + unread_why + ")"}
+            else:
+                # No lookup configured (require_lookup_to_deactivate: false):
+                # the finding's own id, else its key, as before.
+                rid = str(f.get("id") or key)
+        if t["remedy"] == "deactivate" and (not rid or (tmpl.get("sql")
+                                                        and not render_ids([rid], tmpl))):
+            t = {**t, "remedy": "report",
+                 "why": "row id %r is not a plain token, so no SQL is written for it" % rid}
+        ref_ids = [rid] if rid else (
+            [str(r.get("id")) for r in rows if r.get("id")] or ([key] if key else []))
+        triage.append({"key": key, "id": rid or None, "candidates": len(rows),
+                       "name": f.get("name", ""), "reason": f.get("reason", ""), **t,
+                       "brand": (row or {}).get("brand"),
+                       "manufacturer": (row or {}).get("manufacturer")})
+        if t["remedy"] == "cleared":
+            continue
+        new = dict(rec)
+        new["identity_rule"] = {k: t[k] for k in ("remedy", "basis", "relation", "why")}
+        new["ref_ids"] = ref_ids
+        new["evidence"] = [{**e, "ref_id": ref_ids[0] if ref_ids else ""}
+                           for e in rec.get("evidence") or []] or [
+            {"ref_id": ref_ids[0] if ref_ids else "", "snippet": f.get("name", "")[:160]}]
+        if t["remedy"] == "report":
+            out.append(_report_only(new, t["why"]))
+            continue
+        new["rationale"] = ((rec.get("rationale") or "") + " Deactivate: " + t["why"] + ".")[:600]
+        if tmpl.get("sql"):
+            new["migration_template"] = {**tmpl, "sql_with_ids": tmpl["sql"].replace(
+                "{ids}", render_ids([rid], tmpl))}
+            new["implementation_outline"] = {"approach": (
+                "Apply migration_template.sql_with_ids (criterion=%s, table=%s, action=%s) "
+                "and nothing else. Write it to db/migrations/<UTC-ts>_%s.sql."
+                % (IMAGE_NAME_CHECK, tmpl.get("table", "?"), tmpl.get("action", "deactivate"),
+                   tmpl.get("filename", "catalog-audit-" + IMAGE_NAME_CHECK)))}
+        else:
+            new["implementation_outline"] = {"approach": (
+                "Deactivate only row %s, with an idempotent UPDATE scoped to that id "
+                "(WHERE <id> = ... AND is_active = true). Touch no other row." % rid)}
+        if url_tmpl and rid:
+            new["affected_urls"] = [url_tmpl.format(id=rid)]
+        out.append(new)
+    return out, triage
+
+
+def load_identity(conn, rule: dict, keys: list[str]) -> dict:
+    """{key: [{"id", "title", "brand", "manufacturer", "description",
+    "image_url"}, ...]} from the site's lookup_sql (read-only). Every row is
+    kept: a key such as a slug may name several rows, and
+    pick_identity_row decides which one a finding is about."""
+    out: dict = {}
+    if not keys or not rule.get("lookup_sql"):
+        return out
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = %s" % int(rule.get("statement_timeout_ms") or 30000))
+        cur.execute(rule["lookup_sql"], {"keys": list(keys)})
+        cols = [d[0] for d in cur.description or []]
+        for row in cur.fetchall():
+            r = dict(zip(cols, row))
+            key = str(r.get("key") if r.get("key") is not None else row[0])
+            out.setdefault(key, []).append({
+                "id": str(r.get("id") or key),
+                **{c: ("" if r.get(c) is None else str(r.get(c)))
+                   for c in ("title", "brand", "manufacturer", "description", "image_url")},
+            })
+    conn.rollback()
     return out
 
 
@@ -758,7 +1466,9 @@ class CatalogAuditAgent(AgentBase):
         # ── 3. Convert to recs ─────────────────────────────────────────────
         self.status("converting findings → recs", progress=0.55, current_action="convert")
         recs = CONVERTERS[fmt](findings_doc, max_recs=int(audit.get("max_recs", 30)))
+        recs, rule_metrics = self._apply_image_name_rule(recs)
         recs, guard_metrics = self._apply_remedy_guards(recs)
+        guard_metrics = {**rule_metrics, **guard_metrics}
         if not recs:
             return RunResult(status="success",
                               summary="audit found 0 actionable issues — clean run",
@@ -902,11 +1612,61 @@ class CatalogAuditAgent(AgentBase):
             },
         )
 
+    def _apply_image_name_rule(self, recs: list[dict]) -> tuple[list[dict], dict]:
+        """Triage IMAGE_NAME_CHECK findings (apply_image_name_rule). Reads
+        the site's rows read-only when lookup_sql is configured; if they
+        cannot be read, nothing from this check is deactivated this run."""
+        targets = [r for r in recs
+                   if r.get("check_id") == IMAGE_NAME_CHECK and isinstance(r.get("finding"), dict)]
+        if not targets:
+            return recs, {}
+        gcfg = resolve_guard_config(self.cfg.site_id, site_block=self.cfg.get("catalog_audit"),
+                                    storage=self.storage)
+        rule = gcfg["image_name_rule"]
+        ident: dict = {}
+        if rule.get("lookup_sql") and rule.get("dsn_env"):
+            keys = sorted({str(r["finding"].get("key")) for r in targets if r["finding"].get("key")})
+            try:
+                import psycopg2
+                conn = psycopg2.connect(os.environ[rule["dsn_env"]], connect_timeout=15)
+                try:
+                    conn.set_session(readonly=True)
+                    ident = load_identity(conn, rule, keys)
+                finally:
+                    conn.close()
+            except Exception as e:
+                self.decide("error", f"image/name rule: rows unreadable, nothing from this "
+                                     f"check is deactivated this run: {e}"[:300])
+                ident = {}
+        from framework.core import brand_identity as bi
+        brand_cfg = bi.resolve(rule.get("brand_identity") or {},
+                               shared=bi.load_shared(self.storage))
+        out, triage = apply_image_name_rule(recs, ident, rule, brand_cfg=brand_cfg)
+        counts = {k: sum(1 for t in triage if t["remedy"] == k)
+                  for k in ("cleared", "report", "deactivate")}
+        shared_keys = sorted(k for k, v in ident.items() if isinstance(v, list) and len(v) > 1)
+        self._save_artifact("image-name-triage.json", {
+            "run_ts": self.run_ts, "counts": counts, "rows_found": len(ident),
+            "keys_with_several_rows": shared_keys,
+            "deactivate_bases": rule.get("deactivate_bases") or [], "findings": triage})
+        self.decide("observation",
+                    f"image/name rule: {len(triage)} finding(s) -> {counts['deactivate']} "
+                    f"deactivate, {counts['report']} report-only, {counts['cleared']} cleared",
+                    evidence={"cleared": [t["key"] for t in triage if t["remedy"] == "cleared"][:50],
+                              "report": [t["key"] for t in triage if t["remedy"] == "report"][:50]})
+        return out, {"image_name_findings": float(len(triage)),
+                     "image_name_deactivate": float(counts["deactivate"]),
+                     "image_name_report_only": float(counts["report"]),
+                     "image_name_cleared": float(counts["cleared"]),
+                     "image_name_shared_keys": float(sum(
+                         1 for t in triage if (t.get("candidates") or 0) > 1))}
+
     def _apply_remedy_guards(self, recs: list[dict]) -> tuple[list[dict], dict]:
         """Protect set + pending-migration dedup (see GUARD_DEFAULTS). Both
         off unless configured; any failure leaves the recs as they were and
         is logged, except that a configured protect set that cannot be read
-        drops every guarded rec this run (never deactivate blind)."""
+        drops every guarded rec this run (never deactivate blind). An
+        image/name rec kept out by the protect set comes back report-only."""
         gcfg = resolve_guard_config(self.cfg.site_id, site_block=self.cfg.get("catalog_audit"),
                                     storage=self.storage)
         protect, pend = gcfg["protect_set"], gcfg["pending_migrations"]
@@ -925,6 +1685,8 @@ class CatalogAuditAgent(AgentBase):
                 self.decide("error", f"protect set unreadable, guarded recs held this run: {e}"[:300])
                 kept = [r for r in recs if not rec_is_guarded(r, protect)]
                 metrics["protected_remedies_blocked"] = float(len(recs) - len(kept))
+                kept += [_report_only(r, "the protect set could not be read this run")
+                         for r in recs if rec_is_guarded(r, protect) and r.get("identity_rule")]
                 recs = kept
                 protect = {**protect, "enabled": False}
             metrics["protect_set_size"] = float(len(protected))
@@ -951,39 +1713,116 @@ class CatalogAuditAgent(AgentBase):
                                 evidence={"dead": [d["id"] for d in res["dead"]][:50],
                                           "missing": res["missing"][:50]})
         pending: dict = {}
+        pending_files: dict = {}
         if pend.get("enabled") and pend.get("dir"):
             try:
                 applied: set = set()
-                if pend.get("applied_sql") and (pend.get("dsn_env") or protect.get("dsn_env")):
+                applied_known = False
+
+                def _refs(done: set) -> dict:
+                    return pending_migration_refs(
+                        pend["dir"], done, int(pend.get("max_age_days") or 60),
+                        pend.get("filename_regex") or PENDING_FILENAME_RE,
+                        id_cols=pend.get("id_cols") or ("id",),
+                        key_cols=pend.get("key_cols") or (), criterion=pend.get("criterion") or "")
+
+                dsn_env = pend.get("dsn_env") or protect.get("dsn_env")
+                if pend.get("applied_sql") and dsn_env:
                     import psycopg2
-                    conn = psycopg2.connect(os.environ[pend.get("dsn_env") or protect["dsn_env"]],
-                                            connect_timeout=15)
+                    conn = psycopg2.connect(os.environ[dsn_env], connect_timeout=15)
                     try:
+                        conn.set_session(readonly=True)
                         with conn.cursor() as cur:
                             cur.execute(pend["applied_sql"])
                             applied = {str(r[0]) for r in cur.fetchall()}
+                            applied_known = True
+                        conn.rollback()
+                        refs = _refs(applied)
+                        if pend.get("key_resolve_sql") and refs["keys"]:
+                            refs = resolve_pending_keys(conn, pend["key_resolve_sql"], refs)
                     finally:
                         conn.close()
-                pending = pending_migration_ids(
-                    pend["dir"], applied, int(pend.get("max_age_days") or 60),
-                    pend.get("filename_regex") or PENDING_FILENAME_RE)
+                else:
+                    refs = _refs(applied)
+                pending, pending_files = refs["ids"], refs["files"]
+                if refs["keys"] and not pend.get("key_resolve_sql"):
+                    self.decide("observation",
+                                "pending migrations name %d row(s) by key (%s) with no "
+                                "key_resolve_sql to map them to ids; those rows are not deduped"
+                                % (sum(len(v) for v in refs["keys"].values()),
+                                   ",".join(pend.get("key_cols") or [])))
+                if applied_known:
+                    metrics.update(self._migration_ledger_metrics(pend, applied))
             except Exception as e:
                 self.decide("observation", f"pending-migration scan failed: {e}"[:300])
+        # A stranded migration that targets a row people use is worth knowing
+        # about whether or not this run re-flagged that row: a server started
+        # from the checkout would apply it.
+        pend_protected = sorted(
+            ({"id": i, "criterion": c, "reason": protected[i]["reason"],
+              "files": sorted(set((pending_files.get(c) or {}).get(i) or []))}
+             for c, ids in pending.items() for i in ids if i in protected),
+            key=lambda x: (x["criterion"], x["id"]))
+        if protected and pend.get("enabled"):
+            metrics["pending_migrations_targeting_protected"] = float(len(pend_protected))
         if protected or pending:
+            by_id = {str(i): r for r in recs if r.get("identity_rule") for i in r.get("ref_ids") or []}
             recs, blocked, dropped = apply_guards(
                 recs, protected={k: v["reason"] for k, v in protected.items()},
-                pending=pending, protect_cfg=protect)
+                pending=pending, protect_cfg=protect, pending_files=pending_files)
             metrics["protected_remedies_blocked"] = metrics.get(
                 "protected_remedies_blocked", 0.0) + float(len(blocked))
             metrics["pending_migration_dupes_dropped"] = float(dropped)
-            if blocked:
+            # Rows people use are report-only, never deactivated: an
+            # image/name finding on one is still worth a person's look.
+            recs += [_report_only(by_id[b["id"]], "a protected row (%s); never deactivated"
+                                  % (b.get("reason") or "protected"))
+                     for b in blocked if b.get("id") in by_id]
+            if blocked or pend_protected:
                 self._save_artifact("protected-rows.json", {
-                    "run_ts": self.run_ts, "blocked": blocked})
+                    "run_ts": self.run_ts, "blocked": blocked,
+                    "pending_migrations_targeting_protected": pend_protected})
+            if blocked:
                 self.decide("observation",
                             f"remedy guard: {len(blocked)} protected row(s) kept out of "
                             f"deactivate/blank remedies",
                             evidence={"ids": [b["id"] for b in blocked][:50]})
+            if pend_protected:
+                self.decide("observation",
+                            f"{len(pend_protected)} protected row(s) are targeted by an "
+                            f"unapplied migration file of this agent; remove those files "
+                            f"before any server starts from the checkout",
+                            evidence={"rows": pend_protected[:50]})
         return recs, metrics
+
+    def _migration_ledger_metrics(self, pend: dict, applied: set) -> dict:
+        """This agent's migration files that git does not track: applied but
+        never committed (production changed, the repo has no record) and
+        stranded (a server started from the checkout would apply them). The
+        implementer's migration ledger (framework/core/migration_ledger.py)
+        commits the first kind; this only measures and reports."""
+        import re
+        from framework.core import migration_ledger as ml
+        d = Path(pend["dir"])
+        repo = ml.repo_root(str(d)) if d.is_dir() else None
+        if not repo:
+            return {}
+        rx = re.compile(pend.get("filename_regex") or PENDING_FILENAME_RE)
+        names = [n for n in ml.untracked_sql(repo, d) if rx.search(n)]
+        applied_unc = [n for n in names if n in applied]
+        stranded = [n for n in names if n not in applied]
+        if applied_unc or stranded:
+            self._save_artifact("migration-ledger.json", {
+                "run_ts": self.run_ts, "dir": str(d),
+                "applied_uncommitted": applied_unc, "stranded": stranded})
+            self.decide("observation",
+                        f"{len(applied_unc)} of this agent's migrations were applied but never "
+                        f"committed, and {len(stranded)} untracked one(s) are not applied; a "
+                        f"server started from this checkout applies untracked files too",
+                        evidence={"applied_uncommitted": applied_unc[:50],
+                                  "stranded": stranded[:50]})
+        return {"migrations_applied_uncommitted": float(len(applied_unc)),
+                "migrations_stranded": float(len(stranded))}
 
     def _write_auto_queue(self, *, request_id: str, recs: list[dict]) -> None:
         """Direct-dispatch the rec batch to the implementer via
@@ -993,7 +1832,12 @@ class CatalogAuditAgent(AgentBase):
         — recipient replies only to override (defer rec-NNN)."""
         try:
             from framework.core import dispatch
-            rec_ids = [r["id"] for r in recs if r.get("id")]
+            # Report-only recs (review_required) are for a person; the
+            # backlog dispatcher skips them too.
+            rec_ids = [r["id"] for r in recs if r.get("id") and not r.get("review_required")]
+            if not rec_ids:
+                self.decide("observation", "no dispatchable recs (all report-only)")
+                return
             handle = dispatch.gated_dispatch_now(
                 cfg=self.cfg, agent=self,
                 agent_id=self.agent_id, run_dir=str(self.run_dir),
