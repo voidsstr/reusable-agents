@@ -267,7 +267,16 @@ def collect_urls_from_db(site: dict) -> set[str]:
     conn = psycopg2.connect(db_url)
     try:
         for qs in site.get("querySets", []):
-            sql = qs["bulkSql"].replace("$SITE_IDS", site_ids_clause)
+            # sites.json is shared with indexnow-submitter (symlink). Its
+            # incremental-only sets (incrementalOnly + incrementalSql, no
+            # bulkSql) re-ping URLs that a bulk set already covers. On
+            # 2026-11-10 one such set (aisleprompt cyber-week-click-guides)
+            # made every run die on KeyError: 'bulkSql' for two days.
+            bulk_sql = qs.get("bulkSql")
+            if not bulk_sql:
+                err(f"  [{qs.get('name', '?')}] no bulkSql (incremental-only set): skipped")
+                continue
+            sql = bulk_sql.replace("$SITE_IDS", site_ids_clause)
             cur = conn.cursor()
             try:
                 cur.execute(sql)
