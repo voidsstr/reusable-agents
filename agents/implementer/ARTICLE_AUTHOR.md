@@ -73,12 +73,67 @@
 >    upstream URL). Persistence > provenance for editorial assets.
 > 4. If verification fails, search again with the article's primary
 >    keyword + `food photo high quality` and retry up to 3 times. If
->    no candidate passes, fall back to gpt-image-2 generation themed
->    to the article topic.
+>    no candidate passes, leave `hero_image_url` NULL: the site's
+>    `<site>-article-hero-image-curator` fills it within 15 minutes.
+>    Never generate the hero with a paid image API (gpt-image, DALL-E,
+>    fal.ai, Replicate…). Image generation is local only
+>    (`localhost:7861/generate`, see CLAUDE.md), and when that daemon
+>    is down the hero stays NULL.
 >
 > The `aisleprompt-recipe-image-verifier` agent's gpt-4o-mini deployment
 > is the reference impl; reuse its endpoint and the same SYSTEM_PROMPT
 > scaffold, swapping `matches_recipe` → `matches_article_topic`.
+>
+> ## 🖼️ Hero rules — all four, or leave the hero NULL (2026-11-12 review)
+>
+> The 2026-11-12 review of 54 new articles found these heroes:
+> - one ZOTAC RTX 5090 photo on four articles, two of them about the
+>   Surface Laptop Ultra (RTX Spark) and the DGX Spark;
+> - a G.Skill RAM kit at 436×172 on an RTX 3060 article;
+> - 17 of 29 SpecPicks heroes at 344-496 px. Their Amazon URLs asked for
+>   `_AC_SL1500_`, but the source images are about 470 px.
+> - two AislePrompt heroes hotlinked from strangers' servers;
+> - two AislePrompt articles sharing one Moccamaster photo.
+>
+> A hero ships only when it meets all four rules:
+>
+> 1. **It shows the primary subject named in the title.** For
+>    "X vs Y", show X or Y. For a single-product page, show that product.
+>    For a roundup or gift guide, show the #1 pick or the category itself.
+>    A product that only appears in `related_hardware_slugs` is not the
+>    subject. Neither is the best-selling SKU in the vertical.
+> 2. **It is at least 1000 px wide.** Measure the file itself. An image
+>    CDN's size token in the URL is not a measurement:
+>    ```python
+>    import io, urllib.request; from PIL import Image
+>    raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read()
+>    w, h = Image.open(io.BytesIO(raw)).size   # w must be >= 1000
+>    ```
+> 3. **No other article from the last 60 days uses it.** Run this before
+>    you set it. On an Amazon image, compare the image id without its
+>    `._…_` size token, so `81ubl5FITQL._AC_SL1500_.jpg` matches every
+>    size of that photo. In Python, pass the query as a raw string
+>    (`r"""…"""`), or `'\1'` turns into a control character:
+>    ```sql
+>    SELECT slug FROM editorial_articles
+>     WHERE status = 'published' AND slug <> %(slug)s
+>       AND COALESCE(published_at, created_at) > now() - interval '60 days'
+>       AND regexp_replace(hero_image_url, '\._[A-Za-z0-9_,]+_(\.[a-z]+)$', '\1')
+>         = regexp_replace(%(hero)s,       '\._[A-Za-z0-9_,]+_(\.[a-z]+)$', '\1');
+>    -- any row back = pick a different image
+>    ```
+> 4. **It is on an allowed host.** The allowed hosts are the site's own
+>    blob mirror (`nscagentstorage.blob.core.windows.net`), the site's own
+>    domain, and the retailer CDNs (`m.media-amazon.com`, `i.ebayimg.com`).
+>    The list lives in `config/site-consistency-audit-config.json`
+>    (`article_audit.allowed_image_hosts`). Mirror any other source to
+>    the blob first. Never hotlink it.
+>
+> If no candidate meets all four, leave `hero_image_url` NULL and the
+> curator picks one. A NULL hero is better than a wrong, tiny or
+> borrowed one. The twice-daily site-consistency audit reports
+> `small-hero`, `duplicate-hero` and `hero-offsite-host` on every article
+> from the last 30 days, so a violation is found within 12 hours.
 >
 > ## Original checklist (still in force)
 >
@@ -311,10 +366,10 @@ and counts distinct inline `/recipes/<slug>` + kitchen markdown links
 NOT inserted, the rec is re-queued, and the LLM is re-prompted with
 `render_failure_addendum()` listing the exact gap.
 
-| Site         | Min `/recipes/` links | Min kitchen links |
-|--------------|----------------------:|----------------:|
-| aisleprompt  |                     5 |               2 |
-| specpicks    |                     0 |               0 |
+| Site         | Min `/recipes/` links | Min kitchen links | Min direct buy links |
+|--------------|----------------------:|----------------:|---------------------:|
+| aisleprompt  |                     5 |               2 | 2 in `buying-guide` / `kitchen-buying-guide`, and on any title with "gift(s)" or "checklist"; else 0 |
+| specpicks    |                     0 |               0 | 0 (the buy strip renders the buttons from `related_product_asins`) |
 
 Why this exists: articles that don't link to the catalog are content
 dead-ends — no internal-link equity, no on-site session expansion, no
@@ -326,6 +381,52 @@ The directive is also INJECTED into the LLM prompt up-front via
 `render_link_directive(proposal, min_recipes=N, min_kits=M)` so the
 model knows the contract before it writes a single word — see
 `agents/implementer/build-aider-invocation.py`.
+
+### Direct buy links: every named product gets one (HARD GATE)
+
+**Every product you name in a buying guide, gift guide or checklist
+gets its own direct buy link.** Put it next to the product's name, or in
+the product's row of the picks table. On AislePrompt that link is
+`[Check price](/k/<product-slug>?source=amazon)`.
+
+Linking the name to the product page (`/kitchen/<product-slug>`) is not
+enough. Keep that link, because it is the crawlable one, and add the buy
+link as well. A product page is one more click away from the store. The
+2026-11-12 review found seven gift guides, checklists and roundups that
+linked every product only through its `/kitchen/` page. They had 0 buy
+buttons. The guard counted the `/kitchen/` links as kitchen links, so all
+seven passed.
+
+Use only the product slugs the proposal lists, because they were checked
+against the live catalog. Never write a raw retailer URL.
+
+The minimum depends on the site, bucket and title (see the table above).
+It comes from config:
+- `config/article-link-guard-config.json`: `min_buy_links_by_bucket`,
+  `min_buy_links_by_title` and `buy_link_patterns`;
+- `framework.core.article_link_guard.min_buy_links_for`.
+
+**When you INSERT the row yourself, run the guard first.** The wrapper's
+INSERT-time guard only runs on the fallback path. Your own
+`INSERT INTO editorial_articles` skips it.
+1. Save the body to `<run dir>/changes/<slug>.body.md`.
+2. Run:
+   ```bash
+   python3 /home/voidsstr/development/reusable-agents/framework/cli/article_link_guard.py check \
+       --run-dir "<run dir>" --rec-id <rec id> --body "<run dir>/changes/<slug>.body.md"
+   ```
+3. Exit 0 prints `PASS`. Exit 1 prints the gap, the failure addendum and
+   the buy links to add, already filled with the proposal's slugs. Add
+   the missing links without deleting any prose, then run it again.
+4. INSERT only after you see `PASS`.
+
+If the catalog has too few products to reach the minimum, write
+`DEFERRED: link minimum unreachable` and do not insert the article.
+
+After your session, `run.sh` runs the same check over every row written
+in the last 6 hours (`… article_link_guard.py sweep`). The twice-daily
+site audit flags `no-buy-link-on-monetized-article` on every recent
+guide that has no buy button. Your INSERT is not the last check.
 
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial
@@ -351,7 +452,7 @@ INSERT verbatim; do NOT re-derive.
 | `subtitle` | runbook (you write) | shown in lede + meta fallback |
 | `excerpt` | runbook (you write) | meta description 120-165 chars; **NEVER** dupe the title |
 | `body_md` | runbook (you write) | thin-content + word-count + internal-link + outbound-citation rules |
-| `hero_image_url` | proposal (preferred) → product-link query (fallback) | OG image + JSON-LD image |
+| `hero_image_url` | proposal (preferred) → product-link query (fallback); must pass the four Hero rules, else NULL | OG image + JSON-LD image |
 | `bucket` / `category` | proposal | analyzer's article-rule selectors |
 | `tags` | **proposal** | tag-cluster graph; copy verbatim |
 | `difficulty` | **proposal** | JSON-LD audience tier |
@@ -463,17 +564,25 @@ so the dashboard / SEO analyzer can distinguish them.
 
 ## Picking the hero image (MANDATORY before INSERT)
 
-**First, check the proposal.** If the rec carries
-`implementation_outline.hero_image_url` (or `proposal.hero_image_url`)
-already populated by the proposer, **use that value verbatim**. The
-proposer ran an image search at proposal time using the same SearxNG
-allow-list the recipe scraper uses, so the URL is already vetted. Only
-run the queries below if the proposal field is empty.
+Every candidate, including one handed over by the proposal, must pass
+the four **Hero rules** at the top of this runbook before you set it.
+Those rules are: it shows the title's primary subject, it is at least
+1000 px wide, no article from the last 60 days uses it, and it is on an
+allowed host.
 
-The article's `hero_image_url` must be a real photo of one of the
-hardware items the article is about. Run this query against the DB
-BEFORE the INSERT and use the returned URL in the `hero_image_url`
-column:
+**First, check the proposal.** The proposer may have filled in
+`implementation_outline.hero_image_url` (or `proposal.hero_image_url`).
+It searched for that image with the same SearxNG allow-list the recipe
+scraper uses. Use the value if it passes the four rules. If the field is
+empty or the image fails a rule, run the queries below.
+
+The article's `hero_image_url` must be a real photo of the hardware item
+**named in the title**. Run this query against the DB BEFORE the INSERT.
+Pass only the title's subject in `<related_hardware_slugs>`, not every
+related slug: with the full list, the ordering picks the vertical's
+best-selling card, which is how one RTX 5090 photo ended up on four
+articles. Use the returned URL in the `hero_image_url` column once it
+passes the four rules:
 
 ```sql
 SELECT p.main_image_url

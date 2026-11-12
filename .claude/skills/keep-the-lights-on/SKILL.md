@@ -440,6 +440,8 @@ print('$s', d['pages_crawled'],'pages', sev, 'REGRESSION' if f['is_regression'] 
 if f['new_kinds']: print('   NEW:', ', '.join(f['new_kinds']))
 if f['regressed']: print('   WORSE:', f['regressed'])
 if f['improved']:  print('   BETTER:', f['improved'])
+ra=d.get('recent_articles')
+if ra: print('   articles:', ra['audited'], '/', ra['articles'], 'audited via', ra['source'] or '-', ra.get('error') or '')
 "
 done
 ```
@@ -498,6 +500,56 @@ before assuming it is unrelated. Add a `CONSISTENCY` line to the tick box:
   `vision-mini` deployment, whose TPM quota was deliberately cut. There is no
   OCR on this host and no sudo to install tesseract, so a pixel heuristic would
   be guesswork — this asks the same vision model the recipe-image-verifier uses.
+
+**RECENT ARTICLES: every article published in the window, crawled or not
+(added 2026-11-12).** The breadth-first crawl reached only a handful of the 54
+articles published in 30 days. The article review that day found problems on
+them that the crawl never saw:
+- 17 heroes of 344-496 px;
+- one RTX 5090 photo used as the hero of four articles;
+- two heroes hotlinked from strangers' servers;
+- a citation rendered as raw markdown;
+- seven guides with no buy button;
+- 5000-px recipe photos on cards.
+
+Each run now also takes the window's articles and fetches every one:
+- the source is a read-only SELECT on the site DB, or the sitemap's
+  `<lastmod>` when no DSN is set;
+- each page gets the page-level checks above if the crawl missed it, plus
+  the checks below;
+- the report's `recent_articles` block says how many were audited and from
+  which source.
+
+Knobs are per site in `config/site-consistency-audit-config.json`. The storage
+copy overlays it, and every kind's severity is in there too. The auditor never
+fetches `/k/`, `/r/`, `/go/` or `/api/` (`never_fetch_path_re`), and it sends
+the site's probe header (`request_headers`).
+
+The first run with the article audit stores a fresh baseline: its scope
+gains `-a<days>`, so the diff will not call the new kinds a regression. After
+that, the kinds diff like any other.
+
+| Kind | Sev | What it means | Who fixes it |
+|---|---|---|---|
+| `raw-markdown` | error | Markdown the reader sees unrendered: `](https://…)`, `**`, `## `, a `|---` row. The 2026-11-12 case was link text with brackets inside it. | When the markdown is valid, the site's SSR `mdToHtml` (site repo) should render it, so fix the renderer. When the body is malformed, queue an `article-refresh` rec (Opus). |
+| `no-buy-link-on-monetized-article` | error | A buying guide, gift or checklist title, or a page naming products through their product pages, with no direct buy link. | **Going forward:** the link guard (`min_buy_links_by_bucket` / `_by_title` in `config/article-link-guard-config.json`) and the author's pre-INSERT check (`framework/cli/article_link_guard.py check`). **Existing rows:** queue an `article-refresh` rec (Opus) to add `/k/<slug>` buy links. `article_link_guard.py sweep --site <site>` lists every row that still falls short. |
+| `small-hero` | warn | The hero (og:image) is under `hero_min_width` px (1000) or `hero_min_bytes`. | `<site>-article-hero-image-curator`: re-pick a ≥1000 px image of the title's subject. New articles follow the ARTICLE_AUTHOR.md hero rules. |
+| `duplicate-hero` | warn | Two or more recent articles share one hero, matched by URL (CDN size token ignored) or by bytes. | `<site>-article-hero-image-curator`: keep it on the article whose subject it shows, and re-pick the others. |
+| `hero-offsite-host` | warn | The hero is hotlinked from a host outside `allowed_image_hosts`. | `<site>-article-hero-image-curator`: mirror it to blob or replace it. |
+| `heavy-image` | warn | An article image over `max_image_bytes` (1.5 MB) or `max_image_width` (3000 px), reported once per image with its pages. | The pipeline that stored the file. Recipe images: `aisleprompt-recipe-image-archiver` (recompress or resize on mirror). Heroes: the curator. |
+| `recent-article-noindex` | warn | A new article is noindex, so it cannot earn search traffic. On aisleprompt, diet guides are noindexed as YMYL. | The site's `article-proposal-agent` `site.yaml`: stop proposing a bucket the site noindexes. The output gate allows one article a day, and a noindexed one wastes it. |
+| `recent-article-redirects` | warn | A new article's own URL answers 3xx. | The producer, if the slug was renamed, or `article_audit.url_template`. |
+| `article-audit-unavailable` | warn | The window could not be read: the DSN env var is unset, the query failed or the sitemap failed. This is our monitor failing, not the site. | `secrets.env` (`DATABASE_URL_<SITE>`) or `article_audit.query` / `sitemap_path_re`. |
+
+Run it by hand:
+- one site, articles only, no crawl:
+  `--depth 0 --max-pages 1 --no-sitemap-check`;
+- crawl only: `--no-article-audit`;
+- a different window: `--article-window-days N`.
+
+Leave `--state-dir` at its default (`/tmp/...`). That way a hand run never
+overwrites the baseline the timer's runs are compared against
+(`~/.reusable-agents/site-consistency-audit/state`).
 
 **The auditor NEVER repairs anything.** Read-only by design so it can never
 itself become a source of damage. Fixes go through the owning agent, or you.
