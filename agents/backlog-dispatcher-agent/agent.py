@@ -685,6 +685,9 @@ class BacklogDispatcher(AgentBase):
         queued_now: list[str] = []
         per_producer_actions: list[dict] = []
         producers_touched = 0
+        # Rec-contract gate state: config read once per tick, held count.
+        _contract_cfg = None
+        held_by_contract = 0
 
         for aid in PRODUCER_AGENT_IDS:
             if producers_touched >= MAX_PRODUCERS_PER_TICK:
@@ -831,6 +834,24 @@ class BacklogDispatcher(AgentBase):
                     if r.get("review_required") and not r.get(
                             "confirmed_for_implementation"):
                         continue
+                    # ── Rec contracts (2026-11-12) ────────────────────
+                    # A rec its producer wrote under an older contract
+                    # is held (framework/core/rec_contract.py). Case
+                    # that added it: ~168 catalog-audit image/name recs
+                    # written before the image/name rule still said
+                    # "deactivate the product ... WHERE slug=...", with
+                    # no brand/identity triage and no protect set. The
+                    # implementer applies the same gate; the sweep CLI
+                    # turns held recs into review items.
+                    try:
+                        from framework.core import rec_contract as _rc
+                        if _contract_cfg is None:
+                            _contract_cfg = _rc.load_config(storage=s)
+                        if _rc.hold_reason(r, producer=aid, cfg=_contract_cfg):
+                            held_by_contract += 1
+                            continue
+                    except Exception:
+                        pass  # the implementer's gate still applies
                     # ── Implementer capability gate (2026-05-14) ──────
                     # Read storage config to find which rec handlers the
                     # implementer can currently ship. During Azure→AWS
@@ -1102,12 +1123,21 @@ class BacklogDispatcher(AgentBase):
         # Also stash the hash so the auto short-circuit logic in
         # AgentBase._check_short_circuit notices when accumulator changes.
 
+        if held_by_contract:
+            self.decide(
+                "observation",
+                f"rec contract: {held_by_contract} open rec(s) held, not dispatched "
+                "(written under an older producer contract; see "
+                "framework/core/rec_contract.py, release with contract_override)",
+            )
+
         if not per_producer_actions:
             return RunResult(
                 status="success",
                 summary="no producer had unshipped recs in run-dirs",
                 next_state=next_state,
-                metrics={"producers_dispatched": 0, "recs_dispatched": 0},
+                metrics={"producers_dispatched": 0, "recs_dispatched": 0,
+                         "recs_held_by_contract": held_by_contract},
             )
 
         total_recs = sum(len(a["rec_ids"]) for a in per_producer_actions)
@@ -1122,6 +1152,7 @@ class BacklogDispatcher(AgentBase):
                 "producers_dispatched": len(per_producer_actions),
                 "recs_dispatched": total_recs,
                 "inflight_after": inflight + len(per_producer_actions),
+                "recs_held_by_contract": held_by_contract,
             },
         )
 

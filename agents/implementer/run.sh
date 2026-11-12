@@ -592,6 +592,44 @@ except Exception:
     fi
 fi
 
+# ── Rec contracts (framework/core/rec_contract.py, 2026-11-12) ───────────
+# A rec its producer wrote under an older contract is held. It is deferred
+# HERE, before any LLM path, with a DEFERRED summary, and it is marked
+# review_required + contract_hold in this run's recommendations.json, which
+# the EXIT trap syncs back, so the dispatcher stops offering it. The case that
+# added this: catalog-audit image/name recs written before the image/name rule
+# told this runbook to deactivate by slug, with no brand/identity triage and
+# no protect set. The backlog dispatcher applies the same gate; this one also
+# covers the drainer and email paths. Release one rec with
+# `contract_override: true`.
+if [ -n "${RESPONDER_REC_IDS:-}" ] && [ -f "$RESPONDER_RUN_DIR/recommendations.json" ]; then
+    # stdout: nothing when no rec is held, else "KEEP:<ids>" (empty when all are).
+    CONTRACT_OUT=$(
+        cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" python3 -m framework.cli.rec_contract filter \
+            --run-dir "$RESPONDER_RUN_DIR" --rec-ids "$RESPONDER_REC_IDS" \
+            --producer "${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_AGENT_ID:-}}"
+    ) || CONTRACT_OUT=""
+    case "$CONTRACT_OUT" in
+        "KEEP:")
+            echo "[implementer] rec-contract: every rec in this batch is held; deferring all" >&2
+            cat > "$RESPONDER_RUN_DIR/deferred.json" <<DEFEOF
+{
+  "deferred_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "reason": "rec-contract: every rec was written under an older producer contract (framework/core/rec_contract.py)",
+  "rec_ids": "${RESPONDER_REC_IDS:-}",
+  "reason_class": "rec-contract",
+  "next_action": "re-run the producer, or a person sets contract_override: true on the rec"
+}
+DEFEOF
+            exit 0
+            ;;
+        "KEEP:"*)
+            export RESPONDER_REC_IDS="${CONTRACT_OUT#KEEP:}"
+            echo "[implementer] rec-contract: continuing with $RESPONDER_REC_IDS" >&2
+            ;;
+    esac
+fi
+
 # ── Page holds (framework/core/page_hold.py, 2026-10-24) ─────────────────
 # A page the site yaml holds for a person (`page_holds:`) is off limits to
 # every automated edit. Recs that reference one are deferred HERE, before

@@ -63,7 +63,10 @@ put in `agents/responder-agent/auto-queue/`.
      `BACKLOG_DISPATCHER_MAX_PER_PRODUCER` of them.
 6. **Rec eligibility** — skipped when any of: `shipped`, `implemented`,
    `deferred`, `duplicate`, `skipped` (added 2026-09-10, `2a40bfa`);
-   `review_required` without `confirmed_for_implementation`; handler not in
+   `review_required` without `confirmed_for_implementation`; held by a rec
+   contract (`framework/core/rec_contract.py`: a rec its producer wrote under
+   an older contract, such as a catalog-audit image/name rec with no
+   `identity_rule`; release one with `contract_override: true`); handler not in
    `config/implementer-allowed-handlers.json` `allow`; dispatch kind not in
    `config/implementer-allowed-dispatch-kinds.json` `allow`;
    `defer_backoff.should_skip(rec_id, aid)`; dedup key `<run_ts>:<rec_id>`
@@ -118,7 +121,8 @@ unverified.
   `agents/<producer>/runs/<ts>/recommendations.json` (+ the rest of the
   run-dir for materialization), `config/implementer-allowed-handlers.json`,
   `config/implementer-allowed-dispatch-kinds.json`,
-  `framework/defer-backoff/<source_agent_id>.json` (via `defer_backoff`).
+  `config/rec-contract-config.json` (optional; built-in rules apply without
+  it), `framework/defer-backoff/<source_agent_id>.json` (via `defer_backoff`).
 - Host: systemd `--user` scope list, `/tmp/reusable-agents-logs/`
   (`dispatch-implementer-*.log`, `dispatch-rundirs/`),
   `~/.reusable-agents/claude-pool/state.json`.
@@ -139,7 +143,9 @@ unverified.
   `BACKLOG_DISPATCHER_MAX_INFLIGHT` (1), not the effective `total_cap`**
   (default 1 + 3 = 4), which is what actually throttled.
 - Metrics: `producers_dispatched`, `recs_dispatched`, plus `inflight_after`
-  on dispatch or `inflight` + `throttled` on throttle.
+  on dispatch or `inflight` + `throttled` on throttle, and
+  `recs_held_by_contract` on unthrottled ticks (with one `observation`
+  decision when it is non-zero).
 - Run-summary mail: `agent_base._NO_OP_SUMMARY` treats both the "no producer
   had unshipped recs" and `throttled:` summaries as no-ops, so only
   dispatching ticks reach the daily digest. A crashed run takes the
@@ -180,6 +186,11 @@ Storage configs (operator levers):
   SEO/PI/catalog-audit shipping (organic clicks 75 → 1, indexed_pct flat at
   4 %). See `CLAUDE.md` → "Dispatch-kind pause".
 - `config/implementer-allowed-handlers.json` — see *Failure modes*.
+- `config/rec-contract-config.json` — `rules` / `extra_rules` /
+  `disabled_rules` over the built-in rec contracts
+  (`framework/core/rec_contract.py`). The implementer applies the same
+  contracts (`run.sh`), and `python3 -m framework.cli.rec_contract sweep`
+  marks held recs as review items in one pass.
 
 The producer `site.yaml` `auto_implement` flag is deliberately **ignored**
 here since 2026-05-13 (`if False and …`); the classifier + caps are the
