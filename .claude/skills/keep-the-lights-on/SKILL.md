@@ -690,6 +690,16 @@ Class-specific rules:
   article-refresh rec per page. The remedy order is: relink, then swap to an
   in-stock product the page reviews, then unlink last. Escalate only after two
   implementer deferrals.
+- **deal-pick-overpriced.** A deal roundup lists a pick above the check's
+  price-to-MSRP bar. The sweep returns only a count, so run the listing query
+  in the check's `note` (read-only) to get slug, pick ordinal, ASIN, price,
+  MSRP and ratio. File one article-refresh rec per slug, all in the pass's one
+  dispatch, naming every offending pick with its price and MSRP. Skip a slug
+  that still has a rec queued. The remedy order is: swap the pick for an
+  in-band one the page already reviews, then drop it. Never remove the price
+  line, and never loosen the bar to clear the breach. Re-run the listing
+  after the owner's next run. Escalate only after two implementer deferrals
+  on one slug.
 - **price-stale.** Read the scraper's or verifier's throttle metrics, then move
   one knob step and trigger once.
 - **template-drop or placement-drop.** Read `post_deploy` and placement_watch
