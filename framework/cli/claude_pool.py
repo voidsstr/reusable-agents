@@ -601,6 +601,39 @@ def _record_pool_usage(*, agent_id: str, profile_id: str, model: str,
             pass
 
 
+def _real_home() -> str:
+    """The account's home from the password database, not $HOME: inside a
+    pool session $HOME is already a profile directory."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except Exception:  # noqa: BLE001 - fall back to the environment
+        return os.path.expanduser("~")
+
+
+def _dispatch_env(picked_id: str, picked_home: str,
+                  base_env: dict | None = None) -> dict:
+    """The environment claude runs under for one dispatch."""
+    env = dict(os.environ if base_env is None else base_env)
+    env["HOME"] = picked_home
+    # HOME moves to the profile so claude reads that profile's login. Python
+    # derives its user site from HOME as well, so every python3 the session ran
+    # lost the operator's user-installed packages (azure-storage-blob, ...).
+    # 2026-11-12: an article-author session skipped the eBay handoff because
+    # framework.core.handoff could not import its storage backend.
+    env.setdefault("PYTHONUSERBASE", str(Path(_real_home()) / ".local"))
+    parts = [d for d in (env.get("PATH") or "").split(":")
+             if d and Path(d).resolve() != SHIM_DIR.resolve()]
+    env["PATH"] = ":".join(parts)
+    # Tell claude-via-proxy which profile is running so it can pick the
+    # matching SOCKS5 proxy from $CLAUDE_POOL_ROOT/proxies.conf. Each
+    # profile gets its own egress IP, isolating per-IP burst limits at
+    # Anthropic's edge. If no proxies.conf entry exists, the wrapper
+    # falls back to direct (or the legacy WARP socket on :40000).
+    env["CLAUDE_PROXY_FOR_PROFILE"] = picked_id
+    return env
+
+
 def _run_one_dispatch(picked_id: str, picked_home: str,
                       claude_args: list[str],
                       stdin_data: str | None = None) -> tuple[int, str]:
@@ -615,17 +648,7 @@ def _run_one_dispatch(picked_id: str, picked_home: str,
 
     Returns (rc, captured_text).
     """
-    env = dict(os.environ)
-    env["HOME"] = picked_home
-    parts = [d for d in (env.get("PATH") or "").split(":")
-             if d and Path(d).resolve() != SHIM_DIR.resolve()]
-    env["PATH"] = ":".join(parts)
-    # Tell claude-via-proxy which profile is running so it can pick the
-    # matching SOCKS5 proxy from $CLAUDE_POOL_ROOT/proxies.conf. Each
-    # profile gets its own egress IP, isolating per-IP burst limits at
-    # Anthropic's edge. If no proxies.conf entry exists, the wrapper
-    # falls back to direct (or the legacy WARP socket on :40000).
-    env["CLAUDE_PROXY_FOR_PROFILE"] = picked_id
+    env = _dispatch_env(picked_id, picked_home)
     real = _resolve_real_claude()
 
     captured_lines: list[str] = []
