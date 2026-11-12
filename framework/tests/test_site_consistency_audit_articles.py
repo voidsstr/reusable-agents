@@ -334,3 +334,101 @@ def test_crawl_never_requests_click_outs(monkeypatch):
     sca.crawl("https://s.test", 2, 10, 5, 2, dict(PAGE_CFG))
     assert "https://s.test/blog/a-guide" in calls
     assert not [u for u in calls if "/k/" in u or "/r/" in u]
+
+
+# ── hidden article body, shared fallback cards, detection = prevention ────────
+# 2026-11-12 re-review: aisleprompt ships its guide body in
+# <main id="ap-seo" style="display:none">, visible only with JS off, so the
+# audit's verdicts described a panel Google's renderer never shows (R2-T01).
+
+def _page(main_attrs, inner="<p>body</p>", before=""):
+    return (f"<html><head><meta property='og:image' content='/h.jpg'></head><body>{before}"
+            f"<main{main_attrs}><article><h1>Gifts</h1>{inner}"
+            "<svg aria-hidden=\"true\"></svg><input type=\"hidden\" name=\"x\"></article></main>"
+            "<noscript><style>#ap-seo{display:block !important}</style></noscript>"
+            "<div id=\"root\"></div></body></html>")
+
+
+def _facts_of(html, acfg=None):
+    return sca.article_page_facts({"title": "Gifts", "categories": []}, "https://s.test/blog/gifts",
+                                  html, acfg or _acfg(), {})
+
+
+def test_hidden_article_body_is_found_on_the_region_or_any_ancestor():
+    hidden = _facts_of(_page(' id="ap-seo" style="display:none" aria-hidden="false"'))
+    assert hidden["hidden_by"].startswith('<main id="ap-seo" style="display:none"')
+    assert hidden["hidden_by"].endswith("(display:none)")
+    # the R2-T01 fix ships the panel shown: no finding
+    assert _facts_of(_page(' id="ap-seo" aria-hidden="false"'))["hidden_by"] == ""
+    # svg / input "hidden" inside the article, and unclosed <p>/<li> before it, are not the article
+    assert _facts_of(_page("", before="<p>intro<ul><li>a<li>b</ul><br><img src=x>"))["hidden_by"] == ""
+    assert "(hidden attribute)" in _facts_of(_page("", before="<div hidden>"))["hidden_by"]
+    assert "(inside <noscript>)" in _facts_of(_page("", before="<noscript>"))["hidden_by"]
+    assert 'aria-hidden="true"' in _facts_of(_page(' aria-hidden="true"'))["hidden_by"]
+    assert "visibility:hidden" in _facts_of(_page(' style="visibility: hidden"'))["hidden_by"]
+    # a comment or a script mentioning <main style="display:none"> is not markup
+    assert _facts_of(_page("", before="<!-- <div style='display:none'> -->"
+                                      "<script>var s='<div hidden>';</script>"))["hidden_by"] == ""
+
+
+def test_hidden_article_body_finding_and_the_opt_out():
+    f = _fact("gifts", "https://cdn.test/h.jpg", hidden_by='<main id="ap-seo" style="display:none"> (display:none)')
+    out = sca.evaluate_articles([f], {}, _acfg())
+    assert [(x["kind"], x["severity"]) for x in out] == [("hidden-article-body", "error")]
+    assert "display:none" in out[0]["message"]
+    assert sca.evaluate_articles([f], {}, _acfg(hidden_body_ok=True)) == []
+
+
+FALLBACK = [f"/recipes/{s}" for s in ("spaghetti-64137", "omelet-muffins-16368", "quinoa-bowl-165970",
+                                      "chickpea-salad-1", "lentil-soup-2", "tuna-wrap-3")]
+
+
+def test_shared_link_set_flags_one_fallback_module_on_many_articles():
+    acfg = _acfg(shared_link_re=r"^/recipes/[A-Za-z0-9-]+-[0-9]+/?$", shared_link_set_min=6)
+    html = ("<article><h1>Christmas Cookie Recipes</h1>"
+            + "".join(f"<a href='/recipes/cookie-{i}-{i}'>c</a>" for i in range(5))
+            + "<a href='/recipes/category/cookies'>hub</a>"
+            + "".join(f"<a href='https://s.test{u}?ref=card'>card</a>" for u in FALLBACK) + "</article>")
+    f = sca.article_page_facts({"title": "x"}, "https://s.test/blog/cookies", html, acfg, {})
+    assert f["link_set"] == sorted([f"/recipes/cookie-{i}-{i}" for i in range(5)] + FALLBACK)
+    facts = [
+        _fact("cookies", "https://cdn.test/1.jpg", link_set=f["link_set"]),
+        _fact("coffee-gifts", "https://cdn.test/2.jpg", link_set=FALLBACK + ["/recipes/latte-9"]),
+        _fact("whole30", "https://cdn.test/3.jpg", link_set=FALLBACK[:5] + ["/recipes/salmon-7"]),
+    ]
+    out = [x for x in sca.evaluate_articles(facts, {}, acfg) if x["kind"] == "shared-link-set"]
+    assert sorted(x["url"].rsplit("/", 1)[-1] for x in out) == ["coffee-gifts", "cookies"]
+    assert out[0]["severity"] == "warn" and "6 of its card links" in out[0]["message"]
+    assert [x for x in sca.evaluate_articles(facts, {}, _acfg()) if x["kind"] == "shared-link-set"] == []
+
+
+def test_product_link_pattern_matches_a_link_with_a_query():
+    acfg = _acfg(product_link_re=r"^/kitchen/(?!category/)[A-Za-z0-9-]+/?$", buy_link_re=r"^/k/")
+    html = ("<article><a href='/kitchen/oxo-scale?ref=gift'>OXO</a><a href='/kitchen/nordic/'>N</a>"
+            "<a href='/kitchen/category/bakeware?x=1'>cat</a><a href='/k/oxo-scale?source=amazon'>buy</a></article>")
+    f = sca.article_page_facts({}, "https://s.test/blog/x", html, acfg, {})
+    assert (f["product_links"], f["buy_links"]) == (2, 1)
+
+
+def test_audit_reports_buy_link_gaps_exactly_where_the_guard_asks_for_buy_links():
+    # The audit flags no-buy-link-on-monetized-article on titles and product
+    # pages; the link guard must ask the author for buy links on the same ones
+    # (2026-11-12 re-review: they disagreed on product pages and on best/vs).
+    from framework.core import article_link_guard as g
+    acfg = sca.site_config(sca.load_config(), "https://aisleprompt.com")["article_audit"]
+    guard = g.resolve_minima("aisleprompt")
+    title_rx = sca._rx(acfg["monetized_title_re"])
+    for title in ("Gifts for Bakers 2026", "Thanksgiving Kitchen Gear Checklist",
+                  "Black Friday Kitchen Deals 2026", "Best Christmas Cookie Recipes",
+                  "Butter vs Margarine in Cookies", "Is Sous Vide Worth It?", "Diwali Recipes"):
+        audit_flags = bool(title_rx.search(title))
+        guard_asks = g.min_buy_links_for(guard, bucket="recipe-cluster", title=title) > 0
+        assert audit_flags == guard_asks, title
+    for bucket in acfg["monetized_buckets"]:
+        assert g.min_buy_links_for(guard, bucket=bucket) > 0, bucket
+    prod_rx = sca._rx(acfg["product_link_re"])
+    for path in ("/kitchen/oxo-scale", "/kitchen/oxo-scale/", "/kitchen/category/bakeware",
+                 "/kitchen/compare", "/kitchen/buying-guides", "/kitchen/"):
+        guard_names = bool(g.product_page_targets(f"[x]({path})", guard["product_page_patterns"]))
+        assert bool(prod_rx.search(path)) == guard_names, path
+    assert acfg["monetized_min_product_links"] == 1 and guard["min_buy_links_if_product_pages"] >= 1

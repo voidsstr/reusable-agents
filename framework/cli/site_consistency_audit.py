@@ -711,6 +711,8 @@ _REPO_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".
 ARTICLE_SEVERITY = {
     "raw-markdown": "error",                     # a reader sees `](https://…)` / `**`
     "no-buy-link-on-monetized-article": "error",  # lost revenue on a buying page
+    "hidden-article-body": "error",               # Google's renderer sees no article
+    "shared-link-set": "warn",                    # one fallback module on many articles
     "small-hero": "warn",                         # soft lead card, weak og:image
     "hero-offsite-host": "warn",                  # hotlinked: can vanish or be pulled
     "duplicate-hero": "warn",                     # one photo standing in for N subjects
@@ -753,8 +755,18 @@ ARTICLE_DEFAULTS: dict = {
     "product_link_re": "",
     "monetized_min_product_links": 1,
     # a direct buy link: matched against the path of an own-host link, the
-    # full URL of any other
+    # full URL of any other (both patterns are tried with and without the
+    # link's query string)
     "buy_link_re": r"^/(?:k|go)/[A-Za-z0-9-]+|amazon\.[a-z.]+/(?:dp|gp/product)/|amzn\.to/|ebay\.[a-z.]+/itm/",
+    # true for a site that deliberately ships its article as a hidden no-JS
+    # panel: hidden-article-body then stays quiet
+    "hidden_body_ok": False,
+    # shared-link-set: links matching shared_link_re (e.g. recipe cards) of
+    # which at least shared_link_set_min appear, the same ones, on two or
+    # more recent articles — a catalog-wide fallback module standing in for
+    # each article's own. Empty pattern switches the check off.
+    "shared_link_re": "",
+    "shared_link_set_min": 6,
     "severity": dict(ARTICLE_SEVERITY),
 }
 
@@ -935,9 +947,10 @@ _BLOCK_TAG = re.compile(
     r"figcaption|dt|dd|nav|aside|main)\b[^>]*|br\s*/?)>", re.I)
 
 
-def _content_region(html: str, content_re: str = "") -> str:
-    """The article region: `content_re`'s first group, else the first
-    <article>…</article>, else <main>, else the whole page."""
+def _content_region_span(html: str, content_re: str = "") -> tuple[int, int] | None:
+    """(start, end) of the article region in `html` — `content_re`'s first
+    group, else the first <article>…</article>, else <main> — or None when
+    the whole page is the region."""
     pats = ([content_re] if content_re else []) + [r"<article\b[^>]*>(.*)</article>",
                                                     r"<main\b[^>]*>(.*)</main>"]
     for p in pats:
@@ -946,8 +959,93 @@ def _content_region(html: str, content_re: str = "") -> str:
         except re.error:
             continue
         if m:
-            return m.group(1) if m.groups() else m.group(0)
-    return html or ""
+            if not m.groups():
+                return m.start(), m.end()
+            return (m.start(1), m.end(1)) if m.start(1) >= 0 else (m.start(), m.start())
+    return None
+
+
+def _content_region(html: str, content_re: str = "") -> str:
+    """The article region: `content_re`'s first group, else the first
+    <article>…</article>, else <main>, else the whole page."""
+    span = _content_region_span(html, content_re)
+    return (html or "")[span[0]:span[1]] if span else (html or "")
+
+
+# ── is the article region hidden from a JS-on renderer? ─────────────────────
+# R2-T01 (2026-11-12): one site rendered every guide body inside
+# <main id="ap-seo" style="display:none">, shown only with JS off; its React
+# view needs an /api/ route that robots.txt disallows, so Google's renderer
+# sees no article. The page-level checks read that hidden panel and
+# call it fine.
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+              "param", "source", "track", "wbr"}
+_RAWTEXT_TAGS = {"script", "style", "textarea", "title"}
+_TAG_TOKEN = re.compile(
+    r"<!--.*?-->|<(/?)([A-Za-z][A-Za-z0-9-]*)\b((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>", re.S)
+_ATTR_TOKEN = re.compile(r"([^\s=/>\"']+)(?:\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?")
+
+
+def _open_elements_at(html: str, pos: int) -> list[tuple[str, str, str]]:
+    """The elements still open at offset `pos`, outermost first, as
+    (name, attribute text, open tag). A closing tag pops back to its
+    nearest open match (so an unclosed <p> or <li> does not stick); void
+    elements, self-closing tags, comments and raw-text contents are skipped."""
+    stack: list[tuple[str, str, str]] = []
+    html = html or ""
+    i = 0
+    while i < pos:
+        m = _TAG_TOKEN.search(html, i)
+        if not m or m.start() >= pos:
+            break
+        i = m.end()
+        if m.group(0).startswith("<!--"):
+            continue
+        closing, name, attrs = m.group(1), m.group(2).lower(), m.group(3) or ""
+        if closing:
+            for k in range(len(stack) - 1, -1, -1):
+                if stack[k][0] == name:
+                    del stack[k:]
+                    break
+            continue
+        if name in _VOID_TAGS or attrs.rstrip().endswith("/"):
+            continue
+        if name in _RAWTEXT_TAGS:
+            end = re.compile(rf"</{name}\s*>", re.I).search(html, i)
+            i = end.end() if end else len(html)
+            continue
+        stack.append((name, attrs, m.group(0)))
+    return stack
+
+
+def _hidden_reason(name: str, attrs: str) -> str:
+    """Why an element hides its content from a renderer with JS on, or ""."""
+    if name in ("noscript", "template"):
+        return f"inside <{name}>"
+    a = {k.lower(): (v or "").strip("\"'") for k, v in _ATTR_TOKEN.findall(attrs or "")}
+    style = re.sub(r"\s+", "", a.get("style", "")).lower()
+    if "display:none" in style:
+        return "display:none"
+    if "visibility:hidden" in style:
+        return "visibility:hidden"
+    if "hidden" in a:
+        return "hidden attribute"
+    if a.get("aria-hidden", "").lower() == "true":
+        return 'aria-hidden="true"'
+    return ""
+
+
+def hidden_region_reason(html: str, span: tuple[int, int] | None) -> str:
+    """The open tag (and why) of the outermost element that hides the
+    article region — the region's own element or an ancestor — or ""."""
+    if not span:
+        return ""
+    for name, attrs, tag in _open_elements_at(html, span[0]):
+        why = _hidden_reason(name, attrs)
+        if why:
+            shown = re.sub(r"\s+", " ", tag)[:120]
+            return f"{shown} ({why})"
+    return ""
 
 
 def visible_text_lines(html: str, drop_tables: bool = False) -> str:
@@ -998,16 +1096,23 @@ def _rx(pat: str):
 
 def article_page_facts(article: dict, url: str, html: str, acfg: dict, cfg: dict | None = None) -> dict:
     """Everything the article checks need from one fetched page. Pure."""
-    region = _content_region(html, acfg.get("content_re") or "")
+    span = _content_region_span(html, acfg.get("content_re") or "")
+    region = (html or "")[span[0]:span[1]] if span else (html or "")
     buy_rx, prod_rx = _rx(acfg.get("buy_link_re") or ""), _rx(acfg.get("product_link_re") or "")
-    buys, prods = set(), set()
+    share_rx = _rx(acfg.get("shared_link_re") or "")
+    buys, prods, shared = set(), set(), set()
     for href in _attr_all(region, "a", "href"):
         t = _link_target(href, url)
-        key = re.split(r"[?#]", t, maxsplit=1)[0].rstrip("/").lower()
-        if buy_rx and buy_rx.search(t):
+        bare = re.split(r"[?#]", t, maxsplit=1)[0]
+        key = bare.rstrip("/").lower()
+        # a pattern sees the target with and without its query, so a
+        # `…/?$`-anchored product shape matches a link that carries one
+        if buy_rx and (buy_rx.search(t) or buy_rx.search(bare)):
             buys.add(key)
-        elif prod_rx and prod_rx.search(t):
+        elif prod_rx and (prod_rx.search(t) or prod_rx.search(bare)):
             prods.add(key)
+        if share_rx and (share_rx.search(t) or share_rx.search(bare)):
+            shared.add(key)
     imgs = []
     for s in _attr_all(region, "img", "src"):
         if not s or s.startswith("data:"):
@@ -1033,6 +1138,8 @@ def article_page_facts(article: dict, url: str, html: str, acfg: dict, cfg: dict
                                           heading_text=visible_text_lines(region, drop_tables=True)),
         "buy_links": len(buys), "product_links": len(prods),
         "noindex": "noindex" in _meta(html, "robots").lower(),
+        "hidden_by": hidden_region_reason(html, span),
+        "link_set": sorted(shared),
     }
 
 
@@ -1172,6 +1279,12 @@ def evaluate_articles(facts: list[dict], probes: dict, acfg: dict) -> list[dict]
 
     for f in facts:
         u = f["url"]
+        if f.get("hidden_by") and not acfg.get("hidden_body_ok"):
+            out.append(_art_finding(acfg, "hidden-article-body", u,
+                                    f"the article region is hidden by {f['hidden_by']} — a renderer "
+                                    "with JS on (Google's) sees no article unless the app shows it; "
+                                    "the other checks read the hidden copy",
+                                    hidden_by=f["hidden_by"]))
         if f.get("raw_markdown"):
             kinds = ", ".join(k for k, _s in f["raw_markdown"])
             out.append(_art_finding(acfg, "raw-markdown", u,
@@ -1254,6 +1367,33 @@ def evaluate_articles(facts: list[dict], probes: dict, acfg: dict) -> list[dict]
                                     f"image {dims}, {_kb(b or 0)} (max {max_w} px / {_kb(max_b)}) "
                                     f"on {len(pages)} recent article(s), e.g. {pages[0]}",
                                     on_page=pages[0], pages=len(pages), width=w, bytes=b))
+
+    # shared link sets: the same >= shared_link_set_min card links (e.g.
+    # recipe cards) on two or more recent articles — 2026-11-12 review: a
+    # Christmas-cookie article and a coffee-gift guide both showed the same
+    # six catalog-wide fallback recipes (spaghetti, omelet muffins, ...)
+    set_min = int(acfg.get("shared_link_set_min") or 0)
+    if acfg.get("shared_link_re") and set_min > 0:
+        sets = [(f["url"], set(f.get("link_set") or [])) for f in facts]
+        partners: dict[str, dict[str, set]] = collections.defaultdict(dict)
+        for i in range(len(sets)):
+            if len(sets[i][1]) < set_min:
+                continue
+            for j in range(i + 1, len(sets)):
+                common = sets[i][1] & sets[j][1]
+                if len(common) >= set_min:
+                    partners[sets[i][0]][sets[j][0]] = common
+                    partners[sets[j][0]][sets[i][0]] = common
+        for u in sorted(partners):
+            others = partners[u]
+            most = max(len(c) for c in others.values())
+            sample = sorted(set().union(*others.values()))[:3]
+            out.append(_art_finding(acfg, "shared-link-set", u,
+                                    f"{most} of its card links are the same as on {len(others)} other "
+                                    f"recent article(s) ({', '.join(o.rsplit('/', 1)[-1] for o in sorted(others)[:4])})"
+                                    f" — a site-wide fallback module, not the article's own picks; "
+                                    f"e.g. {', '.join(sample)}",
+                                    shared_with=sorted(others), sample=sample))
     return out
 
 
