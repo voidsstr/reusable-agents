@@ -52,10 +52,12 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import copy
 import html as _html
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -119,6 +121,19 @@ CTA = re.compile(
 TAG = re.compile(r"<[^>]+>")
 MONEY = re.compile(r"\$\s?(\d[\d,]*(?:\.\d{2})?)")
 
+# Paths the auditor never requests, on any site: affiliate click-outs log a
+# click and redirect to a retailer, and API routes are not pages. A site
+# config can replace it (`never_fetch_path_re`).
+DEFAULT_NEVER_FETCH = r"^/(?:k|r|go)/|^/api/"
+
+
+def _never_fetch(path: str, cfg: dict) -> bool:
+    rx = cfg.get("never_fetch_path_re", DEFAULT_NEVER_FETCH) if cfg else DEFAULT_NEVER_FETCH
+    try:
+        return bool(rx) and bool(re.search(rx, path or ""))
+    except re.error:
+        return bool(re.search(DEFAULT_NEVER_FETCH, path or ""))
+
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Stop urllib following redirects so a 3xx becomes observable.
@@ -138,7 +153,8 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 RETRY_PAUSE_S = 3
 
 
-def _get(url: str, timeout: int, method: str = "GET", ua: str = UA, retries: int = 1):
+def _get(url: str, timeout: int, method: str = "GET", ua: str = UA, retries: int = 1,
+         headers: dict | None = None):
     """Fetch one URL WITHOUT following redirects.
 
     Returns (status, headers, body_text, elapsed_s). A 3xx carries its
@@ -151,11 +167,16 @@ def _get(url: str, timeout: int, method: str = "GET", ua: str = UA, retries: int
     200 minutes later, and a new kind marks the whole run as a regression. An
     HTTP error status is a real answer from the server and is never retried.
     elapsed_s times the attempt that answered, so a retry cannot fake a slow page.
+
+    `headers` are extra request headers — the site config's
+    `request_headers`, e.g. a probe header that tells the site's analytics
+    the request is our own.
     """
     for attempt in range(retries + 1):
         t0 = time.time()
         try:
-            rq = urllib.request.Request(url, headers={"User-Agent": ua}, method=method)
+            rq = urllib.request.Request(url, headers={"User-Agent": ua, **(headers or {})},
+                                        method=method)
             with _OPENER.open(rq, timeout=timeout) as r:
                 body = b"" if method == "HEAD" else r.read(800_000)
                 return r.status, dict(r.headers), body.decode("utf-8", "replace"), time.time() - t0
@@ -499,15 +520,15 @@ def check_hero_text(img_urls: list[str], timeout: int) -> list[dict]:
 
 # ── Sitemap reconciliation ──────────────────────────────────────────────────
 
-def sitemap_urls(base: str, timeout: int, cap: int) -> list[str]:
+def sitemap_urls(base: str, timeout: int, cap: int, headers: dict | None = None) -> list[str]:
     """Every page <loc> in the sitemap index and its children."""
-    st, _h, body, _e = _get(urllib.parse.urljoin(base, "/sitemap.xml"), timeout)
+    st, _h, body, _e = _get(urllib.parse.urljoin(base, "/sitemap.xml"), timeout, headers=headers)
     if st != 200 or not body:
         return []
     locs = re.findall(r"<loc>([^<]+)</loc>", body)
     pages = [u for u in locs if not u.endswith(".xml")]
     for child in [u for u in locs if u.endswith(".xml")][:20]:
-        s2, _h2, b2, _e2 = _get(child, timeout)
+        s2, _h2, b2, _e2 = _get(child, timeout, headers=headers)
         if s2 == 200 and b2:
             pages.extend(u for u in re.findall(r"<loc>([^<]+)</loc>", b2) if not u.endswith(".xml"))
         if len(pages) > cap:
@@ -536,7 +557,9 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
             break
 
         with ThreadPoolExecutor(workers) as ex:
-            fetched = list(ex.map(lambda p: (p[0], p[1], *_get(p[0], timeout)), batch))
+            fetched = list(ex.map(
+                lambda p: (p[0], p[1], *_get(p[0], timeout, headers=cfg.get("request_headers"))),
+                batch))
 
         for url, d, status, headers, html, elapsed in fetched:
             rec = audit_page(url, html, status, headers, elapsed, cfg)
@@ -558,6 +581,11 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
                         continue
                     # API and machine endpoints are not reader-facing pages.
                     if re.match(r"^/(api|_next|static|assets|feed|rss)(/|$)", p.path, re.I):
+                        continue
+                    # Affiliate click-outs (/k/<slug> and the like) are never
+                    # fetched: each request is logged as a click and earns a
+                    # redirect to the retailer, not a page.
+                    if _never_fetch(p.path, cfg):
                         continue
                     if nxt not in seen:
                         linked_from.setdefault(nxt, url)
@@ -609,12 +637,14 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
     # The sitemaps are agent-generated, so nobody is checking them against the
     # live site. A sitemap full of 404s burns crawl budget on every visit.
     if cfg["check_sitemap"]:
-        sm = sitemap_urls(base, timeout, cfg["sitemap_cap"])
+        sm = [u for u in sitemap_urls(base, timeout, cfg["sitemap_cap"], headers=cfg.get("request_headers"))
+              if not _never_fetch(urllib.parse.urlsplit(u).path, cfg)]
         step = max(1, len(sm) // cfg["sitemap_sample"]) if sm else 1
         sample = sm[::step][: cfg["sitemap_sample"]]
         if sample:
             with ThreadPoolExecutor(workers) as ex:
-                probes = list(ex.map(lambda u: (u, *_get(u, timeout, method="HEAD")), sample))
+                probes = list(ex.map(lambda u: (u, *_get(u, timeout, method="HEAD",
+                                                         headers=cfg.get("request_headers"))), sample))
             for su, st, _hd, _b, _e in probes:
                 if st in (404, 410):
                     results.append(dict(severity="error", kind="sitemap-url-404", url=su,
@@ -659,7 +689,632 @@ def crawl(base: str, depth: int, max_pages: int, timeout: int, workers: int, cfg
                                        timeout))
 
     return {"base": base, "pages_crawled": len(seen), "images_checked": len(imgs),
-            "findings": results}
+            "findings": results, "crawled": sorted(u.rstrip("/") for u in pages)}
+
+
+# ── Recent articles — audited every run, crawled or not ─────────────────────
+#
+# 2026-11-12 article review: of 54 articles published in 30 days, the crawl
+# reached a handful, so it never saw what a reader of the new ones saw:
+# 17 heroes of 344-496 px, one product photo heroing four different
+# articles, two heroes hotlinked from strangers' servers, a citation
+# rendered as raw markdown, seven gift / checklist guides with no buy
+# button, 5000-px recipe photos on cards. The checks below run on EVERY
+# article published in the window (from the site DB, or the sitemap's
+# lastmod), whether or not the BFS reached it. Knobs live in
+# config/site-consistency-audit-config.json (storage copy overlays it);
+# every kind has a severity there.
+
+_CONFIG_KEY = "config/site-consistency-audit-config.json"
+_REPO_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", _CONFIG_KEY)
+
+ARTICLE_SEVERITY = {
+    "raw-markdown": "error",                     # a reader sees `](https://…)` / `**`
+    "no-buy-link-on-monetized-article": "error",  # lost revenue on a buying page
+    "small-hero": "warn",                         # soft lead card, weak og:image
+    "hero-offsite-host": "warn",                  # hotlinked: can vanish or be pulled
+    "duplicate-hero": "warn",                     # one photo standing in for N subjects
+    "heavy-image": "warn",                        # multi-MB / 5000-px images on a card
+    "recent-article-noindex": "warn",             # the day's article slot earns nothing
+    "recent-article-redirects": "warn",           # its canonical URL is a hop
+    "article-audit-unavailable": "warn",          # the audit itself could not run
+}
+
+ARTICLE_DEFAULTS: dict = {
+    "enabled": True,
+    "window_days": 30,
+    "max_articles": 200,
+    # where the recent articles come from: "db", "sitemap" or "auto"
+    # (db when dsn_env is set in the environment, else the sitemap)
+    "source": "auto",
+    "dsn_env": "",
+    # SELECT returning at least slug; optional title, category, bucket,
+    # hero_image_url, published_at. Named params: %(days)s, %(limit)s.
+    "query": "",
+    "url_template": "",            # "https://<host>/<route>/{slug}"
+    "sitemap_path_re": "",          # sitemap source: article URL paths
+    # The article region of a page: first <article>…</article>, else <main>.
+    "content_re": "",
+    "imgs_per_article": 24,
+    "image_probe_bytes": 65536,     # ranged GET: enough for any image header
+    "hero_min_width": 1000,
+    "hero_min_bytes": 40000,
+    "allowed_image_hosts": [],      # hero hosts; empty switches the check off
+    "duplicate_hero_min": 2,        # articles sharing one hero before it fires
+    # path rewrites applied before comparing hero URLs, so CDN size variants
+    # of one picture ("…/81ubl5FITQL._AC_SL1500_.jpg") compare equal
+    "image_url_normalize": [[r"\._[A-Za-z0-9_,]+_(?=\.[A-Za-z0-9]+$)", ""]],
+    "max_image_bytes": 1_500_000,   # the review's bar: 1.5-1.9 MB card images
+    "max_image_width": 3000,
+    # monetized = a listed bucket/category, a title match, or at least
+    # monetized_min_product_links links to product pages
+    "monetized_buckets": [],
+    "monetized_title_re": "",
+    "product_link_re": "",
+    "monetized_min_product_links": 1,
+    # a direct buy link: matched against the path of an own-host link, the
+    # full URL of any other
+    "buy_link_re": r"^/(?:k|go)/[A-Za-z0-9-]+|amazon\.[a-z.]+/(?:dp|gp/product)/|amzn\.to/|ebay\.[a-z.]+/itm/",
+    "severity": dict(ARTICLE_SEVERITY),
+}
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    """Dicts merge key by key (recursively); anything else replaces."""
+    out = dict(base or {})
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config(path: str | None = None, storage=None) -> dict:
+    """The audit config: repo default, the storage copy laid over it, then an
+    explicit --config file. An unreadable repo default or storage copy is
+    skipped; an explicit --config that does not load is reported on stderr."""
+    cfg: dict = {}
+    try:
+        with open(_REPO_CONFIG) as fh:
+            cfg = json.load(fh)
+    except Exception as e:
+        print(f"[site-audit] repo config unreadable ({e}); built-in defaults only", file=sys.stderr)
+    if storage is not None:
+        try:
+            cfg = _deep_merge(cfg, storage.read_json(_CONFIG_KEY) or {})
+        except Exception:
+            pass
+    if path:
+        try:
+            with open(path) as fh:
+                cfg = _deep_merge(cfg, json.load(fh))
+        except Exception as e:
+            print(f"[site-audit] --config {path} not loaded: {e}", file=sys.stderr)
+    return cfg
+
+
+def _bare_host(netloc: str) -> str:
+    h = (netloc or "").lower().split("@")[-1].split(":")[0]
+    return h[4:] if h.startswith("www.") else h
+
+
+def site_config(cfg: dict, base: str) -> dict:
+    """Settings for the site at `base`: the config's `default` block with the
+    `sites` block whose key is the base's host (www. ignored) laid over it.
+    `article_audit` is filled from ARTICLE_DEFAULTS and is configured only
+    when the site names a source (query + url_template, or sitemap_path_re)."""
+    host = _bare_host(urllib.parse.urlsplit(base).netloc)
+    site = copy.deepcopy((cfg or {}).get("default") or {})
+    matched = ""
+    for key, block in ((cfg or {}).get("sites") or {}).items():
+        if _bare_host(key) == host:
+            site = _deep_merge(site, copy.deepcopy(block or {}))
+            matched = key
+            break
+    acfg = _deep_merge(copy.deepcopy(ARTICLE_DEFAULTS), site.get("article_audit") or {})
+    acfg["configured"] = bool((acfg.get("query") and acfg.get("url_template"))
+                              or acfg.get("sitemap_path_re"))
+    site["article_audit"] = acfg
+    site["matched_site"] = matched
+    site.setdefault("request_headers", {})
+    site.setdefault("never_fetch_path_re", DEFAULT_NEVER_FETCH)
+    return site
+
+
+def _art_finding(acfg: dict, kind: str, url: str, message: str, **extra) -> dict:
+    sev = (acfg.get("severity") or {}).get(kind) or ARTICLE_SEVERITY.get(kind, "warn")
+    return dict(severity=sev, kind=kind, url=url, message=message, recent_article=True, **extra)
+
+
+# ── where the recent articles come from ────────────────────────────────────
+
+def recent_articles_from_db(acfg: dict, connect=None) -> list[dict]:
+    """Rows of the site's own `query`, in a READ-ONLY session (the audit
+    never writes). `connect(dsn)` is injectable for tests."""
+    dsn = os.environ.get(acfg.get("dsn_env") or "", "")
+    if not dsn:
+        raise RuntimeError(f"${acfg.get('dsn_env')} is not set")
+    if connect is None:
+        import psycopg2  # optional dependency, only for the db source
+
+        def connect(d):
+            c = psycopg2.connect(d, options="-c default_transaction_read_only=on "
+                                            "-c statement_timeout=30000")
+            c.set_session(readonly=True, autocommit=True)
+            return c
+    conn = connect(dsn)
+    try:
+        cur = conn.cursor()
+        cur.execute(acfg["query"], {"days": int(acfg["window_days"]), "limit": int(acfg["max_articles"])})
+        names = [d[0] for d in cur.description]
+        rows = [dict(zip(names, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        slug = str(r.get("slug") or "").strip()
+        if not slug:
+            continue
+        out.append({"url": acfg["url_template"].replace("{slug}", slug), "slug": slug,
+                    "title": r.get("title") or "",
+                    "categories": [str(r.get(k) or "") for k in ("category", "bucket") if r.get(k)],
+                    "db_hero": r.get("hero_image_url") or "",
+                    "published_at": str(r.get("published_at") or "")[:19]})
+    return out
+
+
+def recent_articles_from_sitemap(base: str, acfg: dict, timeout: int, headers: dict | None = None,
+                                 now: float | None = None) -> list[dict]:
+    """Sitemap entries whose path matches `sitemap_path_re` and whose
+    <lastmod> falls inside the window (lastmod is the last change, so a
+    re-edited old article counts too — the db source is exact)."""
+    rx = re.compile(acfg["sitemap_path_re"])
+    cutoff = (now if now is not None else time.time()) - int(acfg["window_days"]) * 86400
+    st, _h, body, _e = _get(urllib.parse.urljoin(base, "/sitemap.xml"), timeout, headers=headers)
+    if st != 200 or not body:
+        raise RuntimeError(f"sitemap.xml returned {st}")
+    docs = [body]
+    for child in re.findall(r"<sitemap>\s*<loc>([^<]+)</loc>", body)[:20]:
+        s2, _h2, b2, _e2 = _get(child.strip(), timeout, headers=headers)
+        if s2 == 200 and b2:
+            docs.append(b2)
+    out, seen = [], set()
+    for doc in docs:
+        for block in re.findall(r"<url>(.*?)</url>", doc, re.S):
+            loc = (re.search(r"<loc>([^<]+)</loc>", block) or [None, ""])[1].strip()
+            mod = (re.search(r"<lastmod>([^<]+)</lastmod>", block) or [None, ""])[1].strip()
+            if not loc or loc in seen or not rx.search(urllib.parse.urlsplit(loc).path):
+                continue
+            try:
+                ts = time.mktime(time.strptime(mod[:10], "%Y-%m-%d"))
+            except ValueError:
+                continue
+            if ts >= cutoff:
+                seen.add(loc)
+                out.append({"url": loc, "slug": loc.rstrip("/").rsplit("/", 1)[-1], "title": "",
+                            "categories": [], "db_hero": "", "published_at": mod[:19]})
+    return out[: int(acfg["max_articles"])]
+
+
+def recent_articles(base: str, acfg: dict, timeout: int, headers: dict | None = None,
+                    connect=None) -> tuple[list[dict], str, str]:
+    """(articles, source, error). `auto` prefers the DB when its DSN env is
+    set and falls back to the sitemap when the DB source fails."""
+    src = (acfg.get("source") or "auto").lower()
+    errs = []
+    if src in ("db", "auto") and acfg.get("query") and acfg.get("url_template") \
+            and (src == "db" or os.environ.get(acfg.get("dsn_env") or "")):
+        try:
+            return recent_articles_from_db(acfg, connect=connect), "db", ""
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"db: {type(e).__name__}: {str(e)[:120]}")
+    if src in ("sitemap", "auto") and acfg.get("sitemap_path_re"):
+        try:
+            return recent_articles_from_sitemap(base, acfg, timeout, headers), "sitemap", "; ".join(errs)
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"sitemap: {type(e).__name__}: {str(e)[:120]}")
+    return [], "", "; ".join(errs) or "no usable source (dsn env unset and no sitemap_path_re)"
+
+
+# ── what a page shows ───────────────────────────────────────────────────────
+
+# Markdown the renderer should have turned into HTML, found in VISIBLE text
+# (code blocks excluded). Calibrated on the 54 articles of the 2026-11-12
+# review: the only hit was the 4475 citation whose link text held brackets.
+RAW_MARKDOWN = (
+    ("heading-hash", re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+\S", re.M)),
+    ("bold-asterisks", re.compile(r"\*\*[^*\n]{2,80}\*\*")),
+    ("md-link", re.compile(r"\]\((?:https?://|/)[^)\s]+\)")),
+    ("table-pipes", re.compile(r"\|[ \t]*:?-{3,}")),
+    ("code-fence", re.compile(r"```")),
+)
+
+_BLOCK_TAG = re.compile(
+    r"<(?:/?(?:p|div|h[1-6]|li|ul|ol|tr|table|section|article|header|footer|blockquote|figure|"
+    r"figcaption|dt|dd|nav|aside|main)\b[^>]*|br\s*/?)>", re.I)
+
+
+def _content_region(html: str, content_re: str = "") -> str:
+    """The article region: `content_re`'s first group, else the first
+    <article>…</article>, else <main>, else the whole page."""
+    pats = ([content_re] if content_re else []) + [r"<article\b[^>]*>(.*)</article>",
+                                                    r"<main\b[^>]*>(.*)</main>"]
+    for p in pats:
+        try:
+            m = re.search(p, html or "", re.S | re.I)
+        except re.error:
+            continue
+        if m:
+            return m.group(1) if m.groups() else m.group(0)
+    return html or ""
+
+
+def visible_text_lines(html: str, drop_tables: bool = False) -> str:
+    """Visible text with block elements on their own lines; scripts, styles
+    and code (<pre>, <code>) removed, entities decoded. drop_tables removes
+    rendered <table>s too (a "#" column header is not a markdown heading)."""
+    h = re.sub(r"<(script|style|noscript|template|pre|code)\b[^>]*>.*?</\1\s*>", " ", html or "",
+               flags=re.S | re.I)
+    if drop_tables:
+        h = re.sub(r"<table\b[^>]*>.*?</table\s*>", "\n", h, flags=re.S | re.I)
+    h = _BLOCK_TAG.sub("\n", h)
+    t = _html.unescape(TAG.sub(" ", h))
+    t = re.sub(r"[ \t\u00a0]+", " ", t)
+    return "\n".join(line.strip() for line in t.split("\n") if line.strip())
+
+
+def find_raw_markdown(text: str, heading_text: str | None = None) -> list[tuple[str, str]]:
+    """[(kind, snippet)] of markdown syntax left in visible text.
+    `heading_text` (the same text without rendered tables) is what the
+    heading check reads, when given: a table whose first header cell is "#"
+    starts a line with "# Recipe" (2026-11-12 Whole30 article)."""
+    out = []
+    for kind, rx in RAW_MARKDOWN:
+        src = heading_text if (kind == "heading-hash" and heading_text is not None) else text
+        m = rx.search(src or "")
+        if m:
+            i = max(0, m.start() - 50)
+            out.append((kind, (src[i:m.end() + 30]).replace("\n", " ⏎ ")))
+    return out
+
+
+def _link_target(href: str, page_url: str) -> str:
+    """An href as the buy/product patterns see it: the path (+query) when it
+    is on the page's own host, else the absolute URL."""
+    absu = urllib.parse.urljoin(page_url, _html.unescape(href or "").strip())
+    p, own = urllib.parse.urlsplit(absu), urllib.parse.urlsplit(page_url)
+    if p.scheme in ("http", "https") and _bare_host(p.netloc) == _bare_host(own.netloc):
+        return p.path + (f"?{p.query}" if p.query else "")
+    return absu
+
+
+def _rx(pat: str):
+    try:
+        return re.compile(pat, re.I) if pat else None
+    except re.error:
+        return None
+
+
+def article_page_facts(article: dict, url: str, html: str, acfg: dict, cfg: dict | None = None) -> dict:
+    """Everything the article checks need from one fetched page. Pure."""
+    region = _content_region(html, acfg.get("content_re") or "")
+    buy_rx, prod_rx = _rx(acfg.get("buy_link_re") or ""), _rx(acfg.get("product_link_re") or "")
+    buys, prods = set(), set()
+    for href in _attr_all(region, "a", "href"):
+        t = _link_target(href, url)
+        key = re.split(r"[?#]", t, maxsplit=1)[0].rstrip("/").lower()
+        if buy_rx and buy_rx.search(t):
+            buys.add(key)
+        elif prod_rx and prod_rx.search(t):
+            prods.add(key)
+    imgs = []
+    for s in _attr_all(region, "img", "src"):
+        if not s or s.startswith("data:"):
+            continue
+        u = urllib.parse.urljoin(url, _html.unescape(s))
+        p = urllib.parse.urlsplit(u)
+        if _bare_host(p.netloc) == _bare_host(urllib.parse.urlsplit(url).netloc) \
+                and _never_fetch(p.path, cfg or {}):
+            continue
+        if u not in imgs:
+            imgs.append(u)
+    og = _meta(html, "og:image")
+    title = article.get("title") or ""
+    if not title:
+        h1 = re.search(r"<h1\b[^>]*>(.*?)</h1>", html or "", re.S | re.I)
+        title = _html.unescape(TAG.sub("", h1.group(1))).strip() if h1 else ""
+    return {
+        "url": url, "title": title, "categories": list(article.get("categories") or []),
+        "hero": urllib.parse.urljoin(url, og) if og else (article.get("db_hero") or ""),
+        "db_hero": article.get("db_hero") or "",
+        "imgs": imgs[: int(acfg.get("imgs_per_article") or 24)],
+        "raw_markdown": find_raw_markdown(visible_text_lines(region),
+                                          heading_text=visible_text_lines(region, drop_tables=True)),
+        "buy_links": len(buys), "product_links": len(prods),
+        "noindex": "noindex" in _meta(html, "robots").lower(),
+    }
+
+
+# ── images ──────────────────────────────────────────────────────────────────
+
+_JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+def image_dims(data: bytes):
+    """(width, height) from an image's leading bytes — PNG, GIF, JPEG, WebP —
+    or None. Falls back to PIL when it is installed (AVIF etc.)."""
+    d = data or b""
+    try:
+        if d[:8] == b"\x89PNG\r\n\x1a\n" and len(d) >= 24:
+            return int.from_bytes(d[16:20], "big"), int.from_bytes(d[20:24], "big")
+        if d[:6] in (b"GIF87a", b"GIF89a") and len(d) >= 10:
+            return int.from_bytes(d[6:8], "little"), int.from_bytes(d[8:10], "little")
+        if d[:4] == b"RIFF" and d[8:12] == b"WEBP":
+            chunk = d[12:16]
+            if chunk == b"VP8 " and len(d) >= 30:
+                return (int.from_bytes(d[26:28], "little") & 0x3FFF,
+                        int.from_bytes(d[28:30], "little") & 0x3FFF)
+            if chunk == b"VP8L" and len(d) >= 25:
+                b = d[21:25]
+                return (1 + (((b[1] & 0x3F) << 8) | b[0]),
+                        1 + (((b[3] & 0x0F) << 10) | (b[2] << 2) | ((b[1] & 0xC0) >> 6)))
+            if chunk == b"VP8X" and len(d) >= 30:
+                return 1 + int.from_bytes(d[24:27], "little"), 1 + int.from_bytes(d[27:30], "little")
+        if d[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(d):
+                if d[i] != 0xFF:
+                    i += 1
+                    continue
+                m = d[i + 1]
+                if m == 0xFF:                       # fill byte
+                    i += 1
+                    continue
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:   # no length field
+                    i += 2
+                    continue
+                if m in (0xD9, 0xDA):               # end / start of scan: no SOF ahead
+                    break
+                if m in _JPEG_SOF:
+                    return int.from_bytes(d[i + 7:i + 9], "big"), int.from_bytes(d[i + 5:i + 7], "big")
+                i += 2 + int.from_bytes(d[i + 2:i + 4], "big")
+    except Exception:
+        pass
+    try:
+        import io
+        from PIL import Image  # optional
+        return Image.open(io.BytesIO(d)).size
+    except Exception:
+        return None
+
+
+def probe_image(url: str, timeout: int, full: bool = False, probe_bytes: int = 65536,
+                max_bytes: int = 25_000_000) -> dict:
+    """{url, status, bytes, w, h[, sha1]} for one image, following redirects.
+
+    full=False reads only the leading `probe_bytes` (a ranged GET) and takes
+    the total size from Content-Range / Content-Length; full=True downloads
+    the file so its bytes can be hashed (duplicate heroes at different URLs).
+    A failed probe reports its status only — the crawl's broken-image check
+    owns reachability, so an unknown size is never a finding here."""
+    out: dict = {"url": url}
+    hdrs = {"User-Agent": BROWSER_UA}
+    if not full:
+        hdrs["Range"] = f"bytes=0-{max(int(probe_bytes), 1024) - 1}"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=hdrs), timeout=timeout) as r:
+            status = r.status
+            hd = {k.lower(): v for k, v in r.headers.items()}
+            data = r.read(max_bytes if full else max(int(probe_bytes), 1024))
+    except urllib.error.HTTPError as e:
+        out["status"] = e.code
+        return out
+    except Exception as e:  # noqa: BLE001
+        out.update(status=0, error=type(e).__name__)
+        return out
+    out["status"] = status
+    total = None
+    m = re.search(r"/(\d+)\s*$", hd.get("content-range", ""))
+    if m:
+        total = int(m.group(1))
+    elif str(hd.get("content-length", "")).isdigit():
+        total = int(hd["content-length"])
+    if full and len(data) < max_bytes:
+        total = len(data)
+        import hashlib
+        out["sha1"] = hashlib.sha1(data).hexdigest()
+    out["bytes"] = total
+    dims = image_dims(data)
+    if dims is None and not full and total and total <= max_bytes:
+        # A header past the probe window (a big EXIF block): read it all once.
+        return probe_image(url, timeout, full=True, probe_bytes=probe_bytes, max_bytes=max_bytes)
+    if dims:
+        out["w"], out["h"] = dims
+    return out
+
+
+def _host_allowed(url: str, allowed: list) -> bool:
+    host = (urllib.parse.urlsplit(url).netloc or "").lower().split(":")[0]
+    for a in allowed or []:
+        a = str(a).lower().lstrip("*").lstrip(".")
+        if a and (host == a or host.endswith("." + a)):
+            return True
+    return False
+
+
+def _norm_image_url(url: str, rules: list) -> str:
+    p = urllib.parse.urlsplit(url)
+    path = p.path
+    for rule in rules or []:
+        try:
+            path = re.sub(rule[0], rule[1], path)
+        except (re.error, IndexError, TypeError):
+            continue
+    return f"{(p.netloc or '').lower()}{path}"
+
+
+def _kb(n) -> str:
+    return f"{n / 1_000_000:.1f} MB" if n >= 1_000_000 else f"{max(n // 1000, 0)} KB"
+
+
+# ── the checks ──────────────────────────────────────────────────────────────
+
+def evaluate_articles(facts: list[dict], probes: dict, acfg: dict) -> list[dict]:
+    """Findings for the recent articles from their page facts and the image
+    probes ({url: probe_image() result}). Pure."""
+    out: list[dict] = []
+    allowed = acfg.get("allowed_image_hosts") or []
+    min_w, min_b = int(acfg.get("hero_min_width") or 0), int(acfg.get("hero_min_bytes") or 0)
+    title_rx = _rx(acfg.get("monetized_title_re") or "")
+    buckets = {str(b).lower() for b in acfg.get("monetized_buckets") or []}
+    min_prod = int(acfg.get("monetized_min_product_links") or 1)
+
+    for f in facts:
+        u = f["url"]
+        if f.get("raw_markdown"):
+            kinds = ", ".join(k for k, _s in f["raw_markdown"])
+            out.append(_art_finding(acfg, "raw-markdown", u,
+                                    f"markdown the renderer did not convert ({kinds}): "
+                                    f"…{f['raw_markdown'][0][1][:140]}…"))
+        if f.get("noindex"):
+            out.append(_art_finding(acfg, "recent-article-noindex", u,
+                                    "published in the audit window but noindex — it cannot earn "
+                                    "search traffic, so the proposer spent a daily article slot on it"))
+        why = []
+        cats = {c.lower() for c in f.get("categories") or [] if c}
+        if cats & buckets:
+            why.append("bucket " + "/".join(sorted(cats & buckets)))
+        if title_rx and title_rx.search(f.get("title") or ""):
+            why.append("title")
+        if acfg.get("product_link_re") and f.get("product_links", 0) >= min_prod:
+            why.append(f"{f['product_links']} product-page links")
+        if why and f.get("buy_links", 0) == 0:
+            out.append(_art_finding(acfg, "no-buy-link-on-monetized-article", u,
+                                    f"monetized ({', '.join(why)}) but the article renders no direct "
+                                    f"buy link — products are named only through their pages",
+                                    product_links=f.get("product_links", 0)))
+        hero = f.get("hero") or ""
+        if hero:
+            pr = probes.get(hero) or {}
+            w, b = pr.get("w"), pr.get("bytes")
+            small = (w is not None and w < min_w) or (b is not None and b < min_b)
+            if small:
+                dims = f"{w}x{pr.get('h')}" if w is not None else "?x?"
+                out.append(_art_finding(acfg, "small-hero", u,
+                                        f"hero {dims}, {_kb(b or 0)} (min {min_w} px wide, "
+                                        f"{_kb(min_b)}) — renders soft as the lead card and og:image",
+                                        hero=hero, width=w, bytes=b))
+        if allowed:
+            for h in dict.fromkeys(x for x in (hero, f.get("db_hero")) if x):
+                if not _host_allowed(h, allowed):
+                    out.append(_art_finding(acfg, "hero-offsite-host", u,
+                                            f"hero is hotlinked from {urllib.parse.urlsplit(h).netloc} "
+                                            "(not an allowed image host) — mirror or replace it",
+                                            hero=h))
+
+    # duplicate heroes: same normalized URL, or same bytes at different URLs
+    min_dup = max(int(acfg.get("duplicate_hero_min") or 2), 2)
+    rules = acfg.get("image_url_normalize") or []
+    groups: dict = collections.defaultdict(set)
+    for f in facts:
+        hero = f.get("hero") or ""
+        if not hero:
+            continue
+        groups[("url", _norm_image_url(hero, rules))].add(f["url"])
+        sha = (probes.get(hero) or {}).get("sha1")
+        if sha:
+            groups[("sha1", sha)].add(f["url"])
+    shared: dict[str, set] = collections.defaultdict(set)
+    for members in groups.values():
+        if len(members) >= min_dup:
+            for m in members:
+                shared[m] |= members - {m}
+    hero_of = {f["url"]: f.get("hero") for f in facts}
+    for u in sorted(shared):
+        others = sorted(shared[u])
+        out.append(_art_finding(acfg, "duplicate-hero", u,
+                                f"hero is also the hero of {len(others)} other recent article(s): "
+                                + ", ".join(o.rsplit("/", 1)[-1] for o in others[:4]),
+                                hero=hero_of.get(u), shared_with=others))
+
+    # heavy images: once per image, naming the pages that render it
+    max_b, max_w = int(acfg.get("max_image_bytes") or 0), int(acfg.get("max_image_width") or 0)
+    pages_of: dict[str, list] = collections.defaultdict(list)
+    for f in facts:
+        for iu in dict.fromkeys([f.get("hero") or ""] + list(f.get("imgs") or [])):
+            if iu:
+                pages_of[iu].append(f["url"])
+    for iu, pages in pages_of.items():
+        pr = probes.get(iu) or {}
+        w, b = pr.get("w"), pr.get("bytes")
+        if (max_b and b and b > max_b) or (max_w and w and w > max_w):
+            dims = f"{w}x{pr.get('h')}" if w else "?x?"
+            out.append(_art_finding(acfg, "heavy-image", iu,
+                                    f"image {dims}, {_kb(b or 0)} (max {max_w} px / {_kb(max_b)}) "
+                                    f"on {len(pages)} recent article(s), e.g. {pages[0]}",
+                                    on_page=pages[0], pages=len(pages), width=w, bytes=b))
+    return out
+
+
+def audit_recent_articles(base: str, site: dict, cfg: dict, timeout: int, workers: int,
+                          crawled: set | None = None, connect=None) -> tuple[list[dict], dict]:
+    """Audit every article published in the window (crawled or not).
+
+    Returns (findings, summary). A recent article the BFS did not reach also
+    gets every page-level check (audit_page); one it did reach is not
+    re-reported. Read-only: GETs and a read-only SELECT."""
+    acfg = site["article_audit"]
+    headers = site.get("request_headers") or {}
+    summary = {"source": "", "window_days": acfg.get("window_days"), "articles": 0,
+               "audited": 0, "not_in_crawl": 0, "error": ""}
+    arts, source, err = recent_articles(base, acfg, timeout, headers=headers, connect=connect)
+    summary.update(source=source, articles=len(arts), error=err)
+    findings: list[dict] = []
+    if not arts:
+        if err:
+            findings.append(_art_finding(acfg, "article-audit-unavailable", base,
+                                         f"recent-article audit did not run: {err}"))
+        return findings, summary
+
+    crawled_norm = {c.rstrip("/") for c in (crawled or set())}
+    todo = [a for a in arts if not _never_fetch(urllib.parse.urlsplit(a["url"]).path, site)]
+    with ThreadPoolExecutor(max(workers, 1)) as ex:
+        fetched = list(ex.map(lambda a: (a, *_get(a["url"], timeout, headers=headers)), todo))
+
+    facts = []
+    for a, status, hd, html, elapsed in fetched:
+        url = a["url"]
+        if url.rstrip("/") not in crawled_norm:
+            summary["not_in_crawl"] += 1
+            rec = audit_page(url, html, status, hd, elapsed, cfg)
+            for f in rec["findings"]:
+                f["recent_article"] = True
+            findings.extend(rec["findings"])
+        if 300 <= status < 400:
+            loc = urllib.parse.urljoin(url, hd.get("Location") or hd.get("location") or "")
+            findings.append(_art_finding(acfg, "recent-article-redirects", url,
+                                         f"recently published article answers {status} → {loc[:90]} "
+                                         "(its URL in the sitemap/canonical is a hop)", redirect_to=loc))
+            continue
+        if status != 200 or not html:
+            continue
+        facts.append(article_page_facts(a, url, html, acfg, site))
+    summary["audited"] = len(facts)
+
+    heroes = list(dict.fromkeys(f["hero"] for f in facts if f.get("hero")))
+    hero_set = set(heroes)
+    others = list(dict.fromkeys(i for f in facts for i in f["imgs"] if i not in hero_set))
+    pb = int(acfg.get("image_probe_bytes") or 65536)
+    probes: dict = {}
+    with ThreadPoolExecutor(max(workers, 1)) as ex:
+        for u, pr in zip(heroes, ex.map(lambda x: probe_image(x, timeout, full=True, probe_bytes=pb), heroes)):
+            probes[u] = pr
+        for u, pr in zip(others, ex.map(lambda x: probe_image(x, timeout, full=False, probe_bytes=pb), others)):
+            probes[u] = pr
+    summary["images_probed"] = len(probes)
+    findings.extend(evaluate_articles(facts, probes, acfg))
+    return findings, summary
 
 
 # ── Run-over-run regression diff ────────────────────────────────────────────
@@ -737,8 +1392,29 @@ def main(argv=None) -> int:
                     default=r"^/(product|products|buying-guide|buying-guides|kitchen|best)/")
     ap.add_argument("--editorial-re", default=r"^/(articles|blog|reviews|news)/")
     ap.add_argument("--state-dir", default="/tmp/reusable-agents-logs/site-audit-state")
+    ap.add_argument("--config", help="extra audit config JSON laid over "
+                                     "config/site-consistency-audit-config.json (+ its storage copy)")
+    ap.add_argument("--no-storage-config", action="store_true",
+                    help="ignore the storage copy of the audit config")
+    ap.add_argument("--no-article-audit", action="store_true",
+                    help="skip the recent-article audit (crawl only)")
+    ap.add_argument("--article-window-days", type=int,
+                    help="override the site config's article_audit.window_days")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
+
+    storage = None
+    if not a.no_storage_config:
+        try:
+            from framework.core.storage import get_storage
+            storage = get_storage()
+        except (Exception, SystemExit):  # no backend here: the repo default applies
+            storage = None
+    site = site_config(load_config(a.config, storage), a.base)
+    acfg = site["article_audit"]
+    if a.article_window_days:
+        acfg["window_days"] = a.article_window_days
+    run_articles = bool(acfg.get("enabled") and acfg.get("configured") and not a.no_article_audit)
 
     cfg = dict(min_words=a.min_words, slow_s=a.slow_s, dupe_title_cap=3, imgs_per_page=6,
                max_images=500, tiny_img_bytes=12_000, recheck_delay_s=0.4,
@@ -746,16 +1422,35 @@ def main(argv=None) -> int:
                check_sitemap=not a.no_sitemap_check, sitemap_cap=5000,
                sitemap_sample=a.sitemap_sample, vision_hero_check=a.vision_hero_check,
                vision_max=a.vision_max, leak_tokens=a.leak_token,
-               monetized_re=a.monetized_re, editorial_re=a.editorial_re)
+               monetized_re=a.monetized_re, editorial_re=a.editorial_re,
+               request_headers=site.get("request_headers") or {},
+               never_fetch_path_re=site.get("never_fetch_path_re", DEFAULT_NEVER_FETCH))
 
     rep = crawl(a.base, a.depth, a.max_pages, a.timeout, a.workers, cfg)
+    crawled = set(rep.pop("crawled", None) or [])
+    scope = f"d{a.depth}-p{a.max_pages}"
+    if run_articles:
+        # Every article of the window, crawled or not. The crawl's own pages
+        # are passed in so a page is not reported twice.
+        art_findings, rep["recent_articles"] = audit_recent_articles(
+            a.base, site, cfg, a.timeout, a.workers, crawled=crawled)
+        rep["findings"].extend(art_findings)
+        # A run that also audits the window measures more than a crawl-only
+        # run did, so it gets its own baseline instead of reporting the new
+        # kinds as a regression on its first day.
+        scope += f"-a{acfg['window_days']}"
     by_kind = collections.Counter(f["kind"] for f in rep["findings"])
     by_sev = collections.Counter(f["severity"] for f in rep["findings"])
     rep["summary"] = {"by_kind": dict(by_kind), "by_severity": dict(by_sev)}
-    rep["diff"] = diff_against_last(rep, a.state_dir, scope=f"d{a.depth}-p{a.max_pages}")
+    rep["diff"] = diff_against_last(rep, a.state_dir, scope=scope)
 
+    ra = rep.get("recent_articles")
     print(f"\n{a.base}  —  {rep['pages_crawled']} pages, {rep['images_checked']} images, "
           f"{len(rep['findings'])} findings")
+    if ra:
+        print(f"  recent articles ({ra['source'] or 'no source'}, {ra['window_days']} d): "
+              f"{ra['audited']}/{ra['articles']} audited, {ra['not_in_crawl']} not reached by the crawl"
+              + (f" — {ra['error']}" if ra.get("error") else ""))
     print(f"  severity: {dict(by_sev)}")
     for kind, n in by_kind.most_common():
         s = next(f for f in rep["findings"] if f["kind"] == kind)

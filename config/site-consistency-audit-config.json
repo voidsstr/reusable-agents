@@ -1,0 +1,61 @@
+{
+  "schema_version": "1",
+  "_comment": "Per-site settings for framework/cli/site_consistency_audit.py. The storage copy at config/site-consistency-audit-config.json is laid over this repo default (dicts merge key by key, lists replace), then an explicit --config file. A site block is chosen by the --base host (www. ignored). request_headers go on every page request to that site (a probe header marks the audit's traffic as self-traffic); never_fetch_path_re lists paths never requested (affiliate click-outs log a click). article_audit = the recent-article audit (2026-11-12 article review): every article published in the last window_days is fetched and checked even when the crawl never reached it. Source: a read-only SELECT (dsn_env + query with %(days)s / %(limit)s, returning slug and optionally title, category, bucket, hero_image_url, published_at; url_template builds the URL from {slug}) or the sitemap (sitemap_path_re + <lastmod>); source auto = db when the DSN env is set, else the sitemap. Checks and knobs: raw-markdown (visible text of the article region, code excluded); small-hero (og:image, else the DB hero, under hero_min_width px or hero_min_bytes); hero-offsite-host (hero host not in allowed_image_hosts, suffix match; empty list = off); duplicate-hero (same hero URL after image_url_normalize, or same bytes, on >= duplicate_hero_min recent articles); heavy-image (any article image over max_image_bytes or max_image_width px); no-buy-link-on-monetized-article (monetized = category/bucket in monetized_buckets, title matching monetized_title_re, or >= monetized_min_product_links links matching product_link_re; buy links match buy_link_re, tested against the path of an own-host link and the full URL of any other); recent-article-noindex; recent-article-redirects; article-audit-unavailable. severity = {kind: error|warn|info}. Defaults live in ARTICLE_DEFAULTS in the CLI.",
+  "default": {
+    "never_fetch_path_re": "^/(?:k|r|go)/|^/api/",
+    "article_audit": {
+      "enabled": true,
+      "window_days": 30,
+      "hero_min_width": 1000,
+      "hero_min_bytes": 40000,
+      "max_image_bytes": 1500000,
+      "max_image_width": 3000,
+      "duplicate_hero_min": 2
+    }
+  },
+  "sites": {
+    "aisleprompt.com": {
+      "request_headers": {
+        "x-aisleprompt-probe": "site-consistency-audit"
+      },
+      "article_audit": {
+        "dsn_env": "DATABASE_URL_AISLEPROMPT",
+        "query": "SELECT slug, title, category, bucket, hero_image_url, COALESCE(published_at, created_at) AS published_at FROM editorial_articles WHERE status = 'published' AND COALESCE(published_at, created_at) > now() - make_interval(days => %(days)s) ORDER BY COALESCE(published_at, created_at) DESC LIMIT %(limit)s",
+        "url_template": "https://aisleprompt.com/blog/{slug}",
+        "sitemap_path_re": "^/blog/[A-Za-z0-9-]+/?$",
+        "allowed_image_hosts": [
+          "aisleprompt.com",
+          "nscagentstorage.blob.core.windows.net",
+          "m.media-amazon.com"
+        ],
+        "monetized_buckets": [
+          "buying-guide",
+          "kitchen-buying-guide"
+        ],
+        "monetized_title_re": "\\b(gifts?|checklist|best|vs\\.?|worth (it|buying)|deals?)\\b",
+        "product_link_re": "^/kitchen/(?!category/|compare/?$|buying-guides/?$)[A-Za-z0-9-]+/?$",
+        "buy_link_re": "^/k/[A-Za-z0-9-]+|amazon\\.[a-z.]+/(?:dp|gp/product)/|amzn\\.to/"
+      }
+    },
+    "specpicks.com": {
+      "article_audit": {
+        "dsn_env": "DATABASE_URL_SPECPICKS",
+        "query": "SELECT slug, title, category, hero_image_url, COALESCE(published_at, created_at) AS published_at FROM editorial_articles WHERE status = 'published' AND COALESCE(published_at, created_at) > now() - make_interval(days => %(days)s) ORDER BY COALESCE(published_at, created_at) DESC LIMIT %(limit)s",
+        "url_template": "https://specpicks.com/reviews/{slug}",
+        "sitemap_path_re": "^/reviews/(?!archive/?$)[A-Za-z0-9-]+/?$",
+        "allowed_image_hosts": [
+          "specpicks.com",
+          "m.media-amazon.com",
+          "i.ebayimg.com",
+          "nscagentstorage.blob.core.windows.net"
+        ],
+        "monetized_buckets": [
+          "buying-guide"
+        ],
+        "monetized_title_re": "\\b(best|deals?|black friday|vs\\.?|worth (it|buying))\\b",
+        "product_link_re": "^/product/[A-Za-z0-9]+",
+        "buy_link_re": "amazon\\.[a-z.]+/(?:dp|gp/product)/|amzn\\.to/|ebay\\.[a-z.]+/(?:itm|sch)/"
+      }
+    }
+  }
+}
