@@ -1,6 +1,6 @@
 {
   "schema_version": "1",
-  "_comment": "Per-site inline-link guard config (framework/core/article_link_guard.py). Storage copy at config/article-link-guard-config.json overrides this repo default. Site key matches by substring against the rec's agent_id/site hint. Kitchen knobs: kitchen_roots = path roots counted as kitchen links; kitchen_category_template / kitchen_product_template = crawlable link shapes the writer is told to use when the proposer split its slugs (expected_kitchen_category_slugs / expected_kitchen_product_slugs); kitchen_buy_template = optional affiliate click-out for an explicit buy link; kitchen_link_template = shape for the legacy unsplit list (default /k/, resolves both kinds). kitchen_slug_check = optional post-write repair (implementer run.sh): kitchen links whose slug resolves to no active product / category / static slug are unlinked (anchor text kept) and doubled-brand slugs canonicalized before the guard counts them; table/column names are the site's, validated as SQL identifiers. Direct buy links (2026-11-12 review: gift guides and a checklist linked every product only through its /kitchen/<slug> page and shipped with zero buy buttons): buy_link_patterns = regexes a link target must match to count as a direct buy link (path for relative/own-host links, full URL otherwise; default ^/k/<slug>); min_buy_links = the site default (0); min_buy_links_by_bucket = {bucket: n}, replaces the default for that bucket (0 exempts it); min_buy_links_by_title = {title regex: n}, raises the minimum for any matching title (gift and checklist pages ride several buckets). The implementer counts them at INSERT (run.sh verify_body_with_config) and the author self-checks with framework.cli.article_link_guard check. The storage copy is laid over this file block by block (merge_guard_config), so it only needs the keys it changes.",
+  "_comment": "Per-site inline-link guard config (framework/core/article_link_guard.py). Site key matches by substring against the rec's agent_id/site hint. The storage copy at config/article-link-guard-config.json is laid over this file block by block (merge_guard_config), so it only needs the keys it changes; keep it empty of knobs unless an operator is overriding one, because a key it names shadows every later edit of that key here. Kitchen knobs: kitchen_roots = path roots counted as kitchen links; kitchen_category_template / kitchen_product_template = crawlable link shapes the writer is told to use when the proposer split its slugs (expected_kitchen_category_slugs / expected_kitchen_product_slugs); kitchen_buy_template = optional affiliate click-out for an explicit buy link; kitchen_link_template = shape for the legacy unsplit list (default /k/, resolves both kinds). kitchen_slug_check = optional post-write repair (implementer run.sh): kitchen links whose slug resolves to no active product / category / static slug are unlinked (anchor text kept) and doubled-brand slugs canonicalized before the guard counts them; table/column names are the site's, validated as SQL identifiers; the same product table is the catalog check for buy links. Direct buy links (2026-11-12 review: gift guides, a checklist, a seasonal cookie article and a diet article named products only through their /kitchen/<slug> pages and shipped with zero buy buttons): buy_link_patterns = regexes a link target must match to count as a direct buy link (path for relative/own-host links, full URL otherwise; default ^/k/<slug>); a buy-shaped link to a category does not count (the proposal's expected_kitchen_category_slugs, the kitchen_slug_check category/subcategory/reserved slugs, and with a DB connection any slug that is not an active product row); min_buy_links = the site default (0); min_buy_links_by_bucket = {bucket: n}, replaces the default for that bucket (0 exempts it); min_buy_links_by_title = {title regex: n}, raises the minimum for any matching title (gift, checklist and deals pages ride several buckets); product_page_patterns = regexes for links to a product's own page; min_buy_links_if_product_pages = k, a body naming N products through their pages needs min(k, N) buy links whatever its bucket or title; buy_link_label = anchor text of the buy link the deterministic repair (framework/cli/article_link_guard.py sweep --repair-buy-links) adds after a product's first link. The implementer counts them at INSERT (run.sh verify_body_with_config), the author self-checks with framework/cli/article_link_guard.py check, and run.sh sweeps (and repairs) every row written in the last 6 hours after an article-author or article-refresh dispatch.",
   "default": {
     "min_recipes": 5,
     "min_kits": 2,
@@ -29,6 +29,9 @@
       "buy_link_patterns": [
         "^/k/[A-Za-z0-9][A-Za-z0-9-]*"
       ],
+      "product_page_patterns": [
+        "^/kitchen/(?!category/|compare/?$|buying-guides/?$)[A-Za-z0-9][A-Za-z0-9-]*/?$"
+      ],
       "min_buy_links": 0,
       "min_buy_links_by_bucket": {
         "buying-guide": 2,
@@ -36,8 +39,11 @@
       },
       "min_buy_links_by_title": {
         "\\bgifts?\\b": 2,
-        "\\bchecklist\\b": 2
+        "\\bchecklist\\b": 2,
+        "\\bdeals?\\b": 2
       },
+      "min_buy_links_if_product_pages": 2,
+      "buy_link_label": "Check price",
       "kitchen_slug_check": {
         "product_table": "kitchen_products",
         "product_active_column": "is_active",

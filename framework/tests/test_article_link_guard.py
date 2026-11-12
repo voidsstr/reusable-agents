@@ -454,3 +454,224 @@ def test_directive_reads_the_category_as_well_as_the_bucket():
     txt = g.render_link_directive(prop, min_recipes=0, min_kits=2, site_root="https://ap.test",
                                   link_cfg=AP_BUY)
     assert "DIRECT BUY LINKS — at least 2 distinct" in txt
+
+
+# ── Product-page trigger, category buy links, repairs (2026-11-12 re-review) ─
+# The first pass caught gift / checklist titles and monetized buckets only:
+# 757 (Christmas cookies, seasonal-occasion) and 763 (Whole30, diet-guide)
+# each linked three /kitchen/<product> pages, no /k/ link, and passed. And a
+# /k/<category> link (aisleprompt 301s it to the category page) counted as a
+# buy link, while the directive itself told a categories-only checklist to
+# write one.
+
+AP_PP = dict(AP_BUY, min_buy_links_if_product_pages=2,
+             product_page_patterns=[r"^/kitchen/(?!category/|compare/?$|buying-guides/?$)"
+                                    r"[A-Za-z0-9][A-Za-z0-9-]*/?$"],
+             kitchen_slug_check={"product_table": "kitchen_products",
+                                 "product_active_column": "is_active",
+                                 "reserved_slugs": ["category", "compare", "buying-guides"],
+                                 "static_slugs": ["roasting-pans"],
+                                 "subcategory_parents": {"sheet-pans": "bakeware"}})
+
+COOKIES = ("# Christmas Cookie Recipes\n\n"
+           + " ".join(f"Bake the [cookie {i}](/recipes/cookie-{i}-{100 + i})." for i in range(6))
+           + "\n\nA [digital scale](/kitchen/oxo-good-grips-11-pound-scale), the "
+             "[Escali Primo](https://ap.test/kitchen/escali-primo-scale?ref=gift) and a "
+             "[KitchenAid Artisan](/kitchen/kitchenaid-artisan-stand-mixer-5qt) make it easier.\n")
+
+
+def test_seasonal_cookie_article_naming_three_products_needs_buy_links():
+    prop = {"bucket": "seasonal-occasion", "title": "Christmas Cookie Recipes: 25 Classic Holiday Cookies"}
+    a = g.verify_body_with_config(COOKIES, prop, AP_PP)
+    assert (a.product_page_links, a.min_buy_links, a.buy_links, a.passes) == (3, 2, 0, False)
+    assert a.failure_reason().startswith("only 0 direct buy links (min 2)")
+    assert "names 3 product(s) through their product pages" in a.failure_reason()
+    # the repo config carries the same trigger for the site
+    ap = g.resolve_minima("aisleprompt-article-proposal-agent")
+    assert not g.verify_body_with_config(COOKIES, prop, ap).passes
+    diet = {"bucket": "diet-guide", "title": "Whole30 Chicken Recipes: 25 Compliant Dinners"}
+    assert g.verify_body_with_config(COOKIES, diet, ap).min_buy_links == 2
+    # min(k, N): one named product needs one buy link; none needs none
+    one = COOKIES.split("A [digital")[0] + "Use a [scale](/kitchen/oxo-good-grips-11-pound-scale)."
+    assert g.verify_body_with_config(one, prop, AP_PP).min_buy_links == 1
+    assert g.verify_body_with_config(COOKIES.split("A [digital")[0], prop, AP_PP).min_buy_links == 0
+    ok = COOKIES + ("[Check price](/k/oxo-good-grips-11-pound-scale?source=amazon) "
+                    "[Check price](/k/kitchenaid-artisan-stand-mixer-5qt?source=amazon)")
+    assert g.verify_body_with_config(ok, prop, AP_PP).passes
+
+
+def test_product_page_trigger_needs_a_pattern_and_the_knob():
+    prop = {"bucket": "seasonal-occasion", "title": "Christmas Cookie Recipes"}
+    assert g.verify_body_with_config(COOKIES, prop, AP_BUY).min_buy_links == 0      # no knob
+    no_pat = dict(AP_PP, product_page_patterns=[])
+    assert g.verify_body_with_config(COOKIES, prop, no_pat).min_buy_links == 0      # no pattern
+    sp = g.resolve_minima("specpicks-article-proposal-agent")
+    body = "[RTX 3060](/product/B08W8BFG9B) [RX 7600](/product/B0C5Z1V6VZ) [Arc](/product/B0B9)"
+    assert g.verify_body_with_config(body, {"bucket": "trending-ai"}, sp).min_buy_links == 0
+
+
+def test_category_slugs_are_not_buy_links():
+    body = ("[roasting pans](/k/roasting-pans?source=amazon) [cookware](/k/cookware) "
+            "[sheet pans](https://ap.test/k/sheet-pans) [bakeware](/k/bakeware) "
+            "[Meater](/k/meater-pro?source=amazon)")
+    # shape only: five buy-shaped links
+    assert len(g.buy_link_targets(body, AP_PP["buy_link_patterns"], {"ap.test"})) == 5
+    prop = {"title": "Thanksgiving Kitchen Gear Checklist", "bucket": "seasonal-occasion",
+            "expected_kitchen_category_slugs": ["cookware"]}
+    # cookware: the proposal's category; roasting-pans: a static slug;
+    # sheet-pans / bakeware: both sides of subcategory_parents
+    a = g.verify_body_with_config(body, prop, AP_PP)
+    assert (a.buy_links, a.min_buy_links, a.passes) == (1, 2, False)
+    # with the catalog check, an inactive / unknown product does not count either
+    a2 = g.verify_body_with_config(body, prop, AP_PP, slug_ok=lambda s: s == "other-product")
+    assert a2.buy_links == 0
+    a3 = g.verify_body_with_config(body + " [Thermapen](/k/thermapen-one)", prop, AP_PP,
+                                   slug_ok=lambda s: s in {"meater-pro", "thermapen-one"})
+    assert (a3.buy_links, a3.passes) == (2, True)
+    # a retailer URL carries no site slug and is kept
+    assert g.filter_buy_targets({"https://www.amazon.com/dp/b0x", "/k/cookware"}, {"cookware"}) == {
+        "https://www.amazon.com/dp/b0x"}
+    assert g.non_product_slugs(AP_PP) == {"category", "compare", "buying-guides", "roasting-pans",
+                                          "sheet-pans", "bakeware"}
+
+
+def test_directive_never_offers_a_category_as_a_buy_link_and_defers_without_products():
+    checklist = {"title": "Thanksgiving Kitchen Gear Checklist", "bucket": "seasonal-occasion",
+                 "expected_kitchen_category_slugs": ["roasting-pans", "meat-thermometers"]}
+    txt = g.render_link_directive(checklist, min_recipes=0, min_kits=2, site_root="https://ap.test",
+                                  link_cfg=AP_PP)
+    assert "DIRECT BUY LINKS — at least 2 distinct" in txt
+    assert "lists no catalog products" in txt and "DEFERRED: link minimum unreachable" in txt
+    assert "/k/roasting-pans" not in txt and "[Check price]" not in txt
+    mixed = dict(checklist, expected_kitchen_product_slugs=["meater-pro"])
+    txt2 = g.render_link_directive(mixed, min_recipes=0, min_kits=2, site_root="https://ap.test",
+                                   link_cfg=AP_PP)
+    assert "[Check price](https://ap.test/k/meater-pro?source=amazon)" in txt2
+    assert "/k/roasting-pans" not in txt2 and "lists no catalog products" not in txt2
+
+
+def test_directive_applies_the_product_page_trigger_to_the_proposals_products():
+    prop = {"title": "Christmas Cookie Recipes", "bucket": "seasonal-occasion",
+            "expected_kitchen_product_slugs": ["oxo-scale", "escali-primo", "kitchenaid-artisan"]}
+    txt = g.render_link_directive(prop, min_recipes=5, min_kits=2, site_root="https://ap.test",
+                                  link_cfg=AP_PP)
+    assert "DIRECT BUY LINKS — at least 2 distinct" in txt
+    assert "[Check price](https://ap.test/k/kitchenaid-artisan?source=amazon)" in txt
+    one = dict(prop, expected_kitchen_product_slugs=["oxo-scale"])
+    assert "DIRECT BUY LINKS — at least 1 distinct" in g.render_link_directive(
+        one, min_recipes=5, min_kits=2, site_root="https://ap.test", link_cfg=AP_PP)
+    none = dict(prop, expected_kitchen_product_slugs=[], expected_kitchen_category_slugs=["bakeware"])
+    assert "DIRECT BUY LINKS" not in g.render_link_directive(
+        none, min_recipes=5, min_kits=2, site_root="https://ap.test", link_cfg=AP_PP)
+
+
+def test_repair_buy_links_adds_one_after_each_active_products_first_mention():
+    body = ("## [OXO scale](/kitchen/oxo-good-grips-11-pound-scale) is our pick\n\n"
+            "The [OXO scale](/kitchen/oxo-good-grips-11-pound-scale) weighs to 1 g.\n\n"
+            "| Pick | Why |\n|---|---|\n| [Escali Primo](https://ap.test/kitchen/escali-primo-scale) | cheap |\n\n"
+            "The [old mixer](/kitchen/retired-mixer) and [bakeware](/kitchen/category/bakeware).\n\n"
+            "```\n[Code](/kitchen/in-code)\n```\n")
+    active = {"oxo-good-grips-11-pound-scale", "escali-primo-scale", "in-code"}
+    out, notes = g.repair_buy_links(body, AP_PP, product_ok=lambda s: s in active)
+    assert notes == ["added buy link for oxo-good-grips-11-pound-scale",
+                     "added buy link for escali-primo-scale"]
+    assert out.startswith("## [OXO scale](/kitchen/oxo-good-grips-11-pound-scale) is our pick\n")
+    assert ("The [OXO scale](/kitchen/oxo-good-grips-11-pound-scale) ([Check price]"
+            "(/k/oxo-good-grips-11-pound-scale?source=amazon)) weighs") in out
+    assert "| [Escali Primo](https://ap.test/kitchen/escali-primo-scale) ([Check price](/k/escali-primo-scale?source=amazon)) | cheap |" in out
+    assert "retired-mixer?source" not in out and "/k/in-code" not in out
+    assert out.replace(" ([Check price](/k/oxo-good-grips-11-pound-scale?source=amazon))", "").replace(
+        " ([Check price](/k/escali-primo-scale?source=amazon))", "") == body      # nothing else changed
+    # idempotent; and the repaired body passes the trigger it was short of
+    assert g.repair_buy_links(out, AP_PP, product_ok=lambda s: s in active) == (out, [])
+    prop = {"bucket": "seasonal-occasion", "title": "Holiday Baking"}
+    assert not g.verify_body_with_config(body, prop, AP_PP, slug_ok=lambda s: s in active).passes
+    assert g.verify_body_with_config(out, prop, dict(AP_PP, min_kits=0),
+                                     slug_ok=lambda s: s in active).buy_links == 2
+    # emphasis around the product link stays around the product link
+    bold, _n = g.repair_buy_links("- **[OXO scale](/kitchen/oxo-good-grips-11-pound-scale)**, the pick.", AP_PP)
+    assert bold == ("- **[OXO scale](/kitchen/oxo-good-grips-11-pound-scale)** "
+                    "([Check price](/k/oxo-good-grips-11-pound-scale?source=amazon)), the pick.")
+    # a site with no buy template or no product-page pattern is left alone
+    assert g.repair_buy_links(body, dict(AP_PP, kitchen_buy_template="")) == (body, [])
+    assert g.repair_buy_links(body, dict(AP_PP, product_page_patterns=[])) == (body, [])
+
+
+BRACKETED = ("Sources: [Black Forest Labs — FLUX.2 [klein] 4B model card, Hugging Face]"
+             "(https://huggingface.co/black-forest-labs/FLUX.2-klein-4B) and "
+             "[Check the [Noctua NH-U12S](/product/B00C9FLSLY) on Amazon](https://www.amazon.com/dp/B00C9FLSLY). "
+             "Footnote [1] [Source](https://example.org/a) ![alt [x]](/img.png)\n\n"
+             "```\n[code [x] y](https://x.test)\n```\n")
+
+
+def test_bracketed_link_text_is_found_and_repaired_to_parentheses():
+    assert g.find_bracketed_anchors(BRACKETED) == [
+        "Black Forest Labs — FLUX.2 [klein] 4B model card, Hugging Face",
+        "Check the [Noctua NH-U12S](/product/B00C9FLSLY) on Amazon"]
+    out, notes = g.repair_anchor_brackets(BRACKETED)
+    assert "[Black Forest Labs — FLUX.2 (klein) 4B model card, Hugging Face](https://huggingface.co/" in out
+    assert "[Check the Noctua NH-U12S on Amazon](https://www.amazon.com/dp/B00C9FLSLY)" in out
+    assert "Footnote [1] [Source](https://example.org/a) ![alt [x]](/img.png)" in out
+    assert "[code [x] y](https://x.test)" in out          # code untouched
+    assert len(notes) == 2 and g.find_bracketed_anchors(out) == []
+    assert g.repair_anchor_brackets(out) == (out, [])
+
+
+class _Cur:
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchall(self):
+        want = set(self.calls[-1][1][0])
+        return [(s,) for s in self.rows if s in want]
+
+
+class _Conn:
+    def __init__(self, rows):
+        self.cur = _Cur(rows)
+
+    def cursor(self):
+        return self.cur
+
+
+def test_catalog_check_is_one_query_over_buy_and_product_page_slugs():
+    conn = _Conn({"meater-pro", "oxo-good-grips-11-pound-scale"})
+    body = COOKIES + " [Meater](/k/meater-pro) [cookware](/k/cookware) [x](https://other.test/k/zzz)"
+    ok = g.product_slug_checker_from_db(conn, [body, "[OXO](/k/oxo-good-grips-11-pound-scale)"], AP_PP,
+                                        own_hosts={"ap.test"})
+    assert len(conn.cur.calls) == 1
+    sql, params = conn.cur.calls[0]
+    assert sql == "SELECT slug FROM kitchen_products WHERE slug = ANY(%s) AND is_active = TRUE"
+    assert params[0] == sorted({"meater-pro", "cookware", "oxo-good-grips-11-pound-scale",
+                                "escali-primo-scale", "kitchenaid-artisan-stand-mixer-5qt"})
+    assert ok("meater-pro") and ok("OXO-Good-Grips-11-Pound-Scale") and not ok("cookware")
+    # no product table: cannot tell, so no predicate (and no query)
+    assert g.product_slug_checker_from_db(_Conn(set()), body, AP_BUY) is None
+    bad = dict(AP_PP, kitchen_slug_check={"product_table": "kitchen_products; DROP"})
+    try:
+        g.product_slug_checker_from_db(_Conn(set()), body, bad)
+        raise AssertionError("bad identifier accepted")
+    except ValueError:
+        pass
+
+
+def test_repo_config_product_page_shape_and_deals_title():
+    ap = g.resolve_minima("aisleprompt")
+    pats = [re.compile(p) for p in ap["product_page_patterns"]]
+    for path, is_product in (("/kitchen/oxo-good-grips-11-pound-scale", True), ("/kitchen/x-1/", True),
+                             ("/kitchen/category/bakeware", False), ("/kitchen/compare", False),
+                             ("/kitchen/buying-guides", False), ("/kitchen/", False),
+                             ("/k/oxo-scale", False)):
+        assert any(p.search(path) for p in pats) is is_product, path
+    assert ap["min_buy_links_if_product_pages"] >= 2
+    assert g.min_buy_links_for(ap, bucket="seasonal-occasion", title="Black Friday Kitchen Deals 2026") >= 2
+    assert {"cookware", "bakeware", "roasting-pans"} - g.non_product_slugs(ap) == {"roasting-pans"}
