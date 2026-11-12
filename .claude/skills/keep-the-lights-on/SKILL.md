@@ -676,6 +676,12 @@ CTA or hero surfaces, and nothing could say which one cost clicks.
     - no undeployed change to it on HEAD. It would share the next deploy:
       **never two changes to one template in one deploy**
       (`max_changes_per_template_per_deploy: 1`).
+    - With `other_template_changes: confounder`, the two checks above count only
+      rollout items. Other agents' deploys and commits on that template are listed
+      under `confounders` instead of blocking. Use it on a site where other agents
+      touch money templates daily: on 2026-11-12 four other deploys to one guide
+      template left 0 of 12 items eligible. The default, `block`, counts every
+      change.
     - no rollout item for it in flight.
     - no open placement_watch incident on a money placement of that template.
   - Its `depends_on` items are deployed.

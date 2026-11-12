@@ -194,6 +194,8 @@ catalog_health:
 #   repo: /home/voidsstr/development/<site>    # read-only git: which deploys touched a template
 #   min_hours_between_template_deploys: 48
 #   max_changes_per_template_per_deploy: 1
+#   other_template_changes: block # or confounder: only rollout items start a template's
+#                                 # clock; other agents' template changes are logged, not blocking
 #   max_dispatch_per_tick: 1
 #   require_gate_green: true
 #   freeze: null                 # {start: <ISO>, end: <ISO>, reason: "..."} — operator-approved
