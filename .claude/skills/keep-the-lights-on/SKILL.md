@@ -509,8 +509,12 @@ them that the crawl never saw:
 - one RTX 5090 photo used as the hero of four articles;
 - two heroes hotlinked from strangers' servers;
 - a citation rendered as raw markdown;
-- seven guides with no buy button;
-- 5000-px recipe photos on cards.
+- seven articles with no buy button, six of which named their products only
+  through `/kitchen/` product pages;
+- the same six catalog-wide fallback recipe cards on unrelated articles;
+- 5000-px recipe photos on cards;
+- every aisleprompt guide body inside `<main id="ap-seo" style="display:none">`
+  (R2-T01), so Google's renderer saw no article.
 
 Each run now also takes the window's articles and fetches every one:
 - the source is a read-only SELECT on the site DB, or the sitemap's
@@ -532,9 +536,11 @@ that, the kinds diff like any other.
 | Kind | Sev | What it means | Who fixes it |
 |---|---|---|---|
 | `raw-markdown` | error | Markdown the reader sees unrendered: `](https://…)`, `**`, `## `, a `|---` row. The 2026-11-12 case was link text with brackets inside it. | When the markdown is valid, the site's SSR `mdToHtml` (site repo) should render it, so fix the renderer. When the body is malformed, queue an `article-refresh` rec (Opus). |
-| `no-buy-link-on-monetized-article` | error | A buying guide, gift or checklist title, or a page naming products through their product pages, with no direct buy link. | **Going forward:** the link guard (`min_buy_links_by_bucket` / `_by_title` in `config/article-link-guard-config.json`) and the author's pre-INSERT check (`framework/cli/article_link_guard.py check`). **Existing rows:** queue an `article-refresh` rec (Opus) to add `/k/<slug>` buy links. `article_link_guard.py sweep --site <site>` lists every row that still falls short. |
+| `no-buy-link-on-monetized-article` | error | A buying-guide bucket, a gift / checklist / deals title, or a page naming products through their product pages, with no direct buy link. `monetized_title_re` and `product_link_re` match the link guard's `min_buy_links_by_title` and `product_page_patterns`, so the audit flags exactly what the guard asks the author for. A test pins that. | **Going forward:** the link guard (`min_buy_links_by_bucket`, `_by_title` and `min_buy_links_if_product_pages` in `config/article-link-guard-config.json`) and the author's pre-INSERT check (`framework/cli/article_link_guard.py check`). After every article-author and article-refresh dispatch, `run.sh` sweeps the last 6 h with `--repair-buy-links --commit`, which adds a `Check price` link after each active product's first link. **Existing rows:** run the sweep yourself; see "Run it by hand" below for the dry run and apply commands. A row that names no catalog product (no product link to attach to) needs an `article-refresh` rec (Opus). |
+| `hidden-article-body` | error | The article region, or an element around it, is hidden from a renderer with JS on: `display:none`, `visibility:hidden`, the `hidden` attribute, `aria-hidden="true"`, or inside `<noscript>`/`<template>`. Every aisleprompt guide hits this until R2-T01 ships the `#ap-seo` panel shown. While it fires, the other checks are reading a copy Google never renders. | The site's SSR template (site repo). Set `article_audit.hidden_body_ok: true` only for a site that deliberately ships a no-JS panel and serves the same article to JS-on renderers in another way. |
+| `shared-link-set` | warn | At least `shared_link_set_min` (6) links matching `shared_link_re` (aisleprompt: recipe pages), the same ones, appear on two or more recent articles. That is a site-wide fallback module standing in for each article's own cards. In the 2026-11-12 review, a cookie article and a coffee-gift guide showed the same spaghetti, omelet-muffin and quinoa-bowl cards. | The site's card query (aisleprompt `loadBlogEquipmentModule`): an article shows its own recipes or no grid. |
 | `small-hero` | warn | The hero (og:image) is under `hero_min_width` px (1000) or `hero_min_bytes`. | `<site>-article-hero-image-curator`: re-pick a ≥1000 px image of the title's subject. New articles follow the ARTICLE_AUTHOR.md hero rules. |
-| `duplicate-hero` | warn | Two or more recent articles share one hero, matched by URL (CDN size token ignored) or by bytes. | `<site>-article-hero-image-curator`: keep it on the article whose subject it shows, and re-pick the others. |
+| `duplicate-hero` | warn | Two or more recent articles share one hero, matched by URL (CDN size token ignored) or by bytes. | `<site>-article-hero-image-curator`: keep it on the article whose subject it shows, and re-pick the others. As of 2026-11-12 the specpicks curator only treats a hero as overused above 23 articles, so it does not repair a 2-to-4-way duplicate. Each site repo has a per-article duplicate rule in review: specpicks stage 2d and aisleprompt hero hygiene. Until one lands, re-pick by hand. |
 | `hero-offsite-host` | warn | The hero is hotlinked from a host outside `allowed_image_hosts`. | `<site>-article-hero-image-curator`: mirror it to blob or replace it. |
 | `heavy-image` | warn | An article image over `max_image_bytes` (1.5 MB) or `max_image_width` (3000 px), reported once per image with its pages. | The pipeline that stored the file. Recipe images: `aisleprompt-recipe-image-archiver` (recompress or resize on mirror). Heroes: the curator. |
 | `recent-article-noindex` | warn | A new article is noindex, so it cannot earn search traffic. On aisleprompt, diet guides are noindexed as YMYL. | The site's `article-proposal-agent` `site.yaml`: stop proposing a bucket the site noindexes. The output gate allows one article a day, and a noindexed one wastes it. |
@@ -546,6 +552,12 @@ Run it by hand:
   `--depth 0 --max-pages 1 --no-sitemap-check`;
 - crawl only: `--no-article-audit`;
 - a different window: `--article-window-days N`.
+
+Buy-link and bracket repairs on rows already published (the same tool
+run.sh uses). Load `secrets.env` first; the DSN comes from
+`DATABASE_URL_<SITE>`. Dry run, read-only:
+`python3 -m framework.cli.article_link_guard sweep --site aisleprompt --since-hours 720 --repair-buy-links --repair-anchor-brackets`.
+Add `--commit` to write. Use `--slug <slug>` to fix one article.
 
 Leave `--state-dir` at its default (`/tmp/...`). That way a hand run never
 overwrites the baseline the timer's runs are compared against

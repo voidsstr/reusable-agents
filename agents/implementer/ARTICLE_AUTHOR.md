@@ -84,7 +84,7 @@
 > is the reference impl; reuse its endpoint and the same SYSTEM_PROMPT
 > scaffold, swapping `matches_recipe` → `matches_article_topic`.
 >
-> ## 🖼️ Hero rules — all four, or leave the hero NULL (2026-11-12 review)
+> ## 🖼️ Hero rules — subject first, then no reuse, then host, then size (2026-11-12 review)
 >
 > The 2026-11-12 review of 54 new articles found these heroes:
 > - one ZOTAC RTX 5090 photo on four articles, two of them about the
@@ -95,21 +95,14 @@
 > - two AislePrompt heroes hotlinked from strangers' servers;
 > - two AislePrompt articles sharing one Moccamaster photo.
 >
-> A hero ships only when it meets all four rules:
+> Rules 1-3 are required. Rule 4 picks between images that pass them.
 >
 > 1. **It shows the primary subject named in the title.** For
 >    "X vs Y", show X or Y. For a single-product page, show that product.
 >    For a roundup or gift guide, show the #1 pick or the category itself.
 >    A product that only appears in `related_hardware_slugs` is not the
 >    subject. Neither is the best-selling SKU in the vertical.
-> 2. **It is at least 1000 px wide.** Measure the file itself. An image
->    CDN's size token in the URL is not a measurement:
->    ```python
->    import io, urllib.request; from PIL import Image
->    raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read()
->    w, h = Image.open(io.BytesIO(raw)).size   # w must be >= 1000
->    ```
-> 3. **No other article from the last 60 days uses it.** Run this before
+> 2. **No other article from the last 60 days uses it.** Run this before
 >    you set it. On an Amazon image, compare the image id without its
 >    `._…_` size token, so `81ubl5FITQL._AC_SL1500_.jpg` matches every
 >    size of that photo. In Python, pass the query as a raw string
@@ -122,16 +115,32 @@
 >         = regexp_replace(%(hero)s,       '\._[A-Za-z0-9_,]+_(\.[a-z]+)$', '\1');
 >    -- any row back = pick a different image
 >    ```
-> 4. **It is on an allowed host.** The allowed hosts are the site's own
+> 3. **It is on an allowed host.** The allowed hosts are the site's own
 >    blob mirror (`nscagentstorage.blob.core.windows.net`), the site's own
 >    domain, and the retailer CDNs (`m.media-amazon.com`, `i.ebayimg.com`).
 >    The list lives in `config/site-consistency-audit-config.json`
 >    (`article_audit.allowed_image_hosts`). Mirror any other source to
 >    the blob first. Never hotlink it.
+> 4. **Prefer the widest image, at least 1000 px if you can find one.**
+>    Measure the file itself. An image CDN's size token in the URL is not
+>    a measurement:
+>    ```python
+>    import io, urllib.request; from PIL import Image
+>    raw = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=20).read()
+>    w, h = Image.open(io.BytesIO(raw)).size   # prefer w >= 1000
+>    ```
+>    Among the images of the subject that pass rules 1-3, pick the widest.
+>    **If the subject's own image fails only this rule, use it anyway.**
+>    A 470 px photo of the right product is better than a 1500 px photo
+>    of the wrong one.
 >
-> If no candidate meets all four, leave `hero_image_url` NULL and the
-> curator picks one. A NULL hero is better than a wrong, tiny or
-> borrowed one. The twice-daily site-consistency audit reports
+> **Leave `hero_image_url` NULL only when no image of the subject passes
+> rules 1-3.** Do not leave it NULL to dodge rule 4. A NULL hero is filled
+> later by the site's hero curator. Today, on SpecPicks, that refill
+> (`scripts/refill-missing-article-heroes.ts`, pass 1) takes the
+> best-reviewed product across all of `related_hardware_slugs`, with no
+> width floor and no reuse check. That is how one RTX 5090 photo became the
+> hero of four articles. The twice-daily site-consistency audit reports
 > `small-hero`, `duplicate-hero` and `hero-offsite-host` on every article
 > from the last 30 days, so a violation is found within 12 hours.
 >
@@ -368,7 +377,7 @@ NOT inserted, the rec is re-queued, and the LLM is re-prompted with
 
 | Site         | Min `/recipes/` links | Min kitchen links | Min direct buy links |
 |--------------|----------------------:|----------------:|---------------------:|
-| aisleprompt  |                     5 |               2 | 2 in `buying-guide` / `kitchen-buying-guide`, and on any title with "gift(s)" or "checklist"; else 0 |
+| aisleprompt  |                     5 |               2 | 2 in `buying-guide` / `kitchen-buying-guide`, and on any title with "gift(s)", "checklist" or "deal(s)"; on any other article, 1 per product named through its `/kitchen/<slug>` page, up to 2; else 0 |
 | specpicks    |                     0 |               0 | 0 (the buy strip renders the buttons from `related_product_asins`) |
 
 Why this exists: articles that don't link to the catalog are content
@@ -384,26 +393,34 @@ model knows the contract before it writes a single word — see
 
 ### Direct buy links: every named product gets one (HARD GATE)
 
-**Every product you name in a buying guide, gift guide or checklist
-gets its own direct buy link.** Put it next to the product's name, or in
-the product's row of the picks table. On AislePrompt that link is
-`[Check price](/k/<product-slug>?source=amazon)`.
+**Every product you name gets its own direct buy link.** That covers a
+buying guide, a gift guide or a checklist, and it also covers a recipe,
+seasonal or diet article that names a product. Put the buy link next to
+the product's name, or in the product's row of the picks table. On
+AislePrompt that link is `[Check price](/k/<product-slug>?source=amazon)`.
 
 Linking the name to the product page (`/kitchen/<product-slug>`) is not
 enough. Keep that link, because it is the crawlable one, and add the buy
 link as well. A product page is one more click away from the store. The
-2026-11-12 review found seven gift guides, checklists and roundups that
-linked every product only through its `/kitchen/` page. They had 0 buy
-buttons. The guard counted the `/kitchen/` links as kitchen links, so all
-seven passed.
+2026-11-12 review found seven articles with 0 buy buttons. Six of them
+named their products only through `/kitchen/` pages: three gift guides, a
+checklist, a Christmas-cookie article and a Whole30 article. The guard
+counted the `/kitchen/` links as kitchen links, so all six passed.
 
-Use only the product slugs the proposal lists, because they were checked
-against the live catalog. Never write a raw retailer URL.
+**A buy link goes to a product, never to a category.**
+`/k/<category-slug>` (for example `/k/cookware`) is not a buy link. It
+redirects to the category page, and the guard does not count it. Use only
+the product slugs the proposal lists, because they were checked against
+the live catalog. Never write a raw retailer URL. If the proposal lists
+only categories (no `expected_kitchen_product_slugs`) and the article
+needs buy links, write `DEFERRED: link minimum unreachable (no catalog
+products)` in `changes/<rec-id>.summary.md` and do not insert it.
 
-The minimum depends on the site, bucket and title (see the table above).
-It comes from config:
+The minimum depends on the site, the bucket, the title and the products
+the body names (see the table above). It comes from config:
 - `config/article-link-guard-config.json`: `min_buy_links_by_bucket`,
-  `min_buy_links_by_title` and `buy_link_patterns`;
+  `min_buy_links_by_title`, `min_buy_links_if_product_pages`,
+  `product_page_patterns` and `buy_link_patterns`;
 - `framework.core.article_link_guard.min_buy_links_for`.
 
 **When you INSERT the row yourself, run the guard first.** The wrapper's
@@ -415,18 +432,38 @@ INSERT-time guard only runs on the fallback path. Your own
    python3 /home/voidsstr/development/reusable-agents/framework/cli/article_link_guard.py check \
        --run-dir "<run dir>" --rec-id <rec id> --body "<run dir>/changes/<slug>.body.md"
    ```
-3. Exit 0 prints `PASS`. Exit 1 prints the gap, the failure addendum and
-   the buy links to add, already filled with the proposal's slugs. Add
-   the missing links without deleting any prose, then run it again.
+   With `$DATABASE_URL` set (the implementer sets it for you), `check`
+   also confirms that each `/k/<slug>` is an active catalog product.
+3. Exit 0 prints `PASS`. Exit 1 prints one of two things:
+   - the link gap, the failure addendum and the buy links to add, already
+     filled with the proposal's product slugs;
+   - or link text that holds brackets (see "Citations and link text" below).
+   Fix it without deleting any prose, then run `check` again.
 4. INSERT only after you see `PASS`.
 
 If the catalog has too few products to reach the minimum, write
 `DEFERRED: link minimum unreachable` and do not insert the article.
 
-After your session, `run.sh` runs the same check over every row written
-in the last 6 hours (`… article_link_guard.py sweep`). The twice-daily
-site audit flags `no-buy-link-on-monetized-article` on every recent
-guide that has no buy button. Your INSERT is not the last check.
+After your session, `run.sh` runs `… article_link_guard.py sweep` over
+every row written in the last 6 hours. It does two things:
+- where a row is short of its buy-link minimum, it adds
+  ` ([Check price](/k/<slug>?source=amazon))` after the first link to each
+  active product that has no buy link;
+- it turns brackets inside link text into parentheses.
+It reports what is still short in `<run dir>/link-guard.json`. The
+twice-daily site audit flags `no-buy-link-on-monetized-article` on every
+recent article that has no buy button. Those are safety nets, so write the
+buy links yourself: a mechanical "Check price" reads worse than one placed
+where it helps the reader.
+
+### Citations and link text
+
+Link text must not contain square brackets. A renderer that reads link
+text up to the first `]` prints the rest as raw markdown. For example,
+`[Black Forest Labs — FLUX.2 [klein] 4B model card](https://…)` shipped
+as literal text on 2026-11-12. Write `FLUX.2 (klein) 4B` instead. Never
+put a link inside another link's text either. `check` fails both
+mistakes.
 
 ### Voice + style
 - Plain English, second person, no hedging. We're a hardware editorial
@@ -452,7 +489,7 @@ INSERT verbatim; do NOT re-derive.
 | `subtitle` | runbook (you write) | shown in lede + meta fallback |
 | `excerpt` | runbook (you write) | meta description 120-165 chars; **NEVER** dupe the title |
 | `body_md` | runbook (you write) | thin-content + word-count + internal-link + outbound-citation rules |
-| `hero_image_url` | proposal (preferred) → product-link query (fallback); must pass the four Hero rules, else NULL | OG image + JSON-LD image |
+| `hero_image_url` | proposal (preferred) → product-link query (fallback); must pass Hero rules 1-3 (subject, no reuse, allowed host), widest first; NULL only when no image of the subject passes 1-3 | OG image + JSON-LD image |
 | `bucket` / `category` | proposal | analyzer's article-rule selectors |
 | `tags` | **proposal** | tag-cluster graph; copy verbatim |
 | `difficulty` | **proposal** | JSON-LD audience tier |
@@ -564,17 +601,18 @@ so the dashboard / SEO analyzer can distinguish them.
 
 ## Picking the hero image (MANDATORY before INSERT)
 
-Every candidate, including one handed over by the proposal, must pass
-the four **Hero rules** at the top of this runbook before you set it.
-Those rules are: it shows the title's primary subject, it is at least
-1000 px wide, no article from the last 60 days uses it, and it is on an
-allowed host.
+Every candidate, including one handed over by the proposal, goes through
+the **Hero rules** at the top of this runbook before you set it. Rules 1-3
+are required: it shows the title's primary subject, no article from the
+last 60 days uses it, and it is on an allowed host. Rule 4 (width,
+1000 px or more) only chooses between images that pass 1-3. The subject's
+own image wins over a sharper image of something else.
 
 **First, check the proposal.** The proposer may have filled in
 `implementation_outline.hero_image_url` (or `proposal.hero_image_url`).
 It searched for that image with the same SearxNG allow-list the recipe
-scraper uses. Use the value if it passes the four rules. If the field is
-empty or the image fails a rule, run the queries below.
+scraper uses. Use the value if it passes rules 1-3. If the field is empty
+or the image fails rule 1, 2 or 3, run the queries below.
 
 The article's `hero_image_url` must be a real photo of the hardware item
 **named in the title**. Run this query against the DB BEFORE the INSERT.
@@ -582,7 +620,8 @@ Pass only the title's subject in `<related_hardware_slugs>`, not every
 related slug: with the full list, the ordering picks the vertical's
 best-selling card, which is how one RTX 5090 photo ended up on four
 articles. Use the returned URL in the `hero_image_url` column once it
-passes the four rules:
+passes rules 1-3. If it is under 1000 px, look for a wider photo of the
+same subject (rule 4); if there is none, keep this one:
 
 ```sql
 SELECT p.main_image_url
