@@ -247,6 +247,34 @@ breaks the Live LLM tab + cost reporting.
      (`rec_ids` is accepted as an alias.) Without a commit or this file the
      run is recorded as `paused` no matter how much work actually happened.
 
+  **Rewriting a published article's body (article-refresh, or any rec that
+  UPDATEs `editorial_articles.body_md`) — run the link guard first.** The
+  same contract as a new article applies. The minimum recipe, kitchen and
+  product links come from `config/article-link-guard-config.json`. Every
+  product the body names needs its own direct buy link: on AislePrompt
+  that is `[Check price](/k/<product-slug>?source=amazon)` next to the
+  product's `/kitchen/<product-slug>` link. A `/k/<category>` link is not
+  a buy link. Link text must not contain square brackets.
+
+  1. Write the new body to `<run-dir>/changes/<rec-id>.body.md`.
+  2. Run:
+     ```bash
+     python3 /home/voidsstr/development/reusable-agents/framework/cli/article_link_guard.py check \
+         --run-dir "$RESPONDER_RUN_DIR" --rec-id <rec-id> --body "$RESPONDER_RUN_DIR/changes/<rec-id>.body.md"
+     ```
+     A refresh rec carries `article_slug`. `check` reads the row's bucket,
+     category and title from `$DATABASE_URL`, and checks each `/k/<slug>`
+     against the catalog. If the rec has no `article_slug`, pass
+     `--site <site> --slug <slug>`.
+  3. Fix what it prints (exit 1) without deleting prose, and run it again.
+     UPDATE the row only after `PASS`. Never drop an existing buy link in
+     a rewrite.
+
+  After the session, `run.sh` re-checks every row written in the last 6
+  hours. It adds missing buy links next to active products and fixes
+  bracketed link text, and it writes what is still short to
+  `<run-dir>/link-guard.json`.
+
 
   ## Per-rec verification scripts
 

@@ -111,18 +111,26 @@ auto-queue and the operator is emailed.
    `ARTICLE_AUTHOR.md` prompt tells Claude to do. The step INSERTs the
    article from `changes/<rec>.body.md` + `.meta.json` and runs the
    `framework.core.article_link_guard` minima check
-   (`verify_body_with_config`). That check includes the bucket's
-   direct-buy-link minimum. When `DATABASE_URL` is set it then runs
-   `resolve-article-links.py --apply` and
-   `framework.cli.article_heading_repair` (strips leaked outline headings
-   from bodies written in the last 6 h). `reconcile-shipped.py` runs either
-   way.
-   - On the claude path, `ARTICLE_AUTHOR.md` has the author run
-     `framework/cli/article_link_guard.py check` before its own INSERT.
-   - After any `article-author` dispatch, `run.sh` runs
-     `article_link_guard.py sweep --since-hours 6`. The sweep is
-     report-only and logs each row that misses the link contract under
-     `[link-guard]`.
+   (`verify_body_with_config`). That check includes the direct-buy-link
+   minimum. The minimum is set by the bucket, the title, and the products
+   the body names through their product pages. A buy link counts only when
+   its slug is an active catalog product, never a category. When
+   `DATABASE_URL` is set it then runs `resolve-article-links.py --apply`
+   and `framework.cli.article_heading_repair` (strips leaked outline
+   headings from bodies written in the last 6 h). `reconcile-shipped.py`
+   runs either way.
+   - On the claude path, the author runs
+     `framework/cli/article_link_guard.py check` before its own INSERT
+     (`ARTICLE_AUTHOR.md`) or body UPDATE (`AGENT.md`, article-refresh).
+   - After any `article-author` or `article-refresh` dispatch, `run.sh`
+     runs `article_link_guard.py sweep --since-hours 6 --repair-buy-links
+     --repair-anchor-brackets --commit`. On each row short of its buy-link
+     minimum, it adds ` ([Check price](/k/<slug>?source=amazon))` after the
+     first link to each active product that has no buy link. It also turns
+     brackets inside link text into parentheses. It never removes prose and
+     never unpublishes. It logs under `[link-guard]` and writes what is
+     still short (with each row's failure addendum) to
+     `$RESPONDER_RUN_DIR/link-guard.json`.
 7. **Deploy.** Skipped for `h2h`, `article-author`, `catalog-audit` and
    `IMPLEMENTER_SKIP_DEPLOY=1`. If HEAD did not change, it skips the deploy
    **and marks the batch's recs `deferred`** in the source

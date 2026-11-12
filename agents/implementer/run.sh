@@ -2317,14 +2317,17 @@ for rid, body_p, meta_p in pairs:
         # defaults: 5 recipe links + 2 kitchen-category links.
         # Specpicks: 0/0 (no recipes/, kitchen recs surfaced via PDP).
         # DIRECT BUY LINKS (2026-11-12 review): monetized buckets (and gift /
-        # checklist titles) also need N distinct buy links — a /kitchen/
-        # product-page link counts as a kitchen link but is not a buy
-        # button, and seven guides shipped with none. The minimum is picked
-        # by the article's bucket + title from the same config
-        # (min_buy_links_for).
+        # checklist / deals titles, and any body naming products through
+        # their /kitchen/ pages) also need N distinct buy links — a product-
+        # page link counts as a kitchen link but is not a buy button, and
+        # seven articles shipped with none. The minimum is picked by the
+        # article's bucket + title + named products from the same config
+        # (min_buy_links_for). A buy-shaped link counts only when its slug
+        # is an active catalog product: /k/<category> redirects to the
+        # category page (product_slug_checker_from_db, same connection).
         try:
             from framework.core.article_link_guard import (
-                resolve_minima, verify_body_with_config)
+                product_slug_checker_from_db, resolve_minima, verify_body_with_config)
             _rec_for_guard = recs_doc.get(rid) or {}
             _proposal_for_guard = (_rec_for_guard.get("proposal")
                                    or _rec_for_guard.get("article_proposal")
@@ -2336,11 +2339,22 @@ for rid, body_p, meta_p in pairs:
             # config/article-link-guard-config.json; the storage copy is
             # laid over the repo default.
             _minima = resolve_minima(_site_hint, _guard_storage())
+            try:
+                _buy_ok = product_slug_checker_from_db(conn, body_md, _minima)
+            except Exception as _bce:
+                _buy_ok = None
+                print(f"[article-insert] {rid}: catalog check for buy links failed "
+                      f"({_bce}); counting buy links by shape", file=sys.stderr)
+            try:
+                conn.rollback()  # the lookup opened a read transaction
+            except Exception:
+                pass
             _audit = verify_body_with_config(
                 body_md, _proposal_for_guard, _minima,
                 bucket=[str(_proposal_for_guard.get("bucket") or ""),
                         str(_proposal_for_guard.get("category") or "")],
-                title=str(_proposal_for_guard.get("title") or ""))
+                title=str(_proposal_for_guard.get("title") or ""),
+                slug_ok=_buy_ok)
             if not _audit.passes:
                 errors.append((rid, f"INLINE-LINK GUARD: {_audit.failure_reason()} "
                                     f"(recipes={_audit.recipe_links}, "
@@ -2449,17 +2463,17 @@ for rid, body_p, meta_p in pairs:
             _rec_c = recs_doc.get(rid) or {}
             _prop_c = (_rec_c.get("proposal") or _rec_c.get("article_proposal") or {})
             # The storage copy of the policy overrides the repo default, so an
-            # operator can flip a site to reject/warn without a commit.
-            try:
-                from framework.core.storage import get_storage as _claims_gs
-                _claims_store = _claims_gs()
-            except Exception:
-                _claims_store = None
+            # operator can flip a site to reject/warn without a commit. The
+            # shared handle tolerates an unknown STORAGE_BACKEND (SystemExit),
+            # which used to end the whole insert step here.
             _claims = _claims_check(
                 body_md,
                 bucket=str(_prop_c.get("bucket") or _prop_c.get("category") or ""),
-                site_hint=str(_rec_c.get("agent_id") or _prop_c.get("site") or ""),
-                storage=_claims_store,
+                # Proposer recs carry neither agent_id nor proposal.site, so
+                # the dispatch's source agent / site is the hint (an empty
+                # hint applied the default policy to both sites).
+                site_hint=_guard_site_hint(_rec_c, _prop_c),
+                storage=_guard_storage(),
             )
             for _w in _claims.warnings():
                 print(f"[article-insert] {rid}: CLAIMS-GUARD warn: {_w}", file=sys.stderr)
@@ -2777,24 +2791,35 @@ SHIP_EOF
             rm -f "$PROMPT_FILE"
             exit $rc
         fi
-        # ── Link-guard sweep, report only (2026-11-12 article review) ──
-        # The Opus author INSERTs its own rows (written_by='claude-cli'), so
-        # the wrapper's INSERT-time link guard above never sees them: none
-        # of the 54 articles published 2026-10-13..11-12 went through the
-        # wrapper INSERT, and seven guides shipped with zero buy links. ARTICLE_AUTHOR.md has the
-        # author run `framework/cli/article_link_guard.py check` before its
-        # INSERT; this re-checks what was just written and logs every row
-        # that still falls short (the site-consistency audit reports it
-        # too). Read-only — it never edits or unpublishes a row.
-        _LG_SITE="${SOURCE_AGENT_ID_FROM_RECS:-${RESPONDER_SITE:-}}"
-        if [ "$DISPATCH_KIND" = "article-author" ] && [ -n "${DATABASE_URL:-}" ] \
-                && [ -n "$_LG_SITE" ]; then
-            DATABASE_URL="$DATABASE_URL" \
-                PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
-                python3 -m framework.cli.article_link_guard sweep \
-                --site "$_LG_SITE" --since-hours 6 \
-                2>&1 | sed 's/^/[link-guard] /' >&2 || true
-        fi
+        # ── Link-guard sweep + deterministic repair (2026-11-12 review) ──
+        # The Opus author INSERTs (article-author) or UPDATEs (article-refresh)
+        # its own rows, so the wrapper's INSERT-time link guard above never
+        # sees them: none of the 54 articles published 2026-10-13..11-12 went
+        # through the wrapper INSERT, and seven articles shipped with zero buy
+        # links. ARTICLE_AUTHOR.md / AGENT.md have the author run
+        # `framework/cli/article_link_guard.py check` first; this re-checks
+        # every row written in the last 6 hours and repairs what is
+        # mechanical: a ` ([Check price](/k/<slug>?source=amazon))` after the
+        # first link to each active product that has no buy link (rows short
+        # of their buy-link minimum only), and brackets inside link text
+        # turned into parentheses. Never removes prose, never unpublishes.
+        # What is still short (e.g. a gift guide naming no catalog product) is
+        # written to $RESPONDER_RUN_DIR/link-guard.json with its failure
+        # addendum, and the twice-daily site audit reports it too.
+        _LG_SITE="${RESPONDER_SITE:-$SOURCE_AGENT_ID_FROM_RECS}"
+        case "$DISPATCH_KIND" in
+            article-author|article-refresh)
+                if [ -n "${DATABASE_URL:-}" ] && [ -n "$_LG_SITE" ]; then
+                    DATABASE_URL="$DATABASE_URL" \
+                        PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+                        python3 -m framework.cli.article_link_guard sweep \
+                        --site "$_LG_SITE" --since-hours 6 \
+                        --repair-buy-links --repair-anchor-brackets --commit \
+                        --report-json "$RESPONDER_RUN_DIR/link-guard.json" \
+                        2>&1 | sed 's/^/[link-guard] /' >&2 || true
+                fi
+                ;;
+        esac
         rm -f "$PROMPT_FILE"
         ;;
     framework)
