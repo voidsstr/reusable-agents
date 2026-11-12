@@ -473,7 +473,44 @@ _push_implementer_repo() {
     [ -x "$REPO_ROOT/install/push-unpushed.sh" ] || return 0
     bash "$REPO_ROOT/install/push-unpushed.sh" "$IMPLEMENTER_REPO_PATH" || true
 }
-trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure; _stop_llm_flush_sidecar; _push_implementer_repo' EXIT
+
+# Reconcile the site repo's untracked migrations with the database's
+# applied-migrations table, on EVERY exit path (framework/core/
+# migration_ledger.py; off unless storage config/migration-ledger-config.json
+# enables the site). A site's boot-time runner applies every *.sql file in
+# its migrations dir, tracked or not: on 2026-11-11 a server started from the
+# live checkout applied 57 catalog-audit migrations that discarded runs had
+# left untracked. The ledger commits files the database already applied and
+# can move stranded ones out of the dir. Runs before the push so its commit
+# goes out with the rest. Never fails the run.
+_migration_ledger() {
+    [ -n "${IMPLEMENTER_REPO_PATH:-}" ] && [ -n "${RESPONDER_SITE:-}" ] || return 0
+    # The CLI reads DATABASE_URL_<SITE> first, then DATABASE_URL.
+    ( cd "$REPO_ROOT" && PYTHONPATH="$REPO_ROOT" timeout 180 python3 -m framework.cli.migration_ledger \
+        --repo "$IMPLEMENTER_REPO_PATH" --site "$RESPONDER_SITE" 2>&1 \
+        | sed 's/^/[migration-ledger] /' ) || true
+    return 0
+}
+trap '_rc=$?; _record_implementer_end "$_rc"; _sync_back_to_azure; _stop_llm_flush_sidecar; _migration_ledger; _push_implementer_repo' EXIT
+
+# The working tree's dirty paths, one per line, sorted in BYTE order, and the
+# paths dirty after an edit that were not dirty before it. Both sides use
+# LC_ALL=C on purpose. On the fleet host (uutils coreutils 0.10) `sort`
+# collates by the locale while `comm` compares bytes, so under en_US.UTF-8 a
+# dirty list whose locale order differs from byte order (a leading dot, case,
+# punctuation, `/` against `-`) makes comm stop with "not in sorted order" and
+# report pre-existing paths as newly created. In one site checkout the path
+# it misread was a stray untracked `.q-tmp.js`, which tripped the
+# orphan-scaffolding gate on 11 of 15 catalog-audit runs (2026-11-11/12).
+# `git reset --hard` kept each discarded run's untracked migration, and those
+# strays later reached production. Deleting the stray file only hides the
+# bug: other paths in that list are out of byte order too.
+_dirty_paths() {
+    git status --porcelain 2>/dev/null | awk '{print $NF}' | LC_ALL=C sort -u
+}
+_new_dirty_paths() {
+    LC_ALL=C comm -23 "$2" "$1"
+}
 
 # LLM driver:
 #   IMPLEMENTER_LLM=claude     Claude Code CLI (default — uses the user's
@@ -1125,8 +1162,7 @@ DEFEOF
             # blanket-excluded).
             if [ -d "${IMPLEMENTER_REPO_PATH:-}" ]; then
                 pushd "$IMPLEMENTER_REPO_PATH" >/dev/null 2>&1 || true
-                git status --porcelain 2>/dev/null \
-                    | awk '{print $NF}' | sort -u > "$CE_PRE_DIRTY" || true
+                _dirty_paths > "$CE_PRE_DIRTY" || true
                 # Hash each pre-dirty file's CURRENT content (working tree)
                 # so we can detect editor-driven modifications later.
                 while IFS= read -r f; do
@@ -1435,10 +1471,9 @@ except Exception: pass
                 pushd "$IMPLEMENTER_REPO_PATH" >/dev/null 2>&1 || true
                 CE_POST_DIRTY=$(mktemp)
                 CE_NEW_FILES=$(mktemp)
-                git status --porcelain 2>/dev/null \
-                    | awk '{print $NF}' | sort -u > "$CE_POST_DIRTY" || true
+                _dirty_paths > "$CE_POST_DIRTY" || true
                 # Newly-dirty files (not in pre-dirty set) — always commit.
-                comm -23 "$CE_POST_DIRTY" "$CE_PRE_DIRTY" \
+                _new_dirty_paths "$CE_PRE_DIRTY" "$CE_POST_DIRTY" \
                     > "$CE_NEW_FILES" 2>/dev/null || true
                 # Pre-dirty files whose CONTENT changed during the run —
                 # these were previously dropped silently. Append to commit
@@ -1460,7 +1495,7 @@ except Exception: pass
                         CE_ADVANCED_COUNT=$(wc -l < "$CE_ADVANCED" 2>/dev/null || echo 0)
                         echo "[implementer] pre-dirty files advanced by editor: $CE_ADVANCED_COUNT (including in commit)" >&2
                         cat "$CE_ADVANCED" >> "$CE_NEW_FILES"
-                        sort -u -o "$CE_NEW_FILES" "$CE_NEW_FILES" 2>/dev/null || true
+                        LC_ALL=C sort -u -o "$CE_NEW_FILES" "$CE_NEW_FILES" 2>/dev/null || true
                     fi
                     rm -f "$CE_ADVANCED"
                 fi

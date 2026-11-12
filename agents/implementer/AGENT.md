@@ -356,6 +356,21 @@ breaks the Live LLM tab + cost reporting.
 - **Don't deploy.** The deployer runs only after every batch in this
   chain finishes (see auto-chain logic in run.sh). Your job stops at
   per-rec commits + writing each `changes/<rec-id>.summary.md`.
+- **Never start the site server, or its migration runner, against the
+  production database from this checkout.** The site's boot-time runner
+  applies every `*.sql` file in `db/migrations/` that the database has not
+  recorded, whether or not git tracks it, so it also applies other runs'
+  uncommitted files. On 2026-11-11 a session checked an SSR change by
+  starting `src/index.ts` with the production `DATABASE_URL`, and 57
+  uncommitted catalog-audit migrations reached production in nine seconds.
+  To check rendered output, run the site's local suite
+  (`tests/run-local-suite.sh`) or point the server at a local database.
+  Those files were untracked because a framework gate discarded their runs
+  with `git reset --hard`, which keeps untracked files. The gate fired
+  because run.sh's before/after set-diff misread the dirty-path list: `sort`
+  collated it by locale while `comm` compared bytes (fixed with `LC_ALL=C`
+  on both). So an untracked migration you did not write is another run's
+  leftover: never commit, edit or delete it.
 
 ## Working-tree etiquette (CRITICAL — added after a 2026-04-27 false-positive revert)
 
