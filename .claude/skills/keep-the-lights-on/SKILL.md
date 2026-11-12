@@ -990,6 +990,18 @@ the panic line, and append the event to
 `retro-agent/docs/host-issues-log.md`, whose rules require an entry per host
 event. The history, signatures 1–6 and the open mitigations live in that log.
 
+**The quiet variant: the card dies and the host stays up.** Signature: the sweep's
+`gpu_ok` is `DOWN` or `gpu_xid_this_boot` > 0 while `uptime` is normal and
+`gpu_iommu_faults_this_boot` is 0. An Xid 79 ("GPU has fallen off the bus") in
+the middle of a boot leaves the box running on the iGPU, so no reboot or IOMMU
+storm marks it. On 2026-11-11 the card died 5 h after a cold cycle and went 17 h
+before a tick noticed. The remedy is the same cold power cycle (operator). Until
+then, local image generation fails with CUDA errors and ollama runs on the CPU.
+Escalate when that starts to cost the sites: the recipe-image refiller's backlog
+grows, or a hero curator reports articles it could not fill. Do not escalate
+while both read clean. Check the host log first. Another session may already
+have recorded the event.
+
 **The reboot restarts every timer you stopped, and the dispatch-kind allowlist
 does not hold deploys.** It is enforced only in the backlog-dispatcher. Producers
 that call `dispatch_now` themselves (`*-user-growth-strategist`,
