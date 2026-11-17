@@ -1052,7 +1052,14 @@ If it recurs: diff files vs `_migrations`, dry-run the pending set
 cumulatively inside ONE rolled-back transaction, review before letting a
 backlog auto-apply (old agent migrations can undo newer fixes), quarantine
 into `db/migrations/_quarantine/` with a reason, and apply multi-minute
-files by hand so the boot doesn't carry them.
+files by hand so the boot doesn't carry them. Before applying a file by
+hand, take the runner's lock in the same session:
+`SELECT pg_try_advisory_lock(1835624306)` (both sites' runners use this key,
+`MIGRATION_LOCK_KEY` in each site's `src/db/migrationRunner.ts`). If it
+returns false, a booting replica is mid-run, so wait. Hold it until the file
+and its `_migrations` row are both committed. The lock serialises you
+against a replica's boot run, which would otherwise apply the same files
+under you.
 
 **H. Host GPU crash (MCE panic / Xid 79 / instant power-off) and the
 wedged-card boot.** Signature: `uptime` is minutes, `boots_24h` > 1 in the
