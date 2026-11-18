@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "site": { "id": "kit-example", "brandName": "KitExample", "domain": "kit-example.test", "canonicalOrigin": "https://kit-example.test" },
+  "amazon": { "partnerTag": "kitexample-20" },
+  "disclosure": { "earnings": "As an Amazon Associate, KitExample earns from qualifying purchases." },
+  "cache": { "htmlSMaxAgeSeconds": 600, "htmlMaxAgeSeconds": 60, "ssrCacheSeconds": 0 }
+}

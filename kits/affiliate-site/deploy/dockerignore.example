@@ -1,0 +1,28 @@
+# .dockerignore for a site built with the kit's Dockerfile.azure (copy it to the
+# site root as .dockerignore). It keeps the build context small and keeps host
+# build output, test artefacts and local secrets out of the image. The Dockerfile
+# copies only package*.json, tsconfig*.json, site.json, src/, vendor/affiliate-kit/
+# and DOCKER_EXTRA_PATHS, so nothing listed here is needed by the build.
+**/node_modules
+**/dist
+**/coverage
+.git
+.github
+tests
+test-results
+playwright-report
+blob-report
+agents
+prompts
+scripts/local
+vendor/affiliate-kit/unit
+vendor/affiliate-kit/tests
+vendor/affiliate-kit/fixtures
+*.log
+.env
+.env.*
+deploy.env
+secrets.env
+**/*.pem
+**/*.key
+**/*.pfx
