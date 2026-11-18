@@ -1,0 +1,23 @@
+{
+  "id": "amazon-catalog-discovery-agent",
+  "name": "Amazon Catalog Discovery",
+  "description": "Engine for affiliate catalogs: grows a site's catalog from Amazon Creators searchItems. Each run imports seed ASINs (JSON files, read-only SQL on another DB), then walks the site's lane seeds x brands x price bands one itemPage at a time (breadth first, resumed across runs, never past itemPage 10, not stopped by a short page), classifies every new listing into the site's own lanes with title / browse-node rules, and inserts the in-lane ASINs within 40 calls and 300 new ASINs per run (configurable) and the consumer's budget share. Persists only the ASIN and our lane label; never an Amazon title, price or image. Every value comes from the site's config; per-site instances are config-only directories in the site repos.",
+  "category": "seo",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/amazon-catalog-discovery-agent",
+    "config_env": "CATALOG_DISCOVERY_CONFIG",
+    "config_block": "catalog_discovery",
+    "config_schema": "agents/amazon-catalog-discovery-agent/catalog-discovery-config.schema.json",
+    "build_item": "F12",
+    "created_at": "2026-11-17T19:28:00Z"
+  },
+  "runnable_modes": ["cron", "manual"]
+}

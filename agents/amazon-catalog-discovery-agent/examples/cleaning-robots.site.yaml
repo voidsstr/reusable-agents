@@ -1,0 +1,92 @@
+# Amazon catalog discovery: worked example for a cleaning-robots site with
+# model-keyed consumables (the fallback niche).
+#
+# Same engine, different values: the robots lanes come first, consumables are
+# accepted only when the title names the robot they fit (model-keyed), and the
+# pool / window "wing" is held back until its own sizing run. Browse nodes are
+# left out until a sizing run records them (lanes then match on titles only).
+schema_version: "1"
+enabled: true
+consumer: robots-site-discovery
+
+limits:
+  max_calls_per_run: 40
+  max_new_per_run: 300
+
+budget:
+  protect_consumers: [price-refresh]
+
+catalog:
+  dsn_env: CATALOG_DATABASE_URL
+  known_sql: "SELECT asin FROM products WHERE asin = ANY(%(asins)s)"
+  insert_sql: |
+    INSERT INTO products (asin, kind, discovered_via, discovered_at)
+    VALUES (%(asin)s, %(lane_kind)s, %(via)s, now())
+    ON CONFLICT (asin) DO NOTHING
+
+active_phases: [core]
+
+reject_patterns:
+  - {id: toy, pattern: "\\b(toy|kids|children'?s)\\b"}
+  - {id: not-a-robot, pattern: "^(?!.*\\brobot).*\\b(stick|handheld|upright|canister|shop) vac(uum)?\\b"}
+
+lanes:
+  # Consumables first: "Replacement filters for <robot>" must not read as a robot.
+  - id: consumable
+    kind: consumable
+    category: robot-parts
+    phase: core
+    include_any:
+      - "replacement (parts?|kits?|filters?|brush(es)?|bags?|pads?)"
+      - "\\b(hepa )?filters?\\b"
+      - "side brush(es)?|main brush|roller brush"
+      - "(dust|disposal|vacuum) bags?"
+      - "mop (pads?|cloths?)"
+      - "accessor(y|ies) kit"
+    context_required: "\\b(for|compatible with|fits?)\\b.{0,40}\\b(roomba|roborock|shark|eufy|ecovacs|deebot|dreame|braava|narwal|yeedi|tineco|irobot)\\b"
+    exclude: ["\\brobot(ic)? vacuum (cleaner|and mop)\\b(?!.{0,40}(replacement|accessor|parts|filters?|brush))"]
+    min_price: 8
+    seeds:
+      - {id: cn-01, query: "roomba replacement parts kit"}
+      - {id: cn-02, query: "roborock replacement filters brushes"}
+      - {id: cn-03, query: "robot vacuum dust bags replacement"}
+
+  - id: robot-vacuum
+    kind: robot
+    category: robot-vacuums
+    phase: core
+    include_any: ["robot(ic)? vacuum", "robot vacuum and mop", "self[- ]emptying robot"]
+    exclude: ["replacement", "accessor(y|ies)", "\\bparts?\\b", "\\bfilters? for\\b", "dock only", "\\bbattery for\\b", "\\bcover\\b"]
+    min_price: 80
+    price_partitions: [[0, 200], [200, 400], [400, 700], [700, null]]
+    seeds:
+      - {id: rv-01, query: "robot vacuum"}
+      - {id: rv-02, query: "robot vacuum and mop combo", partitions: false}
+      - {id: rv-03, query: "self emptying robot vacuum", partitions: false}
+
+  - id: robot-mop
+    kind: robot
+    category: robot-mops
+    phase: core
+    include_any: ["robot mop|mopping robot"]
+    exclude: ["replacement", "\\bpads?\\b", "accessor(y|ies)"]
+    min_price: 80
+    seeds: ["robot mop"]
+
+  - id: pool-robot
+    kind: robot
+    category: pool-robots
+    phase: wing
+    include_any: ["robotic pool cleaner|pool robot|cordless (robotic )?pool vacuum"]
+    exclude: ["replacement", "\\bfilters?\\b(?!.*cleaner)", "caddy"]
+    min_price: 150
+    seeds: ["robotic pool cleaner"]
+
+  - id: window-robot
+    kind: robot
+    category: window-robots
+    phase: wing
+    include_any: ["window (cleaning )?robot|robot window cleaner"]
+    exclude: ["replacement", "\\bpads?\\b"]
+    min_price: 80
+    seeds: ["window cleaning robot"]

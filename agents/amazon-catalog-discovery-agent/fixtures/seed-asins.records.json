@@ -1,0 +1,15 @@
+{
+  "_doc": "Seed file shape: an object whose `asins` key holds records (as a sizing run might write them). Synthetic ASINs.",
+  "generated": "2026-11-17",
+  "asins": [
+    {"asin": "B0SEEDST01", "lane": "station", "phase": "launch", "counted": true},
+    {"asin": "b0seedst02", "lane": "station", "phase": "launch", "counted": true},
+    {"asin": "B0SEEDKI01", "lane": "kit", "phase": "launch", "counted": true},
+    {"asin": "B0SEEDPA01", "lane": "panel", "phase": "launch", "counted": false},
+    {"asin": "B0SEEDIN01", "lane": "inverter", "phase": "phase2", "counted": true},
+    {"asin": "B0SEEDXX01", "lane": "toaster", "phase": "launch", "counted": true},
+    {"asin": "NOTANASIN", "lane": "station", "phase": "launch", "counted": true},
+    {"asin": "B0SEEDST01", "lane": "station", "phase": "launch", "counted": true},
+    {"asin": "B0SEEDCA01", "phase": "launch", "counted": true}
+  ]
+}

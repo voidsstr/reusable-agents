@@ -1,0 +1,94 @@
+{
+  "schema_version": "1",
+  "agent_id": "amazon-catalog-discovery-agent",
+  "_comment": "Seed these for each per-site instance under its own id (e.g. PUT /api/agents/<site>-amazon-catalog-discovery/goals with this body). Every target_metric is a key the run emits in RunResult.metrics.",
+  "goals": [
+    {
+      "id": "goal-new-in-lane-asins",
+      "title": "Every run adds new in-lane ASINs until the lanes are enumerated",
+      "description": "New ASINs this run inserted into the catalog with one of the site's active lane labels (search results only; seed imports are counted under seed_asins_imported). The launch lanes of the power niche measured about 2.9-3.3k ASINs, so this falls toward 0 as a cycle covers them; a run at the cap (max_new_per_run) defers the rest to the next run. Emitted key: new_in_lane_asins.",
+      "target_metric": "new_in_lane_asins",
+      "metric": {
+        "name": "new_in_lane_asins",
+        "current": 0,
+        "target": 40,
+        "direction": "increase",
+        "unit": "ASINs/run"
+      },
+      "directives": [
+        "When a cycle completes with few new ASINs, read the run report's saturated queries and split them (price_partitions, brands, browse nodes) before adding more broad seeds",
+        "Never loosen a lane's exclude rules or year-1 reject patterns to raise this count: a wrong product in a lane is worse than a missing one",
+        "A run stopped by budget-exhausted or throttled resumes at the same slot next run; do not raise max_calls_per_run past the consumer's budget share"
+      ]
+    },
+    {
+      "id": "goal-reject-precision",
+      "title": "Rejected listings are truly out of scope (precision at least 0.95)",
+      "description": "Of the operator-labelled listings (qa.golden / qa.golden_file) the lane rules rejected, the share the operator also labelled 'reject', over the latest observation of each labelled ASIN. Reported once qa.min_observations rejected listings back it. Emitted key: reject_precision.",
+      "target_metric": "reject_precision",
+      "metric": {
+        "name": "reject_precision",
+        "current": 0,
+        "target": 0.95,
+        "direction": "increase",
+        "unit": "share"
+      },
+      "directives": [
+        "When it drops, read the run report's reject_samples for the labelled ASINs and fix the exclude rule that fired (rejected_rules names it)",
+        "Label a sample of each run's reject_samples (ASIN + reason, no titles are stored) into the golden file so the measurement keeps up with new listings"
+      ]
+    },
+    {
+      "id": "goal-in-lane-precision",
+      "title": "Accepted listings land in the right lane (precision at least 0.95)",
+      "description": "Of the operator-labelled listings the rules put in a lane (held-back lanes included), the share put in the lane the operator chose. Emitted key: in_lane_precision.",
+      "target_metric": "in_lane_precision",
+      "metric": {
+        "name": "in_lane_precision",
+        "current": 0,
+        "target": 0.95,
+        "direction": "increase",
+        "unit": "share"
+      },
+      "directives": [
+        "Lanes are tried in config order: a misfiled listing usually means an earlier lane's include rule is too broad or a later lane needs to move up",
+        "A high cross_lane count with low precision means seed queries pull in neighbouring lanes; tighten the seeds before the lane rules"
+      ]
+    },
+    {
+      "id": "goal-budget-adherence",
+      "title": "Never spend past the run's call allowance",
+      "description": "Creators searchItems calls beyond the run's allowance: min(max_calls_per_run, the consumer's remaining daily share, the day total left after reserving what protected consumers such as the price refresh still need). Must stay 0. Emitted key: budget_overrun_calls.",
+      "target_metric": "budget_overrun_calls",
+      "metric": {
+        "name": "budget_overrun_calls",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "calls/run"
+      },
+      "directives": [
+        "Any value above 0 is a bug in the engine's loop: stop the instance and fix it before the next run",
+        "If price-refresh consumers are clipped late in the UTC day, add them to budget.protect_consumers"
+      ]
+    },
+    {
+      "id": "goal-calls-per-new-asin",
+      "title": "Discovery stays efficient: at most 0.5 calls per new in-lane ASIN",
+      "description": "searchItems calls divided by the new in-lane ASINs they produced this run (calls when nothing new was found). Rises naturally as the lanes saturate; a cycle cooldown (rotation.cycle_cooldown_hours) keeps a saturated catalog from spending calls on pages that only hold known listings. Emitted key: calls_per_new_asin.",
+      "target_metric": "calls_per_new_asin",
+      "metric": {
+        "name": "calls_per_new_asin",
+        "current": 0,
+        "target": 0.5,
+        "direction": "decrease",
+        "unit": "calls/ASIN"
+      },
+      "directives": [
+        "When this climbs while cycle_progress is high, raise rotation.cycle_cooldown_hours rather than adding seeds",
+        "Keep the low-yield stop on (limits.stop_if_new_in_lane_below, the sizing run's stop_if_new_inlane_lt): pages that only hold known or rejected listings then end their query instead of being walked to page 10",
+        "Seeds whose pages are all known or rejected (see the report's slots) should be dropped or narrowed"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,319 @@
+{
+ "_doc": "Reference rules for the differential port test: the global_exclude patterns and lanes of the sizing run's listing-churn config (churn-config.power.json, sha256 cf7e3b167119e3b2), copied verbatim, nothing else. framework/tests/test_amazon_catalog_discovery_agent.py translates them into this engine's config shape and checks that LaneClassifier agrees with a frozen copy of the reference classify_lane / capacity_wh (listing_churn.py) on every title of the test list. Rules only, no listing content.",
+ "global_exclude": [
+  "\\bgas(oline)?\\b(?![- ]?free)",
+  "dual[- ]fuel",
+  "tri[- ]fuel",
+  "\\bpropane\\b",
+  "natural gas",
+  "\\b\\d{2,4}\\s?cc\\b",
+  "interlock",
+  "power inlet",
+  "inlet box",
+  "generator inlet",
+  "grid[- ]tie",
+  "\\bon[- ]grid\\b",
+  "grid[- ]interactive",
+  "micro ?inverter",
+  "net[- ]meter",
+  "zero export",
+  "suicide cord",
+  "backfeed",
+  "^(?!.*\\bbattery\\b).*inverter generator",
+  "^(?!.*inverter).*transfer switch",
+  "manual transfer switch",
+  "jump starter",
+  "jump box",
+  "^(?!.*\\b(xt-?60i?|xt-?90|mc-?4|anderson|dc ?\\d{4}|usb|solar)\\b).*(double[- ]male|male[- ]to[- ]male)"
+ ],
+ "lanes": [
+  {
+   "id": "kit",
+   "phase": "launch",
+   "include_all": [
+    "(power station|solar generator|home backup|battery generator)",
+    "((with|\\+|and|w/|includ\\w*|bundle\\w*|kit)\\W+(\\w+\\W+){0,2}?(\\d+\\s?(pcs|pc|x|×|pack|sets?)\\W*)?\\(?\\d{2,3}\\s?w(att)?s?\\)?\\W+(\\w+\\W+){0,2}?(solar\\W+)?panels?|solar generator kit|panels? included)"
+   ],
+   "exclude": [
+    "power ?bank",
+    "jump starter",
+    "\\b(ring|blink|arlo|wyze|eufy|reolink)\\b",
+    "security camera",
+    "\\blights?\\b",
+    "panels? (not included|optional|sold separately)",
+    "optional (solar )?panel",
+    "without (solar )?panels?",
+    "no (solar )?panels?",
+    "power conditioner",
+    "home theater",
+    "\\b\\d{3,4}\\s?va\\b",
+    "uninterruptible",
+    "line[- ]interactive",
+    "back-?ups"
+   ],
+   "min_price": 150,
+   "wh_range": [
+    250,
+    5200
+   ],
+   "min_price_if_no_wh": 200
+  },
+  {
+   "id": "expansion",
+   "phase": "launch",
+   "include_all": [
+    "(expansion battery|extra battery|extension battery|expandable battery|add-on battery|battery expansion|smart extra battery|expansion pack|\\bexpand(s|ing)? capacity (for|of)\\b|jackery.*battery pack|battery pack.*jackery|battery pack for .*power station)",
+    "(power station|ecoflow|jackery|bluetti|anker|solix|delta|river|explorer|\\bac\\d{3}|\\bb\\d{3}|\\beb\\d|pecron|fossibot|oukitel|vtoman|allpowers|dji|f3000|f2400|e3600|e1500)"
+   ],
+   "exclude": [
+    "laptop",
+    "phone",
+    "camera battery",
+    "drone battery",
+    "power ?bank",
+    "\\bwith\\b.{0,30}\\b(extra|expansion) batter",
+    "home system",
+    "whole[- ]home",
+    "(power station|solar generator)\\s*(\\+|\\band\\b|&|,)\\s*([a-z]{0,4}\\d{3,5}\\w*\\s)?(smart )?(extra|expansion) batter",
+    "(hand truck|\\bcart\\b|dolly).*(expansion|extra) batter",
+    "cooler",
+    "\\b\\d{2,4}\\s?w(att)?s?\\s+(solar )?panels?",
+    "^(?!.*\\b\\d{3,5}\\s?wh\\b).*\\b(adapter|cable)\\b"
+   ],
+   "min_price": 100
+  },
+  {
+   "id": "station",
+   "phase": "launch",
+   "include_all": [
+    "(portable power station|power station|solar generator|home backup (battery|power)|battery generator|portable power supply|battery powered generator|\\b\\d{3,4}(\\.\\d)?\\s?wh\\b.*\\b(emergenc\\w*|camping|home (use|backup)|power outage|\\brv\\b|ac outlets?))"
+   ],
+   "exclude": [
+    "powerbank",
+    "jump starter",
+    "charging station for",
+    "charging dock",
+    "docking station",
+    "usb hub",
+    "wireless charg",
+    "surge protector",
+    "\\bps5\\b",
+    "xbox",
+    "gaming",
+    "apple watch",
+    "for iphone",
+    "\\bcase\\b",
+    "\\bcover\\b",
+    "\\bbag\\b",
+    "carrying",
+    "dust ?proof",
+    "\\bstand\\b",
+    "\\bmount\\b",
+    "replacement (cable|cord)",
+    "^(?!.*\\d\\s?k?wh\\b).*solar (panels?|charger|module|blanket)",
+    "power conditioner",
+    "home theater",
+    "surge protector",
+    "cooler",
+    "speaker",
+    "boombox",
+    "\\bjump\\s?starter\\b",
+    "\\b\\d{3,4}\\s?va\\b",
+    "uninterruptible",
+    "line[- ]interactive",
+    "back-?ups",
+    "\\b(12|12\\.8|24|25\\.6|48|51\\.2)\\s?v(?![a-z])\\s*\\d{2,4}\\s?ah\\b",
+    "^(?!.*\\d\\s?k?wh\\b).*power strip"
+   ],
+   "min_price": 100,
+   "wh_range": [
+    250,
+    5200
+   ],
+   "min_price_if_no_wh": 150
+  },
+  {
+   "id": "panel",
+   "phase": "launch",
+   "include_all": [
+    "(solar panels?|solar module|photovoltaic|\\bpv (panel|module)|solar blanket|solar charger)"
+   ],
+   "exclude": [
+    "\\b(ring|blink|arlo|wyze|eufy|reolink|ezviz|tapo|kasa)\\b",
+    "security camera",
+    "doorbell",
+    "\\blights?\\b",
+    "\\blamp\\b",
+    "fountain",
+    "\\bpump\\b",
+    "\\bfans?\\b",
+    "trickle",
+    "maintainer",
+    "keychain",
+    "power ?bank",
+    "\\btoys?\\b",
+    "educational",
+    "string",
+    "crimp",
+    "cleaning",
+    "\\bbrush\\b",
+    "\\bfuse\\b",
+    "breaker",
+    "faraday",
+    "\\bbags?\\b",
+    "multimeter",
+    "tester",
+    "\\bmeter\\b",
+    "cartridge",
+    "converter",
+    "regulator",
+    "calculator",
+    "deionized",
+    "\\bmagnets?\\b",
+    "^(?!.*\\d{2,4}\\s?w(att)?s?\\b).*\\b(brackets?|mount(ing)? (bracket|kit))\\b",
+    "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b).*\\bcamera\\b",
+    "for (security )?cam(era)?s?\\b",
+    "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b).*(extension cable|adapter|connectors?\\b|y[- ]branch|branch connector)",
+    "\\b\\d{2,5}(\\.\\d+)?\\s?wh\\b",
+    "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b.{0,30}solar panel)(?!.*\\bkit\\b).*(charge controller|\\bmppt\\b)",
+    "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b.{0,30}solar panel).*\\b\\d{2,4}\\s?ah\\b",
+    "lifepo4 (lithium )?battery,",
+    "\\bshunt\\b",
+    "coulometer",
+    "battery monitor",
+    "\\bbulbs?\\b"
+   ],
+   "min_price": 40,
+   "min_watts": 60
+  },
+  {
+   "id": "controller",
+   "phase": "phase2",
+   "include_all": [
+    "(charge controller|\\bmppt\\b.{0,30}controller|\\bpwm\\b.{0,30}controller|solar controller|charge regulator|solar regulator)"
+   ],
+   "exclude": [
+    "\\bfans?\\b",
+    "\\blights?\\b",
+    "tester",
+    "multimeter",
+    "\\bmeter\\b",
+    "wind turbine",
+    "\\bgate\\b",
+    "\\binverter\\b",
+    "extension cable",
+    "solar cable",
+    "\\bconnectors?\\b",
+    "\\bawg\\b",
+    "dc[- ]?(to[- ])?dc",
+    "trickle",
+    "maintainer",
+    "\\b\\d{2,4}\\s?ah\\b"
+   ],
+   "min_price": 15
+  },
+  {
+   "id": "inverter",
+   "phase": "phase2",
+   "include_all": [
+    "(pure sine (wave )?inverter|sine wave inverter|power inverter|inverter charger|off[- ]grid inverter|low frequency inverter|\\b\\d{3,5}\\s?w(att)?\\s+(pure sine )?(power )?inverter\\b|\\binverter\\s+\\d{3,5}\\s?w)"
+   ],
+   "exclude": [
+    "microwave",
+    "air condition",
+    "mini[- ]split",
+    "heat pump",
+    "welder",
+    "refrigerator",
+    "inverter technology",
+    "\\bac unit\\b",
+    "compressor",
+    "hybrid(?!.*off[- ]grid)",
+    "tester",
+    "uninterrupt"
+   ],
+   "min_price": 40
+  },
+  {
+   "id": "lifepo4",
+   "phase": "phase2",
+   "include_all": [
+    "(lifepo4|lifep04|lithium iron phosphate|\\blfp battery)",
+    "\\b(12|12\\.8|24|25\\.6|36|48|51\\.2)\\s?v(?![a-z])",
+    "(?<![\\d.])\\d{2,4}\\s?ah\\b"
+   ],
+   "exclude": [
+    "e-?bike",
+    "scooter",
+    "electric bike",
+    "charger only",
+    "\\bmower\\b",
+    "\\b(prismatic|diy)\\b.*\\bcells?\\b",
+    "\\bcells?\\b.*\\b(prismatic|diy)\\b",
+    "\\b3\\.2\\s?v\\b"
+   ],
+   "min_price": 60
+  },
+  {
+   "id": "dcdc",
+   "phase": "phase2",
+   "include_all": [
+    "(dc[- ]?(to[- ])?dc (battery )?charger|battery isolator|battery monitor|\\bshunt\\b|bus ?bar|fuse block|anl fuse|class t fuse|battery disconnect switch|(lifepo4|lithium) battery charger|battery charger.{0,40}(lifepo4|lithium))"
+   ],
+   "exclude": [
+    "\\bcar audio\\b",
+    "amplifier",
+    "buck",
+    "boost",
+    "step[- ](up|down)",
+    "^(?!.*(battery|charger|monitor|shunt)).*\\bled\\b"
+   ],
+   "min_price": 10
+  },
+  {
+   "id": "cable",
+   "phase": "launch",
+   "include_all": [
+    "(xt-?60i?|xt-?90|mc-?4|anderson|\\bapp connector|dc ?7909|dc ?8020|\\b8020\\b|\\b7909\\b|tt-?30|l14-?30|nema 14-30|solar (extension|adapter|connector|cable)|(car|ac) charging cable|parallel (cable|kit)|charging (cable|cord)|charger cable|power cord|\\bcables?\\b|\\badapters?\\b|\\bconnectors?\\b|\\bcords?\\b)"
+   ],
+   "exclude": [
+    "airsoft",
+    "e-?bike",
+    "scooter",
+    "\\blaptop\\b",
+    "\\bphone\\b",
+    "iphone",
+    "usb[- ]c to",
+    "hdmi",
+    "ethernet",
+    "camera",
+    "speaker",
+    "home theater",
+    "\\bmonitor\\b",
+    "\\biem\\b",
+    "earphone",
+    "headphone",
+    "usb hub",
+    "wi-?fi",
+    "mouse",
+    "\\baudio\\b",
+    "slide[- ]out",
+    "\\btv\\b",
+    "guitar",
+    "microphone",
+    "printer",
+    "^(?!.*(solar|power station|generator|\\brv\\b)).*(\\brc\\b|lipo|drone|\\bfpv\\b|quadcopter|\\bheli)",
+    "\\b\\d{2,3}\\s?w(att)?s?\\b.{0,40}\\bsolar panels?\\b",
+    "\\bsolar panels?\\b.{0,15}\\b\\d{2,3}\\s?w(att)?s?\\b",
+    "\\b\\d{2,5}(\\.\\d+)?\\s?wh\\b",
+    "tesla",
+    "\\bev\\b",
+    "electric vehicle",
+    "j1772",
+    "^(?!.*\\b(cable|adapter|cord|connector)s?\\b).*battery charger"
+   ],
+   "context_required": "(solar|power station|solar generator|ecoflow|jackery|bluetti|anker solix|\\brv\\b|camper|mc-?4|anderson|tt-?30|l14-?30|14-30|30 ?amp|portable power|explorer \\d{3,4}|delta (2|3|pro|max)|river (2|3|pro)|\\bac\\d{3}\\b)",
+   "min_price": 5
+  }
+ ]
+}

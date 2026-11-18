@@ -1,0 +1,18 @@
+{
+  "_doc": "Synthetic titles for examples/cleaning-robots.site.yaml (fictional brands; robot brand names appear only as the model a consumable fits).",
+  "config": "examples/cleaning-robots.site.yaml",
+  "cases": [
+    {"title": "Cleanbot R7 Robot Vacuum and Mop Combo, 5000Pa Suction, Self-Emptying Base", "price": 399, "expect": "robot-vacuum"},
+    {"title": "Robot Vacuum Cleaner with HEPA Filter, Wi-Fi, Works with Alexa", "price": 159, "expect": "robot-vacuum"},
+    {"title": "Cleanbot Lite Robot Vacuum", "price": 59, "expect": "off-lane"},
+    {"title": "Replacement Parts Kit for Roomba i7 i7+ j7 Filters Side Brushes Bags", "price": 24, "expect": "consumable"},
+    {"title": "HEPA Filters Compatible with Roborock S7 S8, 6 Pack", "price": 15, "expect": "consumable"},
+    {"title": "Mop Pads for Braava Jet 240, 12 Pack", "price": 19, "expect": "consumable"},
+    {"title": "Universal Side Brushes 10 Pack", "price": 9, "expect": "off-lane"},
+    {"title": "Robot Mop with Self-Cleaning Station", "price": 299, "expect": "robot-mop"},
+    {"title": "Cordless Stick Vacuum 25Kpa", "price": 129, "expect": "reject", "rule": "not-a-robot"},
+    {"title": "Kids Toy Robot Vacuum Cleaner Play Set", "price": 25, "expect": "reject", "rule": "toy"},
+    {"title": "Robotic Pool Cleaner Cordless, 120 Min Runtime", "price": 399, "expect": "held:pool-robot"},
+    {"title": "Window Cleaning Robot with Dual Spray", "price": 199, "expect": "held:window-robot"}
+  ]
+}

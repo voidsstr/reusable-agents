@@ -1,0 +1,332 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/agents/amazon-catalog-discovery-agent/catalog-discovery-config.schema.json",
+  "title": "Amazon catalog discovery: per-site config",
+  "description": "Config for agents/amazon-catalog-discovery-agent. It is the whole file named by CATALOG_DISCOVERY_CONFIG, or the `catalog_discovery` block of a larger site.yaml. Every niche value (lanes, seeds, browse nodes, price partitions, reject rules, seed sources) lives here; the engine code names no site and no niche. Keys starting with '_' are comments. catalog_discovery/config.py adds the checks a schema cannot express (regexes compile, ids are unique, references resolve, SQL templates use only the parameters the engine supplies).",
+  "type": "object",
+  "required": ["schema_version", "consumer", "catalog", "lanes"],
+  "additionalProperties": false,
+  "patternProperties": {"^_": {}},
+  "properties": {
+    "schema_version": {"type": "string", "const": "1"},
+    "site": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Site-registry name (framework.core.site_registry). Used to resolve the catalog DSN env var when catalog.dsn_env is not set, and as a label."
+    },
+    "enabled": {"type": "boolean", "description": "false = every run returns at once without touching the DB or the API. Default true."},
+    "consumer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Creators budget line every searchItems call is charged to (config/amazon-creators-budget.json shares), e.g. '<site>-discovery'."
+    },
+    "creators": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "partner_tag": {"type": "string", "description": "Associate tag for the API calls (not a secret). Wins over partner_tag_env."},
+        "partner_tag_env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "Env var holding the associate tag. Default: AMAZON_CREATORS_PARTNER_TAG."},
+        "search_index": {"type": "string", "minLength": 1, "description": "Default searchIndex. Default 'All'."},
+        "max_item_page": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Highest itemPage to request. Creators refuses itemPage 11+, so a config may lower this ceiling but never raise it (the engine also clamps to 10). Default 10."},
+        "result_count_cap": {"type": "integer", "minimum": 1, "description": "Value at which Creators clips totalResultCount (306 as measured). A count below it is exact; at it, the list length is unknown."},
+        "price_filter_unit": {"type": "string", "enum": ["cents", "dollars"], "description": "Unit of the minPrice/maxPrice search filters. Creators takes CENTS (verified by the 2026-11-12 sizing run: 1,005 of 1,016 priced items on banded pages fell inside their band). The engine still counts listings outside their band (partition_price_misses) as a regression guard. Default cents."}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "max_calls_per_run": {"type": "integer", "minimum": 0, "description": "searchItems calls per run (also capped by the consumer's remaining daily budget). Default 40."},
+        "max_new_per_run": {"type": "integer", "minimum": 0, "description": "New in-lane ASINs persisted per run from search. Default 300."},
+        "max_pages_per_query": {"type": "integer", "minimum": 1, "description": "Deepest itemPage per query (at most creators.max_item_page, itself at most 10). Default 10."},
+        "max_seed_asins_per_run": {"type": "integer", "minimum": 0, "description": "Seed ASINs inserted per run across all seed sources. Default 5000."},
+        "stop_if_new_in_lane_below": {"type": "integer", "minimum": 0, "description": "Low-yield stop (the sizing run's stop_if_new_inlane_lt): a page at or past low_yield_from_page that adds fewer new in-lane ASINs than this ends its query for the cycle (end reason 'low-yield'). 0 = off (default)."},
+        "low_yield_from_page": {"type": "integer", "minimum": 1, "maximum": 10, "description": "First itemPage the low-yield stop applies to. Default 2 (page 1 of every query is always followed by page 2)."}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "protect_consumers": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Consumers whose unspent daily share is reserved: this run never spends into the day total they still need (local stand-in for the reserved floor W3 adds to amazon_creators)."
+        },
+        "keep_unused_fraction_of_day": {"type": "number", "minimum": 0, "maximum": 1, "description": "Fraction of total_calls_per_day this run must leave unused. Default 0."}
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "min_price": {"type": "number", "minimum": 1, "description": "Pricing-integrity floor applied by amazon_discovery.listing_rejection: no $0 or sub-$1 offer is ever accepted, so a config may raise it, never lower it below 1. Default 1.0."},
+        "currencies": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z]{3}$"}, "minItems": 1, "description": "Allowed offer currencies. Default ['USD']."},
+        "require_new_condition": {"type": "boolean", "description": "Reject listings whose only offer is not New. Default true."}
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "required": ["known_sql", "insert_sql"],
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "dsn_env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "NAME of the env var holding the catalog DSN. Default: the site registry's dsn_env for `site`."},
+        "statement_timeout_ms": {"type": "integer", "minimum": 1000, "description": "Session statement_timeout. Default 30000."},
+        "connect_timeout_s": {"type": "integer", "minimum": 1, "description": "Default 15."},
+        "asin_regex": {"type": "string", "minLength": 1, "description": "ASINs that do not match are never persisted. Default ^B[0-9A-Z]{9}$."},
+        "site_id": {"type": "string", "description": "Value bound to %(site_id)s, for catalogs keyed by site."},
+        "known_sql": {"type": "string", "minLength": 1, "description": "Returns the ASIN (first column) of every row the catalog already carries among %(asins)s (a text[] of ASINs). Only %(asins)s may be used."},
+        "insert_sql": {"type": "string", "minLength": 1, "description": "Persists one ASIN. Named parameters only, from: asin, lane, lane_kind, lane_category, confidence, via, seed, run_ts, site_id. No Amazon content is ever bound. rowcount 1 = inserted, 0 = already there."}
+      }
+    },
+    "active_phases": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "description": "Lanes whose `phase` is not listed are held back: their seeds are not searched and listings classified into them are not persisted. Absent = every phase is active."
+    },
+    "reject_patterns": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/patternRule"},
+      "description": "Global title rejects, applied before any lane, to search listings AND to every seed record that has a title. A listing that matches one is never inserted by search; a titled seed record that matches one is never imported. Seed records without a title cannot be screened, so a source imports their labels only for lanes it lists under `lanes` or with `trust_labels: true`. Catalog rows whose fresh search title hits one are reported (known_now_rejected). Year-1 safety boundaries (e.g. cords a site must not carry) belong here, not in a lane's `exclude`: precedence can file a listing in an earlier lane before a later lane's exclude is tried."
+    },
+    "measures": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/definitions/measure"},
+      "description": "Numbers read from listing titles (e.g. a capacity), referenced by lane `measures` rules."
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/definitions/lane"},
+      "description": "Our own product classes, in PRECEDENCE order: a listing takes the first lane whose rules it passes; failing one lane's rules falls through to the next."
+    },
+    "rotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "cycle_cooldown_hours": {"type": "number", "minimum": 0, "description": "After every query reached its end, wait this long before re-scanning from page 1. Default 0."}
+      }
+    },
+    "seed_asins": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "files": {"type": "array", "items": {"$ref": "#/definitions/seedFile"}},
+        "queries": {"type": "array", "items": {"$ref": "#/definitions/seedQuery"}}
+      }
+    },
+    "qa": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "golden": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "minLength": 1},
+          "description": "Operator-labelled ASINs: ASIN -> expected lane id or 'reject'. Our own labels only."
+        },
+        "golden_file": {"type": "string", "minLength": 1, "description": "JSON object of the same shape (merged under `golden`), relative to this config file."},
+        "window": {"type": "integer", "minimum": 1, "description": "Golden observations kept across runs. Default 500."},
+        "min_observations": {"type": "integer", "minimum": 1, "description": "Precision metrics are reported once this many observations back them. Default 10."}
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "node_and_title": {"type": "number", "minimum": 0, "maximum": 1},
+        "title_only": {"type": "number", "minimum": 0, "maximum": 1},
+        "node_only": {"type": "number", "minimum": 0, "maximum": 1},
+        "seed": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "description": "Value bound to %(confidence)s by the evidence behind a lane label. Defaults 0.9 / 0.7 / 0.6, and 0.8 for seed imports."
+    }
+  },
+  "definitions": {
+    "pattern": {"type": "string", "minLength": 1},
+    "patternRule": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "required": ["pattern"],
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.:-]*$"},
+            "pattern": {"type": "string", "minLength": 1},
+            "note": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "browseNode": {"type": ["string", "integer"], "pattern": "^[0-9]+$", "minimum": 1},
+    "partition": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": ["number", "null"], "minimum": 0},
+      "description": "[low, high) price band in dollars; null = open end."
+    },
+    "measure": {
+      "type": "object",
+      "required": ["patterns"],
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "patterns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {"type": "string", "minLength": 1},
+              {
+                "type": "object",
+                "required": ["regex"],
+                "additionalProperties": false,
+                "properties": {
+                  "regex": {"type": "string", "minLength": 1},
+                  "scale": {"type": "number", "exclusiveMinimum": 0},
+                  "dot_thousands": {"type": "boolean", "description": "Read '1.024' (one digit, dot, three digits) as 1024 for THIS pattern. Only valid on an unscaled pattern: '1.024Wh' is 1024 Wh, but '3.072kWh' is 3072 Wh, not 3,072,000."}
+                }
+              }
+            ]
+          },
+          "description": "Regexes whose group 1 is the number; `scale` multiplies it (e.g. 1000 for kWh -> Wh)."
+        },
+        "strip": {"type": "array", "items": {"$ref": "#/definitions/pattern"}, "description": "Removed from the title before matching (e.g. 'expandable to 6kWh')."},
+        "pick": {"type": "string", "enum": ["first", "max", "min"], "description": "Which match wins: leftmost (default), largest or smallest."},
+        "dot_thousands": {"type": "boolean", "description": "Default for the measure's UNSCALED patterns only (scale 1); a scaled pattern never reads '3.072' as 3072. Prefer the per-pattern key."}
+      }
+    },
+    "measureRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min": {"type": "number"},
+        "max": {"type": "number"},
+        "missing_min_price": {"type": "number", "minimum": 0, "description": "When the title states no value, the listing must cost at least this much."},
+        "required": {"type": "boolean", "description": "When the title states no value, the lane does not match."}
+      }
+    },
+    "seed": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+            "query": {"type": "string"},
+            "brand": {"type": "string", "minLength": 1},
+            "brands": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+            "browse_node": {"oneOf": [{"$ref": "#/definitions/browseNode"}, {"type": "null"}], "description": "Search scope. Absent = the lane's search_browse_node; null = unscoped."},
+            "sort_by": {"type": "string", "minLength": 1},
+            "search_index": {"type": "string", "minLength": 1},
+            "min_price": {"type": "number", "minimum": 1, "description": "Floor for NEW listings found by this seed (amazon_discovery keyword floor). It can only raise pricing.min_price, never lower it."},
+            "partitions": {
+              "oneOf": [
+                {"type": "boolean", "const": false},
+                {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/partition"}}
+              ],
+              "description": "Absent = the lane's price_partitions; false = one unpartitioned query."
+            },
+            "max_pages": {"type": "integer", "minimum": 1},
+            "enabled": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "lane": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Our lane label, persisted with the ASIN (%(lane)s)."},
+        "kind": {"type": "string", "minLength": 1, "description": "%(lane_kind)s. Default: the lane id."},
+        "category": {"type": "string", "minLength": 1, "description": "%(lane_category)s (e.g. the site's category slug). Default: the lane id."},
+        "phase": {"type": "string", "minLength": 1},
+        "enabled": {"type": "boolean", "description": "false = held back like an inactive phase (still used for precedence)."},
+        "browse_nodes": {"type": "array", "items": {"$ref": "#/definitions/browseNode"}, "description": "Amazon browse nodes whose listings belong to this lane (evidence; see `match`)."},
+        "search_browse_node": {"oneOf": [{"$ref": "#/definitions/browseNode"}, {"type": "null"}], "description": "Default browseNodeId filter for this lane's seeds. Default none."},
+        "match": {"type": "string", "enum": ["title", "node", "title_and_node", "title_or_node"], "description": "Positive evidence required: title rules, a browse-node hit, both, or either. Default 'title' when include rules exist, else 'node'."},
+        "include_all": {"type": "array", "items": {"$ref": "#/definitions/pattern"}, "description": "Every regex must match the title."},
+        "include_any": {"type": "array", "items": {"$ref": "#/definitions/pattern"}, "description": "At least one regex must match the title."},
+        "exclude": {"type": "array", "items": {"$ref": "#/definitions/patternRule"}, "description": "Any match moves the listing on to the next lane."},
+        "context_required": {
+          "oneOf": [
+            {"$ref": "#/definitions/pattern"},
+            {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/pattern"}}
+          ],
+          "description": "At least one must match, else the listing moves on (e.g. a cable lane that needs a niche word)."
+        },
+        "min_price": {"type": "number", "minimum": 0},
+        "measures": {"type": "object", "additionalProperties": {"$ref": "#/definitions/measureRule"}},
+        "price_partitions": {"type": "array", "items": {"$ref": "#/definitions/partition"}, "description": "Each seed is searched once per band (minPrice/maxPrice filters), so a lane larger than one query's 100 reachable results can be enumerated."},
+        "search_index": {"type": "string", "minLength": 1},
+        "max_pages": {"type": "integer", "minimum": 1},
+        "seeds": {"type": "array", "items": {"$ref": "#/definitions/seed"}}
+      }
+    },
+    "laneMap": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+      "description": "The source's own lane labels -> our lane ids (e.g. a sizing run's 'expansion_battery' -> 'expansion'). Labels not listed are used as they are."
+    },
+    "seedFile": {
+      "type": "object",
+      "required": ["name", "path"],
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+        "path": {"type": "string", "minLength": 1, "description": "JSON file, relative to this config file. Shapes: [asin, ...], [{asin, lane?, phase?, ...}], {asin: lane}, {asin: {lane?, ...}}."},
+        "json_path": {"type": "string", "description": "Dotted path to the ASIN container inside the file (e.g. 'asins')."},
+        "asin_field": {"type": "string", "minLength": 1},
+        "lane_field": {"type": "string", "minLength": 1},
+        "phase_field": {"type": "string", "minLength": 1},
+        "title_field": {"type": "string", "minLength": 1, "description": "Field holding a title to screen each record with (global rejects, held-back lanes, the lane's own excludes). Read in memory, never stored."},
+        "where": {"type": "object", "description": "Keep a record only when every field holds the given value (or one of a list of accepted values)."},
+        "where_not": {"type": "object", "description": "Drop a record when any field holds the given value (or one of a list of values)."},
+        "lanes": {"type": "array", "items": {"type": "string"}, "description": "Only these lanes are imported from this source. For records WITHOUT a title it is also the trust list: their lane labels are used only for the lanes listed here (or with trust_labels)."},
+        "lane_map": {"$ref": "#/definitions/laneMap"},
+        "trust_labels": {"type": "boolean", "description": "Use the lane labels of untitled records for every lane, not only the ones under `lanes`. Default false: an untitled label cannot be checked against the lane rules or the year-1 rejects."},
+        "default_lane": {"type": "string", "description": "Lane for records that carry none (the operator's own assertion)."},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Value bound to %(confidence)s for this source's rows, instead of confidence.seed / the classifier's (e.g. below a site's pick floor for labels nobody has re-screened)."},
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "seedQuery": {
+      "type": "object",
+      "required": ["name", "sql"],
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+        "site": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "description": "Site-registry name of the database to read (DSN from its dsn_env)."},
+        "dsn_env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "description": "NAME of the env var with the DSN. Use a SELECT-only database role."},
+        "sql": {"type": "string", "minLength": 1, "description": "ONE read-only SELECT (no ';' except one at the end) returning `asin` and optionally `lane`, `phase` and `title` columns. It runs as a subquery, in keyset pages of max_rows (`asin > <cursor> ORDER BY asin`), in a session with default_transaction_read_only=on. `title` is used in memory to screen or classify the row and is never stored."},
+        "lanes": {"type": "array", "items": {"type": "string"}, "description": "Only these lanes are imported; for untitled rows also the trust list (see seedFile.lanes)."},
+        "lane_map": {"$ref": "#/definitions/laneMap"},
+        "trust_labels": {"type": "boolean", "description": "See seedFile.trust_labels."},
+        "default_lane": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "See seedFile.confidence."},
+        "classify_titles": {"type": "boolean", "description": "Let the lane rules pick each titled row's lane (a `lane` column that disagrees skips the row). Default false: the label or default_lane is kept, after the title passes the global rejects and the lane's own excludes."},
+        "refresh_hours": {"type": "number", "minimum": 0, "description": "Re-run the query at most this often once it was read to its end. Default 168."},
+        "statement_timeout_ms": {"type": "integer", "minimum": 1000},
+        "max_rows": {"type": "integer", "minimum": 1, "description": "Rows per keyset page (one page per run; a full page continues next run). Default 5000."},
+        "enabled": {"type": "boolean"}
+      }
+    }
+  }
+}

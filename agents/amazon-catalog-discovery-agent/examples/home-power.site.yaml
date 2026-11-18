@@ -1,0 +1,422 @@
+# Amazon catalog discovery: worked example for a home-backup / portable-power site.
+#
+# Starting point for the launch site's config-only agent directory (build item
+# S12): copy to <site repo>/agents/amazon-catalog-discovery/site.yaml, set
+# `site:` to the site's registry name (its catalog DSN then comes from the site
+# registry, e.g. DATABASE_URL_<SITE>), check the category slugs against the
+# site's migrations, and point the seed sources at the real files.
+#
+# Lane rules are ported from the sizing run's listing-churn config (lanes in
+# precedence order, include/exclude regexes, capacity and wattage bounds),
+# which classified 2,573 search results. Search seeds are the sizing run's own
+# query list (A01-A20 plus family B, sizing-power-config.json), the queries
+# that produced the counted launch-lane set.
+#
+# Year-1 safety boundary (binding design, amendment 8), as GLOBAL rejects so
+# no lane's precedence can let one through: no gas / dual-fuel generators, no
+# generator inlets or transfer switches, no double-male / backfeed cords or
+# dryer-outlet hookups, no grid-tie, and no 240 V, L14-30, L5-30 or 14-50
+# cords (nor the other 240 V plugs: NEMA 6-xx / 10-xx, 50 A RV dogbones,
+# twist-locks). The electrical and fuel rules are negation-aware: 'anti-
+# backfeed' or 'alternative to gas' on a station that states its Wh capacity
+# is not a reject.
+#
+# Validate with:
+#   python3 agents/amazon-catalog-discovery-agent/agent.py --config <this file> --validate
+schema_version: "1"
+# site: <registry name>          # S12: set this; the DSN env var comes from the site registry
+enabled: true
+consumer: power-site-discovery   # S12: '<site>-discovery' (its Creators budget share is a storage-config entry, F15c)
+
+creators:
+  search_index: All
+  max_item_page: 10              # Creators refuses itemPage 11+ (a config may only lower this)
+  result_count_cap: 306          # totalResultCount is clipped here; below it the count is exact
+  price_filter_unit: cents       # verified by the sizing run (2026-11-12): 1,005 of 1,016 banded items in band
+
+limits:
+  max_calls_per_run: 40
+  max_new_per_run: 300
+  max_pages_per_query: 10
+  max_seed_asins_per_run: 2000
+  # The sizing run's stop_if_new_inlane_lt: from page 2 on, a page that adds
+  # fewer than 2 new in-lane ASINs ends its query for the cycle, so a cycle
+  # over a mostly known catalog does not walk every query to page 10.
+  stop_if_new_in_lane_below: 2
+  low_yield_from_page: 2
+
+budget:
+  # Never spend day-total headroom the price refreshes still need today.
+  protect_consumers: [price-refresh, power-site-price-refresh]
+  keep_unused_fraction_of_day: 0.0
+
+pricing:
+  min_price: 1.0                 # the pricing-integrity floor; never lower
+  currencies: [USD]
+  require_new_condition: true
+
+catalog:
+  dsn_env: CATALOG_DATABASE_URL  # S12: drop this line once `site:` is set (registry dsn_env)
+  statement_timeout_ms: 30000
+  asin_regex: "^B[0-9A-Z]{9}$"   # the products.asin CHECK in the site's 0001_catalog migration
+  known_sql: |
+    SELECT asin FROM products WHERE asin = ANY(%(asins)s)
+  # ASIN + our labels only. A missing category slug leaves category_id NULL
+  # (the row still carries kind); a repeat ASIN is a no-op.
+  insert_sql: |
+    INSERT INTO products (asin, kind, category_id, category_confidence, discovered_via, discovered_at)
+    VALUES (%(asin)s, %(lane_kind)s,
+            (SELECT id FROM categories WHERE slug = %(lane_category)s),
+            %(confidence)s, %(via)s, now())
+    ON CONFLICT (asin) DO NOTHING
+
+# Phase-2 off-grid lanes stay held back until the month-3 checkpoint. They
+# still take part in precedence, so an inverter is never filed as a cable.
+active_phases: [launch]
+
+reject_patterns:
+  # Fuel generators. 'no gas', 'gas-free', 'alternative to gas' ... describe a
+  # battery product, but only a title that also states a Wh capacity is
+  # trusted to be one.
+  - id: fuel-generator
+    pattern: >-
+      (?<!no )(?<!non-)(?<!non )(?<!zero )(?<!without )(?<!alternative to )(?<!instead of )(?<!replace )(?<!replaces )(?<!replace your )(?<!replaces your )(?<!than )(?<!than a )(?<!than your )(?<!vs )(?<!vs\. )\bgas(oline)?\b(?![- ]?(free|less)\b)|^(?!.*\d\s?k?wh\b).*(\b(no|non|zero|without|alternative to|instead of|replaces?( your)?|than( a| your)?|vs\.?)[- ]gas(oline)?\b|\bgas(oline)?[- ]?(free|less)\b)|dual[- ]fuel|tri[- ]fuel|\bpropane\b|natural gas|\b\d{2,4}\s?cc\b
+  - {id: inverter-generator, pattern: "^(?!.*\\bbattery\\b).*inverter generator"}
+  - {id: generator-inlet, pattern: "generator inlet|power inlet|inlet box|interlock"}
+  # An inverter charger's built-in transfer relay is not the product the
+  # boundary means; every other transfer switch (and the home panels that are
+  # transfer switches) is.
+  - id: transfer-switch
+    pattern: "^(?!.*\\binverter[- ]chargers?\\b)(?!.*\\bbuilt[- ]in (auto(matic)? )?transfer switch).*\\btransfer[- ]switch(es)?\\b|smart home panel|home integration kit"
+  - {id: generator-cord, pattern: "\\bgenerator (power |extension |transfer )?cords?\\b"}
+  # Negation-aware: 'anti-backfeed', 'no backfeed', 'never backfeed',
+  # 'backfeed protection' are safety features, not backfeed hookups.
+  - id: backfeed
+    pattern: "(?<!anti)(?<!anti-)(?<!anti )(?<!no )(?<!non-)(?<!never )(?<!zero )(?<!without )(?<!prevent )(?<!prevents )(?<!avoid )\\bback[- ]?feed(ing)?\\b(?![- ]?(protection|prevention|proof|free|safe)\\b)|suicide cord"
+  # DC connector pairs (MC4, XT60, Anderson, SAE, DC barrels, USB) are fine;
+  # 'solar' is NOT an exemption: an AC double-male cord 'for solar generator'
+  # is the hookup the boundary bans.
+  - id: double-male
+    pattern: "^(?!.*(\\b(xt-?60i?|xt-?90|mc-?4|anderson|sae|dc ?\\d{4}|usb)\\b|5\\.5\\s?(mm)?\\s?x\\s?2\\.[15])).*(double[- ]male|dual[- ]male|male[- ]to[- ]male)"
+  - {id: dryer-outlet, pattern: "dryer (outlet|plug|receptacle|cord|hook[- ]?up)"}
+  # 240 V class cords and adapters: listings that are a cord / cable / adapter
+  # / plug and whose HEAD (the text before 'for', 'compatible', 'fits', ...)
+  # states no Wh capacity. A 240 V split-phase STATION states its own Wh up
+  # front; a 'L14-30 cord for <station> 3600Wh' names its station's Wh only
+  # after 'for', so it is still a cord.
+  - id: cord-240v
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*\\b(208|220|230|240|250)\\s?-?\\s?v(olts?|ac)?\\b"
+  - id: cord-l14-30
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*(\\bl14-?30|\\bnema\\s?14-?30|\\b14-30[pr]?\\b)"
+  - id: cord-l5-30
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*\\bl5-?30"
+  - id: cord-14-50
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*(\\b14-50[pr]?\\b|\\bnema\\s?14-?50)"
+  - id: cord-nema-6-10
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*(\\bl?6-(15|20|30|50)[pr]?\\b|\\bnema\\s?l?6-?(15|20|30|50)|\\b10-(30|50)[pr]?\\b|\\bnema\\s?10-?(30|50))"
+  # 50 A RV service is 14-50 (120/240 V). Anderson SB50 and other DC parts
+  # rated 50 A are not cords of that kind.
+  - id: cord-50a
+    pattern: "^(?!.*\\b(anderson|sb ?50|mc-?4|xt-?60i?|xt-?90|dc|12\\s?v|24\\s?v|48\\s?v)\\b)(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*\\b50\\s?-?\\s?a(mps?)?\\b"
+  - id: cord-twist-lock
+    pattern: "^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b)(?=.*\\b(cords?|cables?|adapters?|plugs?|pigtails?|extensions?|dogbones?|splitters?)\\b).*(\\btwist[- ]?lock(ing)?\\b|\\b4[- ]prong\\b)"
+  # A hub that combines two stations into 120/240 V split phase is the 240 V
+  # hookup's compatibility edge, not a station.
+  - {id: voltage-hub, pattern: "\\bvoltage hub\\b|^(?!(?:(?!\\b(?:for|compatible|fits?|works with|replacement)\\b).)*?\\d\\s?k?wh\\b).*\\bsplit[- ]phase (kit|hub|box|cable|adapter)\\b"}
+  - {id: grid-tie, pattern: "grid[- ]tie|\\bon[- ]grid\\b|grid[- ]interactive|micro ?inverter|net[- ]meter|zero export"}
+  - {id: jump-starter, pattern: "jump starter|jump box"}
+  - {id: doorbell, pattern: "\\bdoorbell\\b"}
+  # Security-camera solar panels (the roster's 'camera solar'): solar panel /
+  # charger listings without a Wh capacity that name a camera product.
+  - id: camera-solar
+    pattern: "^(?!.*\\d\\s?k?wh\\b)(?=.*\\bsolar (panels?|chargers?)\\b).*(\\b(security|surveillance|trail|game|hunting|spotlight|floodlight|stick[- ]up) cam(era)?s?\\b|\\b(ring|blink|arlo|wyze|reolink|ezviz|tapo|kasa|eufy ?cam|google nest)\\b|\\bcam(era)?s? solar)"
+
+measures:
+  capacity_wh:
+    patterns:
+      # "1.024Wh" is 1024 Wh: the dot-thousands reading belongs to this
+      # pattern only. On the kWh pattern '3.072kWh' is 3,072 Wh.
+      - {regex: "(?<![\\d.,])(\\d{1,2},\\d{3}(?:\\.\\d+)?|\\d{1,5}(?:\\.\\d+)?)\\s?(?:wh|watt[- ]?hours?)\\b", dot_thousands: true}
+      - {regex: "(\\d+(?:\\.\\d+)?)\\s?kwh\\b", scale: 1000}
+    # "expandable to 6kWh" states the ceiling with add-on packs, not the unit.
+    strip: ["(expand(able|ed|s)?|extend(able|ed)?|scalable|up)\\s*(up\\s*)?to\\s*[\\d.,]+\\s?k?wh"]
+    pick: first
+  watts:
+    patterns: ["(\\d{2,4})\\s?(?:w|watts?)\\b"]
+    pick: max
+
+lanes:
+  - id: kit
+    kind: kit
+    category: solar-generator-kits
+    phase: launch
+    browse_nodes: ["348967011"]
+    include_all:
+      - "(power station|solar generator|home backup|battery generator)"
+      - "((with|\\+|and|w/|includ\\w*|bundle\\w*|kit)\\W+(\\w+\\W+){0,2}?(\\d+\\s?(pcs|pc|x|×|pack|sets?)\\W*)?\\(?\\d{2,3}\\s?w(att)?s?\\)?\\W+(\\w+\\W+){0,2}?(solar\\W+)?panels?|solar generator kit|panels? included)"
+    exclude: ["power ?bank", "jump starter", "\\b(ring|blink|arlo|wyze|eufy|reolink)\\b", "security camera",
+              "\\blights?\\b", "panels? (not included|optional|sold separately)", "optional (solar )?panel",
+              "without (solar )?panels?", "no (solar )?panels?", "power conditioner", "home theater",
+              "\\b\\d{3,4}\\s?va\\b", "uninterruptible", "line[- ]interactive", "back-?ups"]
+    min_price: 150
+    measures:
+      capacity_wh: {min: 250, max: 5200, missing_min_price: 200}
+    seeds:
+      - {id: A09, query: "solar generator kit with panels"}
+
+  - id: expansion
+    kind: battery
+    category: expansion-batteries
+    phase: launch
+    include_all:
+      - "(expansion battery|extra battery|extension battery|expandable battery|add-on battery|battery expansion|smart extra battery|expansion pack|\\bexpand(s|ing)? capacity (for|of)\\b|battery pack for .*power station)"
+      - "(power station|ecoflow|jackery|bluetti|anker|solix|delta|river|explorer|\\bac\\d{3}|\\bb\\d{3}|\\beb\\d|pecron|fossibot|oukitel|vtoman|allpowers|dji)"
+    exclude: ["laptop", "phone", "camera battery", "drone battery", "power ?bank",
+              "\\bwith\\b.{0,30}\\b(extra|expansion) batter", "home system", "whole[- ]home",
+              "(power station|solar generator)\\s*(\\+|\\band\\b|&|,)\\s*([a-z]{0,4}\\d{3,5}\\w*\\s)?(smart )?(extra|expansion) batter",
+              "(hand truck|\\bcart\\b|dolly).*(expansion|extra) batter", "cooler",
+              "\\b\\d{2,4}\\s?w(att)?s?\\s+(solar )?panels?",
+              "^(?!.*\\b\\d{3,5}\\s?wh\\b).*\\b(adapter|cable)\\b"]
+    min_price: 100
+    seeds:
+      - {id: A07, query: "expandable power station extra battery"}
+      - {id: A08, query: "power station expansion battery"}
+
+  - id: station
+    kind: station
+    category: power-stations
+    phase: launch
+    browse_nodes: ["348967011"]
+    include_all:
+      - "(portable power station|power station|solar generator|home backup (battery|power)|battery generator|portable power supply|battery powered generator|\\b\\d{3,4}(\\.\\d)?\\s?wh\\b.*\\b(emergenc\\w*|camping|home (use|backup)|power outage|\\brv\\b|ac outlets?))"
+    exclude: ["powerbank", "jump starter", "charging station for", "charging dock", "docking station",
+              "usb hub", "wireless charg", "surge protector", "\\bps5\\b", "xbox", "gaming", "apple watch",
+              "for iphone", "\\bcase\\b", "\\bcover\\b", "\\bbag\\b", "carrying", "dust ?proof", "\\bstand\\b",
+              "\\bmount\\b", "replacement (cable|cord)", "^(?!.*\\d\\s?k?wh\\b).*solar (panels?|charger|module|blanket)",
+              "power conditioner", "home theater", "cooler", "speaker", "boombox", "\\b\\d{3,4}\\s?va\\b",
+              "uninterruptible", "line[- ]interactive", "back-?ups",
+              "\\b(12|12\\.8|24|25\\.6|48|51\\.2)\\s?v(?![a-z])\\s*\\d{2,4}\\s?ah\\b",
+              "^(?!.*\\d\\s?k?wh\\b).*power strip",
+              # a cord that names a station is not a station (unless it only comes with one)
+              "\\bextension (cord|cable)s?\\b(?!\\s+included)"]
+    min_price: 100
+    measures:
+      capacity_wh: {min: 250, max: 5200, missing_min_price: 150}
+    seeds:
+      # Broad queries are split into the sizing run's price bands (cents
+      # filters) so each reaches past the 100 results 10 pages can show.
+      - {id: A01, query: "portable power station", partitions: [[1, 200], [200, 700], [700, null]]}
+      - {id: A02, query: "solar generator", partitions: [[1, 200], [200, 700], [700, null]]}
+      - {id: A03, query: "power station home backup"}
+      - {id: A04, query: "portable power station 2000w"}
+      - {id: A05, query: "3000w 240v power station"}
+      - {id: A06, query: "lifepo4 power station"}
+      # Family B: brand and capacity seeds (independent of family A). Brand
+      # results that are not stations take their own lane, or are rejected.
+      - {id: B01, query: "EcoFlow"}
+      - {id: B02, query: "Jackery"}
+      - {id: B03, query: "Anker SOLIX"}
+      - {id: B04, query: "BLUETTI"}
+      - {id: B05, query: "Pecron"}
+      - {id: B06, query: "ALLPOWERS"}
+      - {id: B07, query: "OUKITEL power station"}
+      - {id: B08, query: "FOSSiBOT power station"}
+      - {id: B09, query: "VTOMAN"}
+      - {id: B10, query: "1024Wh power station"}
+      - {id: B11, query: "2048Wh power station"}
+      - {id: B12, query: "3600Wh power station"}
+
+  - id: panel
+    kind: panel
+    category: solar-panels
+    phase: launch
+    browse_nodes: ["3236381"]
+    include_all: ["(solar panels?|solar module|photovoltaic|\\bpv (panel|module)|solar blanket|solar charger)"]
+    exclude: ["\\b(ring|blink|arlo|wyze|eufy|reolink|ezviz|tapo|kasa)\\b", "security camera", "doorbell",
+              "\\blights?\\b", "\\blamp\\b", "fountain", "\\bpump\\b", "\\bfans?\\b", "trickle", "maintainer",
+              "keychain", "power ?bank", "\\btoys?\\b", "educational", "string", "crimp", "cleaning", "\\bbrush\\b",
+              "\\bfuse\\b", "breaker", "faraday", "\\bbags?\\b", "multimeter", "tester", "\\bmeter\\b", "cartridge",
+              "converter", "regulator", "calculator", "deionized", "\\bmagnets?\\b",
+              "^(?!.*\\d{2,4}\\s?w(att)?s?\\b).*\\b(brackets?|mount(ing)? (bracket|kit))\\b",
+              "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b).*\\bcamera\\b", "for (security )?cam(era)?s?\\b",
+              "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b).*(extension cable|adapter|connectors?\\b|y[- ]branch|branch connector)",
+              "\\b\\d{2,5}(\\.\\d+)?\\s?wh\\b",
+              "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b.{0,30}solar panel)(?!.*\\bkit\\b).*(charge controller|\\bmppt\\b)",
+              "^(?!.*\\b\\d{2,4}\\s?w(att)?s?\\b.{0,30}solar panel).*\\b\\d{2,4}\\s?ah\\b",
+              "lifepo4 (lithium )?battery,", "\\bshunt\\b", "coulometer", "battery monitor", "\\bbulbs?\\b"]
+    min_price: 40
+    measures:
+      watts: {min: 60}
+    seeds:
+      - {id: A10, query: "portable solar panel for power station", partitions: [[1, 130], [130, 280], [280, null]]}
+      - {id: A11, query: "foldable solar panel 200w"}
+      - {id: A12, query: "rigid solar panel 100w monocrystalline"}
+      - {id: A13, query: "bifacial solar panel 400w"}
+
+  - id: controller
+    kind: controller
+    category: charge-controllers
+    phase: phase2
+    include_all: ["(charge controller|\\bmppt\\b.{0,30}controller|\\bpwm\\b.{0,30}controller|solar controller|charge regulator|solar regulator)"]
+    exclude: ["\\bfans?\\b", "\\blights?\\b", "tester", "multimeter", "\\bmeter\\b", "wind turbine", "\\bgate\\b",
+              "\\binverter\\b", "extension cable", "solar cable", "\\bconnectors?\\b", "\\bawg\\b", "dc[- ]?(to[- ])?dc",
+              "trickle", "maintainer", "\\b\\d{2,4}\\s?ah\\b"]
+    min_price: 15
+    seeds:
+      - {id: P06, query: "mppt charge controller 40a"}
+
+  - id: inverter
+    kind: inverter
+    category: inverters
+    phase: phase2
+    include_all: ["(pure sine (wave )?inverter|sine wave inverter|power inverter|inverter charger|off[- ]grid inverter|low frequency inverter|\\b\\d{3,5}\\s?w(att)?\\s+(pure sine )?(power )?inverter\\b|\\binverter\\s+\\d{3,5}\\s?w)"]
+    exclude: ["microwave", "air condition", "mini[- ]split", "heat pump", "welder", "refrigerator",
+              "inverter technology", "\\bac unit\\b", "compressor", "hybrid(?!.*off[- ]grid)", "tester", "uninterrupt"]
+    min_price: 40
+    seeds:
+      - {id: P04, query: "pure sine wave inverter 3000w"}
+      - {id: P05, query: "inverter charger 24v"}
+
+  - id: lifepo4
+    kind: battery
+    category: lifepo4-batteries
+    phase: phase2
+    include_all:
+      - "(lifepo4|lifep04|lithium iron phosphate|\\blfp battery)"
+      - "\\b(12|12\\.8|24|25\\.6|36|48|51\\.2)\\s?v(?![a-z])"
+      - "(?<![\\d.])\\d{2,4}\\s?ah\\b"
+    exclude: ["e-?bike", "scooter", "electric bike", "charger only", "\\bmower\\b",
+              "\\b(prismatic|diy)\\b.*\\bcells?\\b", "\\bcells?\\b.*\\b(prismatic|diy)\\b", "\\b3\\.2\\s?v\\b"]
+    min_price: 60
+    seeds:
+      - {id: P01, query: "12v 100ah lifepo4", partitions: [[1, 220], [220, 350], [350, null]]}
+      - {id: P02, query: "24v lifepo4"}
+      - {id: P03, query: "48v server rack battery"}
+
+  - id: dcdc
+    kind: dcdc
+    category: dc-dc-chargers
+    phase: phase2
+    include_all: ["(dc[- ]?(to[- ])?dc (battery )?charger|battery isolator|battery monitor|\\bshunt\\b|bus ?bar|fuse block|anl fuse|class t fuse|battery disconnect switch|(lifepo4|lithium) battery charger|battery charger.{0,40}(lifepo4|lithium))"]
+    exclude: ["\\bcar audio\\b", "amplifier", "buck", "boost", "step[- ](up|down)",
+              "^(?!.*(battery|charger|monitor|shunt)).*\\bled\\b"]
+    min_price: 10
+    seeds:
+      - {id: P07, query: "dc-dc battery charger"}
+      - {id: P08, query: "battery monitor shunt 500a"}
+
+  # Last: its generic cable / adapter words would otherwise capture inverter
+  # chargers and panel bundles. The year-1 cord boundary is in reject_patterns
+  # (global), so it holds whatever lane a cord would otherwise land in.
+  - id: cable
+    kind: cable
+    category: cables-adapters
+    phase: launch
+    include_all: ["(xt-?60i?|xt-?90|mc-?4|anderson|\\bapp connector|dc ?7909|dc ?8020|\\b8020\\b|\\b7909\\b|tt-?30|solar (extension|adapter|connector|cable)|(car|ac) charging cable|parallel (cable|kit)|charging (cable|cord)|charger cable|power cord|\\bcables?\\b|\\badapters?\\b|\\bconnectors?\\b|\\bcords?\\b)"]
+    exclude:
+      - "airsoft"
+      - "e-?bike"
+      - "scooter"
+      - "\\blaptop\\b"
+      - "\\bphone\\b"
+      - "iphone"
+      - "usb[- ]c to"
+      - "hdmi"
+      - "ethernet"
+      - "camera"
+      - "speaker"
+      - "home theater"
+      - "\\bmonitor\\b"
+      - "earphone|headphone|\\biem\\b"
+      - "usb hub"
+      - "wi-?fi"
+      - "mouse"
+      - "\\baudio\\b"
+      - "slide[- ]out"
+      - "\\btv\\b"
+      - "guitar"
+      - "microphone"
+      - "printer"
+      - "^(?!.*(solar|power station|generator|\\brv\\b)).*(\\brc\\b|lipo|drone|\\bfpv\\b|quadcopter|\\bheli)"
+      - "\\b\\d{2,3}\\s?w(att)?s?\\b.{0,40}\\bsolar panels?\\b"
+      - "\\bsolar panels?\\b.{0,15}\\b\\d{2,3}\\s?w(att)?s?\\b"
+      - "\\b\\d{2,5}(\\.\\d+)?\\s?wh\\b"
+      - "tesla|\\bev\\b|electric vehicle|j1772"
+      - "^(?!.*\\b(cable|adapter|cord|connector)s?\\b).*battery charger"
+    context_required: "(solar|power station|solar generator|ecoflow|jackery|bluetti|anker solix|\\brv\\b|camper|mc-?4|anderson|tt-?30|30 ?amp|portable power|explorer \\d{3,4}|delta (2|3|pro|max)|river (2|3|pro)|\\bac\\d{3}\\b)"
+    min_price: 5
+    seeds:
+      - {id: A14, query: "mc4 solar extension cable"}
+      - {id: A15, query: "xt60 to mc4 adapter"}
+      - {id: A16, query: "anderson to xt60 cable"}
+      - {id: A17, query: "dc8020 solar adapter"}
+      - {id: A18, query: "tt-30 rv adapter power station"}
+      # A19 'l14-30 30 amp generator cord' is a sizing query whose every
+      # result is a year-1 reject: searching it would only spend calls.
+      - {id: A19, query: "l14-30 30 amp generator cord", enabled: false}
+      - {id: A20, query: "power station car charging cable"}
+
+rotation:
+  cycle_cooldown_hours: 72       # once every query is walked to its end, rescan from page 1 after 3 days
+
+seed_asins:
+  files:
+    # The sizing run's sizing-power.json, copied into the site repo as
+    # content/seed-asins.json. Its .asins records carry the sizing labels
+    # (lane, phase, counted, subclass), no titles. 1,300 records are counted
+    # launch-lane ASINs and 651 counted phase-2 ones (held back by
+    # active_phases).
+    #
+    # Of the 1,300, this source imports the 747 station / kit / expansion /
+    # panel labels. The 553 cable labels are NOT imported on trust: the sizing
+    # classifier's cable lane admitted L14-30, L5-30, 14-50 and NEMA cords
+    # (its 125 'ac-rv-generator' records came from the 'tt-30 rv adapter' and
+    # 'l14-30 generator cord' queries), and with no title there is nothing to
+    # re-screen against the year-1 boundary. Search re-finds the cables with
+    # titles, through the global rejects.
+    - name: sizing-launch
+      path: ../../content/seed-asins.json
+      json_path: asins
+      where: {counted: true}
+      lane_map: {expansion_battery: expansion}
+      lanes: [station, kit, expansion, panel]
+    # Opt-in (D1 decides): the 370 DC-solar and car-charging cable labels.
+    # The sizing classifier assigned those subclasses only to titles without
+    # TT-30 / L14-30 / L5-30 / 14-50 / NEMA / generator-cord words, but a bare
+    # '240V' was not screened, so they land below the 0.5 pick floor until a
+    # human or a fresh title confirms them (catalog rows whose search title
+    # hits a global reject are reported as known_now_rejected).
+    - name: sizing-launch-dc-cables
+      path: ../../content/seed-asins.json
+      json_path: asins
+      where: {counted: true, lane: cable, subclass: [dc-solar, car-charging]}
+      lanes: [cable]
+      confidence: 0.45
+      enabled: false
+  queries:
+    # A sister catalog's stray power ASINs: a title naming a power station or
+    # solar generator plus a Wh figure is a reliable signal there, its panel
+    # and cable strays are not. Titles are screened and classified in memory,
+    # never stored. Use a SELECT-only database role for this DSN.
+    - name: sister-power-strays
+      dsn_env: SISTER_CATALOG_DATABASE_URL   # or `site: <registry name>`
+      sql: |
+        SELECT DISTINCT ON (asin) asin, title
+          FROM products
+         WHERE is_active AND asin ~ '^B[0-9A-Z]{9}$'
+           AND title ~* '(power station|solar generator)'
+           AND title ~* '\d{3,4}(\.\d)?\s?wh'
+         ORDER BY asin
+      classify_titles: true
+      lanes: [station, kit, expansion]
+      refresh_hours: 168
+
+# qa:
+#   golden_file: discovery-golden.json   # {"B0...": "station", "B0...": "reject"}: operator labels
+#   min_observations: 10
+
+confidence:
+  node_and_title: 0.9
+  title_only: 0.7
+  node_only: 0.6
+  seed: 0.8
