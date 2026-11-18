@@ -1,0 +1,120 @@
+/**
+ * base.css as a string, so renderPage() can inline it however the kit is
+ * compiled or bundled (tsc does not copy .css files). Generated from
+ * base.css: unit/render/baseCss.test.ts fails when the two differ, and
+ * KIT_REGEN_BASE_CSS=1 npx jest unit/render/baseCss.test.ts rewrites this file.
+ */
+export const BASE_CSS = `/*
+ * affiliate-site kit: base.css
+ *
+ * The page shell, notices, markdown bodies, CTAs and price stamps. Colours
+ * come only from the --kit-* tokens themeCss(ctx.theme) emits, and every text
+ * colour sits on a background it was contrast-checked against when site.json
+ * loaded (THEME_CONTRAST_PAIRS, WCAG AA):
+ *   text and muted on bg or surface; link on bg; cta-text on cta-bg;
+ *   accent, focus and border only for rules, outlines and borders.
+ * So a link inside a surface-coloured box takes the text colour (underlined).
+ * Code blocks use fixed dark colours that pass AA in both colour schemes.
+ * renderPage() inlines this file (BASE_CSS, kept identical by a unit test).
+ */
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--kit-bg);color:var(--kit-text);font-family:var(--kit-font);font-size:1rem;line-height:1.6;overflow-wrap:break-word}
+img,svg,video{max-width:100%;height:auto}
+a{color:var(--kit-link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:3px solid var(--kit-focus);outline-offset:2px}
+[id]{scroll-margin-top:1rem}
+h1,h2,h3,h4,h5,h6{color:var(--kit-text);line-height:1.25;margin:1.6em 0 .6em}
+h1{font-size:clamp(1.6rem,4.5vw,2.25rem);margin-top:.4em}
+h2{font-size:1.45rem}
+h3{font-size:1.2rem}
+h4,h5,h6{font-size:1.05rem}
+p,ul,ol,dl,blockquote,figure{margin:0 0 1em}
+hr{border:0;border-top:1px solid var(--kit-border);margin:2em 0}
+code,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}
+:not(pre)>code{background:var(--kit-surface);color:var(--kit-text);padding:.1em .35em;border-radius:4px}
+a :not(pre)>code,a>code{background:transparent;color:inherit;padding:0}
+
+/* shell */
+.kit-wrap{width:100%;max-width:72rem;margin:0 auto;padding-left:1rem;padding-right:1rem}
+.kit-skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:var(--kit-bg);color:var(--kit-link);padding:.5rem 1rem}
+.kit-skip-link:focus{left:1rem;top:1rem}
+.kit-header{background:var(--kit-bg);border-bottom:1px solid var(--kit-border)}
+.kit-header-inner{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1.5rem;padding-top:.75rem;padding-bottom:.75rem}
+.kit-brand{color:var(--kit-text);font-weight:700;font-size:1.15rem;text-decoration:none}
+.kit-nav ul{display:flex;flex-wrap:wrap;gap:.25rem 1rem;list-style:none;margin:0;padding:0}
+.kit-nav a{color:var(--kit-link);text-decoration:none}
+.kit-nav a:hover,.kit-nav a[aria-current="page"]{text-decoration:underline}
+.kit-main{display:block;min-width:0;padding-top:1rem;padding-bottom:2.5rem}
+.kit-footer{background:var(--kit-bg);color:var(--kit-muted);border-top:1px solid var(--kit-border);font-size:.875rem;padding:1.5rem 0 2rem}
+.kit-footer a{color:var(--kit-link)}
+.kit-footer ul{list-style:none;margin:0;padding:0}
+.kit-footer li{margin:.3rem 0}
+.kit-footer-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem 2rem;margin:1.25rem 0}
+.kit-footer-heading{color:var(--kit-text);font-weight:700;margin:0 0 .4rem}
+.kit-footer-links ul{display:flex;flex-wrap:wrap;gap:.25rem 1.25rem}
+.kit-copyright{color:var(--kit-muted);margin:1rem 0 0}
+
+/* notices: the 2(k) notice and the earnings disclosure stay in plain view, legible */
+.kit-amazon-notice,.kit-earnings-disclosure{color:var(--kit-muted);font-size:.8125rem;line-height:1.5;margin:.5rem 0}
+.kit-earnings-disclosure a{color:var(--kit-muted);text-decoration:underline}
+.kit-earnings-disclosure--top{margin:0 0 1rem}
+
+/* breadcrumb */
+.kit-breadcrumb{color:var(--kit-muted);font-size:.875rem;margin:0 0 .75rem}
+.kit-breadcrumb ol{display:flex;flex-wrap:wrap;gap:.25rem;list-style:none;margin:0;padding:0}
+.kit-breadcrumb li+li::before{content:"›";color:var(--kit-muted);margin-right:.25rem}
+.kit-breadcrumb a{color:var(--kit-link)}
+.kit-bc-current{color:var(--kit-muted)}
+
+/* markdown bodies (mdToHtml) */
+.ssr-list{padding-left:1.4em}
+.ssr-list li{margin:.25em 0}
+.ssr-quote{color:var(--kit-text);border-left:4px solid var(--kit-accent);margin:1.25em 0;padding:.25em 0 .25em 1em}
+.ssr-quick-answer-authored{background:var(--kit-surface);color:var(--kit-text);border-left:4px solid var(--kit-accent);border-radius:0 .5rem .5rem 0;margin:0 0 1.5em;padding:.25rem 1rem .5rem}
+.ssr-quick-answer-authored>:first-child{margin-top:.75rem}
+.ssr-quick-answer-authored a{color:var(--kit-text);text-decoration:underline}
+.md-table-wrap{max-width:100%;overflow-x:auto;margin:0 0 1.25em;border:1px solid var(--kit-border);border-radius:.5rem}
+.md-table{width:100%;border-collapse:collapse;font-size:.95rem}
+.md-table th,.md-table td{padding:.55rem .75rem;text-align:left;vertical-align:top;border-bottom:1px solid var(--kit-border)}
+.md-table thead th{background:var(--kit-surface);color:var(--kit-text);font-weight:700}
+.md-table thead th a{color:var(--kit-text);text-decoration:underline}
+.md-table tbody tr:last-child td{border-bottom:0}
+.md-table .md-align-left{text-align:left}
+.md-table .md-align-center{text-align:center}
+.md-table .md-align-right{text-align:right}
+.ssr-code-block{background:#0f172a;border:1px solid #334155;border-radius:.6rem;margin:1.25em 0;overflow:hidden}
+.ssr-code-lang{display:block;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:.45rem .9rem 0}
+.ssr-code{background:#0f172a;color:#e2e8f0;margin:0;padding:.75rem .9rem 1rem;overflow-x:auto;font-size:.86rem;line-height:1.6;white-space:pre}
+.ssr-code code{background:transparent;color:inherit;padding:0;font-size:inherit;white-space:inherit}
+
+/* FAQ (faqSectionHtml) */
+.kit-faq{margin:2rem 0}
+.kit-faq-item{background:var(--kit-bg);color:var(--kit-text);border:1px solid var(--kit-border);border-radius:.5rem;margin:.5rem 0}
+.kit-faq-item summary{color:var(--kit-text);cursor:pointer;font-weight:600;padding:.75rem 1rem}
+.kit-faq-item p{color:var(--kit-text);margin:0;padding:0 1rem .9rem}
+
+/* CTAs (links.ts) */
+.ssr-amz-cta{display:inline-flex;align-items:center;justify-content:center;gap:.4em;max-width:100%;min-height:44px;padding:.7rem 1.2rem;border-radius:.5rem;background:var(--kit-cta-bg);color:var(--kit-cta-text);font-weight:700;line-height:1.2;text-align:center;text-decoration:none}
+.ssr-amz-cta:visited{color:var(--kit-cta-text)}
+.ssr-amz-cta:hover{color:var(--kit-cta-text);text-decoration:underline}
+.ssr-detail-link{display:inline-flex;align-items:center;min-height:44px;padding:.7rem 1rem;border:1px solid var(--kit-border);border-radius:.5rem;color:var(--kit-link);font-weight:600;text-decoration:none}
+.ssr-detail-link:hover{text-decoration:underline}
+
+/* prices and availability (price.ts; PRICE_STAMP_CSS styles the Details popover) */
+.ssr-price{color:var(--kit-text);font-weight:800}
+.ssr-price-checked{color:var(--kit-muted);font-size:.875em}
+.kit-availability{color:var(--kit-text);font-weight:600}
+.kit-availability--unknown{color:var(--kit-muted);font-weight:400}
+
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+`;
+
+/** BASE_CSS without comments and blank lines: what a page actually inlines. */
+export const BASE_CSS_MIN: string = BASE_CSS
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n')
+  .map((l) => l.trim())
+  .filter(Boolean)
+  .join('\n');

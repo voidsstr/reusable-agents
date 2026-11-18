@@ -1,0 +1,365 @@
+{
+ "upstream": {
+  "repo": "specpicks",
+  "localPath": "/home/voidsstr/development/specpicks",
+  "commit": "b5415b0813a48e900491015da5d167ad16e41369",
+  "committedAt": "2026-11-17T18:36:11-05:00",
+  "portedOn": "2026-11-17"
+ },
+ "hash": {
+  "algorithm": "sha256",
+  "unit": "Identical to PORTED_FROM.json: the top-level declaration(s) of `symbol` in `upstreamFile`, as the TypeScript parser prints them (Node.getText: modifiers, signature and body; leading comments excluded). Overloads are joined with a newline. A `const` also takes the immediately following top-level statements that mention it.",
+  "normalization": "CRLF to LF, trailing whitespace stripped from each line, UTF-8.",
+  "tool": "unit/render/drift.test.ts (KIT_DRIFT_REF=<commit> KIT_DRIFT_REPORT=<file> recomputes; KIT_DRIFT_STRICT=1 fails on drift)"
+ },
+ "mergeInto": "PORTED_FROM.json (append these entries; same upstream commit and hash unit). Kept here until the kit barrel owner merges it.",
+ "entries": [
+  {
+   "upstreamFile": "src/services/ssrRender.ts",
+   "symbol": "mdToHtml",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "mdToHtml",
+   "note": "GFM tables as table.md-table in a scroll wrapper (alignment, escaped pipes, rows padded or cut to the header, no outer pipes needed); Amazon links and raw-HTML anchors keep or get one of the site's own tags, AFFILIATE_REL, target and data-cta-placement, or are unlinked (enforceAffiliateLinks); Amazon CDN images dropped; code spans, links and images set aside before emphasis; exact escaping in code; backslash escapes and <https://...> autolinks (literal labels); #fragment and mailto links kept, javascript:/data: dropped; site links absolute on the canonical origin; ol start kept; wrapped list items keep continuation lines; a '1.' line, a rule or a block-level HTML tag ends a paragraph; empty paragraphs and anchors dropped; HTML comments outside code removed; no inline styles or copy-button script; the /vs/ dead-route rule is the rewriteLink hook.",
+   "sha256": "f6152e64b4c3ff19ef8032e610e6661dd39a4c6e0a626ac16f9770fda401ca45"
+  },
+  {
+   "upstreamFile": "src/services/ssrRender.ts",
+   "symbol": "underscoreEmphasis",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "underscoreEmphasis",
+   "sha256": "176423cd5d11d81d139150dc0ae6216ed0c673c9a2c56f9a988f8087e287d0ba"
+  },
+  {
+   "upstreamFile": "src/services/ssrRender.ts",
+   "symbol": "headingId",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "headingId",
+   "sha256": "0258fb47273d7bebee4a61a5ee3f90bced2b0652a0f8b3a7d60e41a1c36c5345"
+  },
+  {
+   "upstreamFile": "src/services/ssrRender.ts",
+   "symbol": "breadcrumbHtml",
+   "kitFile": "server/src/render/blocks.ts",
+   "kitSymbol": "breadcrumbNavHtml",
+   "note": "Ordered list with CSS separators instead of inline SVG; built from breadcrumbTrail(), shared with BreadcrumbList.",
+   "sha256": "5f4aea76f9ec9603fe1e47643f76b6f43dc1809a3966201662586230fd3bd160"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "MD_LINK_TEXT",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "MD_LINK_TEXT",
+   "sha256": "006ee2f142d0fcaf03754299c37cb5a6b29796bbaf30e3b97aa53a3e6637794b"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "mdLinkRe",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "mdLinkRe",
+   "sha256": "3b6488e080971826bb4b5811669e7d38416660d1c0d5dda0715e805da0fd968b"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "mdImageRe",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "mdImageRe",
+   "sha256": "511154256816f2ede50717a3dcf8d60749ca14bf023c9cba899b7cb2b78704eb"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "mdLinkOrImageRe",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "mdLinkOrImageRe",
+   "sha256": "887cd898a6ffcefab9d4c96ed05e53f004875c6ec3b0faaefd1944620a8c0e1f"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "unwrapNestedLinks",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "unwrapNestedLinks",
+   "sha256": "5ad78813e6bf9dc24499558e5c3fcd300a632b9546a30372fe33848bd40aa519"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "PRODUCT_HREF",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "productHrefRe",
+   "note": "Built from ctx.routes.product and ctx.site.domain.",
+   "sha256": "fec3cbc7b7620081dce13f74607b3b10b500bc8fd03277f3a2d863762d0df30f"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "isAmazonUrl",
+   "kitFile": "server/src/render/amazonHosts.ts",
+   "kitSymbol": "isAmazonLinkHost",
+   "note": "Also amzn.com/eu/asia and a.co short links.",
+   "sha256": "bafea3c2a774048ead88e3f7d140c30618aea6d08ac0564b664587ce6e58d6c4"
+  },
+  {
+   "upstreamFile": "src/services/markdownLink.ts",
+   "symbol": "resolveNestedLink",
+   "kitFile": "server/src/render/md.ts",
+   "kitSymbol": "resolveNestedLink",
+   "note": "Takes ctx for the product route.",
+   "sha256": "6c8ff4175a9face80d3641c41203ddaeb3aabf7909e9697006ee298cd0592de2"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "TRAILING_FUNCTION_WORDS",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "TRAILING_FUNCTION_WORDS",
+   "sha256": "7a59e4fe38b7aaadb121d077beef3e707b5280c7b74926373c9541bdbac890c4"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "TRAILING_TITLE_JUNK",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "TRAILING_TITLE_JUNK",
+   "sha256": "6d38a89bc58be4ccad32c2d318065068c364797023e5cb7d28dd5cf360087659"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "stripDanglingTail",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "stripDanglingTail",
+   "sha256": "6e844aaea7b492c1d02dca970d2cbace50f6298d5354a4b9c636c1bc63f8578d"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "dropDanglingModifier",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "dropDanglingModifier",
+   "sha256": "9610d736b591fc7d8b2b5b4029d0be10793602f68fff77900ed8eda6f051fe9a"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "dropQuestionStub",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "dropQuestionStub",
+   "sha256": "0fb13eaa00cdbfd8dd339e70055309048ee8ccac324c29f6977b6737eb4db25c"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "dropUnclosedParen",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "dropUnclosedParen",
+   "sha256": "63c36511c8cdd78b3f6c04cbd6f62ec924930e2dc338afd665a3a3011d224c8f"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "htmlLen",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "htmlLength",
+   "sha256": "fa3e9017f15fc7274176cca89a3f0d09ecf6849e6279bc8c1bb835f85e7396b5"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "truncate",
+   "kitFile": "server/src/render/text.ts",
+   "kitSymbol": "truncateAtWord",
+   "note": "SpecPicks' hardware PARTIAL_MODEL_TAIL is the partialTail option; a cut that lands exactly at the end of a word keeps that word.",
+   "sha256": "f277a5c1b1a0ed5215da807a97cad7cc32e297969b69002a333789cdc3ae65e6"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "metaDescriptionFrom",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "metaDescriptionFrom",
+   "sha256": "44dc0665290d96261e5ffd293f1a5e76c6958ba75ba6e8504bf10b49c4283404"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "MAX_TITLE_CHARS",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "MAX_TITLE_CHARS",
+   "sha256": "e26446fec05a9fd2441d66e0ae3beee54f1ac925d26e05b3eb8d95a303e55041"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "compactTitleHeadOnce",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "compactTitleHeadOnce",
+   "sha256": "b81bcdc61ba1b12089e8e8b6f49addbbebeb45d20ad7c607fc5d834c2722caa9"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "compactTitleHead",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "compactTitleHead",
+   "note": "Without the hardware-only steps (compactMatchupDetail, dropRepeatedCapacity).",
+   "sha256": "20f5763d1a66cc5f3379d4ca0be3db68cd4c839f48610c088af71bac7593c259"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "collapseVsPrefix",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "collapseVsPrefix",
+   "sha256": "2dbebcfb4ea5b341fe7c03a287f3cecc26315a4eaa96b903dd276f843e651844"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "matchupWithTopic",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "matchupWithTopic",
+   "sha256": "3a2149c409b3e8df0fb69f0612241716b649fce0c241c4a32accc9bc40c2ea21"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "clampTitle",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "clampTitle",
+   "sha256": "07ef322721a618f0c8df7820d06572100e8ab7aa6d5b8e8ec130ebc81d09d715"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "renderHead",
+   "kitFile": "server/src/render/seo.ts",
+   "kitSymbol": "headTags",
+   "note": "og:image never Amazon-hosted (falls back to the default card or none); og:locale; twitter:card summary without an image; JSON-LD via serializeJsonLd.",
+   "sha256": "28439095ac9ff9c0847b38031c1149f87ac919f0f9acd99c229946e85a0b63c2"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "scrubJsonLdReviews",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "stripAggregateRatings",
+   "note": "The kit has no review data: only the aggregateRating removal is kept, applied to every serialized node.",
+   "sha256": "2a0120e9327b82d1b1d04dfa9626c6ceba1f99f0a519d12117c223e4d8e411b1"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "SPEC_VALUE_PLACEHOLDER",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "SPEC_VALUE_PLACEHOLDER",
+   "sha256": "daf460ebdcd4a8fa381648ea2a41e8e8b06b81c6c55d9b9916392763c058728d"
+  },
+  {
+   "upstreamFile": "src/services/ssrHead.ts",
+   "symbol": "productHead",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "productLd",
+   "note": "Only the Product node (150-char name without ellipsis, brand cleaning, placeholder brands dropped, sku/@id, offers only when quotable) and the BreadcrumbList/FAQPage rules; no rating, no image padding, no Amazon-hosted image.",
+   "sha256": "acbbebd6b53403427f2d43687b277f6c9cb732e40967aff3975fabbfc6fa3182"
+  },
+  {
+   "upstreamFile": "src/services/productIds.ts",
+   "symbol": "gtinCheckDigitOk",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "gtinCheckDigitOk",
+   "sha256": "af836241f744b2b1efadddc301bf422724b99159a3fdfa3a9eb21d8ae428b9d6"
+  },
+  {
+   "upstreamFile": "src/services/productIds.ts",
+   "symbol": "sanitizeMpn",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "sanitizeMpn",
+   "note": "No eBay id rule.",
+   "sha256": "d67dde5749e77ddc8a6dbb7e93c08da0f6e837cb3097f11cc2588af09d7cce55"
+  },
+  {
+   "upstreamFile": "src/services/productIds.ts",
+   "symbol": "productIdentifiers",
+   "kitFile": "server/src/render/jsonld.ts",
+   "kitSymbol": "gtinFields",
+   "note": "The caller passes mpn and gtin from its own spec data; no Amazon spec-key scan.",
+   "sha256": "dbdb0940b3c2b32262ae527226c2af1edb81eff34a63a8c01b152167fb2c30cd"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "escapeXml",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "escapeXml",
+   "note": "Also drops characters XML 1.0 forbids.",
+   "sha256": "6ea95f1f6dab5cf09efad1f90bab4e34dac8ff28608f5621cd9861d56740a985"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "formatDate",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "sitemapDate",
+   "note": "undefined for an invalid date instead of throwing.",
+   "sha256": "4f2079e6cc88e4c95c644b4c52a968eddb84310702edfb34b45c8eac64088c7d"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "SitemapImage",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "SitemapImage",
+   "sha256": "7c61b50bb43741b2dec1db6116ad109095691e452bdc36e6b9967c0c4ad61d87"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "SitemapUrl",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "SitemapUrl",
+   "sha256": "e2a7416f9d4d9ac849dc6d74a87dcfeeb4a5956b0c11e9782afb8bc78fede013"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "buildSitemapXml",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "urlsetXml",
+   "sha256": "26553619614bdf16eaba364f1f07240b1b028591a5690301b8c45853601256d5"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "buildSitemapIndex",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "sitemapIndexXml",
+   "sha256": "d4e3d557ca37e739302aa0b27dd5ebdd57e2ae2e1591aad909a7d06ec649094b"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "PER_SUBSITEMAP_CAP",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "SITEMAP_SHARD_TARGET",
+   "sha256": "3491f9ea9fec6396070ba326fcb9d611ef728bf04ab0da54c9d19f0e65a936b4"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "sitemapXmlResponse",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "sitemapFileResponse",
+   "note": "Framework-agnostic response object; empty or failed builds answer 503 through sitemapUnavailableResponse.",
+   "sha256": "98f260a40e8b60cd5863ee7417a47dd72a699c67c0e63b53f573de42b064faf5"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "sendSitemapUnavailable",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "sitemapUnavailableResponse",
+   "sha256": "e86b8470e4fcf7f4fa93dda2f3083f7b750c0fbf07fe48dd89967c472bebe6c0"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "productSitemapPageOf",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "shardFromPgHash",
+   "note": "sitemapShardOf hashes the URL in JS for sites that do not partition in SQL.",
+   "sha256": "da0ba848491a33bbe79cb42a4aa19e158ae9b6c4234a6f8ea4734959038c4924"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "buildProductSitemapSnapshot",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "buildSitemapSet",
+   "note": "Generalised to every kind; candidates carry the page's own indexing decision; duplicates removed across kinds; Amazon images never listed.",
+   "sha256": "57d49a8c1d7561774c5a3815aa1626280be80ac31c6efb42fe5425733756142a"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "maxLastmod",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "maxLastmod",
+   "sha256": "a61b36fdddcdaba4c073944ddb75d0a128ef7c87c72bda984767736ba651bfc7"
+  },
+  {
+   "upstreamFile": "src/routes/sitemap.ts",
+   "symbol": "computeChildLastmods",
+   "kitFile": "server/src/render/sitemap.ts",
+   "kitSymbol": "buildSitemapSet",
+   "note": "Each child's index lastmod is the newest lastmod of its own URLs.",
+   "sha256": "d6d9b352e9783449343292477276d3c3c69d70176c043a8bc8b7d4cf3070a9d0"
+  }
+ ]
+}
