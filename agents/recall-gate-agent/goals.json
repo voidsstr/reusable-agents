@@ -1,0 +1,80 @@
+{
+  "schema_version": "1",
+  "agent_id": "recall-gate-agent",
+  "goals": [
+    {
+      "id": "goal-recall-sync-fresh",
+      "title": "CPSC recall data is never more than 26 hours old",
+      "description": "Hours since the recall data was last both fetched (the stalest enabled source: SaferProducts API, CPSC recall CSV, CPSC warning CSV) and committed to every subscribed site's database (a site that never committed counts as 9999). A failed fetch keeps the previous success time and a failed site keeps its last commit, so an outage shows up here instead of silently matching against old data. A halted run (unreadable config, lost subscriptions) still reports it. Emitted key: recall_sync_age_h.",
+      "target_metric": "recall_sync_age_h",
+      "metric": {
+        "name": "recall_sync_age_h",
+        "current": 0,
+        "target": 26,
+        "direction": "decrease",
+        "unit": "hours",
+        "reopen": true
+      },
+      "directives": [
+        "Name each failed source and its error in the run summary; the next run retries it with the API window widened back to the last success",
+        "A CSV header change fails that source on purpose: update RECALL_CSV_REQUIRED / WARNING_CSV_REQUIRED and the parser together, never loosen the check",
+        "Never fetch cpsc.gov HTML pages (bot wall); the API and the two CSV exports are the sources"
+      ]
+    },
+    {
+      "id": "goal-no-recalled-live-buy-buttons",
+      "title": "Zero recalled SKUs with a live buy button",
+      "description": "Blocked products (an active stop-use match, or a repair-hold match before hold_until) whose site data (buy_button.sql) or live page (HTTP probe on the site's own host) still offers a buy button, PLUS blocked products nobody could verify: a probe error, a page past max_probes, or a site with no check configured at all (recalled_buy_buttons_unverified, buy_button_unchecked_sites). An unmeasured goal never reads green. A blocked product that catalog_sql no longer returns (retired) keeps its block and is probed at the page stored with its match; one with no stored page is reported as recalled_blocked_unlisted and not counted (catalog_sql must return every product that still renders a page). Emitted key: recalled_live_buy_buttons.",
+      "target_metric": "recalled_live_buy_buttons",
+      "metric": {
+        "name": "recalled_live_buy_buttons",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "SKUs",
+        "reopen": true
+      },
+      "directives": [
+        "A violation means the site's renderer is not reading v_recall_buy_blocks (or its HTML cache is stale): alert, and treat it as stop-publishing per the recall runbook until it is 0",
+        "An unverified SKU needs a check, not a waiver: set by_site.<site>.buy_button.sql and/or buy_button.http (allowed_hosts, markers)",
+        "Never clear a match to make this number drop; clearing is a human review decision. A retired SKU stuck here means its stored page is unreachable (probe error, other host): fix the check, or catalog_sql if the page still renders"
+      ]
+    },
+    {
+      "id": "goal-manual-queue-under-72h",
+      "title": "No recall match waits more than 72 hours for review",
+      "description": "Age in hours of the oldest manual-queue row across subscribed sites: sibling and ambiguous matches (since first matched) and rows the gate asked a human about (since requested: it would lift a block, no longer finds a listed product, found stronger evidence for a match a human cleared, or blocked a product over a review decision because the evidence or the recall's remedy turned stricter). Review rows stay out of picks and ladders; a requested review keeps its block until a human confirms or clears it. Emitted key: manual_queue_oldest_h.",
+      "target_metric": "manual_queue_oldest_h",
+      "metric": {
+        "name": "manual_queue_oldest_h",
+        "current": 0,
+        "target": 72,
+        "direction": "decrease",
+        "unit": "hours",
+        "reopen": true
+      },
+      "directives": [
+        "List the oldest queue items in the run summary with the review command: python3 -m framework.core.recall_gate review --site <site> --match-key <key> --decision confirm|clear --reviewer <name>",
+        "If one catalog family keeps producing sibling matches, sharpen that site's catalog (model_number, family) rather than loosening the matcher"
+      ]
+    },
+    {
+      "id": "goal-recall-gate-sites-clean",
+      "title": "Every subscribed site syncs on every run",
+      "description": "Subscribed sites whose sync failed this run (missing DSN, config problem, missing tables, lock held, SQL error). A failed site keeps yesterday's recall state and gets no new matches. Emitted key: site_errors.",
+      "target_metric": "site_errors",
+      "metric": {
+        "name": "site_errors",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "sites/run",
+        "reopen": true
+      },
+      "directives": [
+        "Name the failing site and the error class in the decision log; never log a DSN value",
+        "Missing tables: apply python3 -m framework.core.recall_gate schema --site <site> through the site's own migration"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "id": "recall-gate-agent",
+  "name": "Recall Gate Agent",
+  "description": "Daily CPSC recall and product-safety-warning sync for every subscribed site (one instance serves all of them). Pulls the SaferProducts recall API and the CPSC recall and warning CSVs, matches them to each site's catalog with deterministic brand/model rules (never an LLM), writes recalls and recall_matches into the site database (stop-use and repair-hold hide the buy button; sibling and ambiguous matches go to a manual queue), and emails the operator once per new match. Sites subscribe in config/recall-gate-config.json by_site.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "",
+  "runbook": "AGENT.md",
+  "entry_command": "python3 /home/voidsstr/development/reusable-agents/agents/recall-gate-agent/agent.py",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/recall-gate-agent",
+    "config_key": "config/recall-gate-config.json",
+    "intended_cron": "15 6 * * *",
+    "llm": "none",
+    "owner_note": "owner is empty on purpose: AgentBase then sends a failed run's email to AGENT_DEFAULT_OWNER_EMAIL (the fleet operator); 'framework' is not a deliverable address."
+  },
+  "runnable_modes": [
+    "cron",
+    "manual"
+  ]
+}

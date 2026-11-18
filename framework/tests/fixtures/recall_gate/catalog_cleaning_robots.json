@@ -1,0 +1,13 @@
+{
+  "_doc": "SYNTHETIC catalog for the cleaning-robots profile (the fallback niche). Real brand/model names; invented ids. B093Y1KK5Q is the ASIN CPSC itself printed in warnings 24-054 and 23-160.",
+  "rows": [
+    {"product_id": 201, "brand": "Aiper", "model_name": "Seagull Pro", "model_number": "ZT6001", "family": "Seagull", "category": "pool-robot"},
+    {"product_id": 202, "brand": "Aiper", "model_name": "Seagull SE", "family": "Seagull", "category": "pool-robot"},
+    {"product_id": 203, "brand": "Aiper", "model_name": "Scuba S1", "family": "Scuba", "category": "pool-robot"},
+    {"product_id": 205, "brand": "Aiper", "model_name": "Elite Pro", "family": "Elite", "category": "pool-robot"},
+    {"product_id": 211, "brand": "Dyson", "model_name": "V6 Animal", "family": "V6", "category": "stick-vacuum"},
+    {"product_id": 212, "brand": "ZAUTNKN.INC", "model_name": "21.6V 3000mAh Replacement Battery for Dyson V6", "category": "consumable", "asin": "B093Y1KK5Q"},
+    {"product_id": 221, "brand": "iRobot", "model_name": "Roomba j7+", "model_number": "j755020", "family": "Roomba", "category": "robot-vacuum"},
+    {"product_id": 251, "brand": "Husqvarna", "model_name": "Automower 430X AWD", "family": "Automower", "category": "lawn-robot"}
+  ]
+}

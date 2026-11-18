@@ -1,0 +1,160 @@
+{
+  "schema_version": "1",
+  "_doc": [
+    "Recall gate (framework/core/recall_gate.py, agents/recall-gate-agent). Resolution: module DEFAULTS <- this file; a framework-storage copy at config/recall-gate-config.json REPLACES this file wholesale (copy it whole when you override). Dicts deep-merge, lists replace, keys starting with '_' are comments.",
+    "Only values live here. Niche vocabulary goes in profiles.<name>; a site subscribes with by_site.<site> = {enabled, profile, catalog_sql, ...}. The site's DSN env var NAME comes from by_site.<site>.dsn_env, else from framework.core.site_registry (dsn_env, plus dsn_env_aliases when dsn_include_aliases is true).",
+    "Email goes to the fleet operator pair, read from the env vars named in email.to_env / email.from_env, in the same order framework.core.resilience (notify_operator) reads them. Never put a personal address in email.to.",
+    "catalog_sql text columns (brand, model_name, model_number, family, aliases) must come from the site's own models/brands tables, never the Creators/PA-API offer cache: the gate stores 'brand model_name' forever (recall_matches.item_label, emails, the manual-queue mirror). There is no free-text label column.",
+    "The matcher never calls an LLM. Category patterns run against normalised text: lower case, accents stripped, '&' -> 'and', number+unit joined ('2000-Watt' -> '2000w', '12 volt' -> '12v')."
+  ],
+  "enabled": true,
+  "sources": {
+    "saferproducts_api": {"enabled": true, "window_days": 21, "initial_lookback_days": 730},
+    "cpsc_recall_csv": {"enabled": true, "min_rows": 1000},
+    "cpsc_warning_csv": {"enabled": true, "min_rows": 10}
+  },
+  "matching": {
+    "max_span": 8,
+    "compat_lookback": 4,
+    "compat_reference_matches": "ignore",
+    "out_of_category": "review",
+    "unmapped_models": "review",
+    "exclusion_cues": ["excluding", "not including", "with the exception of"]
+  },
+  "tiers": {
+    "_doc": "First rule whose 'when' holds decides the recall-level tier. 'when' keys: kind, remedy_options_any, remedy_options_none, remedy_options_subset_of, remedy_options_nonempty, title_regex, remedy_regex, hazard_regex. hold_anchor: published (recall date) | first_match | later.",
+    "rules": [
+      {"id": "warning", "when": {"kind": ["warning"]}, "tier": "stop-use"},
+      {"id": "repair-remedy",
+       "when": {"remedy_options_subset_of": ["repair", "inspect", "new-instructions", "label"], "remedy_options_nonempty": true},
+       "tier": "repair-hold", "hold_days": 90, "hold_anchor": "published"},
+      {"id": "default", "when": {}, "tier": "stop-use"}
+    ]
+  },
+  "email": {
+    "enabled": true,
+    "to_env": ["FRAMEWORK_OPERATOR_EMAIL", "OPERATOR_EMAIL"],
+    "from_env": ["IMPLEMENTER_FROM", "OPERATOR_FROM_EMAIL"],
+    "msmtp_account": "automation",
+    "bypass_digest": true,
+    "max_per_run": 25,
+    "subject_prefix": "[recall-gate]",
+    "alert_on_live_buy_button": true
+  },
+  "goals": {"sync_age_max_h": 26, "manual_queue_max_age_h": 72},
+  "profiles": {
+    "home-backup-power": {
+      "_doc": "Portable power stations, solar panels, expansion batteries and their cables/kits. catalog_categories are the values the site's catalog_sql returns in its 'category' column. Generators and power banks are deliberately not categories: year-1 sites carry no generator content and sell no power banks.",
+      "relevance_fields": ["title", "product_names"],
+      "categories": {
+        "station": {
+          "patterns": [
+            "\\bpower stations?\\b",
+            "\\bsolar generators?\\b",
+            "\\bportable power (supply|supplies|sources?|systems?|charging stations?)\\b",
+            "\\bbattery (powered )?generators?\\b",
+            "\\b(home|whole[ -]home) backup batter(y|ies)\\b",
+            "\\b(home|whole[ -]home) backup power( systems?| supply| supplies| stations?)?\\b",
+            "\\bbackup power (systems?|supply|supplies|stations?)\\b",
+            "\\bhome (energy|battery|power) storage( systems?| batter(y|ies)| units?)?\\b",
+            "\\benergy storage (systems?|batter(y|ies)|units?)\\b",
+            "\\bhome batter(y|ies)\\b"
+          ],
+          "exclude": ["\\bworkbench\\b"],
+          "catalog_categories": ["station", "kit"]
+        },
+        "panel": {
+          "patterns": [
+            "\\bsolar panels?\\b",
+            "\\bsolar (chargers?|modules?|blankets?|briefcases?)\\b",
+            "\\bphotovoltaic\\b"
+          ],
+          "catalog_categories": ["panel", "kit"]
+        },
+        "battery": {
+          "patterns": [
+            "\\b(lifepo4|lithium iron phosphate|deep cycle|expansion|extra|rv|marine|12v lithium|24v lithium|48v lithium|server rack|rack mount(ed)?) batter(y|ies)\\b",
+            "\\b(12v|24v|48v) (lithium|lifepo4)\\b"
+          ],
+          "catalog_categories": ["battery", "kit"]
+        },
+        "cable": {
+          "patterns": [
+            "\\b(extension|power|charging|solar|combiner|branch|adapter) (cords?|cables?)\\b",
+            "\\b(male to male|double male)\\b",
+            "\\b(mc4|anderson|xt60|ec8|ec5) (cables?|connectors?|adapters?)\\b"
+          ],
+          "catalog_categories": ["cable", "adapter", "kit"]
+        }
+      },
+      "generic_words": [
+        "portable", "power", "station", "stations", "solar", "generator", "generators",
+        "battery", "batteries", "lithium", "lifepo4", "lfp", "backup", "home", "camping",
+        "outdoor", "emergency", "rv", "pure", "sine", "wave", "ac", "dc", "usb", "outlet",
+        "outlets", "charging", "panel", "panels", "foldable", "monocrystalline",
+        "storage", "system", "electric", "supply", "unit", "w", "wh", "watt", "watts", "kwh"
+      ],
+      "brand_aliases": {
+        "goal zero": ["goalzero"],
+        "ecoflow": ["eco flow"]
+      }
+    },
+    "cleaning-robots": {
+      "_doc": "Robot vacuums and mops, pool / window / lawn robots, and their model-keyed consumables (batteries, filters, brushes, docks).",
+      "relevance_fields": ["title", "product_names"],
+      "categories": {
+        "robot": {
+          "patterns": [
+            "\\brobot(ic)? (vacuums?|vacuum cleaners?|cleaners?|mops?|sweepers?)\\b",
+            "\\brobotic (pool|window|lawn|grill|gutter) (vacuums?|vacuum cleaners?|cleaners?|mowers?)\\b",
+            "\\b(window|pool|lawn|grill|gutter) (cleaning )?robots?\\b",
+            "\\brobotic (lawn ?mowers?|mowers?)\\b"
+          ],
+          "catalog_categories": ["robot-vacuum", "robot-mop", "pool-robot", "window-robot", "lawn-robot", "kit"]
+        },
+        "consumable": {
+          "patterns": [
+            "\\b(replacement|spare) (batter(y|ies)|battery packs?|filters?|brushes?|mop pads?|bags?)\\b",
+            "\\bbattery packs? for\\b.{0,60}\\b(vacuums?|robots?)\\b",
+            "\\b(vacuums?|robots?)\\b.{0,30}\\b(chargers?|charging (docks?|stations?|bases?)|docking stations?|batter(y|ies))\\b"
+          ],
+          "catalog_categories": ["consumable", "battery", "accessory", "dock"]
+        }
+      },
+      "generic_words": [
+        "robot", "robotic", "vacuum", "vacuums", "cleaner", "cleaners", "mop", "mopping",
+        "cordless", "pool", "window", "lawn", "mower", "self", "emptying", "base",
+        "station", "dock", "replacement", "battery", "batteries", "filter", "filters",
+        "brush", "brushes", "pack", "packs", "compatible"
+      ],
+      "brand_aliases": {}
+    }
+  },
+  "by_site": {},
+  "_example_by_site": {
+    "example-site": {
+      "enabled": false,
+      "profile": "home-backup-power",
+      "_dsn": "Leave dsn_env empty to use the site registry's dsn_env for this site.",
+      "dsn_env": "",
+      "tables": {"recalls": "recalls", "matches": "recall_matches", "sync_log": "recall_sync_log"},
+      "_catalog_sql": "Our own models/brands columns only (never the Creators/PA-API offer cache). Columns: product_id and/or model_id, brand (required), model_name, model_number, family, aliases, brand_aliases, category, asin, upcs, components, url, slug. Return EVERY product whose page the site still renders, retired or inactive ones included (no WHERE p.is_active): a product left out is treated as having no page. A blocked product that drops out keeps its block and is still probed at the url/slug/asin stored with its match.",
+      "catalog_sql": "SELECT p.id AS product_id, m.id AS model_id, b.name AS brand, m.model_name, m.model_number, m.family, c.kind AS category, p.asin, ARRAY(SELECT cm.model_number FROM kit_components kc JOIN models cm ON cm.id = kc.component_model_id WHERE kc.kit_model_id = m.id AND cm.model_number IS NOT NULL) AS components, 'https://example-site.example/product/' || m.slug AS url FROM products p JOIN models m ON m.id = p.model_id JOIN brands b ON b.id = m.brand_id LEFT JOIN categories c ON c.id = p.category_id",
+      "statement_timeout_ms": 60000,
+      "post_sync_sql": [],
+      "buy_button": {
+        "_doc": "A site with blocked SKUs and no check counts them all as unverified, and unverified SKUs count as live buy buttons in the goal. The probe only GETs the site registry's domain (and www.) plus allowed_hosts, never follows an off-site redirect, and treats a redirect to a marker (a store link) as a live buy button.",
+        "sql": "",
+        "http": {
+          "enabled": false,
+          "url_template": "",
+          "markers": ["data-cta-placement=", "/r/[A-Z0-9]{10}\\b", "amazon\\.com/dp/[A-Z0-9]{10}"],
+          "headers": {},
+          "max_probes": 50,
+          "allowed_hosts": [],
+          "max_redirects": 3
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "_doc": "SYNTHETIC catalog for the home-backup-power profile. Brand and model names are real products so the golden tests exercise real CPSC text; ids, ASINs and URLs are invented (B0RGTEST..). Columns follow recall_gate.CatalogItem.",
+  "rows": [
+    {"product_id": 1, "model_id": 101, "brand": "EcoFlow", "model_name": "DELTA Max 2000", "model_number": "EFD310", "family": "DELTA Max", "category": "station", "asin": "B0RGTEST01", "url": "https://power.example/product/ecoflow-delta-max-2000"},
+    {"product_id": 2, "model_id": 102, "brand": "EcoFlow", "model_name": "DELTA Max 1600", "model_number": "EFD311T", "family": "DELTA Max", "category": "station", "asin": "B0RGTEST02", "url": "https://power.example/product/ecoflow-delta-max-1600"},
+    {"product_id": 3, "model_id": 103, "brand": "EcoFlow", "model_name": "DELTA 2 Max", "model_number": "EFD350T", "family": "DELTA 2", "category": "station", "asin": "B0RGTEST03"},
+    {"product_id": 4, "model_id": 104, "brand": "EcoFlow", "model_name": "RIVER 2", "family": "RIVER", "category": "station", "asin": "B0RGTEST04"},
+    {"product_id": 5, "model_id": 105, "brand": "EcoFlow", "model_name": "DELTA Max Smart Extra Battery", "family": "DELTA Max", "category": "battery", "asin": "B0RGTEST05"},
+    {"product_id": 6, "model_id": 106, "brand": "EcoFlow", "model_name": "DELTA Max 2000 + 220W Solar Panel Kit", "category": "kit", "components": ["EFD310"], "asin": "B0RGTEST06"},
+    {"product_id": 11, "model_id": 111, "brand": "Aeiusny", "model_name": "Portable Power Station 500W", "category": "station", "asin": "B0RGTEST11", "url": "https://power.example/product/aeiusny-500w"},
+    {"product_id": 12, "model_id": 112, "brand": "Aeiusny", "model_name": "400W Portable Power Station", "category": "station", "asin": "B0RGTEST12"},
+    {"product_id": 13, "model_id": 113, "brand": "Aeiusny", "model_name": "300W Portable Power Station", "category": "station", "asin": "B0RGTEST13"},
+    {"product_id": 14, "model_id": 114, "brand": "Aeiusny", "model_name": "Portable Power Station", "category": "station", "asin": "B0RGTEST14"},
+    {"product_id": 21, "model_id": 121, "brand": "Goal Zero", "model_name": "Yeti 3000X", "family": "Yeti", "category": "station", "asin": "B0RGTEST21"},
+    {"product_id": 22, "model_id": 122, "brand": "Goal Zero", "model_name": "Yeti 1500X", "family": "Yeti", "category": "station", "asin": "B0RGTEST22"},
+    {"product_id": 24, "model_id": 124, "brand": "Goal Zero", "model_name": "Boulder 100 Briefcase", "family": "Boulder", "category": "panel", "asin": "B0RGTEST24"},
+    {"product_id": 31, "model_id": 131, "brand": "Jackery", "model_name": "Explorer 1000 v2", "family": "Explorer", "category": "station", "asin": "B0RGTEST31"},
+    {"product_id": 41, "model_id": 141, "brand": "Anker", "model_name": "SOLIX C1000", "model_number": "A1761", "family": "SOLIX", "category": "station", "asin": "B0RGTEST41"},
+    {"product_id": 61, "model_id": 161, "brand": "HALO", "model_name": "HALO 1000", "category": "station", "asin": "B0RGTEST61"},
+    {"product_id": 71, "model_id": 171, "brand": "Predator", "model_name": "2000 Watt Power Station", "category": "station", "asin": "B0RGTEST71"},
+    {"product_id": 72, "model_id": 172, "brand": "Predator", "model_name": "1000 Watt Power Station", "category": "station", "asin": "B0RGTEST72"},
+    {"product_id": 81, "model_id": 181, "brand": "Klein Tools", "model_name": "Blackfire Power Station", "category": "station", "asin": "B0RGTEST81"}
+  ]
+}
