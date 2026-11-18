@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/shared/schemas/sites-registry.schema.json",
+  "title": "Site registry - the sites one framework deployment serves",
+  "description": "Shape of the built-in defaults (shared/sites/registry.default.json) and of the framework-storage override (config/sites-registry.json); both are documents of this shape. framework/core/site_registry.py merges the override over the defaults BY SITE NAME: a present field replaces the default, null resets a field to its derived default, objects deep-merge, lists replace. A site the defaults do not define is appended in override order and must then carry domain, repo_path and branch. Checked after merging, beyond this schema: no two sites (disabled ones included) share a domain, repo_path, seo_site_yaml file or DSN env var, and at least one site stays enabled (#/definitions/site is the resolved shape SiteEntry.to_dict() returns). Keys starting with '_' are comments and are ignored. framework/tests/test_site_registry.py keeps this schema and the module's own validator in agreement.",
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1",
+      "description": "Document version. Optional in a storage override; must be \"1\" when present."
+    },
+    "replace_sites": {
+      "type": "boolean",
+      "description": "Storage override only. true drops every site the built-in defaults define, so the override's 'sites' is the complete list (a different deployment of the framework); it must still define at least one enabled site. The template lists still come from the defaults unless the override sets them."
+    },
+    "producer_templates": {
+      "$ref": "#/definitions/template_list",
+      "description": "Registry-wide producer templates ('*-<suffix>'; '*' becomes the site's agent_prefix). Every site inherits this list unless it sets its own producer_templates. The order is the backlog dispatcher's walk order: producer ids are expanded template by template, and within one template site by site."
+    },
+    "content_agent_templates": {
+      "$ref": "#/definitions/template_list",
+      "description": "Registry-wide templates for a site's content-production agents: the agents that take the site's content_tier in the priority ladder. Inherited unless a site sets its own."
+    },
+    "sites": {
+      "type": "array",
+      "description": "Ordered list of site entries (in the override: patches matched by name). The order is meaningful: sites are enumerated in it, and it is the site order inside each template when producer ids are expanded. Names must be unique within one document.",
+      "items": {
+        "$ref": "#/definitions/site_patch"
+      }
+    }
+  },
+  "definitions": {
+    "site_name": {
+      "type": "string",
+      "maxLength": 40,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "description": "Lowercase kebab-case slug: the RESPONDER_SITE value, the editorial site key, the key every consumer uses."
+    },
+    "domain": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$",
+      "description": "Bare lowercase hostname, no scheme and no path (e.g. example.com)."
+    },
+    "abs_path": {
+      "type": "string",
+      "maxLength": 1024,
+      "pattern": "^/[^\\x00-\\x1f]*[^/\\x00-\\x1f]$",
+      "description": "Absolute POSIX path without a trailing slash."
+    },
+    "branch": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^(?!.*\\.\\.)(?!.*//)(?!.*[/.]$)[A-Za-z0-9][A-Za-z0-9._/-]*$",
+      "description": "Git branch name."
+    },
+    "env_name": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[A-Z_][A-Z0-9_]*$",
+      "description": "The NAME of an environment variable (never its value)."
+    },
+    "env_name_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/definitions/env_name"
+      }
+    },
+    "yaml_path": {
+      "type": "string",
+      "maxLength": 1024,
+      "pattern": "^[^\\x00-\\x1f]+\\.ya?ml$",
+      "description": "Path to a YAML file. Relative paths resolve against the framework repo root; absolute paths are used as they are."
+    },
+    "label": {
+      "type": "string",
+      "maxLength": 80,
+      "pattern": "^[^\\x00-\\x1f]+$"
+    },
+    "accent": {
+      "type": "string",
+      "pattern": "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$",
+      "description": "CSS hex colour."
+    },
+    "goal_id": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^goal-[a-z0-9-]+$",
+      "description": "A goal id in the agent-goals.schema.json format."
+    },
+    "kpi_label": {
+      "type": "string",
+      "maxLength": 120,
+      "pattern": "^[^\\x00-\\x1f]+$"
+    },
+    "tier": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 99,
+      "description": "Priority tier (framework/core/priority.py: lower runs first)."
+    },
+    "group": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 99
+    },
+    "template": {
+      "type": "string",
+      "maxLength": 62,
+      "pattern": "^\\*(?:-[a-z0-9]+)+$",
+      "description": "Agent-id template '*-<suffix>'; '*' is replaced by the site's agent_prefix (the same template form framework/core/dependencies.py uses)."
+    },
+    "template_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/definitions/template"
+      }
+    },
+    "agent_ref": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^(?:\\*(?:-[a-z0-9]+)+|[a-z][a-z0-9]*(?:-[a-z0-9]+)*)$",
+      "description": "A full agent id, or a '*-<suffix>' template expanded with the site's agent_prefix."
+    },
+    "agent_ref_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/definitions/agent_ref"
+      }
+    },
+    "extra": {
+      "type": "object",
+      "description": "Free-form, consumer-specific values that are not first-class fields yet. Deep-merged by the override. Promote a key to a real field once a second consumer reads it."
+    },
+    "site_patch": {
+      "type": "object",
+      "description": "One site entry in a document. Only 'name' is required here: in the storage override an entry for a site the defaults already define is a patch. Every other field may be null, meaning 'use the derived default'.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      },
+      "properties": {
+        "name": {
+          "$ref": "#/definitions/site_name"
+        },
+        "label": {
+          "description": "Display name for digests and dashboards. Derived default: the name, title-cased.",
+          "anyOf": [{"$ref": "#/definitions/label"}, {"type": "null"}]
+        },
+        "domain": {
+          "description": "The site's public hostname. Required once merged.",
+          "anyOf": [{"$ref": "#/definitions/domain"}, {"type": "null"}]
+        },
+        "repo_path": {
+          "description": "Absolute path of the site's git checkout on the fleet host (the path is a contract: manifests and the implementer hardcode it). Required once merged.",
+          "anyOf": [{"$ref": "#/definitions/abs_path"}, {"type": "null"}]
+        },
+        "branch": {
+          "description": "Branch the implementer commits to. Required once merged.",
+          "anyOf": [{"$ref": "#/definitions/branch"}, {"type": "null"}]
+        },
+        "seo_site_yaml": {
+          "description": "The site's SEO site.yaml (the implementer's SEO_AGENT_CONFIG fallback). Relative to the framework repo root unless absolute. Derived default: examples/sites/<name>.yaml.",
+          "anyOf": [{"$ref": "#/definitions/yaml_path"}, {"type": "null"}]
+        },
+        "dsn_env": {
+          "description": "NAME of the environment variable holding the site's Postgres DSN. Derived default: DATABASE_URL_<NAME> (upper-cased, '-' becomes '_'). The value is read only by site_registry.dsn_for() and is never logged.",
+          "anyOf": [{"$ref": "#/definitions/env_name"}, {"type": "null"}]
+        },
+        "dsn_env_aliases": {
+          "description": "Other env var NAMES some consumers read for the same DSN, in fallback order. dsn_for() tries them only when asked to (include_aliases=True, or names=[...] for one particular convention).",
+          "anyOf": [{"$ref": "#/definitions/env_name_list"}, {"type": "null"}]
+        },
+        "agent_prefix": {
+          "description": "Prefix of the site's per-site agent ids ('<prefix>-seo-opportunity-agent'). Derived default: the name.",
+          "anyOf": [{"$ref": "#/definitions/site_name"}, {"type": "null"}]
+        },
+        "accent": {
+          "description": "Accent colour for the site's digest and goals cards.",
+          "anyOf": [{"$ref": "#/definitions/accent"}, {"type": "null"}]
+        },
+        "kpi_goal_id": {
+          "description": "The site-goals-tracker goal shown as the site's headline KPI.",
+          "anyOf": [{"$ref": "#/definitions/goal_id"}, {"type": "null"}]
+        },
+        "kpi_label": {
+          "description": "Caption for the headline KPI.",
+          "anyOf": [{"$ref": "#/definitions/kpi_label"}, {"type": "null"}]
+        },
+        "starvation": {
+          "description": "Whether the site takes part in the priority starvation rebalance (a site with a starved content pipeline is boosted). Default false: a new or gated site would otherwise be boosted permanently.",
+          "type": ["boolean", "null"]
+        },
+        "content_tier": {
+          "description": "Priority tier for the site's content agents (content_agent_templates). null leaves them to the priority config's patterns and default tier.",
+          "anyOf": [{"$ref": "#/definitions/tier"}, {"type": "null"}]
+        },
+        "producer_templates": {
+          "description": "This site's producer templates; replaces the registry-wide list for this site. [] means no templated producers.",
+          "anyOf": [{"$ref": "#/definitions/template_list"}, {"type": "null"}]
+        },
+        "producer_extras": {
+          "description": "Explicit extra producers for this site (full agent ids or templates), walked after the templated producers.",
+          "anyOf": [{"$ref": "#/definitions/agent_ref_list"}, {"type": "null"}]
+        },
+        "content_agent_templates": {
+          "description": "This site's content-agent templates; replaces the registry-wide list for this site.",
+          "anyOf": [{"$ref": "#/definitions/template_list"}, {"type": "null"}]
+        },
+        "dispatch_group": {
+          "description": "Producer ids are expanded group by group in ascending order; inside a group, template by template across the group's sites. A higher group keeps a site's producers behind every lower group's in the dispatcher walk. Derived default: 0 for a site the built-in defaults define; one more than the highest built-in group for a site only the storage override defines, so a new site never takes a dispatch slot ahead of a built-in producer unless it sets this.",
+          "anyOf": [{"$ref": "#/definitions/group"}, {"type": "null"}]
+        },
+        "enabled": {
+          "description": "false keeps the site known (get_site, site_for_agent) but leaves it out of every enumeration: list_sites, producer ids, starvation sites, content tiers. Default true.",
+          "type": ["boolean", "null"]
+        },
+        "extra": {
+          "anyOf": [{"$ref": "#/definitions/extra"}, {"type": "null"}]
+        }
+      }
+    },
+    "site": {
+      "type": "object",
+      "description": "A resolved site entry (SiteEntry.to_dict()): every field present, derived defaults filled in.",
+      "additionalProperties": false,
+      "required": [
+        "name", "label", "domain", "repo_path", "branch", "seo_site_yaml", "dsn_env",
+        "dsn_env_aliases", "agent_prefix", "accent", "kpi_goal_id", "kpi_label", "starvation",
+        "content_tier", "producer_templates", "producer_extras", "content_agent_templates",
+        "dispatch_group", "enabled", "extra"
+      ],
+      "properties": {
+        "name": {"$ref": "#/definitions/site_name"},
+        "label": {"$ref": "#/definitions/label"},
+        "domain": {"$ref": "#/definitions/domain"},
+        "repo_path": {"$ref": "#/definitions/abs_path"},
+        "branch": {"$ref": "#/definitions/branch"},
+        "seo_site_yaml": {"$ref": "#/definitions/yaml_path"},
+        "dsn_env": {"$ref": "#/definitions/env_name"},
+        "dsn_env_aliases": {"$ref": "#/definitions/env_name_list"},
+        "agent_prefix": {"$ref": "#/definitions/site_name"},
+        "accent": {"anyOf": [{"$ref": "#/definitions/accent"}, {"type": "null"}]},
+        "kpi_goal_id": {"anyOf": [{"$ref": "#/definitions/goal_id"}, {"type": "null"}]},
+        "kpi_label": {"anyOf": [{"$ref": "#/definitions/kpi_label"}, {"type": "null"}]},
+        "starvation": {"type": "boolean"},
+        "content_tier": {"anyOf": [{"$ref": "#/definitions/tier"}, {"type": "null"}]},
+        "producer_templates": {"$ref": "#/definitions/template_list"},
+        "producer_extras": {"$ref": "#/definitions/agent_ref_list"},
+        "content_agent_templates": {"$ref": "#/definitions/template_list"},
+        "dispatch_group": {"$ref": "#/definitions/group"},
+        "enabled": {"type": "boolean"},
+        "extra": {"$ref": "#/definitions/extra"}
+      }
+    }
+  }
+}

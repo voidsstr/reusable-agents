@@ -1,0 +1,58 @@
+{
+  "schema_version": "1",
+  "_doc": [
+    "Built-in defaults for framework/core/site_registry.py: the sites this deployment serves today. Schema: shared/schemas/sites-registry.schema.json. It lives under shared/ because the dashboard API image copies only framework/ and shared/.",
+    "A framework-storage copy at config/sites-registry.json (exactly that key) is merged over this file BY SITE NAME (fields replace, null resets to the derived default, objects deep-merge, lists replace); a site this file does not define is appended, and by default is walked after every site here (dispatch_group one higher). replace_sites=true in the storage copy drops these entries. The result must keep at least one enabled site.",
+    "No two sites may share a domain, repo_path, seo_site_yaml file or DSN env var (dsn_env and dsn_env_aliases together), disabled sites included.",
+    "Every value here reproduces what the consumers enumerate in code today (backlog-dispatcher PRODUCER_AGENT_IDS and _site_from_agent_id, priority.py _STARVATION_SITES and tiers 2/3, implementation_queue's subject-tag heuristic, implementer run.sh's examples/sites/<site>.yaml and DATABASE_URL_<SITE> lookups, goals-tracker SITE_TRACKERS, the DSN maps). framework/tests/test_site_registry.py reads those consumers' source and fails if this file drifts from them.",
+    "dsn_env_aliases lists the other env var names consumers read for the same DSN: reconcile-shipped tries DATABASE_URL_<SITE> then <SITE>_DSN; the metrics collector and the indexnow/GSC sites.json read only <SITE>_DATABASE_URL. A consumer that reads one convention passes names=[...] to dsn_for()."
+  ],
+  "producer_templates": [
+    "*-progressive-improvement-agent",
+    "*-seo-opportunity-agent",
+    "*-competitor-research-agent",
+    "*-catalog-audit-agent",
+    "*-article-proposal-agent",
+    "*-feedback-triage-agent"
+  ],
+  "content_agent_templates": [
+    "*-article-proposal-agent",
+    "*-head-to-head-agent"
+  ],
+  "sites": [
+    {
+      "name": "aisleprompt",
+      "label": "AislePrompt",
+      "domain": "aisleprompt.com",
+      "repo_path": "/home/voidsstr/development/aisleprompt",
+      "branch": "master",
+      "seo_site_yaml": "examples/sites/aisleprompt.yaml",
+      "dsn_env": "DATABASE_URL_AISLEPROMPT",
+      "dsn_env_aliases": ["AISLEPROMPT_DSN", "AISLEPROMPT_DATABASE_URL"],
+      "accent": "#4f46e5",
+      "kpi_goal_id": "goal-instacart-cart-30d",
+      "kpi_label": "Instacart cart creates",
+      "starvation": true,
+      "content_tier": 2
+    },
+    {
+      "name": "specpicks",
+      "label": "SpecPicks",
+      "domain": "specpicks.com",
+      "repo_path": "/home/voidsstr/development/specpicks",
+      "branch": "master",
+      "seo_site_yaml": "examples/sites/specpicks.yaml",
+      "dsn_env": "DATABASE_URL_SPECPICKS",
+      "dsn_env_aliases": ["SPECPICKS_DSN", "SPECPICKS_DATABASE_URL"],
+      "accent": "#f59e0b",
+      "kpi_goal_id": "goal-amazon-clicks-30d",
+      "kpi_label": "Human Amazon clicks",
+      "starvation": true,
+      "content_tier": 3,
+      "producer_extras": [
+        "specpicks-category-integrity-agent",
+        "specpicks-stale-content-watcher"
+      ]
+    }
+  ]
+}
