@@ -1,0 +1,24 @@
+{
+  "id": "spec-extractor-agent",
+  "name": "Spec Extractor",
+  "description": "Engine for catalog sites that publish their own specs: fetches manufacturer pages and manual PDFs politely (robots.txt, per-host rate limit, conditional requests, Amazon refused), extracts specs with deterministic per-brand extractors (a batched cheap-model fallback and a budgeted strong-model conflict adjudication, both off unless the site enables them), writes one provenance row per value plus typed spec rows and a spec status per model, then rebuilds compatibility edges (framework.core.compat_graph) and runtime estimates. Every phase short-circuits on unchanged input. Every table, column, kind and brand comes from the site's site.yaml; the niche lives in the spec-sources and compat-graph storage profiles. Per-site instances are config-only directories in the site repos.",
+  "category": "research",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "AGENT.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "pipeline-stage",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/spec-extractor-agent",
+    "config_env": "SPEC_EXTRACTOR_CONFIG",
+    "config_block": "spec_extractor",
+    "config_schema": "agents/spec-extractor-agent/spec-extractor-config.schema.json",
+    "config_keys": ["config/spec-sources-config.json", "config/compat-graph-config.json"],
+    "intended_cron": "10 4,16 * * *",
+    "llm": "optional: cheap-model fallback (spec_sources llm.enabled, CLAUDE_POOL_RESERVE=2) and strong-model adjudication (adjudication.enabled, <= 0.1 h/day)",
+    "created_at": "2026-11-17T21:00:00Z"
+  },
+  "runnable_modes": ["cron", "manual"]
+}

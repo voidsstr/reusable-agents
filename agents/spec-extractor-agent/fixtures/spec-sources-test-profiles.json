@@ -1,0 +1,123 @@
+{
+  "_comment": "Test-only spec_sources profiles for framework/tests/test_spec_extractor_agent.py. The station profile is framework/tests/fixtures/spec_sources/profiles/home-power.json (the F9 fixture, read-only) plus `station_extra_fields` merged in by the test; `solar-panel`, `solar-adapter` and `expansion-battery` (the shipped site.example.yaml's battery kind) are new here (field definitions copied from framework/tests/fixtures/compat_graph/catalog.json). Panels and adapters in the fixture catalog carry operator-entered values, so these profiles have fields and no extractors. Niche values only; the engine knows none of them.",
+  "station_extra_fields": {
+    "pv_input_connectors": {
+      "kind": "text",
+      "description": "Solar input connector(s)",
+      "llm": false
+    },
+    "pv_current_limited": {
+      "kind": "bool",
+      "values": {
+        "true": [
+          "current limit"
+        ],
+        "false": [
+          "^no$"
+        ]
+      },
+      "llm": false
+    }
+  },
+  "profiles": {
+    "solar-panel": {
+      "fields": {
+        "voc": {
+          "kind": "quantity",
+          "unit": "V",
+          "min": 1,
+          "max": 1500,
+          "required": true
+        },
+        "vmp": {
+          "kind": "quantity",
+          "unit": "V",
+          "min": 1,
+          "max": 1500,
+          "required": true
+        },
+        "isc": {
+          "kind": "quantity",
+          "unit": "A",
+          "min": 0.05,
+          "max": 100,
+          "required": true
+        },
+        "rated_w": {
+          "kind": "quantity",
+          "unit": "W",
+          "min": 1,
+          "max": 2000,
+          "required": true
+        },
+        "temp_coeff_voc_pct_c": {
+          "kind": "quantity",
+          "unit": "%/degC",
+          "min": -1.0,
+          "max": 0.5
+        },
+        "cell_type": {
+          "kind": "text"
+        },
+        "connector": {
+          "kind": "text"
+        }
+      },
+      "rules": [],
+      "extractor_sets": {},
+      "default_extractors": [],
+      "brands": {}
+    },
+    "solar-adapter": {
+      "fields": {
+        "connector_a": {
+          "kind": "text",
+          "required": true
+        },
+        "connector_b": {
+          "kind": "text",
+          "required": true
+        },
+        "max_a": {
+          "kind": "quantity",
+          "unit": "A",
+          "min": 0.1,
+          "max": 500
+        },
+        "max_v": {
+          "kind": "quantity",
+          "unit": "V",
+          "min": 1,
+          "max": 2000
+        }
+      },
+      "rules": [],
+      "extractor_sets": {},
+      "default_extractors": [],
+      "brands": {}
+    },
+    "expansion-battery": {
+      "fields": {
+        "capacity_wh": {
+          "kind": "quantity",
+          "unit": "Wh",
+          "min": 50,
+          "max": 50000,
+          "required": true
+        },
+        "chemistry": {
+          "kind": "text"
+        },
+        "compatible_stations": {
+          "kind": "text",
+          "description": "Stations the battery expands, as published",
+          "llm": false
+        }
+      },
+      "rules": [],
+      "extractor_sets": {},
+      "default_extractors": [],
+      "brands": {}
+    }
+  }
+}

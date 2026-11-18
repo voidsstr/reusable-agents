@@ -1,0 +1,8 @@
+# Agent-specific Python deps. The framework itself + storage SDK + FastAPI
+# are installed once at the framework level — agents only need to list
+# extras they import directly.
+PyYAML          # the site.yaml config
+jsonschema      # spec-extractor-config.schema.json validation
+psycopg2-binary # the site's Postgres (spec tables, compat_edges, runtime estimates)
+# poppler-utils (system package, pdftotext) converts manual PDFs; without it
+# PDF sources are recorded as document failures and retried with backoff.

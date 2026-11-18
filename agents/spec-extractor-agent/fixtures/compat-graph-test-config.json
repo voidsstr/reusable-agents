@@ -1,0 +1,378 @@
+{
+ "_comment": "Frozen test copy (2026-11-17) of the home-power compat profile from config/compat-graph-config.json, used by framework/tests/test_spec_extractor_agent.py as the compat_graph storage config. A test fixture, not deployment config: the live profile stays in config/compat-graph-config.json / the storage copy.",
+ "defaults": {},
+ "profiles": {
+  "home-power": {
+   "_comment": "Portable power stations, solar panels, expansion batteries, cables and adapters (binding amendments 6 and 8 of the third-site design). Field names are the site's spec_sources field registry: stations pv_v_min, pv_voc_max, pv_a_max, pv_w_max, pv_current_limited (bool: the maker documents input current limiting), pv_input_connectors; panels voc, vmp, isc, rated_w, temp_coeff_voc_pct_c (%/°C; absent = NEC factor, labelled), cell_type, connector; adapters/cables connector_a, connector_b, max_a, max_v. Year 1 excludes 240 V / L14-30 / L5-30 / 14-50 cords and every edge through them, and grid-interactive models. Connector ratings are left null where the rating is not a published standard value: a null rating is not checked.",
+   "connectors": {
+    "mc4": {
+     "label": "MC4",
+     "family": "pv",
+     "aliases": [
+      "\\bmc[- ]?4\\b",
+      "\\bphotovoltaic connectors?\\b",
+      "\\bpv connectors?\\b",
+      "\\bsolar connectors?\\b"
+     ],
+     "max_a": 30,
+     "max_v": 600,
+     "series": true,
+     "parallel": true
+    },
+    "anderson-pp45": {
+     "label": "Anderson Powerpole (PP45)",
+     "family": "anderson",
+     "aliases": [
+      "\\banderson\\b",
+      "\\bpower ?pole\\b",
+      "\\bapp\\b",
+      "\\bpp ?45\\b"
+     ],
+     "max_a": 45,
+     "max_v": 600,
+     "series": false,
+     "parallel": true
+    },
+    "dc8020": {
+     "label": "DC8020",
+     "family": "dc-barrel",
+     "aliases": [
+      "\\bdc ?8020\\b",
+      "\\b8020\\b",
+      "\\bdc ?8 ?mm\\b"
+     ],
+     "series": false,
+     "parallel": true
+    },
+    "dc7909": {
+     "label": "DC7909",
+     "family": "dc-barrel",
+     "aliases": [
+      "\\bdc ?7909\\b",
+      "\\b7909\\b",
+      "\\b7\\.9 ?mm\\b"
+     ],
+     "series": false,
+     "parallel": true
+    },
+    "dc5521": {
+     "label": "DC5521",
+     "family": "dc-barrel",
+     "aliases": [
+      "\\bdc ?5521\\b",
+      "\\b5\\.5 ?(?:x|mm ?x) ?2\\.1 ?mm\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "xt60": {
+     "label": "XT60",
+     "family": "xt",
+     "aliases": [
+      "\\bxt[- ]?60\\b(?![- ]?i)"
+     ],
+     "mates_with": [
+      "xt60i"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "xt60i": {
+     "label": "XT60i",
+     "family": "xt",
+     "aliases": [
+      "\\bxt[- ]?60[- ]?i\\b"
+     ],
+     "mates_with": [
+      "xt60"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "gx16": {
+     "label": "GX16 aviation",
+     "family": "aviation",
+     "aliases": [
+      "\\bgx ?16(?:mf)?(?:-\\d+)?\\b",
+      "\\baviation (?:plug|port|connector)\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "car-12v": {
+     "label": "12 V car socket",
+     "family": "vehicle",
+     "aliases": [
+      "\\bcar (?:port|outlet|socket|charger)\\b",
+      "\\bcigarette lighter\\b",
+      "\\b12 ?v (?:car|auxiliary)\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "nema-5-15": {
+     "label": "NEMA 5-15",
+     "family": "ac-120",
+     "aliases": [
+      "\\bnema ?5-15[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "nema-5-20": {
+     "label": "NEMA 5-20",
+     "family": "ac-120",
+     "aliases": [
+      "\\bnema ?5-20[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "tt-30": {
+     "label": "TT-30",
+     "family": "ac-rv",
+     "aliases": [
+      "\\btt-?30[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "l5-30": {
+     "label": "NEMA L5-30",
+     "family": "ac-120-locking",
+     "aliases": [
+      "\\b(?:nema ?)?l5-?30[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "l14-30": {
+     "label": "NEMA L14-30",
+     "family": "ac-240",
+     "aliases": [
+      "\\b(?:nema ?)?l14-?30[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    },
+    "nema-14-50": {
+     "label": "NEMA 14-50",
+     "family": "ac-240",
+     "aliases": [
+      "\\b(?:nema ?)?14-50[pr]?\\b"
+     ],
+     "series": false,
+     "parallel": false
+    }
+   },
+   "policy": {
+    "exclude_connectors": [
+     "l14-30",
+     "l5-30",
+     "nema-14-50"
+    ],
+    "exclude_connector_model_kinds": [
+     "adapter",
+     "cable",
+     "cord"
+    ],
+    "connector_fields": [
+     "connector",
+     "connectors",
+     "connector_a",
+     "connector_b",
+     "output_connectors",
+     "input_connectors"
+    ],
+    "exclude_models": [
+     {
+      "field": "ac_voltage",
+      "op": "gte",
+      "value": 200,
+      "kinds": [
+       "adapter",
+       "cable",
+       "cord"
+      ]
+     },
+     {
+      "field": "max_v_ac",
+      "op": "gte",
+      "value": 200,
+      "kinds": [
+       "adapter",
+       "cable",
+       "cord"
+      ]
+     },
+     {
+      "field": "grid_interactive",
+      "op": "truthy"
+     }
+    ]
+   },
+   "rules": {
+    "mfr-list": {
+     "kind": "manufacturer_list",
+     "version": 1,
+     "description": "Manufacturer fit statements (compatible panels, expansion batteries, cables). Preferred over computed verdicts; a computed disagreement is flagged and shown."
+    },
+    "pv-cold-voc": {
+     "kind": "max_voltage_cold",
+     "version": 2,
+     "description": "v2 = binding amendment 6: design temperature -40 °C (or the per-ZIP extreme minimum), the panel's Voc temperature coefficient or else the NEC 690.7(A) factor (x1.25 at -40 °C), and a fit needs >= 5 % headroom under pv_voc_max. v1 was the pre-review draft (-20 °C, -0.28 %/°C assumed, no headroom) and never shipped.",
+     "a_fields": {
+      "max_v": "pv_voc_max"
+     },
+     "b_fields": {
+      "voc": "voc",
+      "tc": "temp_coeff_voc_pct_c",
+      "technology": "cell_type"
+     },
+     "params": {
+      "headroom": 0.05
+     }
+    },
+    "pv-min-voltage": {
+     "kind": "min_voltage",
+     "version": 1,
+     "description": "The string's operating voltage (n x Vmp) must reach the station's minimum solar input voltage.",
+     "a_fields": {
+      "min_v": "pv_v_min"
+     },
+     "b_fields": {
+      "vmp": "vmp"
+     }
+    },
+    "pv-max-current": {
+     "kind": "max_current",
+     "version": 1,
+     "description": "m x Isc must not exceed the station's maximum solar input current, unless the station documents current limiting.",
+     "a_fields": {
+      "max_a": "pv_a_max",
+      "current_limited": "pv_current_limited"
+     },
+     "b_fields": {
+      "isc": "isc"
+     }
+    },
+    "pv-connector": {
+     "kind": "connector_path",
+     "version": 1,
+     "description": "Direct connector match, or one adapter whose connectors are manufacturer data.",
+     "a_fields": {
+      "connectors": "pv_input_connectors"
+     },
+     "b_fields": {
+      "connectors": "connector"
+     },
+     "params": {
+      "adapter_kinds": [
+       "adapter",
+       "cable"
+      ],
+      "endorse_relation": "adapter_for",
+      "no_path": "unknown"
+     }
+    },
+    "pv-watts": {
+     "kind": "watts_clip",
+     "version": 1,
+     "description": "Informational: panel watts beyond the station's maximum solar input are clipped.",
+     "a_fields": {
+      "max_w": "pv_w_max"
+     },
+     "b_fields": {
+      "rated_w": "rated_w"
+     }
+    }
+   },
+   "rulesets": {
+    "solar-charging": {
+     "version": 1,
+     "description": "Which panels charge which stations, in which series/parallel configuration, at the coldest design temperature.",
+     "relation": "charges_from",
+     "a_kinds": [
+      "station"
+     ],
+     "b_kinds": [
+      "panel"
+     ],
+     "rules": [
+      "mfr-list",
+      "pv-cold-voc",
+      "pv-min-voltage",
+      "pv-max-current",
+      "pv-connector",
+      "pv-watts"
+     ],
+     "arrays": {
+      "max_series": 4,
+      "max_parallel": 4,
+      "max_units": 4
+     },
+     "store_verdicts": [
+      "fits",
+      "fits_with_adapter",
+      "fits_in_series",
+      "fits_in_parallel",
+      "over_limit"
+     ]
+    },
+    "expansion-battery": {
+     "version": 1,
+     "description": "Expansion batteries, from manufacturer lists only.",
+     "relation": "expands",
+     "a_kinds": [
+      "station"
+     ],
+     "b_kinds": [
+      "battery"
+     ],
+     "rules": [
+      "mfr-list"
+     ],
+     "store_verdicts": [
+      "fits",
+      "no_fit"
+     ]
+    },
+    "adapter-fit": {
+     "version": 1,
+     "description": "Which products a cable or adapter is documented for (cable/adapter pages list manufacturer fit data only).",
+     "relation": "adapter_for",
+     "a_kinds": [
+      "station",
+      "panel"
+     ],
+     "b_kinds": [
+      "adapter",
+      "cable"
+     ],
+     "rules": [
+      "mfr-list"
+     ],
+     "store_verdicts": [
+      "fits",
+      "no_fit"
+     ]
+    }
+   },
+   "texts": {
+    "headroom": "Counts as a fit only with at least {headroom_pct}% headroom under the station's {max_v} V maximum solar input voltage (at most {allowed_v} V).",
+    "voc-tc": "Panel open-circuit voltage corrected for the cold with its published temperature coefficient ({tc} %/°C): x{factor}.",
+    "voc-nec": "The panel maker publishes no temperature coefficient, so the NEC 690.7(A) cold-voltage factor x{factor} is applied.",
+    "voc-tc-rejected": "The panel's published temperature coefficient ({tc} %/°C) is outside the plausible range, so the larger of its factor and the NEC 690.7(A) factor (x{factor}) is applied.",
+    "cell-type-assumed": "Panel cell type not published: crystalline silicon assumed for the NEC factor.",
+    "current-limited": "The station documents solar input current limiting, so extra panel current is not drawn.",
+    "current-checked": "Panel short-circuit current {design_a} A checked against the station's {max_a} A maximum solar input current.",
+    "per-input": "Limits apply to one solar input; the station's inputs are not combined.",
+    "watts-clipped": "{array_w} W of panels; the station uses at most {max_w} W of solar input.",
+    "parallel-connector": "{parallel} panels in parallel need a parallel (branch) connector.",
+    "adapter": "Connects through one adapter: {via_name}."
+   }
+  }
+ },
+ "by_site": {},
+ "by_agent_id": {}
+}

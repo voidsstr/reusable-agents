@@ -1,0 +1,61 @@
+{
+  "schema_version": "1",
+  "agent_id": "spec-extractor-agent",
+  "_comment": "Engine defaults. A per-site instance (<site>-spec-extractor) seeds these goals under its own id at registration (install/seed-default-goals.sh or PUT /api/agents/<id>/goals), adjusting targets to its catalog. Every target_metric is a key of the engine's RunResult.metrics, so progress records itself each run.",
+  "goals": [
+    {
+      "id": "goal-primary-spec-complete",
+      "title": "At least 45% of the primary catalog is spec-complete",
+      "description": "Share (0-100) of the primary catalog whose model has every required field of its kind accepted from a cited source (a conflict on a required field counts as missing). The primary catalog is the products of metrics.primary_kinds when tables.products is configured, otherwise those kinds' models. Pages whose specs are complete can show a sourced spec table and a runtime card; the rest stay thin. Emitted key: primary_spec_complete_pct.",
+      "target_metric": "primary_spec_complete_pct",
+      "metric": {"name": "primary_spec_complete_pct", "current": 0, "target": 45, "direction": "increase", "unit": "%"},
+      "directives": [
+        "Read catalog_models_missing / catalog_models_partial / catalog_models_conflict: missing usually means no source row or an unextractable document (sources_unhealthy, documents_failed); partial means the brand's extractors miss a field (add a label or a brand extractor in the spec-sources profile); conflict means the adjudication queue needs a decision",
+        "Seed spec_sources rows (manufacturer page, manual PDF) for the highest-demand models first; sources.priority_sql fetches them first",
+        "Turn on the cheap-model fallback (spec_sources llm.enabled) only after the deterministic extractors plateau; it fills prose-only fields with a verbatim quote"
+      ]
+    },
+    {
+      "id": "goal-open-spec-conflicts-low",
+      "title": "At most 20 open spec conflicts",
+      "description": "Distinct (model, field) pairs whose stored status is conflict: sources disagree beyond the field's tolerance, or a cross-field rule failed. A conflict on a required field blocks the model's completeness and its runtime card until adjudicated (model within 0.1 h/day, operator for human-only fields such as safety limits). Emitted key: open_spec_conflicts.",
+      "target_metric": "open_spec_conflicts",
+      "metric": {"name": "open_spec_conflicts", "current": 0, "target": 20, "direction": "decrease", "unit": "conflicts"},
+      "directives": [
+        "conflicts_needs_human counts items only an operator can settle (rule conflicts, adjudicate: human fields, items the model left undecided): add an operator decision through the adjudication queue",
+        "A wrong-variant source (a manual for another region or model) shows up as several conflicts on one model: remove or re-point that spec_sources row instead of deciding each field"
+      ]
+    },
+    {
+      "id": "goal-runtime-cards-live",
+      "title": "At least 300 models carry runtime estimates",
+      "description": "In-scope models of the runtime kinds (the catalog the models relation and its where select) with at least one runtime estimate row (spec-complete, with a capacity and a continuous output that covers the preset); rows of models that left the scope are deleted, so they never count. Only meaningful when runtime.enabled; adjust the target to the catalog. Emitted key: runtime_models_live.",
+      "target_metric": "runtime_models_live",
+      "metric": {"name": "runtime_models_live", "current": 0, "target": 300, "direction": "increase", "unit": "models"},
+      "directives": [
+        "runtime_models_estimated below primary_models_complete means presets exceed the models' continuous output or the capacity field is missing; check runtime.energy fields"
+      ]
+    },
+    {
+      "id": "goal-no-amazon-sourced-specs",
+      "title": "No stored spec value comes from Amazon",
+      "description": "Stored spec_values rows whose source is an Amazon URL. The Amazon IP License allows Amazon text to be shown for at most 24 hours and never stored; specs must come from manufacturers. The primitive refuses Amazon pages and the writer drops Amazon-sourced rows, so this must stay 0. Emitted key: amazon_sourced_values.",
+      "target_metric": "amazon_sourced_values",
+      "metric": {"name": "amazon_sourced_values", "current": 0, "target": 0, "direction": "decrease", "unit": "rows"},
+      "directives": [
+        "Any value above 0 is a defect: find the spec_sources row with the Amazon URL, delete it (its values cascade) and stop the instance until the cause is fixed"
+      ]
+    },
+    {
+      "id": "goal-sources-healthy",
+      "title": "At most 10% of fetchable sources are failing",
+      "description": "Share (0-100) of fetchable spec_sources rows whose last fetch failed, is gone (404/410), is blocked by robots.txt or was refused. Their last good values are kept, but they no longer refresh and a gone page breaks the citation link. Emitted key: sources_unhealthy_pct.",
+      "target_metric": "sources_unhealthy_pct",
+      "metric": {"name": "sources_unhealthy_pct", "current": 0, "target": 10, "direction": "decrease", "unit": "%"},
+      "directives": [
+        "Gone sources need a new URL (manufacturers move manuals); blocked ones need another source (a manual mirror that allows crawling) or an operator entry with a citation",
+        "Never raise the per-host rate or ignore robots.txt to improve this number"
+      ]
+    }
+  ]
+}

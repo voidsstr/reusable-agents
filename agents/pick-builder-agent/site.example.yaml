@@ -1,0 +1,123 @@
+# Example per-site config for agents/pick-builder-agent (the engine).
+#
+# A site uses the engine through a config-only directory in its own repo,
+# e.g. <site repo>/agents/pick-builder/, holding:
+#   - site.yaml        a `pick_builder:` block like the one below;
+#   - manifest.json    id "<site>-pick-builder", its own cron (e.g. "35 */4 * * *",
+#                      30 minutes after the price refresh), and
+#       entry_command: PICK_BUILDER_CONFIG=<site repo>/agents/pick-builder/site.yaml
+#                      python3 /home/voidsstr/development/reusable-agents/agents/pick-builder-agent/agent.py
+#   - AGENT.md         and 3-7 goals bound to the metrics in the engine's goals.json.
+#
+# Names match agents/pick-builder-agent/fixtures/schema.sql. The plans,
+# selectors and substitute rules are this placeholder site's POLICY (a
+# home-backup-power catalog); the engine only knows selectors.
+# framework/tests/test_pick_builder_agent.py runs this exact file against
+# the fixture schema, so it stays a working template.
+pick_builder:
+  site: example-site
+
+  database:
+    dsn_env: DATABASE_URL_EXAMPLE_SITE   # NAME of the env var, never the DSN
+    statement_timeout_ms: 60000
+
+  eligibility:
+    relation: v_pick_eligible            # every pick comes from this view
+    # all three integrity columns mapped, so the engine's floor checks them too
+    columns: {product_id: product_id, asin: asin, model_id: model_id, kind: kind, price: price,
+              list_price: list_price, currency: currency, category_confidence: category_confidence}
+    attributes: {brand: brand, usable_wh: usable_wh, capacity_wh: capacity_wh,
+                 cont_w: ac_cont_w, rated_w: rated_w}
+    # Attributes from the Amazon API besides price / list_price / currency
+    # (always hidden): filter and sort on them, never name them in a reason.
+    never_store: []
+
+  compat:
+    table: compat_edges                  # compat_graph.reference_ddl() shape (config jsonb included)
+    fit_verdicts: [fits, fits_with_adapter]   # a slot is ONE unit
+    exclude_flags: [computed-check-unknown]   # never pick an edge whose safety check could not run
+
+  ladders:
+    enabled: true
+    ladders: {table: ladders, where: "l.status = 'active'"}
+    tiers:
+      table: ladder_tiers
+      columns: {id: id, ladder_id: ladder_id, budget: budget_usd, params: params, order: budget_usd}
+      param_columns: {required_wh: required_wh}
+    slots: {table: ladder_slots, columns: {updated_at: updated_at}}
+    budget: {enforce: true}
+    plans:
+      outage-kit:
+        - role: station
+          max_budget_share: 0.8
+          filters:
+            - {attr: kind, op: eq, value: station}
+            - {attr: usable_wh, op: gte, value: "{tier.required_wh}"}
+          sort: [{key: "usable_wh / price", dir: desc}, {key: cont_w, dir: desc}]
+          reason: "Most usable energy per dollar at {usable_wh:,.0f} Wh"
+        - role: panel
+          filters: [{attr: kind, op: eq, value: panel}]
+          # ONE panel must charge the station on its own (directly or through one
+          # adapter); a panel that needs an adapter must fit the budget WITH that
+          # adapter, and the adapter's money is reserved for the cable slot
+          compat: {relation: charges_from, with: station, side: b, verdicts: [fits, fits_with_adapter],
+                   include_via_in_budget: true}
+          sort: [{key: "rated_w / price", dir: desc}]
+          reason: "{rated_w:,.0f} W panel that charges the station"
+        - role: cable
+          # the exact adapter of that edge; a direct connection is "not-needed"
+          via_of: {relation: charges_from, a_role: station, b_role: panel}
+        - role: alt
+          # an alternative station, not an add-on: judged against the tier
+          # budget alone, it spends nothing of the kit's
+          budget: own
+          max_budget_share: 0.8
+          filters:
+            - {attr: kind, op: eq, value: station}
+            - {attr: usable_wh, op: gte, value: "{tier.required_wh}"}
+            # not the station pick's model ("|" = no exclusion when the station slot is empty)
+            - {attr: model_id, op: ne, value: "{slot.station.model_id|}"}
+          sort: [{key: price, dir: asc}]
+
+  lists:
+    enabled: true
+    lists: {table: pick_lists, where: "pl.status = 'active'"}
+    items: {table: pick_list_items}
+    kinds:
+      best-under:
+        count: "{list.size|5}"
+        filters:
+          - {attr: kind, op: eq, value: "{list.product_kind}"}
+          - {attr: price, op: lte, value: "{list.max_price}"}
+        sort: [{key: "usable_wh / price", dir: desc}]
+        max_per: [{attr: brand, count: 2}]
+      best-for:
+        count: "{list.size|5}"
+        filters:
+          - {attr: kind, op: eq, value: station}
+          - {attr: cont_w, op: gte, value: "{list.min_cont_w}"}
+        sort: [{key: price, dir: asc}]
+
+  substitutes:
+    enabled: true
+    subjects:
+      relation: v_substitute_subjects
+      columns: {product_id: product_id, asin: asin, model_id: model_id, kind: kind, unbuyable: unbuyable}
+      attributes: {usable_wh: usable_wh, cont_w: ac_cont_w}
+    output:
+      table: product_substitutes
+      columns: {subject_id: product_id, substitute_id: alt_product_id, rank: rank, reason: reason}
+    rules:
+      station:
+        constraints:
+          - {attr: usable_wh, op: within_pct, value: 15}
+          - {attr: cont_w, op: gte_subject}
+        sort: [{key: price, dir: asc}]
+        reason: "{usable_wh:,.0f} Wh and {cont_w:,.0f} W continuous"
+    max_per_subject: 3
+    same_model: prefer
+
+  publish:
+    key: "agents/{agent_id}/state/pick-asins.json"   # the price refresh's `picks` storage_list group
+    include: [ladders, lists]
+    keep_dropped_runs: 1

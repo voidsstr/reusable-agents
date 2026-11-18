@@ -1,0 +1,146 @@
+# Example per-site config for agents/spec-extractor-agent (the engine).
+#
+# A site uses the engine through a config-only directory in its own repo,
+# e.g. <site repo>/agents/spec-extractor/, holding:
+#   - site.yaml        a `spec_extractor:` block like the one below;
+#   - manifest.json    id "<site>-spec-extractor", its own cron (e.g. "10 4,16 * * *"), and
+#       entry_command: SPEC_EXTRACTOR_CONFIG=<site repo>/agents/spec-extractor/site.yaml
+#                      python3 /home/voidsstr/development/reusable-agents/agents/spec-extractor-agent/agent.py
+#   - AGENT.md         and 3-7 goals bound to the metrics in the engine's goals.json.
+#
+# The tables below match agents/spec-extractor-agent/fixtures/schema.sql (the
+# reference implementation of the table contract). The niche (fields,
+# extractors, brands, connectors, rules) is NOT here: it is a profile in the
+# storage configs config/spec-sources-config.json and
+# config/compat-graph-config.json, selected by name. The site name is a
+# placeholder; framework/tests/test_spec_extractor_agent.py validates this
+# file, so it stays a working template.
+spec_extractor:
+  site: example-site
+
+  database:
+    # NAME of the env var holding the site's DSN (never the DSN). Optional
+    # once the site is in the site registry (its dsn_env is the default).
+    dsn_env: DATABASE_URL_EXAMPLE_SITE
+    statement_timeout_ms: 120000
+
+  tables:
+    models:
+      relation: v_spec_models          # a view joining the brand slug
+      write_table: models              # where the status columns live
+      where: "m.lifecycle <> 'retired'"
+      columns: {id: id, kind: kind, brand: brand, name: name, model_number: model_number}
+      status_columns: {status: spec_status, completeness: spec_completeness, checked_at: spec_checked_at}
+    sources:
+      table: spec_sources
+    values:
+      table: spec_values
+      columns: {snippet: snippet, qualifier: qualifier, conflict_id: conflict_id}
+    products:
+      table: products
+      where: "p.is_active"
+      columns: {id: id, model_id: model_id, kind: kind}
+
+  # Common framework.core.spec_sources layer: which niche profile, how the
+  # bot identifies itself, and the two LLM switches (both off by default).
+  spec_sources:
+    profile: home-power
+    fetch:
+      user_agent: "Mozilla/5.0 (compatible; SpecSourcesBot/1.0; +https://example-site.example/bot)"
+    llm:
+      enabled: false                   # batched cheap-model fallback (10 per call, pool reserve 2)
+    adjudication:
+      enabled: false                   # strong-model conflict decisions, <= 0.1 h/day
+      model: ""                        # required to adjudicate through the routing
+
+  kinds:
+    station:
+      required: [capacity_wh, chemistry, ac_cont_w, pv_voc_max]
+      typed:
+        table: station_specs
+        key: model_id
+        columns:
+          model_number: model_number
+          capacity_wh: capacity_wh
+          chemistry: chemistry
+          ac_cont_w: ac_cont_w
+          ac_surge_w: ac_surge_w
+          ups_ms: ups_ms
+          ups_supported: ups_supported
+          pv_v_min: pv_v_min
+          pv_voc_max: pv_voc_max
+          pv_w_max: pv_w_max
+          weight_kg: weight_kg
+          dimensions_mm: dimensions_mm
+        completeness: spec_completeness
+        updated_at: validated_at
+    panel:
+      spec_sources: {profile: solar-panel}
+      typed:
+        table: panel_specs
+        columns: {rated_w: rated_w, voc: voc, vmp: vmp, isc: isc,
+                  temp_coeff_voc_pct_c: temp_coeff_voc_pct_c, connector: connector}
+        updated_at: validated_at
+    battery:
+      # expansion batteries: their pages list the stations they fit (compat.fit_lists)
+      spec_sources: {profile: expansion-battery}
+      required: [capacity_wh]
+
+  brands:
+    map: {}          # site brand value -> spec_sources brand slug, when they differ
+    only: []         # roll out brand by brand: only these slugs are fetched
+    skip: []
+
+  sources:
+    fetch_kinds: [manufacturer-page, manual-pdf, manufacturer-faq, cert-listing]
+    refetch_hours: 20
+    max_fetches_per_run: 300
+    max_run_minutes: 40
+    # Demand first: models whose products verified humans clicked (the beacon
+    # series; bots and /r/ redirects excluded).
+    priority_sql: >-
+      SELECT p.model_id FROM products p JOIN outbound_clicks c ON c.asin = p.asin
+      WHERE c.via = 'beacon' AND NOT c.is_bot
+        AND c.clicked_at > now() - interval '30 days' AND p.model_id IS NOT NULL
+      GROUP BY p.model_id ORDER BY count(*) DESC
+
+  consolidate:
+    revisit_after_runs: 14
+
+  compat:
+    enabled: true
+    graph: {profile: home-power}
+    batch_size: 10
+    full_rebuild_every_runs: 14
+    fit_lists:
+      # An expansion battery's page lists the stations it fits (kind battery is
+      # configured above, so its compatible_stations field is extracted).
+      - {field: compatible_stations, kinds: [battery], relation: expands, subject_side: b,
+         list_kinds: [station]}
+    fit_records:
+      table: compat_fit_records
+    purge_orphaned: disabled    # disabling a ruleset deletes its computed edges on the next run
+
+  runtime:
+    enabled: true
+    kinds: [station]
+    require_complete: true
+    energy:
+      rated_field: capacity_wh
+      measured_field: usable_wh_measured
+      # niche values (no engine default): usable share of a rated capacity
+      rated_factor: 0.842
+      rated_interval: [0.75, 0.925]
+    continuous_field: ac_cont_w
+    peak_field: ac_surge_w
+    presets:
+      table: load_presets
+      where: "NOT p.medical"
+      columns: {id: id, power_w: avg_w, peak_w: surge_w, duty_cycle: duty_cycle,
+                energy_per_day_wh: wh_per_day}
+    output:
+      table: runtime_estimates
+      columns: {usable_energy: usable_wh, peak_ok: surge_ok}
+
+  metrics:
+    primary_kinds: [station]

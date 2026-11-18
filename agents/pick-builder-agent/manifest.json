@@ -1,0 +1,23 @@
+{
+  "id": "pick-builder-agent",
+  "name": "Pick Builder",
+  "description": "Deterministic engine for catalog sites: fills ladder slots (budget tiers with role plans such as product + accessory + the exact adapter, compat-aware) and best lists from the ONE eligibility view the site names, leaving any slot no eligible product satisfies empty with its reason instead of loosening policy; builds the substitutes map (what to buy instead of an unbuyable listing); and publishes the pick-ASIN list framework.core.price_refresh_priority reads as a storage_list group. Applies the pricing-integrity floor on top of the view, writes only the groups that changed in one snapshot transaction, verifies after the run that every live pick is still eligible, and short-circuits when inputs and outputs are unchanged. No LLM, no external API. Every table, column, plan and rule comes from the site's site.yaml; per-site instances are config-only directories in the site repos.",
+  "category": "seo",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "AGENT.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/pick-builder-agent",
+    "config_env": "PICK_BUILDER_CONFIG",
+    "config_block": "pick_builder",
+    "config_schema": "agents/pick-builder-agent/pick-builder-config.schema.json",
+    "intended_cron": "35 */4 * * *",
+    "llm": "none",
+    "created_at": "2026-11-17T21:00:00Z"
+  },
+  "runnable_modes": ["cron", "manual"]
+}

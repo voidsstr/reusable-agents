@@ -1,0 +1,522 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/agents/pick-builder-agent/pick-builder-config.schema.json",
+  "title": "pick-builder engine: the site.yaml `pick_builder` block",
+  "description": "Per-site configuration of agents/pick-builder-agent. Every table and column is named here (the TABLE CONTRACT in AGENT.md); selectors are data. Unknown keys are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "ident": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?$"
+    },
+    "column": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-z_][a-z0-9_]*$"
+    },
+    "fragment": {
+      "type": "string",
+      "description": "Trusted SQL fragment (no ';'; double any literal '%')."
+    },
+    "columns": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/column"
+      }
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-z_][a-z0-9_]*$"
+      },
+      "description": "logical attribute name -> column of the relation"
+    },
+    "scalarOrTemplate": {
+      "type": [
+        "number",
+        "string",
+        "boolean",
+        "array",
+        "null"
+      ]
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attr",
+        "op"
+      ],
+      "properties": {
+        "attr": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "eq",
+            "ne",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "in",
+            "not_in",
+            "truthy",
+            "falsy",
+            "is_null",
+            "not_null",
+            "within_pct",
+            "gte_subject",
+            "lte_subject",
+            "eq_subject"
+          ]
+        },
+        "value": {
+          "$ref": "#/definitions/scalarOrTemplate"
+        },
+        "expr": {
+          "type": "string"
+        }
+      }
+    },
+    "sortKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "dir": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        }
+      }
+    },
+    "maxPer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attr",
+        "count"
+      ],
+      "properties": {
+        "attr": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "count": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/filter"
+          }
+        },
+        "compat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relation",
+            "with"
+          ],
+          "properties": {
+            "relation": {
+              "type": "string"
+            },
+            "with": {
+              "type": "string"
+            },
+            "side": {
+              "type": "string",
+              "enum": [
+                "a",
+                "b"
+              ]
+            },
+            "verdicts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "include_via_in_budget": {
+              "type": "boolean",
+              "description": "A candidate whose edge needs an adapter must fit the budget with the cheapest eligible listing of it."
+            }
+          }
+        },
+        "via_of": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "relation",
+            "a_role",
+            "b_role"
+          ],
+          "properties": {
+            "relation": {
+              "type": "string"
+            },
+            "a_role": {
+              "type": "string"
+            },
+            "b_role": {
+              "type": "string"
+            }
+          }
+        },
+        "sort": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sortKey"
+          }
+        },
+        "max_per": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/maxPer"
+          }
+        },
+        "one_per_model": {
+          "type": "boolean"
+        },
+        "max_budget_share": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "budget": {
+          "type": "string",
+          "enum": [
+            "kit",
+            "own"
+          ],
+          "description": "kit (default): the slot spends the tier's remaining budget; own: an alternative judged against the tier budget alone, spending nothing of the kit's."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Template over the pick's own attributes and the parameters; never price, list_price, currency or a never_store attribute (stored text outlives the 24h Amazon window)."
+        }
+      }
+    },
+    "substituteRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "match_kind": {
+          "type": "boolean"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/filter"
+          }
+        },
+        "sort": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sortKey"
+          }
+        },
+        "reason": {
+          "type": "string",
+          "description": "Template over the substitute's own attributes and subject.<attr>; never price, list_price, currency or a never_store attribute."
+        }
+      }
+    },
+    "tableBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "string"
+        },
+        "where": {
+          "$ref": "#/definitions/fragment"
+        },
+        "columns": {
+          "$ref": "#/definitions/columns"
+        },
+        "param_columns": {
+          "$ref": "#/definitions/attributes"
+        }
+      }
+    }
+  },
+  "properties": {
+    "site": {
+      "type": "string"
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dsn_env": {
+          "type": "string",
+          "pattern": "^[A-Z_][A-Z0-9_]*$",
+          "maxLength": 128,
+          "description": "NAME of the env var holding the site DSN (never the DSN). Default: the site registry's dsn_env."
+        },
+        "statement_timeout_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "connect_timeout_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "application_name": {
+          "type": "string"
+        },
+        "lock_key": {
+          "type": "string"
+        }
+      }
+    },
+    "eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "relation": {
+          "type": "string",
+          "description": "The eligibility view: the only relation picks come from."
+        },
+        "where": {
+          "$ref": "#/definitions/fragment"
+        },
+        "columns": {
+          "$ref": "#/definitions/columns"
+        },
+        "attributes": {
+          "$ref": "#/definitions/attributes"
+        },
+        "never_store": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Attributes that come from the Amazon API (or any 24h-limited source) besides price / list_price / currency (always hidden): selectors may filter and sort on them, but no stored reason or evidence may name them."
+        },
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min_price": {
+              "type": "number",
+              "minimum": 0
+            },
+            "currencies": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "list_price_not_below_price": {
+              "type": "boolean"
+            },
+            "min_category_confidence": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "asin_regex": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "string"
+        },
+        "columns": {
+          "$ref": "#/definitions/columns"
+        },
+        "fit_verdicts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Verdicts a compat slot accepts by default (a slot is ONE unit: fits, fits_with_adapter)."
+        },
+        "exclude_flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "compat_graph edge flags that disqualify an edge for an automated pick (default: computed-check-unknown, a safety check that could not run)."
+        }
+      }
+    },
+    "ladders": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ladders": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "tiers": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "slots": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enforce": {
+              "type": "boolean"
+            }
+          }
+        },
+        "plans": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/selector"
+            }
+          }
+        }
+      }
+    },
+    "lists": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "lists": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "items": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "kinds": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/selector"
+          }
+        }
+      }
+    },
+    "substitutes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "subjects": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relation": {
+              "type": "string"
+            },
+            "where": {
+              "$ref": "#/definitions/fragment"
+            },
+            "columns": {
+              "$ref": "#/definitions/columns"
+            },
+            "attributes": {
+              "$ref": "#/definitions/attributes"
+            }
+          }
+        },
+        "output": {
+          "$ref": "#/definitions/tableBlock"
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/substituteRule"
+          }
+        },
+        "max_per_subject": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "same_model": {
+          "type": "string",
+          "enum": [
+            "prefer",
+            "allow",
+            "exclude"
+          ]
+        },
+        "one_per_model": {
+          "type": "boolean"
+        }
+      }
+    },
+    "publish": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string",
+          "description": "Storage key ({agent_id} expands); a price_refresh_priority storage_list group reads it."
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "ladders",
+              "lists",
+              "substitutes"
+            ]
+          }
+        },
+        "keep_dropped_runs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}

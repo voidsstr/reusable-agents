@@ -1,0 +1,91 @@
+{
+  "schema_version": "1",
+  "agent_id": "pick-builder-agent",
+  "_comment": "Engine defaults. A per-site instance (<site>-pick-builder) seeds these goals under its own id at registration (install/seed-default-goals.sh or PUT /api/agents/<id>/goals). Every target_metric is a key of the engine's RunResult.metrics, so progress records itself each run.",
+  "goals": [
+    {
+      "id": "goal-no-ineligible-picks",
+      "title": "No live pick is outside the eligibility view",
+      "description": "Ladder slots, list items and substitutes whose product is not in the site's eligibility view (after the integrity floor), measured in a fresh transaction after the run commits. The engine only ever picks from that view, so a value above 0 is either a price that aged out in the seconds between build and check (the next run replaces it) or a defect. Pages must never show a pick with a stale, foreign or invalid price. Emitted key: ineligible_in_picks.",
+      "target_metric": "ineligible_in_picks",
+      "metric": {
+        "name": "ineligible_in_picks",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "picks"
+      },
+      "directives": [
+        "Above 0 on two runs in a row is a defect: compare the eligibility view's definition with the integrity floor and check that nothing else writes the slot / item / substitute tables",
+        "ineligible_found (picks that went ineligible since the previous run) rising means the price refresh is not keeping pick ASINs fresh: check its picks storage_list group and gates"
+      ]
+    },
+    {
+      "id": "goal-slots-filled-from-policy",
+      "title": "At least 80% of ladder slots and list positions are filled from eligible products",
+      "description": "Filled ladder slots plus filled list positions over all of them (0-100), leaving out slots a direct connection makes unnecessary (status not-needed: the kit is complete). An empty slot is the correct outcome when no eligible product meets the slot's policy: this goal is raised by adding eligible inventory (discovery, price freshness, specs, certification), never by loosening a selector. Emitted key: slots_filled_pct.",
+      "target_metric": "slots_filled_pct",
+      "metric": {
+        "name": "slots_filled_pct",
+        "current": 0,
+        "target": 80,
+        "direction": "increase",
+        "unit": "%"
+      },
+      "directives": [
+        "Read the empty slots' reasons (ladder_slots.reason names the filter that left no candidate) and the --plan CLI (the counted trace); lists_short says which lists are short and why",
+        "Never relax a filter, a budget or the eligibility view to fill a slot; route the gap to the agent that adds the missing inventory or data",
+        "An alternative role (another station for the tier) belongs on budget: own, not on the kit's leftover budget"
+      ]
+    },
+    {
+      "id": "goal-unbuyable-substitutes",
+      "title": "At least 60% of unbuyable products offer an eligible substitute",
+      "description": "Unbuyable subjects (the subjects view's unbuyable flag) that have at least one substitute, over all unbuyable subjects of a kind with a substitute rule (0-100). An unbuyable page with a same-spec substitute keeps converting; one without has no buy path. Emitted key: unbuyable_with_substitute_pct.",
+      "target_metric": "unbuyable_with_substitute_pct",
+      "metric": {
+        "name": "unbuyable_with_substitute_pct",
+        "current": 0,
+        "target": 60,
+        "direction": "increase",
+        "unit": "%"
+      },
+      "directives": [
+        "Subjects without specs never get a substitute (no near-miss): their specs come first",
+        "If the window is too tight for the catalog, change it in the site's substitute rule deliberately and say why; do not widen it to move this number"
+      ]
+    },
+    {
+      "id": "goal-pick-list-published",
+      "title": "The pick-ASIN list is published every run",
+      "description": "1 when writing the pick-ASIN list to framework storage failed this run, or the list read back differed, else 0. The price refresh prioritises pick ASINs from that list; while it is stale, new picks fall back to the long tail and can lose their fresh price (and with it their eligibility). Emitted key: pick_publish_failed.",
+      "target_metric": "pick_publish_failed",
+      "metric": {
+        "name": "pick_publish_failed",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "runs"
+      },
+      "directives": [
+        "A failure is a framework storage problem (credentials, archive tier): fix storage. The run leaves publish_pending in its state, so the next run publishes again even when nothing changed"
+      ]
+    },
+    {
+      "id": "goal-eligibility-view-integrity",
+      "title": "The eligibility view never returns an invalid price",
+      "description": "Rows the eligibility view returned that fail the engine's pricing-integrity floor (null or sub-$1 price, a non-USD currency, a list price below the price, a low category confidence, a malformed ASIN). They are never picked, but they mean the site's view is wrong, and other readers of the view may show them. Emitted key: pool_integrity_rejects.",
+      "target_metric": "pool_integrity_rejects",
+      "metric": {
+        "name": "pool_integrity_rejects",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "rows"
+      },
+      "directives": [
+        "Fix the view's WHERE clause (the CLAUDE.md pricing-integrity filters), not the engine's floor"
+      ]
+    }
+  ]
+}

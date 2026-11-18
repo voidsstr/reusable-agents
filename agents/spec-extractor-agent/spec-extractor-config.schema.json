@@ -1,0 +1,284 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/agents/spec-extractor-agent/spec-extractor-config.schema.json",
+  "title": "spec-extractor engine: the site.yaml `spec_extractor` block",
+  "description": "Per-site configuration of agents/spec-extractor-agent. Engine-owned blocks reject unknown keys; the `spec_sources`, `kinds.<kind>.spec_sources` and `compat.graph` blocks are config layers of framework.core.spec_sources / framework.core.compat_graph and are validated by those primitives at run time. Every table and column the engine touches is named under `tables` (the TABLE CONTRACT in AGENT.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "ident": {"type": "string", "pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)?$"},
+    "column": {"type": ["string", "null"], "pattern": "^[a-z_][a-z0-9_]*$"},
+    "fragment": {"type": "string", "description": "Trusted SQL fragment (no ';'; double any literal '%')."},
+    "columns": {"type": "object", "additionalProperties": {"$ref": "#/definitions/column"}},
+    "stringList": {"type": "array", "items": {"type": "string"}}
+  },
+  "properties": {
+    "site": {"type": "string", "description": "Site name (default: the site registry entry owning the agent id)."},
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dsn_env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$", "maxLength": 128, "description": "NAME of the env var holding the site DSN (never the DSN). Default: the site registry's dsn_env."},
+        "statement_timeout_ms": {"type": "integer", "minimum": 0},
+        "connect_timeout_s": {"type": "integer", "minimum": 1},
+        "application_name": {"type": "string"},
+        "lock_key": {"type": "string", "description": "Advisory-lock key for one-run-at-a-time (default spec-extractor:<agent id>)."}
+      }
+    },
+    "tables": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "relation": {"$ref": "#/definitions/ident"},
+            "write_table": {"type": "string"},
+            "where": {"$ref": "#/definitions/fragment"},
+            "columns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/definitions/column"},
+                "kind": {"$ref": "#/definitions/column"},
+                "brand": {"$ref": "#/definitions/column"},
+                "name": {"$ref": "#/definitions/column"},
+                "model_number": {"$ref": "#/definitions/column"},
+                "aliases": {"$ref": "#/definitions/column"}
+              }
+            },
+            "status_columns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {"$ref": "#/definitions/column"},
+                "completeness": {"$ref": "#/definitions/column"},
+                "checked_at": {"$ref": "#/definitions/column"}
+              }
+            }
+          }
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"$ref": "#/definitions/ident"},
+            "columns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/definitions/column"},
+                "model_id": {"$ref": "#/definitions/column"},
+                "kind": {"$ref": "#/definitions/column"},
+                "url": {"$ref": "#/definitions/column"},
+                "publisher": {"$ref": "#/definitions/column"},
+                "fetched_at": {"$ref": "#/definitions/column"},
+                "content_sha256": {"$ref": "#/definitions/column"},
+                "state": {"$ref": "#/definitions/column"}
+              }
+            }
+          }
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"$ref": "#/definitions/ident"},
+            "columns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/definitions/column"},
+                "model_id": {"$ref": "#/definitions/column"},
+                "field": {"$ref": "#/definitions/column"},
+                "value_num": {"$ref": "#/definitions/column"},
+                "value_text": {"$ref": "#/definitions/column"},
+                "unit": {"$ref": "#/definitions/column"},
+                "source_id": {"$ref": "#/definitions/column"},
+                "extractor": {"$ref": "#/definitions/column"},
+                "extractor_id": {"$ref": "#/definitions/column"},
+                "confidence": {"$ref": "#/definitions/column"},
+                "status": {"$ref": "#/definitions/column"},
+                "snippet": {"$ref": "#/definitions/column"},
+                "qualifier": {"$ref": "#/definitions/column"},
+                "conflict_id": {"$ref": "#/definitions/column"}
+              }
+            }
+          }
+        },
+        "products": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"type": "string"},
+            "where": {"$ref": "#/definitions/fragment"},
+            "columns": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/definitions/column"},
+                "model_id": {"$ref": "#/definitions/column"},
+                "kind": {"$ref": "#/definitions/column"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "spec_sources": {"type": "object", "description": "Common framework.core.spec_sources layer (profile, fetch, llm, adjudication). Validated by the primitive."},
+    "kinds": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "spec_sources": {"type": "object", "description": "Extra spec_sources layer for this kind (e.g. its own profile). Fetch / refusal / adjudication keys are read from the common layer only."},
+          "fields": {"$ref": "#/definitions/stringList", "description": "The fields this kind has (a subset of the profile's). Default: every profile field."},
+          "required": {"$ref": "#/definitions/stringList", "description": "Fields that make this kind spec-complete. Default: the profile's required flags."},
+          "typed": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["table", "columns"],
+            "properties": {
+              "table": {"$ref": "#/definitions/ident"},
+              "key": {"type": "string"},
+              "columns": {"type": "object", "additionalProperties": {"type": "string"}},
+              "completeness": {"type": "string"},
+              "updated_at": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "brands": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "map": {"type": "object", "additionalProperties": {"type": "string"}},
+        "only": {"$ref": "#/definitions/stringList"},
+        "skip": {"$ref": "#/definitions/stringList"}
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fetch_kinds": {"$ref": "#/definitions/stringList"},
+        "refetch_hours": {"type": "number", "minimum": 1},
+        "max_fetches_per_run": {"type": "integer", "minimum": 0},
+        "max_run_minutes": {"type": "number", "minimum": 1},
+        "retry_base_hours": {"type": "number", "minimum": 0.5},
+        "retry_max_hours": {"type": "number", "minimum": 1},
+        "gone_retry_hours": {"type": "number", "minimum": 1},
+        "priority_sql": {"$ref": "#/definitions/fragment"}
+      }
+    },
+    "consolidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revisit_after_runs": {"type": "integer", "minimum": 1},
+        "max_models_per_run": {"type": "integer", "minimum": 1},
+        "batch_models": {"type": "integer", "minimum": 1, "maximum": 2000}
+      }
+    },
+    "compat": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "graph": {"type": "object", "description": "framework.core.compat_graph site_cfg layer (profile, writer...). Validated by the primitive."},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 500},
+        "full_rebuild_every_runs": {"type": "integer", "minimum": 1},
+        "number_fields": {"$ref": "#/definitions/stringList"},
+        "fit_lists": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["field", "relation"],
+            "properties": {
+              "field": {"type": "string"},
+              "kinds": {"$ref": "#/definitions/stringList"},
+              "relation": {"type": "string"},
+              "subject_side": {"type": "string", "enum": ["a", "b"]},
+              "verdict": {"type": "string"},
+              "list_kinds": {"$ref": "#/definitions/stringList"}
+            }
+          }
+        },
+        "fit_records": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"type": "string"},
+            "where": {"$ref": "#/definitions/fragment"},
+            "columns": {"$ref": "#/definitions/columns"}
+          }
+        },
+        "connectors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"type": "string"},
+            "columns": {"$ref": "#/definitions/columns"}
+          }
+        },
+        "purge_orphaned": {"type": "string", "enum": ["disabled", "all", "none"], "description": "On a full rebuild: delete the non-manual rows of rulesets the profile disabled (disabled, the default), also of rulesets it does not know (all), or only count them (none)."}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "kinds": {"$ref": "#/definitions/stringList"},
+        "require_complete": {"type": "boolean"},
+        "energy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rated_field": {"type": "string"},
+            "measured_field": {"type": "string"},
+            "rated_factor": {"type": "number", "exclusiveMinimum": 0, "description": "Usable share of a rated capacity (niche data, no default; required with rated_field)."},
+            "rated_interval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "measured_interval": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
+            "basis_labels": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {"measured": {"type": "string"}, "rated": {"type": "string"}}
+            }
+          }
+        },
+        "continuous_field": {"type": "string"},
+        "peak_field": {"type": "string"},
+        "round_hours": {"type": "integer", "minimum": 0, "maximum": 6},
+        "presets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"type": "string"},
+            "where": {"$ref": "#/definitions/fragment"},
+            "columns": {"$ref": "#/definitions/columns"}
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "table": {"$ref": "#/definitions/ident"},
+            "columns": {"$ref": "#/definitions/columns"}
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "primary_kinds": {"$ref": "#/definitions/stringList", "description": "Kinds whose spec completeness the primary_spec_complete_pct goal measures."}
+      }
+    }
+  }
+}
