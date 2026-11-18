@@ -1,0 +1,53 @@
+{
+  "_comment": "Upstream provenance of the kit's database layer (build item K4). entries: the SpecPicks declarations server/src/db/migrate.ts ports, hashed as PORTED_FROM.json documents (unit/db/helpers/declHash.ts) at upstream.commit. schemaSources: the upstream migration files whose statements define the tables and views kit_0001..kit_0004 mirror (unit/db/drift.test.ts reports new ones); columns that exist only in the live database are in upstream-schema.json. Refresh after a re-port: KIT_DRIFT_REF=<commit> KIT_DB_DRIFT_REPORT=/tmp/db-drift.json npx jest unit/db/drift.test.ts",
+  "upstream": {
+    "repo": "specpicks",
+    "localPath": "/home/voidsstr/development/specpicks",
+    "commit": "1deac3393ebf8cfcb0e6679c1b96a577a1950336",
+    "designReferenceCommit": "60d8dee83c4618e9aab818f5bd93d70d8a120a2c",
+    "headAtPort": "b5415b0813a48e900491015da5d167ad16e41369",
+    "portedOn": "2026-11-17"
+  },
+  "entries": [
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "MIGRATION_LOCK_KEY", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "MIGRATION_LOCK_KEY", "note": "Same key (0x6d696772), so the operator runbook's hand-apply lock is unchanged.", "sha256": "58b0b5315c5e956e3c1c3f5d28c1d89d4624bf44ef9941f8b4eb903532fe0d80"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "DEFAULT_LOCK_WAIT_MS", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "DEFAULT_LOCK_WAIT_MS", "sha256": "e46fd20d927e5d9816e9d69bcef0134479b6bd2b2f54c75f05a8e1479b74b058"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "DEFAULT_LOCK_POLL_MS", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "DEFAULT_LOCK_POLL_MS", "sha256": "4ae350f0e56483a8005dafb3c397039819463bee500d1f47797ac392af1d13c4"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "WAIT_NOTE_EVERY_MS", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "WAIT_NOTE_EVERY_MS", "sha256": "9be60d53cb9433d8c178b2eaf3e91a939331e8dbd73d017483408ce0a9e1dcdb"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "MigrationRunnerOptions", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "MigrationRunnerOptions", "note": "Kit adds sources, ledgerTable and lockKey; migrationsDir kept.", "sha256": "311719f88733e21b4edf60bc5bda04190c5fcd5c0ab6267fa789bf8cc9aec5df"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "MigrationRunSummary", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "MigrationRunSummary", "note": "onDisk counts every source.", "sha256": "3b56a6a162ef203df7f28c40bfe5095731442424544d959b76f738895913cf27"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "MigrationLockTimeoutError", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "MigrationLockTimeoutError", "sha256": "2083e47c5cf7c51889d6cdb7712731443586b57434a5ea98eb4fa0cd2d6fcf2f"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "resolve", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "resolve", "note": "Validates the ledger name and lock key.", "sha256": "a323219b6bc3d112435ed9fb3f4963be34fd210add4eeb0bd00d6944f8aebbbf"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "acquireMigrationLock", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "takeLock", "note": "Exported wrapper acquireMigrationLock(client, options) resolves options first.", "sha256": "493eb9c16bb3ed6cd9ba24cb9d3ebee6920728b9270966b079710292af965d2d"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "releaseMigrationLock", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "releaseLock", "note": "Exported wrapper releaseMigrationLock(client, options).", "sha256": "2b054bd92730deb6137002ad76fa89f2602c4ecbe564401cffac49781141c313"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "ensureMigrationsTable", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "ensureMigrationsTable", "note": "Ledger name is an option; to_regclass takes it as a parameter.", "sha256": "c7f1b5cf8a6963d0e19926dbfb6bfe466e7e6437b3201f0fee13f493df04e63e"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "recordedMigrations", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "recordedMigrations", "sha256": "c05b18003128daca5165e3f629242bd91416fe1a8915daf22483f4a0bf6e93b8"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "SqlStatement", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "SqlStatement", "sha256": "c228a185d778a8288bb1b0b420815116e801c4ae24dcc1b25d19289712cd328f"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "splitSqlStatements", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "splitSqlStatements", "note": "Verbatim.", "sha256": "ac6162916fd947b48efbcb0495f1835b2c22b17262e2297ef7443072bed28fc9"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "applyOne", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "applyOne", "note": "Takes a MigrationFile from any source; forwards WARNING notices to warn.", "sha256": "4f58041d7c33d23adb4e8a2e973d37a7c9aa89536dcbaf15362b96239f7cda56"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "RunState", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "RunState", "sha256": "501a1aab371e77d81584b7d03a03ab37cb3c148cc56c2b1a94443d3ce9d7942e"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "runOn", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "runOn", "note": "Files come from listMigrationFiles(sources), listed before connecting.", "sha256": "4952ddb25297006af556b125bfb6f107ed0ba4150e7119529eb6730338d7dc8a"},
+    {"upstreamFile": "src/db/migrationRunner.ts", "symbol": "runPendingMigrations", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "runPendingMigrations", "sha256": "96510daf17f34703691153a1d2e02a0496008e6fc6105543145d751391aa87d3"},
+    {"upstreamFile": "src/db/migrate.ts", "symbol": "runMigrations", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "runKitMigrations", "note": "The kit's boot entry applies the kit's migrations, then the site's.", "sha256": "239254d43c2c711818e44a5b3e4ed718fdd165692d4278d6a735f7ad352c811b"},
+    {"upstreamFile": "src/index.ts", "symbol": "killStaleTransactions", "kitFile": "server/src/db/migrate.ts", "kitSymbol": "killStaleTransactions", "note": "Opt-in in the kit (--kill-stale); same predicate, interval as a parameter.", "sha256": "f1c5a5bf37d27bdf83bd5ec85fa572151d5aac39ccbefe09bf7bfb308eaf17a6"}
+  ],
+  "schemaSources": {
+    "dir": "db/migrations",
+    "tables": ["outbound_clicks", "ai_traffic_log", "editorial_articles"],
+    "views": ["outbound_clicks_human", "outbound_clicks_verified_human", "amazon_clicks_verified_human_daily"],
+    "files": [
+      "010_click_tracking.sql",
+      "017_testbench.sql",
+      "018_testbench_research_pipeline.sql",
+      "026_editorial_seo_fields.sql",
+      "20260526T140000Z_ai-traffic-log.sql",
+      "20260829T180000Z_hero_image_host_allowlist.sql",
+      "20260910T094200Z_growth-01-article-series.sql",
+      "20260922T120000Z_outbound-clicks-bot-classification.sql",
+      "20260924T230000Z_outbound-clicks-verified-human.sql",
+      "20260925T161000Z_links-ai-traffic-log-verification.sql",
+      "20260930T093011Z_rec-011-merge-duplicate-article-categories.sql",
+      "20261011T013000Z_seo-rec009-ai-traffic-path-ts-index.sql",
+      "20261108T103012Z_pi-rec011-updated-at-tracks-content-edits.sql"
+    ]
+  }
+}

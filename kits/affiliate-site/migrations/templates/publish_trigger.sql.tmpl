@@ -1,0 +1,278 @@
+-- Publish guard for editorial_articles (affiliate-site kit {{kit_version}}, rendered
+-- from migrations/templates/publish_trigger.sql.tmpl by
+-- server/src/db/publishTrigger.ts; do not edit the rendered copy by hand,
+-- re-render it with new parameters into a NEW site migration instead).
+--
+--   publisher role     {{publisher_role}}
+--   draft status       {{draft_status}}
+--   published status   {{published_status}}
+--   content columns    {{content_columns}}
+--
+-- WHY. On a site with a content policy, publishing is a gated state change
+-- (affiliate-site kit design, binding amendment 1). The article author INSERTs its
+-- own rows and used to write them as published, so they skipped every guard.
+-- With this migration only the publisher role can put a row into, or keep it
+-- in, the published state with content it has not seen; the publish gate
+-- (framework/cli/article_publish_gate.py) is the one writer that logs in as
+-- that role, and it promotes a draft only when the link guard, the link
+-- classes, the claims guard and the content policy all pass.
+--
+-- THE CONTENT COLUMNS are what those checks read: the text (title, subtitle,
+-- excerpt, body_md, faqs, outbound_citations) and category, which picks the
+-- claims guard's and link guard's per-bucket policy (the gate reads `bucket`,
+-- else `category`; a site that adds a `bucket` column lists it too).
+--
+-- RULES, for every write by a role other than {{publisher_role}}:
+--   INSERT                       status := '{{draft_status}}', whatever was asked
+--                                (an author's INSERT ... ON CONFLICT DO UPDATE
+--                                takes the UPDATE rules on its conflict path).
+--   UPDATE asking for '{{published_status}}'
+--     row was not published      status := '{{draft_status}}' (only the publisher
+--                                publishes, or un-archives).
+--     row was published and a    status := '{{draft_status}}' (the new content has
+--     content column changed     not been checked; the gate re-checks it).
+--     row was published, no      kept published. Housekeeping writes such as
+--     content column changed     view_count = view_count + 1 on every page view,
+--                                hero swaps, featured rotation, trend scores
+--                                and related-link arrays must not unpublish an
+--                                article.
+--   UPDATE asking for any other status (draft, archived, ...)
+--                                kept as asked: leaving the published state is
+--                                always allowed.
+-- Writes by {{publisher_role}} pass the guard unchanged. The gate's promote is
+--   UPDATE editorial_articles SET status = '{{published_status}}' ... RETURNING status
+-- and a RETURNING value of '{{draft_status}}' tells it the connection was not the
+-- publisher role ("trigger-kept-draft"), so a misconfigured DSN fails closed.
+-- Only status = '{{published_status}}' may ever render publicly.
+--
+-- TWO TRIGGERS, both ENABLE ALWAYS (they fire under session_replication_role =
+-- replica too):
+--   editorial_articles_zzz_publish_guard_trg    BEFORE INSERT OR UPDATE: applies
+--       the rules above. BEFORE triggers fire in name order (bytewise); 'zzz'
+--       puts it after the kit's and the reference site's editorial_articles_*
+--       triggers, but a trigger whose name sorts after it (set_*, trg_*)
+--       fires later.
+--   editorial_articles_zzz_publish_recheck_trg  AFTER INSERT OR UPDATE of a row
+--       stored as '{{published_status}}': re-checks the row as written and
+--       raises an error when it breaks the rules, or when a write by
+--       {{publisher_role}} changed its content. A BEFORE trigger that sorts
+--       AFTER the guard (set_*, trg_*, ...) can change a row the guard already
+--       judged; the recheck makes that write fail instead of publishing
+--       unchecked content. Name every other BEFORE trigger so it sorts before
+--       editorial_articles_zzz_publish_guard_trg; installing this migration
+--       warns about any that does not.
+-- A content column is compared on every call by name, so after a content
+-- column is dropped or renamed, guarded writes to a published row fail with
+-- an error (the page-view counter's fire-and-forget UPDATE included) rather
+-- than pass or unpublish the article: re-render the guard in the migration
+-- that changes the column. A missing or uncomparable column at install time
+-- is an error.
+--
+-- THE ROLES must keep it meaningful (the site's roles migration or the kit's
+-- deploy/ provisioning; the install warns about the first three it can see):
+--   * no role but the table owner holds TRIGGER on editorial_articles. GRANT ALL
+--     and ALTER DEFAULT PRIVILEGES ... GRANT ALL include it, and so does
+--     membership of the owner role. A role that can create a trigger can make
+--     its own writes pass this guard's BEFORE trigger, and can plant code that
+--     runs as whoever writes the row next, the publisher included (the recheck
+--     catches the first, not the second). Grant SELECT, INSERT, UPDATE by name.
+--   * no BEFORE trigger on editorial_articles sorts after the guard (above).
+--   * the author and app roles cannot SET session_replication_role (GRANT SET
+--     ON PARAMETER, PostgreSQL 15+, or a managed admin group that has it).
+--     ENABLE ALWAYS keeps both triggers firing in replica mode, but
+--     pg_restore --disable-triggers and ALTER TABLE ... ENABLE TRIGGER reset
+--     them to fire on origin only. After either, run
+--       ALTER TABLE editorial_articles
+--         ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_guard_trg,
+--         ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_recheck_trg;
+--     Seed fixtures promote through SET ROLE {{publisher_role}}, never replica mode.
+--   * the author role (agents) and the app role are not {{publisher_role}}, are
+--     not members of it (SET ROLE would pass) and are not superusers;
+--   * migrations run as a dedicated owner role. Neither the author role nor the
+--     app role owns editorial_articles or is a member of its owner (an owner
+--     can DISABLE TRIGGER). Running the migrations from the app's own pool at
+--     boot makes the app role the owner;
+--   * only the publish gate's process holds the publisher DSN. It is never in
+--     an environment or a file an author session can read (keep it out of
+--     the agents' shared secrets file);
+--   * no SECURITY DEFINER function owned by {{publisher_role}} writes
+--     editorial_articles (inside one, current_user is its owner);
+--   * {{publisher_role}} needs only SELECT and UPDATE (status, published_at) on
+--     editorial_articles.
+-- If {{publisher_role}} does not exist yet, this migration warns and nothing can
+-- be published until it does (fail closed).
+--
+-- IDEMPOTENT: CREATE OR REPLACE throughout, then ENABLE ALWAYS again
+-- (CREATE OR REPLACE TRIGGER resets a trigger to fire on origin only).
+-- PostgreSQL 14 or later.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '15min';
+
+DO $check$
+DECLARE
+  missing text[];
+  col     text;
+  found   text;
+BEGIN
+  IF to_regclass('editorial_articles') IS NULL THEN
+    RAISE EXCEPTION 'publish guard: table editorial_articles does not exist (apply kit_0003 first)';
+  END IF;
+  SELECT array_agg(c ORDER BY c) INTO missing
+    FROM unnest(ARRAY['status', {{content_columns}}]::text[]) AS c
+   WHERE NOT EXISTS (
+     SELECT 1 FROM pg_attribute a
+      WHERE a.attrelid = to_regclass('editorial_articles')
+        AND a.attname = c
+        AND a.attnum > 0
+        AND NOT a.attisdropped);
+  IF missing IS NOT NULL THEN
+    RAISE EXCEPTION 'publish guard: editorial_articles has no column(s) %', missing;
+  END IF;
+  -- The guard compares each content column with IS DISTINCT FROM; a type
+  -- without an equality operator (json, point, xml) would fail every guarded
+  -- write, so it fails here instead. LIMIT 0 reads no row.
+  FOREACH col IN ARRAY ARRAY[{{content_columns}}]::text[] LOOP
+    BEGIN
+      EXECUTE format('SELECT 1 FROM editorial_articles WHERE %1$I IS DISTINCT FROM %1$I LIMIT 0', col);
+    EXCEPTION WHEN undefined_function THEN
+      RAISE EXCEPTION 'publish guard: content column editorial_articles.% cannot be compared: %', col, SQLERRM;
+    END;
+  END LOOP;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{publisher_role}}') THEN
+    RAISE WARNING 'publish guard: role {{publisher_role}} does not exist yet; until it does nothing can be published';
+  END IF;
+
+  -- What else could get a write past the two triggers (warnings: the roles
+  -- and triggers are the site's, and some may be created after this file).
+  SELECT string_agg(t.tgname::text, ', ' ORDER BY t.tgname::text COLLATE "C") INTO found
+    FROM pg_trigger t
+   WHERE t.tgrelid = 'editorial_articles'::regclass
+     AND NOT t.tgisinternal
+     AND (t.tgtype & 3) = 3          -- FOR EACH ROW, BEFORE
+     AND (t.tgtype & 20) <> 0        -- on INSERT or UPDATE
+     AND t.tgname::text COLLATE "C" > 'editorial_articles_zzz_publish_guard_trg';
+  IF found IS NOT NULL THEN
+    RAISE WARNING 'publish guard: BEFORE trigger(s) % fire after editorial_articles_zzz_publish_guard_trg (triggers fire in name order) and can change a row the guard already judged; a write they turn into one the guard forbids fails at editorial_articles_zzz_publish_recheck_trg. Rename them to sort before the guard', found;
+  END IF;
+  SELECT string_agg(r.rolname::text, ', ' ORDER BY r.rolname::text) INTO found
+    FROM pg_roles r
+   WHERE NOT r.rolsuper
+     AND r.rolname <> '{{publisher_role}}'
+     AND r.oid <> (SELECT c.relowner FROM pg_class c WHERE c.oid = 'editorial_articles'::regclass)
+     AND has_table_privilege(r.oid, 'editorial_articles'::regclass, 'TRIGGER');
+  IF found IS NOT NULL THEN
+    RAISE WARNING 'publish guard: role(s) % can create triggers on editorial_articles (the TRIGGER privilege: GRANT ALL includes it, and so does membership of the owner role); a trigger runs as whoever writes the row, the publisher included. Revoke it and grant SELECT, INSERT, UPDATE by name', found;
+  END IF;
+  IF current_setting('server_version_num')::int >= 150000 THEN
+    EXECUTE $q$
+      SELECT string_agg(r.rolname::text, ', ' ORDER BY r.rolname::text)
+        FROM pg_roles r
+       WHERE NOT r.rolsuper
+         AND has_parameter_privilege(r.oid, 'session_replication_role', 'SET')$q$
+      INTO found;
+    IF found IS NOT NULL THEN
+      RAISE WARNING 'publish guard: role(s) % may SET session_replication_role. Both guard triggers are ENABLE ALWAYS and fire in replica mode, but a restore with --disable-triggers or an ENABLE TRIGGER resets them to fire on origin only; keep it from the author and app roles', found;
+    END IF;
+  END IF;
+END
+$check$;
+
+CREATE OR REPLACE FUNCTION editorial_articles_publish_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  publisher       CONSTANT name   := '{{publisher_role}}';
+  draft_status    CONSTANT text   := '{{draft_status}}';
+  public_status   CONSTANT text   := '{{published_status}}';
+  content_columns CONSTANT text[] := ARRAY[{{content_columns}}]::text[];
+  changed boolean;
+BEGIN
+  IF current_user = publisher THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    NEW.status := draft_status;
+    RETURN NEW;
+  END IF;
+  -- UPDATE by any other role. Leaving the published state is always allowed.
+  IF NEW.status IS DISTINCT FROM public_status THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.status IS DISTINCT FROM public_status THEN
+    NEW.status := draft_status;
+    RETURN NEW;
+  END IF;
+  -- A published row stays published only while its content is unchanged. The
+  -- comparison names each column and is parsed on every call, so a dropped or
+  -- renamed content column is an error here, never a silent pass.
+  EXECUTE (SELECT 'SELECT ' || string_agg(format('($1).%1$I IS DISTINCT FROM ($2).%1$I', c), ' OR ')
+             FROM unnest(content_columns) AS c)
+     INTO changed
+    USING NEW, OLD;
+  IF changed THEN
+    NEW.status := draft_status;
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+
+COMMENT ON FUNCTION editorial_articles_publish_guard() IS
+  'Publish guard (kit template publish_trigger.sql.tmpl): writes by any role but {{publisher_role}} cannot make a row published, and an edit to a published row''s content ({{content_columns_plain}}) returns it to {{draft_status}}. INSERTs by those roles are always {{draft_status}}.';
+
+CREATE OR REPLACE FUNCTION editorial_articles_publish_recheck()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  publisher       CONSTANT name   := '{{publisher_role}}';
+  public_status   CONSTANT text   := '{{published_status}}';
+  content_columns CONSTANT text[] := ARRAY[{{content_columns}}]::text[];
+  changed boolean := false;
+  broken  text;
+BEGIN
+  -- The trigger's WHEN clause passes only rows stored as published.
+  IF TG_OP = 'UPDATE' AND (current_user = publisher OR OLD.status = public_status) THEN
+    EXECUTE (SELECT 'SELECT ' || string_agg(format('($1).%1$I IS DISTINCT FROM ($2).%1$I', c), ' OR ')
+               FROM unnest(content_columns) AS c)
+       INTO changed
+      USING NEW, OLD;
+  END IF;
+  IF current_user = publisher THEN
+    IF changed THEN
+      broken := format('changed in a write by %s that left it %s', publisher, public_status);
+    END IF;
+  ELSIF TG_OP = 'INSERT' THEN
+    broken := format('inserted as %s by %s', public_status, current_user);
+  ELSIF OLD.status IS DISTINCT FROM public_status THEN
+    broken := format('made %s by %s', public_status, current_user);
+  ELSIF changed THEN
+    broken := format('edited by %s and left %s', current_user, public_status);
+  END IF;
+  IF broken IS NOT NULL THEN
+    RAISE EXCEPTION 'publish guard: editorial_articles row % was %', coalesce(to_jsonb(NEW) ->> 'slug', '?'), broken
+      USING ERRCODE = 'check_violation',
+            HINT = 'Only the publish gate publishes, and only content it checked. A BEFORE trigger that fires after editorial_articles_zzz_publish_guard_trg (triggers fire in name order) changed this row after the guard judged it, or the guard trigger is disabled.';
+  END IF;
+  RETURN NULL;
+END
+$fn$;
+
+COMMENT ON FUNCTION editorial_articles_publish_recheck() IS
+  'Publish guard recheck (kit template publish_trigger.sql.tmpl), AFTER INSERT OR UPDATE of a row stored as {{published_status}}: raises when a role other than {{publisher_role}} left it published against the guard''s rules, or when a write by {{publisher_role}} changed its content ({{content_columns_plain}}).';
+
+CREATE OR REPLACE TRIGGER editorial_articles_zzz_publish_guard_trg
+  BEFORE INSERT OR UPDATE ON editorial_articles
+  FOR EACH ROW EXECUTE FUNCTION editorial_articles_publish_guard();
+
+CREATE OR REPLACE TRIGGER editorial_articles_zzz_publish_recheck_trg
+  AFTER INSERT OR UPDATE ON editorial_articles
+  FOR EACH ROW
+  WHEN (NEW.status = '{{published_status}}')
+  EXECUTE FUNCTION editorial_articles_publish_recheck();
+
+ALTER TABLE editorial_articles
+  ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_guard_trg,
+  ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_recheck_trg;
