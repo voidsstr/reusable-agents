@@ -1,0 +1,93 @@
+{
+  "$schema": "../schema/site.schema.json",
+  "schemaVersion": 1,
+  "site": {
+    "id": "kit-example",
+    "brandName": "ExamplePicks",
+    "domain": "example.com",
+    "canonicalOrigin": "https://example.com",
+    "language": "en-US"
+  },
+  "routes": {
+    "product": "/product/{asin}"
+  },
+  "amazon": {
+    "partnerTag": "kitexample-20",
+    "placementTags": {
+      "pdp-hero": "kitexample-pdp-20",
+      "sticky-mobile": "kitexample-sticky-20"
+    },
+    "sourceTags": {
+      "article": "kitexample-guides-20"
+    },
+    "acceptSegmentTagParam": true,
+    "ctaLabel": "View current price on Amazon",
+    "searchCtaLabel": "Search Amazon for this item"
+  },
+  "sources": [
+    { "kind": "product", "prefixes": ["/product/"] },
+    { "kind": "category", "exact": ["/categories"], "prefixes": ["/category/"] },
+    { "kind": "brand", "exact": ["/brands"], "prefixes": ["/brand/"] },
+    { "kind": "best", "prefixes": ["/best/"] },
+    { "kind": "article", "prefixes": ["/guides/"] },
+    { "kind": "deal", "exact": ["/deals"], "prefixes": ["/deals/"] },
+    { "kind": "search", "prefixes": ["/search"] }
+  ],
+  "disclosure": {
+    "earnings": "As an Amazon Associate, ExamplePicks earns from qualifying purchases.",
+    "pagePath": "/disclosure"
+  },
+  "byline": {
+    "name": "ExamplePicks Editorial Team",
+    "profilePath": "/about"
+  },
+  "theme": {
+    "fontFamily": "system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+    "light": {
+      "bg": "#ffffff",
+      "surface": "#f8fafc",
+      "text": "#0f172a",
+      "muted": "#475569",
+      "border": "#e2e8f0",
+      "link": "#1d4ed8",
+      "accent": "#b45309",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#2563eb"
+    },
+    "dark": {
+      "bg": "#0b1120",
+      "surface": "#111827",
+      "text": "#e5e7eb",
+      "muted": "#9ca3af",
+      "border": "#1f2937",
+      "link": "#93c5fd",
+      "accent": "#fbbf24",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#60a5fa"
+    }
+  },
+  "crawlers": {
+    "policy": { "search": "allow", "agent": "allow", "training": "block" },
+    "disallowPaths": ["/api/", "/r/"]
+  },
+  "aiCrawlers": {
+    "extraStaticRanges": []
+  },
+  "edge": {
+    "cdn": "none",
+    "extraTrustedProxies": []
+  },
+  "indexNow": {
+    "key": "0f4c2a9e7b1d4e3a8c6b5d2f1e0a9c7b"
+  },
+  "cache": {
+    "htmlSMaxAgeSeconds": 600,
+    "htmlMaxAgeSeconds": 60,
+    "ssrCacheSeconds": 0
+  },
+  "prices": {
+    "freshnessHours": 24
+  }
+}

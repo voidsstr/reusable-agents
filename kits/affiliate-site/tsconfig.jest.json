@@ -1,0 +1,7 @@
+{
+  "//": "ts-jest config. ts-jest 29.4 compiles transpile-only (no type errors) when isolatedModules is on, so jest turns it off here: `npm test` then fails on a type error in a test or in any module it imports. tsconfig.json keeps isolatedModules for the typecheck, so every file stays transpilable by esbuild.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "isolatedModules": false
+  }
+}

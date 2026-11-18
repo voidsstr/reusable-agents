@@ -1,0 +1,16 @@
+{
+  "//": "Server build: CommonJS into dist/, with declarations. No DOM lib, so server code that touches browser globals fails here (npm run typecheck runs this too).",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "noEmit": false,
+    "rootDir": "server/src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["server/src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "coverage", "server/src/**/*.test.ts"]
+}

@@ -1,0 +1,16 @@
+# Installed and generated. The kit is vendored as SOURCE; every consumer
+# installs from package-lock.json and builds its own output.
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Playwright (tests/ui, run by the gate engine)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Local scratch
+.drift-report*.json
+*.log
