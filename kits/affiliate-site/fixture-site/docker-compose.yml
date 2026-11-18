@@ -1,0 +1,33 @@
+# The gate fixture's long-lived Postgres (kit_fixture, plus kit_fixture_violations
+# from db/init). run-local-suite.sh starts it when it is not running and never
+# recreates it. No restart policy: nothing here starts on its own.
+services:
+  postgres:
+    build:
+      context: ./db
+    image: kitfixture-postgres:16
+    container_name: ${SUITE_DB_CONTAINER:-kitfixture_postgres}
+    environment:
+      POSTGRES_USER: kitfixture
+      POSTGRES_PASSWORD: kitfixture
+      POSTGRES_DB: kit_fixture
+    ports:
+      - "127.0.0.1:${SUITE_DB_PORT:-5434}:5432"
+    # The runner's CPU cap (SUITE_CPUS) from creation; 0 (unset) is no cap.
+    cpus: ${SUITE_CPUS:-0}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Healthy only once the init script has created the second database.
+      test: ["CMD-SHELL", "pg_isready -U kitfixture -d kit_fixture_violations"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    networks:
+      - kitfixture_net
+
+volumes:
+  pgdata:
+
+networks:
+  kitfixture_net:

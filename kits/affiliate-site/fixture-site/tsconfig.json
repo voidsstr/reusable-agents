@@ -1,0 +1,9 @@
+{
+  "//": "Type-check config for the gate fixture site (src) and its gate wiring (tests). The kit's own tsconfig.json does not include fixture-site/, so tests/selftest runs this one.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,6 @@
+{
+  "crawlers": {
+    "policy": { "search": "allow", "agent": "block", "training": "allow" },
+    "disallowPaths": ["/api/", "/r/"]
+  }
+}

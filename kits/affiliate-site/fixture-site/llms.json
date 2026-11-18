@@ -1,0 +1,21 @@
+{
+  "summary": "GateFixture is the affiliate-site kit's gate fixture: product pages, buying guides, a best list and recall notices built only from kit modules.",
+  "details": [
+    "Every page here exists to prove the kit's deploy gate: green on this clean fixture, red on the deliberately seeded violations."
+  ],
+  "sections": [
+    {
+      "title": "Start here",
+      "links": [
+        { "title": "Buying guides", "href": "/guides", "note": "editorial guides with comparison tables" },
+        { "title": "Best widgets", "href": "/best/best-widgets", "note": "the ranked list" },
+        { "title": "Recall notices", "href": "/recalls", "note": "products under an active recall, with no buy button" }
+      ]
+    }
+  ],
+  "citationGuidance": [
+    "Cite the guide or product page URL; pages are updated in place."
+  ],
+  "latestArticles": { "pathPrefix": "/guides/", "days": 3650, "limit": 10 },
+  "sitemaps": ["/sitemap.xml"]
+}

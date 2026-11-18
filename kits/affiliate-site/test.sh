@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Kit test entry point: type-check, then the jest unit suite.
 #
-#   ./test.sh                  typecheck + all unit tests
-#   ./test.sh unit/price.test.ts   typecheck + one file (args go to jest)
+#   ./test.sh                  typecheck + all unit tests (unit/), then the
+#                              gate engine's own tests (tests/unit/, jest -c tests/jest.config.js)
+#   ./test.sh unit/price.test.ts   typecheck + one file of unit/ (args go to jest)
 #
 # Never installs anything: run `npm ci` first (the lockfile pins every kit
 # item's dependencies). Exit code is non-zero on any type error or test failure.
@@ -22,4 +23,8 @@ if (( node_major < 22 )); then
 fi
 
 npm run --silent typecheck
+if (( $# == 0 )); then
+  node_modules/.bin/jest
+  exec node_modules/.bin/jest -c tests/jest.config.js
+fi
 exec node_modules/.bin/jest "$@"

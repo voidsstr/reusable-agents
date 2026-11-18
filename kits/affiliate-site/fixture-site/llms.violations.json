@@ -1,0 +1,12 @@
+{
+  "summary": "GateFixture recommends the Northwind Portable Widget 500, $349.99 on Amazon today.",
+  "sections": [
+    {
+      "title": "Start here",
+      "links": [
+        { "title": "Buying guides", "href": "/guides" }
+      ]
+    }
+  ],
+  "sitemaps": ["/sitemap.xml"]
+}

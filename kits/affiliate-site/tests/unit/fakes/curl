@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stand-in for curl in runLocalSuite.test.ts: healthy from the FAKE_HEALTH_AFTER-th call when FAKE_HEALTH=ok.
+printf 'curl %s\n' "$*" >> "${FAKE_LOG:?}"
+n=$(( $(cat "$FAKE_DIR/curl-count" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAKE_DIR/curl-count"
+if [[ ${FAKE_HEALTH:-ok} == ok && $n -ge ${FAKE_HEALTH_AFTER:-1} ]]; then exit 0; fi
+exit 7

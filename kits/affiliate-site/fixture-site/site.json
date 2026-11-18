@@ -1,0 +1,91 @@
+{
+  "$schema": "../schema/site.schema.json",
+  "schemaVersion": 1,
+  "site": {
+    "id": "kit-gate-fixture",
+    "brandName": "GateFixture",
+    "domain": "gate-fixture.test",
+    "canonicalOrigin": "https://gate-fixture.test",
+    "language": "en-US"
+  },
+  "routes": {
+    "product": "/product/{asin}"
+  },
+  "amazon": {
+    "partnerTag": "gatefixture-20",
+    "placementTags": {
+      "pdp-hero": "gatefixture-pdp-20",
+      "sticky-mobile": "gatefixture-sticky-20"
+    },
+    "sourceTags": {
+      "article": "gatefixture-guides-20"
+    },
+    "acceptSegmentTagParam": true,
+    "ctaLabel": "View current price on Amazon",
+    "searchCtaLabel": "Search Amazon for this item"
+  },
+  "sources": [
+    { "kind": "product", "prefixes": ["/product/"] },
+    { "kind": "best", "prefixes": ["/best/"] },
+    { "kind": "article", "exact": ["/guides"], "prefixes": ["/guides/"] },
+    { "kind": "recall", "exact": ["/recalls"], "prefixes": ["/recalls/"] },
+    { "kind": "note", "prefixes": ["/notes/"] }
+  ],
+  "disclosure": {
+    "earnings": "As an Amazon Associate, GateFixture earns from qualifying purchases.",
+    "pagePath": "/disclosure"
+  },
+  "byline": {
+    "name": "GateFixture Editorial Team",
+    "profilePath": "/about"
+  },
+  "theme": {
+    "fontFamily": "system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+    "light": {
+      "bg": "#ffffff",
+      "surface": "#f8fafc",
+      "text": "#0f172a",
+      "muted": "#475569",
+      "border": "#e2e8f0",
+      "link": "#1d4ed8",
+      "accent": "#b45309",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#2563eb"
+    },
+    "dark": {
+      "bg": "#0b1120",
+      "surface": "#111827",
+      "text": "#e5e7eb",
+      "muted": "#9ca3af",
+      "border": "#1f2937",
+      "link": "#93c5fd",
+      "accent": "#fbbf24",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#60a5fa"
+    }
+  },
+  "crawlers": {
+    "policy": { "search": "allow", "agent": "allow", "training": "block" },
+    "disallowPaths": ["/api/", "/r/"]
+  },
+  "aiCrawlers": {
+    "extraStaticRanges": []
+  },
+  "edge": {
+    "cdn": "none",
+    "extraTrustedProxies": []
+  },
+  "indexNow": {
+    "key": "bb2a2a8ffc5b29dbf8de65cea729e40f"
+  },
+  "cache": {
+    "htmlSMaxAgeSeconds": 600,
+    "htmlMaxAgeSeconds": 60,
+    "ssrCacheSeconds": 0
+  },
+  "prices": {
+    "freshnessHours": 24
+  }
+}

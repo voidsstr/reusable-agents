@@ -1,0 +1,28 @@
+# The gate's target: the fixture's production image (Dockerfile), built from
+# this tree on every gate run, on its own port, against the fixture Postgres.
+#   bash tests/run-local-suite.sh
+services:
+  backend-test:
+    build:
+      context: ..
+      dockerfile: fixture-site/Dockerfile
+      target: production
+    image: kitfixture-backend-test:latest
+    container_name: ${SUITE_APP_CONTAINER:-kitfixture_backend_test}
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgresql://kitfixture:kitfixture@postgres:5432/${SUITE_DB_NAME:-kit_fixture}
+      FIXTURE_SITE_OVERLAY: ${KIT_FIXTURE_SITE_OVERLAY:-}
+      FIXTURE_LLMS_JSON: ${KIT_FIXTURE_LLMS_JSON:-llms.json}
+    ports:
+      - "127.0.0.1:${SUITE_APP_PORT:-10032}:8080"
+    # The runner's CPU cap (SUITE_CPUS) from creation, not only after start
+    # (the runner's docker update --cpus); 0 (unset) is no cap.
+    cpus: ${SUITE_CPUS:-0}
+    networks:
+      - kitfixture_net

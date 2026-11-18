@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Stand-in for npx in runLocalSuite.test.ts: records how Playwright would have been run.
+printf 'npx %s\n' "$*" >> "${FAKE_LOG:?}"
+{
+  echo "args=$*"
+  echo "cwd=$(pwd)"
+  echo "nice=$(nice)"
+  echo "TEST_URL=${TEST_URL:-}"
+  echo "KIT_GATE_DB_URL=${KIT_GATE_DB_URL:-}"
+  echo "SUITE_PROJECT=${SUITE_PROJECT:-}"
+  for f in "${AGENT_LOCK_DIR:?}"/local-suite-*.lock; do
+    if flock -n "$f" true; then echo "lock-free=${f##*/}"; else echo "lock-held=${f##*/}"; fi
+  done
+} > "$FAKE_DIR/npx.env"
+echo $$ > "$FAKE_DIR/npx.pid"
+if [[ -n ${FAKE_NPX_SLEEP:-} ]]; then exec sleep "$FAKE_NPX_SLEEP"; fi
+exit "${FAKE_NPX_RC:-0}"

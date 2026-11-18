@@ -1,0 +1,15 @@
+# Build-context filter for fixture-site/Dockerfile (context: the kit root).
+# BuildKit reads <Dockerfile>.dockerignore next to the Dockerfile.
+**/node_modules
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+**/blob-report
+**/*.log
+**/*.tsbuildinfo
+unit
+tests
+deploy
+fixtures
+fixture-site/tests

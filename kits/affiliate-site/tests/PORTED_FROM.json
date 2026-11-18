@@ -1,0 +1,110 @@
+{
+  "//": "Where the kit gate engine (tests/) was ported from: the SpecPicks commit and a sha256 per upstream file. tests/unit/drift.test.ts re-hashes them when the checkout exists and reports what changed upstream since the port (it fails only with KIT_DRIFT_STRICT=1).",
+  "upstream": {
+    "repo": "specpicks",
+    "localPath": "/home/voidsstr/development/specpicks",
+    "commit": "b030991a3d0c8a07db8d132a9b0111ee6fb471b0",
+    "committedAt": "2026-11-17T20:25:18-05:00",
+    "portedOn": "2026-11-17"
+  },
+  "hash": {
+    "algorithm": "sha256",
+    "unit": "the whole upstream file",
+    "normalization": "CRLF to LF, trailing whitespace stripped from each line, UTF-8."
+  },
+  "entries": [
+    {
+      "upstreamFile": "tests/run-local-suite.sh",
+      "kitFiles": [
+        "tests/run-local-suite.sh"
+      ],
+      "upstreamLastChange": "2cdaf74c 2026-10-19",
+      "sha256": "2c2690838611aeb708b97e92c7304e48356dd9fb4d362808d4342bca7fe6714c"
+    },
+    {
+      "upstreamFile": "tests/playwright.config.ts",
+      "kitFiles": [
+        "tests/playwright.base.ts"
+      ],
+      "upstreamLastChange": "e0b71e37 2026-10-19",
+      "sha256": "383ee98c6354f7488aa01ba6c05b8315e20c3f9bf850c948e6dbe45623fdb334"
+    },
+    {
+      "upstreamFile": "tests/ui/all-pages.spec.ts",
+      "kitFiles": [
+        "tests/ui/all-pages.engine.ts",
+        "tests/ui/all-pages.spec.ts"
+      ],
+      "upstreamLastChange": "c2123c81 2026-10-19",
+      "sha256": "de6d1f62d2bc2815e8d6eb14406a5618965121a2ec5b3d3ac86b9c910809304e"
+    },
+    {
+      "upstreamFile": "tests/ui/pages.manifest.ts",
+      "kitFiles": [
+        "tests/ui/lib/manifestTypes.ts",
+        "tests/ui/lib/sources.ts"
+      ],
+      "upstreamLastChange": "c2123c81 2026-10-19",
+      "sha256": "80e4654bf0c6041f4bbc979ab0e8f81204c36d28b4a09d13979dfd4b3d03f454"
+    },
+    {
+      "upstreamFile": "tests/ui/lib/pageAudit.ts",
+      "kitFiles": [
+        "tests/ui/lib/pageAudit.ts"
+      ],
+      "upstreamLastChange": "31f222dd 2026-10-19",
+      "sha256": "82c9e551b6400b142ead633e1c9a45514545b283262b556fa45ea909ed2afd29"
+    },
+    {
+      "upstreamFile": "tests/ui/lib/legibility.ts",
+      "kitFiles": [
+        "tests/ui/lib/legibility.ts"
+      ],
+      "upstreamLastChange": "c2123c81 2026-10-19",
+      "sha256": "f7e3e1e564acc5929d1b54e8a637dbcdaaf7b009111764b21b2607a8c1b99e40"
+    },
+    {
+      "upstreamFile": "tests/ui/lib/site.ts",
+      "kitFiles": [
+        "tests/ui/lib/site.ts"
+      ],
+      "upstreamLastChange": "c2123c81 2026-10-19",
+      "sha256": "49ed59a9f2e0082a0f05ed8bee394445297232b4ea61e0679c290af5ef95d18f"
+    },
+    {
+      "upstreamFile": "tests/ui/ai-fetcher-access.spec.ts",
+      "kitFiles": [
+        "tests/ui/ai-fetcher-access.spec.ts",
+        "tests/ui/lib/robotsTxt.ts"
+      ],
+      "upstreamLastChange": "7ca1ce68 2026-10-14",
+      "sha256": "40d2bd8413a492fe87da42f947541fe83071632e309aa7451a1d79bbdbaa625f"
+    },
+    {
+      "upstreamFile": "tests/ui/amazon-cta.spec.ts",
+      "kitFiles": [
+        "tests/ui/kit-compliance.spec.ts",
+        "tests/ui/lib/compliance.ts"
+      ],
+      "upstreamLastChange": "9d3ce772 2026-10-21",
+      "sha256": "91a36781dab929060a08023dc5854f6ebf6707f2cad39c651c5fb5cf7820eb89"
+    },
+    {
+      "upstreamFile": "tests/ui/unbuyable-pdp.spec.ts",
+      "kitFiles": [
+        "tests/ui/unbuyable-pdp.spec.ts",
+        "tests/ui/lib/pdpInspect.ts"
+      ],
+      "upstreamLastChange": "6f308c06 2026-10-24",
+      "sha256": "2c2ab3a9db8978fde278a9831f3ce071badabcdabacc70e2d35828b0853c10cf"
+    },
+    {
+      "upstreamFile": "tests/ui/pdp-cta-placements.spec.ts",
+      "kitFiles": [
+        "tests/ui/pdp-cta-placements.spec.ts"
+      ],
+      "upstreamLastChange": "e13bf9bf 2026-10-16",
+      "sha256": "b20c1ad9c3f2762d66547e581a4eeb8ad569f73a086877040d7ea5146ee987fa"
+    }
+  ]
+}

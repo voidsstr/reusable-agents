@@ -1,0 +1,15 @@
+{
+  "//": "Builds the fixture server (and the kit modules it imports) to fixture-site/dist/, keeping the kit's tree layout: dist/fixture-site/src/server.js, dist/server/src/... . No DOM lib, as for any server build. A bundler would merge the kit modules into one scope and fire their CLI entry points, so this compiles with tsc.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "noEmit": false,
+    "rootDir": "..",
+    "outDir": "dist",
+    "sourceMap": false,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

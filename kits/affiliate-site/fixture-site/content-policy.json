@@ -1,0 +1,29 @@
+{
+  "_comment": "Rule set the kit gate's fixture site is scanned with (laid over the repo's config/content-policy-config.json with --config). Kept apart from any live site's rule sets so the gate's self-test does not move when those are tuned.",
+  "rule_sets": {
+    "kit-fixture": {
+      "description": "Gate fixture: one negation-aware reject rule and one required notice.",
+      "rules": [
+        {
+          "id": "fixture-backfeed",
+          "label": "backfeeding a home through an outlet",
+          "action": "reject",
+          "patterns": ["\\bback-?feed(?:s|ing|ed)?\\b"],
+          "why": "Backfeeding a home through an outlet energises the utility line and can kill a line worker.",
+          "fix": "Remove the instruction; say a transfer switch or interlock installed by a licensed electrician is required."
+        }
+      ],
+      "required_notices": [
+        {
+          "id": "fixture-electrician-notice",
+          "label": "the licensed-electrician notice",
+          "action": "reject",
+          "triggers": ["\\btransfer\\s+switch(?:es)?\\b"],
+          "notice_patterns": ["\\blicensed\\s+electricians?\\b"],
+          "message": "A page that mentions a transfer switch must say that installing one takes a licensed electrician.",
+          "suggested_text": "A transfer switch must be installed by a licensed electrician."
+        }
+      ]
+    }
+  }
+}
