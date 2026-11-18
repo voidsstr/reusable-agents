@@ -1,0 +1,33 @@
+# The deploy gate's target: this site's production image (Dockerfile.azure,
+# the image Azure Container Apps and ECS run), built from the tree under test
+# on every gate run, on its own port, against the fixture Postgres.
+# tests/run-local-suite.sh builds, starts and removes it; never run it by hand
+# against anything but the fixture database.
+services:
+  backend-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.azure
+      target: production
+    image: {{SLUG}}-backend-test:latest
+    container_name: ${SUITE_APP_CONTAINER:-{{SLUG}}_backend_test}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgresql://{{FIXTURE_DB_USER}}:{{FIXTURE_DB_PASSWORD}}@postgres:5432/${SUITE_DB_NAME:-{{FIXTURE_DB_NAME}}}
+      # The fixture app applies the migrations itself; production runs them in
+      # the deploy's migrate stage, as the owner role.
+      MIGRATE_ON_BOOT: "1"
+      # A gate run stays off the network: no fetches of the AI crawlers' IP ranges.
+      SITE_HERMETIC: "1"
+    ports:
+      - "127.0.0.1:${SUITE_APP_PORT:-{{GATE_PORT}}}:8080"
+    # The gate runner's CPU cap (tests/suite.env SUITE_CPUS) from creation, not
+    # only once the runner's docker update reaches a running container; 0
+    # (unset) is no cap.
+    cpus: ${SUITE_CPUS:-0}
+    networks:
+      - gate

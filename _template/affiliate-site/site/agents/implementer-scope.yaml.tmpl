@@ -1,0 +1,121 @@
+# The implementer path-scope for {{SLUG}} (reusable-agents
+# framework/core/implementer_scope.py; schema
+# shared/schemas/site-config.schema.json -> implementer). Copy this block, as
+# is, into every per-site site.yaml that dispatches work to the implementer
+# (agents/seo-opportunity-agent/site.yaml first) and into reusable-agents
+# examples/sites/{{SLUG}}.yaml, the config the implementer falls back to
+# (SEO_AGENT_CONFIG) for dispatches that carry none. The deployer reads the
+# deploy-repair block from the site.yaml that holds its deployer block.
+#
+# Operator-owned paths are excluded for EVERY dispatch kind:
+#   vendor/**               the affiliate-site kit, vendored read-only (kit
+#                           changes are made in reusable-agents
+#                           kits/affiliate-site and synced)
+#   site.json               tags, disclosure, byline, theme, crawler policy, limits
+#   {{POLICY_FILE}}  the niche policy
+#   tests/ui/gate.config.ts the gate's policy: compliance sources, content-policy
+#                           rule sets, and every waiver (tests/ui/pages.manifest.ts,
+#                           the page families, stays editable by code changes)
+# and the gate wiring, the deploy files, agents/, prompts/ and CLAUDE.md. A
+# scope_by_dispatch_kind block REPLACES the default block for its kind (it
+# does not merge), so every block below repeats those exclusions; a kind not
+# listed uses the default block.
+#
+# Where this is enforced: on the implementer's framework-chain path (recs that
+# target an excluded path are deferred before the LLM sees them, and files a
+# session touches outside its scope are reverted before the commit), and on
+# every deploy-repair commit (deploy_repair.check_repair). NOT on the
+# implementer's claude path, its default: the session commits by itself and
+# nothing checks this scope (reusable-agents agents/implementer/README.md,
+# "Path scope"). There vendor/** (with its MANIFEST.sha256), site.json, the
+# niche policy, tests/ui/gate.config.ts and the gate wiring are protected only
+# by instructions. The site's own checks narrow that and no more: the deploy
+# gate refuses a vendor/affiliate-kit that differs from the kit version it
+# claims as reusable-agents holds it (at a commit, or in the working tree),
+# but the gate shim that runs the check is a file in the site, and the check
+# only warns for a kit version no commit holds yet; nothing in the site checks
+# site.json, the policy or gate.config.ts (it refuses waivers only in the
+# page manifest).
+#
+# PREREQUISITE: keep this site's implementer dispatches disabled (no agent
+# that dispatches to the implementer for it registered or enabled) until
+# either the implementer's claude path applies this scope to its own commits
+# (reverts or refuses excluded paths), or the deployer refuses a release whose
+# diff since the last green deploy touches an excluded path (reusable-agents
+# kits/affiliate-site/CHANGELOG.md, Known issues).
+implementer:
+  repo_path: {{SITE_DIR}}
+  branch: main
+  commit_message_template: '{{SLUG}} agent: %s'
+  allowed_paths:
+    - "src/**"
+    - "db/migrations/**"
+    - "content/**"
+    - "tests/ui/**"
+    - "tests/unit/**"
+    - "scripts/**"
+    - "public/**"
+    - "README.md"
+    - "docs/**"
+  excluded_paths:
+    - "vendor/**"
+    - "site.json"
+    - "{{POLICY_FILE}}"
+    - "tests/ui/gate.config.ts"
+    - "CLAUDE.md"
+    - "agents/**"
+    - "prompts/**"
+    - "keep-the-lights-on.yaml"
+    - "deploy.env"
+    - "Dockerfile*"
+    - "docker-compose*.yml"
+    - "azure/**"
+    - "aws/**"
+    - "db/fixtures/**"
+    - "tests/run-local-suite.sh"
+    - "tests/suite.env"
+    - "tests/playwright.config.ts"
+    - "tests/unit/kit-integrity.test.ts"
+    - "package.json"
+    - "package-lock.json"
+  post_apply:
+    kick_mobile_build: false
+    kick_backend_deploy: true
+  scope_by_dispatch_kind:
+    # The deployer's test-gate repair session (reusable-agents
+    # agents/deployer/gate_runner.py, REPAIR.md): what a repair may edit to
+    # turn a red gate green. The code, and a test only to correct a wrong one
+    # (deploy_repair.check_repair rejects a weakened one). Never the kit, the
+    # gate's policy or page manifest, the gate wiring, the database or the
+    # deploy files.
+    deploy-repair:
+      allowed_paths: ["src/**", "content/**", "tests/ui/**", "tests/unit/**", "scripts/**"]
+      excluded_paths: ["vendor/**", "site.json", "{{POLICY_FILE}}", "tests/ui/gate.config.ts", "tests/ui/pages.manifest.ts",
+                       "db/**", "agents/**", "prompts/**", "deploy.env", "Dockerfile*", "docker-compose*.yml", "azure/**",
+                       "aws/**", "tests/run-local-suite.sh", "tests/suite.env", "tests/playwright.config.ts",
+                       "tests/unit/kit-integrity.test.ts", "package.json", "package-lock.json"]
+      post_apply: {kick_mobile_build: false, kick_backend_deploy: true}
+    # Dispatches that write database rows, never repository files (the
+    # authors write editorial_articles; h2h writes its comparison rows): "**"
+    # refuses every path, so anything such a session touches is reverted.
+    article-author:
+      allowed_paths: []
+      excluded_paths: ["**", "vendor/**", "site.json", "{{POLICY_FILE}}", "tests/ui/gate.config.ts"]
+      post_apply: {kick_mobile_build: false, kick_backend_deploy: false}
+    article-refresh:
+      allowed_paths: []
+      excluded_paths: ["**", "vendor/**", "site.json", "{{POLICY_FILE}}", "tests/ui/gate.config.ts"]
+      post_apply: {kick_mobile_build: false, kick_backend_deploy: false}
+    h2h:
+      allowed_paths: []
+      excluded_paths: ["**", "vendor/**", "site.json", "{{POLICY_FILE}}", "tests/ui/gate.config.ts"]
+      post_apply: {kick_mobile_build: false, kick_backend_deploy: false}
+    # A catalog-audit fix is a NEW SQL migration plus its summary
+    # (reusable-agents agents/implementer/CATALOG_AUDIT.md: write
+    # db/migrations/<UTC-ts>_catalog-audit-<criterion>.sql and
+    # changes/<rec-id>.summary.md, commit both), never a code edit.
+    catalog-audit:
+      allowed_paths: ["db/migrations/**", "changes/**"]
+      excluded_paths: ["vendor/**", "site.json", "{{POLICY_FILE}}", "tests/ui/gate.config.ts", "CLAUDE.md", "agents/**",
+                       "prompts/**", "deploy.env", "db/fixtures/**", "package.json", "package-lock.json"]
+      post_apply: {kick_mobile_build: false, kick_backend_deploy: true}

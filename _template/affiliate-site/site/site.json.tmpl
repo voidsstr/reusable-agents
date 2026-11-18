@@ -1,0 +1,83 @@
+{
+  "$schema": "./vendor/affiliate-kit/schema/site.schema.json",
+  "schemaVersion": 1,
+  "site": {
+    "id": "{{SLUG}}",
+    "brandName": {{json:BRAND}},
+    "domain": "{{DOMAIN}}",
+    "canonicalOrigin": "https://{{DOMAIN}}",
+    "language": "en-US"
+  },
+  "routes": {
+    "product": "/product/{asin}"
+  },
+  "amazon": {
+    "partnerTag": "{{PARTNER_TAG}}",
+    "placementTags": {},
+    "sourceTags": {},
+    "acceptSegmentTagParam": false,
+    "ctaLabel": "View current price on Amazon",
+    "searchCtaLabel": "Search Amazon for this item"
+  },
+  "sources": [
+    { "kind": "product", "prefixes": ["/product/"] },
+    { "kind": "article", "exact": ["/guides"], "prefixes": ["/guides/"] }
+  ],
+  "disclosure": {
+    "earnings": {{json:EARNINGS}},
+    "pagePath": "/disclosure"
+  },
+  "byline": {
+    "name": {{json:BYLINE}},
+    "profilePath": "/about"
+  },
+  "theme": {
+    "fontFamily": "system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif",
+    "light": {
+      "bg": "#ffffff",
+      "surface": "#f8fafc",
+      "text": "#0f172a",
+      "muted": "#475569",
+      "border": "#e2e8f0",
+      "link": "#1d4ed8",
+      "accent": "#b45309",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#2563eb"
+    },
+    "dark": {
+      "bg": "#0b1120",
+      "surface": "#111827",
+      "text": "#e5e7eb",
+      "muted": "#9ca3af",
+      "border": "#1f2937",
+      "link": "#93c5fd",
+      "accent": "#fbbf24",
+      "ctaBg": "#f59e0b",
+      "ctaText": "#111827",
+      "focus": "#60a5fa"
+    }
+  },
+  "crawlers": {
+    "policy": { "search": "allow", "agent": "allow", "training": "block" },
+    "disallowPaths": ["/api/", "/r/"]
+  },
+  "aiCrawlers": {
+    "extraStaticRanges": []
+  },
+  "edge": {
+    "cdn": "none",
+    "extraTrustedProxies": []
+  },
+  "indexNow": {
+    "key": "{{INDEXNOW_KEY}}"
+  },
+  "cache": {
+    "htmlSMaxAgeSeconds": 600,
+    "htmlMaxAgeSeconds": 60,
+    "ssrCacheSeconds": 0
+  },
+  "prices": {
+    "freshnessHours": 24
+  }
+}

@@ -1,0 +1,16 @@
+# Installed and generated (npm ci and npm run build recreate them).
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Deploy-gate output (tests/run-local-suite.sh, Playwright).
+test-results/
+playwright-report/
+blob-report/
+
+# Local secrets and scratch. deploy.env is committed: it holds only references.
+.env
+.env.*
+secrets.env
+*.log

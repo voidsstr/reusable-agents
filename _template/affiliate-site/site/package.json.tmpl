@@ -1,0 +1,21 @@
+{
+  "name": "{{SLUG}}",
+  "version": "0.1.0",
+  "private": true,
+  "description": {{json:DESCRIPTION}},
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node vendor/affiliate-kit/scripts/build-client.mjs --outdir dist/client",
+    "build:image": "npm run build && chmod -R a+rX package.json site.json dist vendor/affiliate-kit db content",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.build.json --noEmit",
+    "test": "jest",
+    "start": "node dist/src/index.js",
+    "migrate": "node dist/vendor/affiliate-kit/server/src/db/migrate.js --site-dir db/migrations",
+    "gate": "bash tests/run-local-suite.sh"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

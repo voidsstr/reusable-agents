@@ -1,0 +1,22 @@
+{
+  "details": [
+    "Specifications come from the makers' published spec sheets and manuals. Prices and availability come from Amazon.com and carry the time they were checked; this file never quotes one."
+  ],
+  "sections": [
+    {
+      "title": "Start here",
+      "links": [
+        { "title": "Buying guides", "href": "/guides", "note": "every guide, newest first" },
+        { "title": "About", "href": "/about", "note": "who writes the site and where its data comes from" },
+        { "title": "How we earn money", "href": "/disclosure", "note": "the Amazon Associates disclosure" }
+      ]
+    }
+  ],
+  "citationGuidance": [
+    "Cite the guide or product page URL; pages are updated in place.",
+    "Do not quote a price from this site: prices change, and each one on a page carries the time it was checked."
+  ],
+  "citedPages": { "pathPrefixes": ["/guides/"], "articlePathPrefix": "/guides/" },
+  "latestArticles": { "pathPrefix": "/guides/" },
+  "sitemaps": ["/sitemap.xml"]
+}

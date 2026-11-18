@@ -1,0 +1,200 @@
+# {{BRAND}} ({{DOMAIN}}): instructions for Claude
+
+{{BRAND}} is an Amazon Associates review site: catalog-driven product pages
+with fresh prices, buyer-intent guides, and an agent fleet on the
+reusable-agents framework. It is built on the **affiliate-site kit**
+(`vendor/affiliate-kit`, kit {{KIT_VERSION}}), which holds the money mechanics
+(price rule, CTAs, Offer JSON-LD, click logging), the licence notices, the
+deploy gate and the deploy scripts. This repository holds the niche: its
+`site.json`, its renderers and domain code, its migrations and content, and
+config-only agent directories.
+
+Repository: `{{SITE_DIR}}`, branch `main`. The framework rules in
+`reusable-agents/CLAUDE.md` (AgentBase, framework-first, Opus-only authoring,
+local-only image generation, pricing integrity) apply here too; this file adds
+what is specific to a kit site.
+
+## North star: verified-human Amazon clicks
+
+The one number this site exists to move is **verified-human Amazon clicks**:
+clicks on our Amazon links that the click beacon records (`outbound_clicks`,
+`via='beacon'`) and that pass the framework's human-click verdict (view
+`outbound_clicks_verified_human`), per week, per money placement
+(`data-cta-placement`). Organic clicks, indexed pages and IP-verified
+assistant fetches (`ai_traffic_log`, `ip_verified IS NOT FALSE`) are the
+leading indicators. Pages generated, articles published and code shipped are
+not success.
+
+Before any change: name the goal it moves and how the click series will
+show it. A change that moves no metric did not happen. Never trade a licence
+rule or a gate for clicks.
+
+## The kit boundary (read-only)
+
+- `vendor/affiliate-kit/` is vendored **read-only** by reusable-agents
+  `install/sync-site-kit.sh`, which writes `KIT_VERSION` and
+  `MANIFEST.sha256`. Before every run the deploy gate
+  (`tests/run-local-suite.sh`) checks the vendored copy against that
+  manifest, then against the kit version it claims in the reusable-agents
+  checkout (`install/sync-site-kit.sh --verify-anchored`: byte-identical to
+  that version at a commit there, or in its working tree), and stops (exit
+  78) on any difference: an edit, an addition, a removal, a symbolic link,
+  or an edit whose manifest line was rewritten to match.
+  `tests/unit/kit-integrity.test.ts` runs the same checks in `npm test`.
+- What those checks cannot stop: they live in this repository. A session
+  that also rewrites the gate shim or that test, or claims a kit version no
+  reusable-agents commit holds yet (the anchored check only warns then),
+  gets an edited kit through. On the implementer's claude path nothing
+  applies the path scope, so there the kit boundary is kept by you alone.
+  Never "fix" a check, the manifest, `KIT_VERSION` or a vendored file.
+- A kit change is made in reusable-agents `kits/affiliate-site`, released with
+  a version bump and a CHANGELOG entry, committed there (the gate anchors the
+  vendored copy to reusable-agents commits), then synced:
+  `bash /home/voidsstr/development/reusable-agents/install/sync-site-kit.sh {{SITE_DIR}}`
+  (the kit README's "Upgrading a site" lists the follow-up steps).
+- Import the kit from `vendor/affiliate-kit/server/src` (core),
+  `.../server/src/http` (mountKit, beacon, robots, llms), `.../server/src/render`
+  (layout, SEO, JSON-LD, Markdown, sitemaps) and `.../server/src/db`
+  (migrations). Never copy kit code into `src/`: extend it through
+  `site.json`, or change the kit.
+
+## Operator-owned files
+
+Agents never edit these. The implementer scope (`agents/implementer-scope.yaml`)
+excludes them for every dispatch kind, so a rec that targets one is deferred
+and a stray edit is reverted. That scope is checked on the implementer's
+framework-chain path and on every deploy-repair commit, not on its claude
+path (its default): there, these rules are yours to keep, and nothing else
+stops an edit to `site.json`, the niche policy or `tests/ui/gate.config.ts`
+from shipping (`composeGateConfig` refuses a waiver only when the page
+manifest sets it). Until reusable-agents enforces the scope on that path,
+or its deployer refuses a release that touches these files, the operator
+keeps this site's implementer dispatches disabled (`agents/README.md`).
+
+- `site.json`: tracking IDs, segment tags, disclosure, byline, theme, crawler
+  policy, IndexNow key, cache and price-freshness limits.
+- `{{POLICY_FILE}}`: the niche policy.
+- `tests/ui/gate.config.ts`: the gate's policy. The recall and content-policy
+  sources (or the reason a site has none), the other compliance sources, the
+  product-page specs' sources, and every waiver: a check a family skips, a
+  family whose fixture may be empty, a sitemap empty on the fixture, a
+  production-only link target. It refuses a page manifest that sets any of
+  these, so the gate fails if one is added in the wrong file.
+- `CLAUDE.md`, `agents/**`, `prompts/**`, `keep-the-lights-on.yaml`,
+  `deploy.env`, `db/fixtures/**`, the gate wiring (`tests/run-local-suite.sh`,
+  `tests/suite.env`, `tests/playwright.config.ts`), the deploy files and
+  `vendor/**`.
+
+`tests/ui/pages.manifest.ts` (the page families) is the site's own: a change
+that adds a page route adds its family there. A deploy repair never edits it
+(reusable-agents `deploy_repair` protects every manifest under `tests/`).
+
+## Niche safety boundary (operator-owned)
+
+Fill this in before the first article ships: what this site never
+recommends, never claims and never shows. The machine-enforced parts live in
+`{{POLICY_FILE}}` and in the content-policy rule sets every rendered page and
+article must pass (`tests/ui/gate.config.ts` `CONTENT_RULE_SETS`: {{CONTENT_RULE_SETS_TEXT}}).
+
+## Amazon data rules (Associates licence; the kit and the gate enforce them)
+
+1. **Store only ASINs past 24 hours.** Every value from the Creators API
+   (title, image URL, detail-page URL, price, list price, availability, and
+   every other API field) is purged within 24h of being fetched; only the ASIN
+   and our own derived data (lane, lifecycle, outcome) persist. The purge runs
+   only after a successful refresh, and a failed refresh never blanks data.
+2. **Prices only through the kit.** `priceStamp()` shows a price only while it
+   is quotable (USD, at least $1, fetched within 24h minus the HTML cache age),
+   with its UTC time and the exact IP License 2(i) disclaimer behind
+   "Details". Never format a price yourself, and never put one in a title, a
+   meta or social description, llms.txt or anywhere without a stamp.
+3. **The 2(k) notice wherever Amazon text shows.** Wrap Amazon-sourced text in
+   `amazonTextHtml()` (or mark it `data-amazon-content`); the layout then
+   carries the notice in plain view.
+4. **Amazon links only through the kit**: `cta()`, `amazonSearchCta()`,
+   `detailLink()` or `/r/<ASIN>`, which set `rel="sponsored nofollow
+   noopener"`, `target="_blank"`, a `data-cta-placement` and a tag from
+   `site.json`.
+5. **No Amazon images stored or reused.** Never in `hero_image_url` or
+   `og:image` (a database CHECK and the gate refuse them). Article heroes come
+   from the local image daemon (`http://127.0.0.1:7861/generate`) or stay NULL.
+6. **No price history, price alerts, price tracking or "lowest ever" /
+   "all-time low" claims** (Participation Requirements 6(y)).
+7. **HTML caching stays within `site.json` `cache`**: `s-maxage` at most 600,
+   never "cache everything" for HTML at a CDN. The price window depends on it.
+8. **Pricing integrity**: never crown a pick with an invalid price
+   (reusable-agents CLAUDE.md, "Pricing integrity").
+
+## The gate contract
+
+- **The deploy gate** is `bash tests/run-local-suite.sh`: the kit runner with
+  `tests/suite.env`. It builds the production image (`Dockerfile.azure`) from
+  the tree, starts it on :{{GATE_PORT}} against the fixture Postgres on
+  :{{FIXTURE_DB_PORT}}, seeds and re-stamps the fixture (`db/fixtures`), and runs
+  the kit's specs (all-pages, kit-compliance, AI fetchers, unbuyable PDPs, CTA
+  placements) plus this site's `tests/ui/*.spec.ts`. Before any of that it
+  checks the vendored kit against `MANIFEST.sha256` and against the kit
+  release it claims in reusable-agents. It never overlaps another
+  gate on this host: for the whole run it holds the locks of the gate projects
+  `tests/suite.env` names (`SUITE_HOST_LOCKS='{{HOST_LOCKS}}'`; a named lock is
+  created when missing, so the exclusion holds even before that gate has run
+  since a reboot), and `*` adds any other gate lock present when it starts.
+  It runs niced, with a CPU cap on the app and the fixture database.
+  Exit codes: 0 pass, 1 tests failed, 2 fixture DB, 3 image build, 4 start,
+  5 exited before healthy, 6 never healthy, 7 lock timeout, 8 fixture SQL
+  (seed or re-stamp) failed, 78 settings or an edited vendored kit.
+- **Every route has a gate family.** A page route in `src/routes/table.ts`
+  without a family in `tests/ui/pages.manifest.ts` (or a non-page reason in
+  the table) fails the gate; so does a sitemap the manifest does not list.
+- **The recall gate and the content gate are never cut.** Each names its
+  source in `tests/ui/gate.config.ts`, or states there, in words, why the
+  site has none yet; the gate prints that reason on every run.
+- **Never weaken a test to pass**, never edit a kit spec, never grant a
+  waiver to get a change through, never deploy around the gate.
+  `--skip-tests` is only for an operator rollback.
+- **Unit tests**: `npm test` (kit integrity, the app's routes and pages, the
+  deploy files). `npm run typecheck` checks the site and the vendored kit.
+
+## Git: commit straight to main
+
+Commit straight to `main`: no feature branches unless the operator asks. Never
+push unless asked; this repository has no remote until the operator adds one.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `site.json` | the site's identity, tags, notices, theme and limits (the kit's SiteContext) |
+| `src/index.ts` | the server: kit middleware first (mountKit), then the route table, then the 404 |
+| `src/routes/table.ts` | every route: renderer, sitemap kind and gate family |
+| `src/render/` | page renderers on the kit's layout, SEO, JSON-LD and Markdown helpers |
+| `src/db/` | the pool and bounded reads |
+| `{{POLICY_FILE}}` | the niche policy (operator-owned) |
+| `db/migrations/` | site migrations, applied after the kit's (never edit an applied file) |
+| `db/fixtures/` | the gate fixture's seed and re-stamp SQL |
+| `content/llms.json` | the llms.txt copy |
+| `tests/` | gate wiring, the gate policy (`ui/gate.config.ts`) and page manifest (`ui/pages.manifest.ts`), site specs, unit tests |
+| `agents/` | config-only agent directories, the implementer scope, registration |
+| `prompts/implementer/` | runbook addenda per dispatch kind |
+| `deploy.env`, `Dockerfile.azure`, `azure/`, `aws/` | deployment (kit scripts; `vendor/affiliate-kit/deploy/README.md`) |
+| `keep-the-lights-on.yaml` | the on-call config (inactive until registered) |
+| `vendor/affiliate-kit/` | the kit, read-only |
+
+## Commands
+
+```bash
+npm ci                         # dependencies (the kit's exact pins)
+npm run typecheck && npm test  # types (site + vendored kit) and unit tests
+npm run build                  # dist/ (server) and dist/client (kit browser bundle)
+bash tests/run-local-suite.sh  # the deploy gate (docker)
+bash azure/deploy.sh --dry-run # the Azure deploy, printed (vendor/affiliate-kit/deploy/README.md)
+```
+
+Articles: on a content-policy site, authors write drafts and the publish
+gate (reusable-agents `framework/cli/article_publish_gate.py`) promotes them,
+but only once the site's migrations install the kit's publish guard
+(`vendor/affiliate-kit/migrations/README.md`, "The publish guard"). The
+scaffold does not install it, and `editorial_articles.status` defaults to
+`published`: until the guard is in, nothing in the database stops an author's
+INSERT from going live as written. Install it before the first article.
+Privacy page: update it before adding analytics or any other tracking.

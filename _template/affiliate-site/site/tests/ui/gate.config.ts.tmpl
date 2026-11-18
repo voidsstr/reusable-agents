@@ -1,0 +1,169 @@
+import * as path from 'path';
+import type { CheckId, GateConfig, PageFamily } from '../../vendor/affiliate-kit/tests/ui/lib/manifestTypes';
+import { GUIDES_PATH, nonPageRoutes, pageRoutes } from '../../src/routes/table';
+import { PAGE_MANIFEST } from './pages.manifest';
+
+/**
+ * OPERATOR-OWNED: this site's deploy-gate policy, and the module the kit's
+ * specs load (tests/playwright.config.ts names it; the kit validates what it
+ * exports: vendor/affiliate-kit/tests/ui/lib/gateConfig.ts, every field
+ * documented in manifestTypes.ts, every check in vendor/affiliate-kit/tests/README.md).
+ *
+ * The gate config is two files:
+ *   tests/ui/pages.manifest.ts  WHAT the site serves: its page families,
+ *                               their samples and sitemaps. A change that
+ *                               adds a page route adds its family there.
+ *   tests/ui/gate.config.ts     WHAT the gate enforces, and every way it may
+ *                               check less: the recall and content-policy
+ *                               sources (or the reason a site has none), the
+ *                               other compliance sources, the PDP specs'
+ *                               sources, and each waiver. Only the operator
+ *                               edits this file: the implementer scope
+ *                               excludes it for every dispatch kind, and
+ *                               composeGateConfig() refuses a manifest that
+ *                               sets any of it, so a change that weakens the
+ *                               gate cannot hide in the manifest. Nothing
+ *                               checks an edit HERE: the scope is not applied
+ *                               on the implementer's claude path, so there
+ *                               this rule is kept by instructions alone.
+ *
+ * The recall gate and the content gate are never cut (binding amendment 11):
+ * each names its source, or states here, in words, why the site has none yet.
+ * Every waiver carries its reason, printed with the skip on every run.
+ *
+ * When product pages land: give them a family in the manifest (monetized:
+ * true); here, replace RECALLS_WAIVED with compliance.recalledProducts and set
+ * compliance.amazonTitles, both read from the fixture database (so a renderer
+ * that forgets the 2(k) marker or a recall cannot also hide it from the gate),
+ * and set unbuyable and placements for the PDP specs.
+ */
+
+const SITE_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * The reusable-agents checkout whose framework/cli/content_policy_scan.py the
+ * gate runs: KIT_GATE_FRAMEWORK_DIR or REUSABLE_AGENTS_DIR when set, else the
+ * checkout next to this repository (the fleet layout; the deployer's clean
+ * worktree resolves it from GATE_SOURCE_REPO, the live checkout).
+ */
+const FRAMEWORK_DIR = process.env.KIT_GATE_FRAMEWORK_DIR
+  || process.env.REUSABLE_AGENTS_DIR
+  || path.resolve(process.env.GATE_SOURCE_REPO || SITE_ROOT, '..', 'reusable-agents');
+
+/** Content-policy rule sets every rendered page and published article must pass (framework config/content-policy-config.json). */
+export const CONTENT_RULE_SETS: readonly string[] = Object.freeze({{jsonlist:CONTENT_RULE_SETS}});
+
+/**
+ * Why this site runs no content-policy rule set, in words; '' when
+ * CONTENT_RULE_SETS names any. The gate skips the scan with this reason.
+ */
+export const CONTENT_POLICY_WAIVED: string = {{json:CONTENT_POLICY_WAIVED}};
+
+/**
+ * Why the recall check has nothing to check yet. Replace it with
+ * compliance.recalledProducts (the recalled SKUs and their product pages, read
+ * from the fixture database) as soon as the site has a product catalog.
+ */
+export const RECALLS_WAIVED = 'no product catalog yet (scaffold): when product pages land, read the recalled SKUs from the fixture database into compliance.recalledProducts';
+
+/**
+ * Checks a page family skips, each with its reason (CheckId in
+ * manifestTypes.ts): the only place a family may skip one. The kit-compliance
+ * rules are never waivable.
+ */
+export const FAMILY_EXCEPTIONS: Readonly<Record<string, Readonly<Partial<Record<CheckId, string>>>>> = Object.freeze({});
+
+/** Families whose fixture may hold no sample at all, each with its reason (PageFamily.fixtureOptional). */
+export const FIXTURE_OPTIONAL: Readonly<Record<string, string>> = Object.freeze({});
+
+/** Sub-sitemaps that answer 503 (emptyOnFixture) or an empty urlset (emptyUrlsetOnFixture) on the fixture by design, with the reason. */
+export const SITEMAP_WAIVERS: Readonly<{ emptyOnFixture?: Record<string, string>; emptyUrlsetOnFixture?: Record<string, string> }> = Object.freeze({});
+
+/** Internal link targets that exist in production but not in the fixture, with the reason. */
+export const PROD_ONLY_LINK_TARGETS: Readonly<Record<string, string>> = Object.freeze({});
+
+/** What tests/ui/pages.manifest.ts may set: what the site serves, never what the gate skips. */
+export interface PageManifest {
+  /** Every page family the site serves (no exceptions or fixtureOptional: those are granted above). */
+  families: PageFamily[];
+  /** The sub-sitemaps, their sample sizes and shards (the fixture waivers are granted above). */
+  sitemaps?: Omit<NonNullable<GateConfig['sitemaps']>, 'emptyOnFixture' | 'emptyUrlsetOnFixture'>;
+  chrome?: GateConfig['chrome'];
+  redirects?: GateConfig['redirects'];
+  cacheKeyCases?: GateConfig['cacheKeyCases'];
+  phoneSweep?: GateConfig['phoneSweep'];
+}
+
+const MANIFEST_KEYS: readonly string[] = ['families', 'sitemaps', 'chrome', 'redirects', 'cacheKeyCases', 'phoneSweep'];
+const FAMILY_WAIVERS: readonly string[] = ['exceptions', 'fixtureOptional'];
+const SITEMAP_WAIVER_KEYS: readonly string[] = ['emptyOnFixture', 'emptyUrlsetOnFixture'];
+
+/** A page manifest that sets what only this file may set. Thrown at load, so every gate spec fails with the list. */
+export class GatePolicyError extends Error {
+  constructor(readonly problems: readonly string[]) {
+    super(`gate policy (tests/ui/gate.config.ts, operator-owned):\n  ${problems.join('\n  ')}`);
+    this.name = 'GatePolicyError';
+  }
+}
+
+const OWNED = 'only tests/ui/gate.config.ts (operator-owned) grants it';
+
+/**
+ * The gate config: the page manifest, plus this file's routes, compliance
+ * sources and waivers. Throws GatePolicyError when the manifest sets a key
+ * this file owns, when a family carries its own waiver, or when a waiver here
+ * names a family the manifest does not have.
+ */
+export function composeGateConfig(manifest: PageManifest): GateConfig {
+  const problems: string[] = [];
+  const raw = manifest as unknown as Record<string, unknown>;
+  for (const key of Object.keys(raw)) {
+    if (!MANIFEST_KEYS.includes(key) && raw[key] !== undefined) problems.push(`pages.manifest.ts sets '${key}': ${OWNED}`);
+  }
+  const families = Array.isArray(manifest.families) ? manifest.families : [];
+  const ids = new Set(families.map((f) => f?.id));
+  const composed: PageFamily[] = families.map((f) => {
+    const own = (f ?? {}) as unknown as Record<string, unknown>;
+    const id = String(own.id);
+    for (const key of FAMILY_WAIVERS) {
+      if (own[key] !== undefined) problems.push(`family '${id}' sets ${key}: ${OWNED} (${key === 'exceptions' ? 'FAMILY_EXCEPTIONS' : 'FIXTURE_OPTIONAL'})`);
+    }
+    const exceptions = FAMILY_EXCEPTIONS[id];
+    const fixtureOptional = FIXTURE_OPTIONAL[id];
+    return {
+      ...f,
+      ...(exceptions ? { exceptions: { ...exceptions } } : {}),
+      ...(fixtureOptional ? { fixtureOptional } : {}),
+    };
+  });
+  for (const [label, grants] of [['FAMILY_EXCEPTIONS', FAMILY_EXCEPTIONS], ['FIXTURE_OPTIONAL', FIXTURE_OPTIONAL]] as const) {
+    for (const id of Object.keys(grants)) if (!ids.has(id)) problems.push(`${label} names family '${id}', which pages.manifest.ts does not have`);
+  }
+  const sitemaps = (manifest.sitemaps ?? {}) as Record<string, unknown>;
+  for (const key of SITEMAP_WAIVER_KEYS) {
+    if (sitemaps[key] !== undefined) problems.push(`pages.manifest.ts sets sitemaps.${key}: ${OWNED} (SITEMAP_WAIVERS)`);
+  }
+  if (problems.length) throw new GatePolicyError(problems);
+
+  const config: GateConfig = {
+    families: composed,
+    // From the route table itself, so the gate fails on a route with no family.
+    routes: { declared: pageRoutes, nonPage: nonPageRoutes() },
+    compliance: {
+      articlePath: `${GUIDES_PATH}/{slug}`,
+      recallsWaived: RECALLS_WAIVED,
+      ...(CONTENT_RULE_SETS.length > 0 ? { contentPolicy: { ruleSets: [...CONTENT_RULE_SETS], frameworkDir: FRAMEWORK_DIR } } : {}),
+      // Both set, or neither: the kit's validator refuses the config with the reason.
+      ...(CONTENT_POLICY_WAIVED ? { contentPolicyWaived: CONTENT_POLICY_WAIVED } : {}),
+    },
+  };
+  if (manifest.sitemaps || Object.keys(SITEMAP_WAIVERS).length) config.sitemaps = { ...manifest.sitemaps, ...SITEMAP_WAIVERS };
+  if (Object.keys(PROD_ONLY_LINK_TARGETS).length) config.prodOnlyLinkTargets = { ...PROD_ONLY_LINK_TARGETS };
+  if (manifest.chrome) config.chrome = manifest.chrome;
+  if (manifest.redirects) config.redirects = manifest.redirects;
+  if (manifest.cacheKeyCases) config.cacheKeyCases = manifest.cacheKeyCases;
+  if (manifest.phoneSweep) config.phoneSweep = manifest.phoneSweep;
+  return config;
+}
+
+export const config: GateConfig = composeGateConfig(PAGE_MANIFEST);

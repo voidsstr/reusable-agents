@@ -1,0 +1,34 @@
+# The deploy gate's fixture Postgres. tests/run-local-suite.sh starts it when
+# it is not running and never recreates it; the app under test applies the
+# migrations to it, and db/fixtures/*.sql seed and re-stamp it at every gate
+# run. Fixture credentials, never secrets. No restart policy: nothing here
+# starts on its own.
+services:
+  postgres:
+    image: postgres:16
+    container_name: ${SUITE_DB_CONTAINER:-{{SLUG}}_postgres}
+    environment:
+      POSTGRES_USER: {{FIXTURE_DB_USER}}
+      POSTGRES_PASSWORD: {{FIXTURE_DB_PASSWORD}}
+      POSTGRES_DB: {{FIXTURE_DB_NAME}}
+    ports:
+      - "127.0.0.1:${SUITE_DB_PORT:-{{FIXTURE_DB_PORT}}}:5432"
+    # The gate runner's CPU cap (tests/suite.env SUITE_CPUS) from creation, not
+    # only once the runner's docker update reaches a running container; 0
+    # (unset) is no cap.
+    cpus: ${SUITE_CPUS:-0}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{FIXTURE_DB_USER}} -d {{FIXTURE_DB_NAME}}"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    networks:
+      - gate
+
+volumes:
+  pgdata:
+
+networks:
+  gate:

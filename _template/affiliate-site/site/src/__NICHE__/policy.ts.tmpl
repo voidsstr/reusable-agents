@@ -1,0 +1,32 @@
+/**
+ * OPERATOR-OWNED: the {{NICHE}} niche's policy for {{DOMAIN}}.
+ *
+ * The values here bound what this site may publish and recommend: product
+ * kinds it never covers, claims it never makes, thresholds a pick must clear.
+ * The operator decides them; agents never edit this file. It is excluded
+ * from every implementer dispatch kind (agents/implementer-scope.yaml), so a
+ * rec that targets it is deferred and an edit that touches it is reverted.
+ *
+ * Niche code (src/{{NICHE}}/) reads these values; it never restates them as
+ * literals. A change here is a policy decision: record who made it and when.
+ * Text rules that must hold on every rendered page belong in the content
+ * policy rule sets the gate scans with (CLAUDE.md), not here.
+ */
+
+export interface NichePolicy {
+  /** When the operator last reviewed this policy (YYYY-MM-DD). */
+  readonly reviewedOn: string;
+  /** Who reviewed it. */
+  readonly reviewedBy: string;
+  /** Product kinds (catalog lanes) the site never lists or recommends. */
+  readonly excludedProductKinds: readonly string[];
+  /** Phrases no page may carry, beyond the content-policy rule sets. */
+  readonly bannedClaims: readonly string[];
+}
+
+export const POLICY: NichePolicy = Object.freeze({
+  reviewedOn: '{{CREATED_ON}}',
+  reviewedBy: 'operator (not yet reviewed)',
+  excludedProductKinds: Object.freeze([] as string[]),
+  bannedClaims: Object.freeze([] as string[]),
+});

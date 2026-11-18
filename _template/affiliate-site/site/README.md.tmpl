@@ -1,0 +1,76 @@
+# {{BRAND}}
+
+{{DOMAIN}}: an Amazon Associates review site on the affiliate-site kit
+({{KIT_VERSION}}, vendored read-only in `vendor/affiliate-kit`). Scaffolded on
+{{CREATED_ON}} by reusable-agents `install/create-affiliate-site.sh`.
+
+Start with `CLAUDE.md`: the north star, the kit boundary, the Amazon data
+rules and the gate contract.
+
+## Quick start
+
+```bash
+npm ci
+npm run typecheck && npm test
+npm run build
+bash tests/run-local-suite.sh        # the deploy gate: builds the image, needs docker
+```
+
+Local server against a database you own (never production):
+
+```bash
+DATABASE_URL=postgresql://... MIGRATE_ON_BOOT=1 SITE_HERMETIC=1 PORT=8080 npm start
+```
+
+## What the scaffold gives you
+
+- The kit's routes (health, robots.txt, llms.txt, IndexNow key, click beacon,
+  browser bundle) and AI-traffic logging, mounted first.
+- A route table (`src/routes/table.ts`) with the home page, the guides index
+  and article pages (from the kit's `editorial_articles`), about, disclosure,
+  privacy, and the sitemaps.
+- The deploy gate wired to a fixture Postgres on :{{FIXTURE_DB_PORT}} with the
+  app under test on :{{GATE_PORT}}, a fixture article, and the kit's
+  compliance specs. It first checks the vendored kit against its manifest
+  and against the kit release it claims in reusable-agents, and never
+  overlaps the gates in `tests/suite.env` `SUITE_HOST_LOCKS`.
+- The gate config in two files: `tests/ui/pages.manifest.ts` (the page
+  families; add one with every page route) and `tests/ui/gate.config.ts`
+  (operator-owned: the compliance sources, the content-policy rule sets and
+  every waiver).
+- `deploy.env`, the rendered `Dockerfile.azure`, and `azure/` and `aws/`
+  wrappers around the kit's deploy scripts.
+- Config templates: `agents/implementer-scope.yaml`, `keep-the-lights-on.yaml`.
+
+## Next steps
+
+1. Fill in `site.json` (segment tags per placement and source, byline,
+   theme), the niche safety boundary in `CLAUDE.md` and `{{POLICY_FILE}}`.
+2. Add the niche: catalog migrations (`db/migrations/0001_...`), domain code
+   under `src/{{NICHE}}/`, renderers and their routes, with a gate family for
+   each in `tests/ui/pages.manifest.ts` and fixture rows in `db/fixtures/`.
+   When product pages land, set the recall source (instead of the scaffold's
+   recall waiver), the Amazon titles and the product-page specs' sources in
+   `tests/ui/gate.config.ts`, and add a product page and a best-of list that
+   exist in production to `deploy.env` `SMOKE_PATHS` (it lists only routes
+   the site serves; the post-release smoke expects 200 from each).
+3. On a content-policy site, install the kit's publish guard before the first
+   article (`vendor/affiliate-kit/migrations/README.md`, "The publish guard"):
+   until then nothing stops an author's INSERT from publishing as written.
+4. Provision and deploy: `vendor/affiliate-kit/deploy/README.md`.
+5. Agents: config-only directories under `agents/`; register only on the
+   operator's go-ahead. Keep the implementer's dispatches for this site
+   disabled until the framework enforces `agents/implementer-scope.yaml` on
+   every path (`agents/README.md`, "Prerequisite").
+
+## Upgrading the kit
+
+```bash
+bash /home/voidsstr/development/reusable-agents/install/sync-site-kit.sh {{SITE_DIR}}
+bash vendor/affiliate-kit/deploy/render-dockerfile.sh --env deploy.env --write
+npm ci && npm run typecheck && npm test && bash tests/run-local-suite.sh
+```
+
+The sync reports any dependency pin the new kit changed; align `package.json`
+with `npm install <pkg>@<pin> --save-exact`. The kit README ("Upgrading a
+site") has the full path.
