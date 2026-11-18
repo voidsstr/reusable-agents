@@ -1,0 +1,856 @@
+{
+  "schema_version": 1,
+  "about": [
+    "F0 inventory of code in framework/ and agents/ that enumerates the reference sites; enforced by framework/tests/test_no_two_site_enumerations.py (see its docstring for what counts as a hit).",
+    "This is W1's work list (switch consumers to site_registry after the BFCM freeze): each entry's w1 note says what replaces it. Fix an entry, delete it; the test fails on stale entries so the list stays exact and ends at zero.",
+    "Entries match on (path, scope, kind, size, tokens) and count. line and snippet are informational: line numbers drift.",
+    "reference_sites holds the site ids the scan looks for: the two live sites plus runtimepicks, the site being built, so new code cannot pair it with a live site either. If the niche changes, replace runtimepicks with the new site's id.",
+    "not_detected lists W1-relevant places this scan cannot flag: they name a single site (a default), no literal at all, or sit outside the scan roots (install/ and scripts/ are not scanned). They are informational and not enforced; W1 should change each together with the matching entry."
+  ],
+  "generated_from_commit": "6f4dcfd",
+  "generated_on": "2026-11-17",
+  "reference_sites": [
+    "aisleprompt",
+    "specpicks",
+    "runtimepicks"
+  ],
+  "sanctioned_paths": [],
+  "entries": [
+    {
+      "path": "agents/agent-metrics-collector/agent.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "AISLEPROMPT_DATABASE_URL",
+        "SPECPICKS_DATABASE_URL",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 49,
+      "snippet": "DB_DSN_MAP = {",
+      "w1": "Site -> DSN env var map. W1: resolve each registered site's dsn_env (and dsn_env_aliases) from site_registry instead."
+    },
+    {
+      "path": "agents/agent-metrics-collector/agent.py",
+      "scope": "m_progressive_improvement",
+      "kind": "if-chain:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 168,
+      "snippet": "if site == \"aisleprompt\":",
+      "w1": "Catalog-health SQL: recipe_catalog for one site, products for 'everyone else'. A third site would run the products query. W1: per-site metric SQL from config keyed by site; skip sites without one."
+    },
+    {
+      "path": "agents/agent-metrics-collector/agent.py",
+      "scope": "m_article_author",
+      "kind": "if-chain:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 193,
+      "snippet": "if site == \"aisleprompt\":",
+      "w1": "Both branches run the same SQL today, so the branch only encodes the two sites. W1: drop the branch (one query for every site)."
+    },
+    {
+      "path": "agents/agent-metrics-collector/agent.py",
+      "scope": "m_catalog_audit",
+      "kind": "if-chain:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 232,
+      "snippet": "if site == \"aisleprompt\":",
+      "w1": "Catalog-audit health SQL differs by site schema. W1: per-site metric SQL from config keyed by site."
+    },
+    {
+      "path": "agents/agent-metrics-collector/agent.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 19,
+      "tokens": [
+        "aisleprompt",
+        "aisleprompt-article-proposal-agent",
+        "aisleprompt-catalog-audit-agent",
+        "aisleprompt-competitor-research-agent",
+        "aisleprompt-kitchen-scraper",
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-seo-opportunity-agent",
+        "aisleprompt-user-growth-strategist",
+        "specpicks",
+        "specpicks-article-proposal-agent",
+        "specpicks-benchmark-research-agent",
+        "specpicks-catalog-audit-agent",
+        "specpicks-competitor-research-agent",
+        "specpicks-ebay-product-sync-agent",
+        "specpicks-head-to-head-agent",
+        "specpicks-product-hydration-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-scraper-watchdog",
+        "specpicks-seo-opportunity-agent"
+      ],
+      "count": 1,
+      "line": 409,
+      "snippet": "AGENT_METRIC_FNS: dict[str, Callable[[], dict[str, float]]] = {",
+      "w1": "Metric-function table keyed by full per-site agent ids. W1: key by agent template ('*-seo-opportunity-agent' -> fn) and expand over site_registry sites."
+    },
+    {
+      "path": "agents/backlog-dispatcher-agent/agent.py",
+      "scope": "<module>",
+      "kind": "tuple",
+      "size": 14,
+      "tokens": [
+        "aisleprompt-article-proposal-agent",
+        "aisleprompt-catalog-audit-agent",
+        "aisleprompt-competitor-research-agent",
+        "aisleprompt-feedback-triage-agent",
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-seo-opportunity-agent",
+        "specpicks-article-proposal-agent",
+        "specpicks-catalog-audit-agent",
+        "specpicks-category-integrity-agent",
+        "specpicks-competitor-research-agent",
+        "specpicks-feedback-triage-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-seo-opportunity-agent",
+        "specpicks-stale-content-watcher"
+      ],
+      "count": 1,
+      "line": 87,
+      "snippet": "PRODUCER_AGENT_IDS = (",
+      "w1": "PRODUCER_AGENT_IDS (14 ids today; the design said 15). Without W1 a third site's producers are never dispatched. W1: site_registry.producer_agent_ids() + the explicit extras (category-integrity, stale-content-watcher); equivalence test against today's ids."
+    },
+    {
+      "path": "agents/backlog-dispatcher-agent/agent.py",
+      "scope": "_site_from_agent_id",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 113,
+      "snippet": "for prefix in (\"aisleprompt\", \"specpicks\"):",
+      "w1": "Derives the site from an agent-id prefix. W1: site_registry.site_for_agent() (the framework's own 'reusable-agents-' prefix stays a framework constant)."
+    },
+    {
+      "path": "agents/backlog-dispatcher-agent/agent.py",
+      "scope": "_write_live_scopes_heartbeat",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 437,
+      "snippet": "for site in (\"specpicks\", \"aisleprompt\"):",
+      "w1": "Extracts the site marker from a live scope name. W1: match any site_registry id."
+    },
+    {
+      "path": "agents/backlog-dispatcher-agent/agent.py",
+      "scope": "_producer_allows_auto_implement",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 524,
+      "snippet": "for site in (\"aisleprompt\", \"specpicks\"):",
+      "w1": "On-disk site.yaml fallback guesses <site-repo>/agents/... per site. W1: site_registry repo_path + site_for_agent()."
+    },
+    {
+      "path": "agents/catalog-audit-agent/agent.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "_findings_to_recs_aisleprompt",
+        "_findings_to_recs_specpicks_images",
+        "aisleprompt-catalog-audit",
+        "specpicks-image-csv"
+      ],
+      "count": 1,
+      "line": 360,
+      "snippet": "CONVERTERS = {",
+      "w1": "Findings-format registry; the two format ids carry the reference sites' names but are selected per site by site.yaml findings_format, so a third site needs no code change unless it needs a new format. catalog-audit is out of the RuntimePicks launch roster. W1: keep (deliberate) or rename the formats to neutral ids with aliases."
+    },
+    {
+      "path": "agents/catalog-audit-agent/agent.py",
+      "scope": "CatalogAuditAgent.signals",
+      "kind": "if-chain",
+      "size": 2,
+      "tokens": [
+        "aisleprompt-catalog-audit",
+        "specpicks-image-csv"
+      ],
+      "count": 1,
+      "line": 1396,
+      "snippet": "if fmt == \"aisleprompt-catalog-audit\":",
+      "w1": "Dispatch on the findings_format ids (see CONVERTERS). W1: route through the CONVERTERS registry instead of an if-chain, or keep with the format registry."
+    },
+    {
+      "path": "agents/catalog-audit-agent/agent.py",
+      "scope": "CatalogAuditAgent.run",
+      "kind": "if-chain",
+      "size": 3,
+      "tokens": [
+        "_latest_findings_aisleprompt",
+        "_latest_findings_specpicks_images",
+        "aisleprompt-catalog-audit",
+        "specpicks-image-csv"
+      ],
+      "count": 1,
+      "line": 1454,
+      "snippet": "if fmt == \"aisleprompt-catalog-audit\":",
+      "w1": "Dispatch on the findings_format ids (see CONVERTERS). W1: route through a format registry instead of an if-chain, or keep with the format registry."
+    },
+    {
+      "path": "agents/catalog-audit-shipped-backfill/agent.py",
+      "scope": "CatalogAuditShippedBackfill",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "DATABASE_URL_AISLEPROMPT",
+        "DATABASE_URL_SPECPICKS",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 137,
+      "snippet": "DSN_BY_SITE = {",
+      "w1": "Site -> DSN env var map. W1: resolve each registered site's dsn_env (and dsn_env_aliases) from site_registry instead."
+    },
+    {
+      "path": "agents/catalog-audit-shipped-backfill/agent.py",
+      "scope": "CatalogAuditShippedBackfill.signals",
+      "kind": "block",
+      "size": 0,
+      "tokens": [
+        "agents/aisleprompt-catalog-audit-agent/runs/",
+        "agents/specpicks-catalog-audit-agent/runs/",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 170,
+      "snippet": "keys_aisle = self.storage.list_prefix(\"agents/aisleprompt-catalog-audit-agent/runs/\")",
+      "w1": "Lists both sites' catalog-audit run dirs. W1: iterate site_registry sites that run '*-catalog-audit-agent'."
+    },
+    {
+      "path": "agents/catalog-audit-shipped-backfill/agent.py",
+      "scope": "CatalogAuditShippedBackfill.run",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 188,
+      "snippet": "for site_idx, site in enumerate((\"aisleprompt\", \"specpicks\")):",
+      "w1": "Site loop. W1: iterate site_registry sites that run '*-catalog-audit-agent'."
+    },
+    {
+      "path": "agents/digest-rollup-agent/agent.py",
+      "scope": "_agent_site",
+      "kind": "tuple",
+      "size": 3,
+      "tokens": [
+        "aisleprompt-",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 60,
+      "snippet": "for prefix in (\"specpicks-\", \"aisleprompt-\", \"reusable-agents-\"):",
+      "w1": "Derives the site from an agent-id prefix. W1: site_registry.site_for_agent() (the framework's own 'reusable-agents-' prefix stays a framework constant)."
+    },
+    {
+      "path": "agents/digest-rollup-agent/agent.py",
+      "scope": "_agent_badge",
+      "kind": "dict",
+      "size": 3,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 359,
+      "snippet": "palette = {",
+      "w1": "Badge colour per site. W1: site_registry accent (framework colour stays a constant)."
+    },
+    {
+      "path": "agents/goals-tracker/agent.py",
+      "scope": "render_site_kpi_cards",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "AislePrompt",
+        "SpecPicks",
+        "aisleprompt-site-goals-tracker",
+        "specpicks-site-goals-tracker"
+      ],
+      "count": 1,
+      "line": 377,
+      "snippet": "SITE_TRACKERS = {",
+      "w1": "Site -> (label, tracker agent id). W1: site_registry label + agent_id_for(site, '*-site-goals-tracker')."
+    },
+    {
+      "path": "agents/goals-tracker/agent.py",
+      "scope": "render_site_section",
+      "kind": "dict",
+      "size": 3,
+      "tokens": [
+        "AislePrompt",
+        "SpecPicks",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 479,
+      "snippet": "site_label = {\"aisleprompt\": \"AislePrompt\", \"specpicks\": \"SpecPicks\", \"shared\": \"Shared / Cross-site\"}.get(site, site.t…",
+      "w1": "Site display labels. W1: site_registry label (keep the 'shared' bucket as a constant)."
+    },
+    {
+      "path": "agents/goals-tracker/agent.py",
+      "scope": "_UNUSED_render_site_kpi_rollup",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "AislePrompt",
+        "SpecPicks",
+        "aisleprompt-site-goals-tracker",
+        "specpicks-site-goals-tracker"
+      ],
+      "count": 1,
+      "line": 569,
+      "snippet": "SITE_TRACKERS = {",
+      "w1": "Dead code (_UNUSED_). W1: delete the function."
+    },
+    {
+      "path": "agents/goals-tracker/agent.py",
+      "scope": "_UNUSED_render_site_kpi_rollup",
+      "kind": "ifexp:implicit-other",
+      "size": 2,
+      "tokens": [
+        "AislePrompt"
+      ],
+      "count": 1,
+      "line": 604,
+      "snippet": "<div style=\"flex:1;min-width:380px;background:#f8fafc;border-radius:10px;padding:16px 20px;border-left:4px solid {'#4f4…",
+      "w1": "Accent colour chosen by label, other site by default. Dead code (_UNUSED_). W1: delete the function."
+    },
+    {
+      "path": "agents/gsc-coverage-auditor/inspect.py",
+      "scope": "main",
+      "kind": "string",
+      "size": 1,
+      "tokens": [
+        "set GSC_INSPECT_SITE=<aisleprompt|specpicks>"
+      ],
+      "count": 1,
+      "line": 422,
+      "snippet": "raise SystemExit(\"set GSC_INSPECT_SITE=<aisleprompt|specpicks>\")",
+      "w1": "Usage message lists the valid sites. W1: build it from site_registry.site_names()."
+    },
+    {
+      "path": "agents/gsc-coverage-auditor/submit-sitemap.py",
+      "scope": "main",
+      "kind": "string",
+      "size": 1,
+      "tokens": [
+        "set GSC_SITE=<aisleprompt|specpicks>"
+      ],
+      "count": 1,
+      "line": 104,
+      "snippet": "raise SystemExit(\"set GSC_SITE=<aisleprompt|specpicks>\")",
+      "w1": "Usage message lists the valid GSC_SITE values. W1: build it from site_registry.site_names()."
+    },
+    {
+      "path": "agents/implementer/azure-shipped-backfill.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "DATABASE_URL_AISLEPROMPT",
+        "DATABASE_URL_SPECPICKS",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 19,
+      "snippet": "DSN_BY_SITE = {",
+      "w1": "Site -> DSN env var map. W1: resolve each registered site's dsn_env (and dsn_env_aliases) from site_registry instead."
+    },
+    {
+      "path": "agents/implementer/azure-shipped-backfill.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 42,
+      "snippet": "for site, slug_idx in {\"aisleprompt\": shipped_slugs(\"aisleprompt\"),",
+      "w1": "Site loop over live editorial_articles. W1: iterate site_registry sites."
+    },
+    {
+      "path": "agents/implementer/azure-shipped-backfill.py",
+      "scope": "<module>",
+      "kind": "tuple",
+      "size": 4,
+      "tokens": [
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-seo-opportunity-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-seo-opportunity-agent"
+      ],
+      "count": 1,
+      "line": 85,
+      "snippet": "for agent_id in (\"aisleprompt-seo-opportunity-agent\",",
+      "w1": "Hard-coded per-site producer ids. W1: expand site_registry producer templates over the registered sites (site_registry.producer_agent_ids()), plus explicit extras."
+    },
+    {
+      "path": "agents/implementer/azure-shipped-backfill.py",
+      "scope": "<module>",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt-catalog-audit-agent",
+        "specpicks-catalog-audit-agent"
+      ],
+      "count": 1,
+      "line": 129,
+      "snippet": "for agent_id in (\"aisleprompt-catalog-audit-agent\",",
+      "w1": "Hard-coded per-site producer ids. W1: expand site_registry producer templates over the registered sites (site_registry.producer_agent_ids()), plus explicit extras."
+    },
+    {
+      "path": "agents/implementer/catalog-audit-shipped-backfill.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "DATABASE_URL_AISLEPROMPT",
+        "DATABASE_URL_SPECPICKS",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 37,
+      "snippet": "DSN_BY_SITE = {",
+      "w1": "Site -> DSN env var map. W1: resolve each registered site's dsn_env (and dsn_env_aliases) from site_registry instead."
+    },
+    {
+      "path": "agents/implementer/catalog-audit-shipped-backfill.py",
+      "scope": "main",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 182,
+      "snippet": "for site in (\"aisleprompt\", \"specpicks\"):",
+      "w1": "Site loop. W1: iterate site_registry sites that run '*-catalog-audit-agent'."
+    },
+    {
+      "path": "agents/implementer/reconcile-shipped.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "AISLEPROMPT_DSN",
+        "DATABASE_URL_AISLEPROMPT",
+        "DATABASE_URL_SPECPICKS",
+        "SPECPICKS_DSN",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 13,
+      "snippet": "DSN_BY_SITE = {",
+      "w1": "Site -> DSN env var map. W1: resolve each registered site's dsn_env (and dsn_env_aliases) from site_registry instead."
+    },
+    {
+      "path": "agents/implementer/run.sh",
+      "scope": "<script>",
+      "kind": "line",
+      "size": 0,
+      "tokens": [
+        "DATABASE_URL_AISLEPROMPT",
+        "DATABASE_URL_SPECPICKS"
+      ],
+      "count": 1,
+      "line": 2830,
+      "snippet": "DATABASE_URL_AISLEPROMPT=\"${DATABASE_URL_AISLEPROMPT:-}\" \\",
+      "w1": "Env passthrough of both sites' DSN vars to reconcile-shipped.py. W1: let reconcile-shipped resolve every registered site's dsn_env itself (the env is inherited), or export them all."
+    },
+    {
+      "path": "agents/progressive-improvement-agent/agent.py",
+      "scope": "ProgressiveImprovementAgent.run",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt-",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 796,
+      "snippet": "for prefix in (\"aisleprompt-\", \"specpicks-\"):",
+      "w1": "Picks the per-site catalog-audit handoff target by id prefix. W1: site_for_agent() + agent_id_for(site, '*-catalog-audit-agent')."
+    },
+    {
+      "path": "framework/api/app/routes/agents.py",
+      "scope": "_derive_application",
+      "kind": "list",
+      "size": 3,
+      "tokens": [
+        "aisleprompt",
+        "aisleprompt-",
+        "specpicks",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 263,
+      "snippet": "for prefix, app in [",
+      "w1": "Dashboard application derivation by id prefix. W1: site_registry.site_for_agent() ('reusable-agents' stays a framework constant). Dashboard deploy needed after the change."
+    },
+    {
+      "path": "framework/api/app/routes/dispatch.py",
+      "scope": "<module>",
+      "kind": "tuple",
+      "size": 14,
+      "tokens": [
+        "aisleprompt-app-store-opportunity-agent",
+        "aisleprompt-article-proposal-agent",
+        "aisleprompt-catalog-audit-agent",
+        "aisleprompt-competitor-research-agent",
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-seo-opportunity-agent",
+        "specpicks-app-store-opportunity-agent",
+        "specpicks-article-proposal-agent",
+        "specpicks-benchmark-research-agent",
+        "specpicks-catalog-audit-agent",
+        "specpicks-competitor-research-agent",
+        "specpicks-head-to-head-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-seo-opportunity-agent"
+      ],
+      "count": 1,
+      "line": 46,
+      "snippet": "_ACCUMULATOR_AGENT_IDS = (",
+      "w1": "_ACCUMULATOR_AGENT_IDS: producers whose accumulators the dashboard reads. Hard-coded per-site producer ids. W1: expand site_registry producer templates over the registered sites (site_registry.producer_agent_ids()), plus explicit extras. Dashboard deploy needed after the change."
+    },
+    {
+      "path": "framework/api/app/routes/dispatch.py",
+      "scope": "_compute_lifetime_stats",
+      "kind": "tuple",
+      "size": 12,
+      "tokens": [
+        "aisleprompt-article-proposal-agent",
+        "aisleprompt-catalog-audit-agent",
+        "aisleprompt-competitor-research-agent",
+        "aisleprompt-progressive-improvement-agent",
+        "aisleprompt-seo-opportunity-agent",
+        "aisleprompt-user-growth-strategist",
+        "specpicks-article-proposal-agent",
+        "specpicks-catalog-audit-agent",
+        "specpicks-competitor-research-agent",
+        "specpicks-progressive-improvement-agent",
+        "specpicks-seo-opportunity-agent",
+        "specpicks-user-growth-strategist"
+      ],
+      "count": 1,
+      "line": 584,
+      "snippet": "for aid in (",
+      "w1": "Belt-and-braces production agent ids for lifetime stats. Hard-coded per-site producer ids. W1: expand site_registry producer templates over the registered sites (site_registry.producer_agent_ids()), plus explicit extras."
+    },
+    {
+      "path": "framework/api/app/routes/dispatch.py",
+      "scope": "get_rec_verification_script",
+      "kind": "tuple",
+      "size": 3,
+      "tokens": [
+        "aisleprompt-",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 1476,
+      "snippet": "for prefix in (\"specpicks-\", \"aisleprompt-\", \"reusable-agents-\"):",
+      "w1": "Derives the site from an agent-id prefix. W1: site_registry.site_for_agent() (the framework's own 'reusable-agents-' prefix stays a framework constant)."
+    },
+    {
+      "path": "framework/api/app/routes/dispatch.py",
+      "scope": "_legacy_disabled_unused",
+      "kind": "if-chain",
+      "size": 6,
+      "tokens": [
+        "https://aisleprompt.com",
+        "https://aisleprompt.com/",
+        "https://aisleprompt.com/recipes/q/",
+        "https://specpicks.com/api/testbench/articles/",
+        "https://specpicks.com/reviews/"
+      ],
+      "count": 1,
+      "line": 1546,
+      "snippet": "if typ == \"article-author-proposal\":",
+      "w1": "Legacy, disabled code path (per-site article URLs). W1: delete the function."
+    },
+    {
+      "path": "framework/api/app/routes/dispatch.py",
+      "scope": "<module>",
+      "kind": "set",
+      "size": 4,
+      "tokens": [
+        "aisleprompt.com",
+        "specpicks.com",
+        "www.aisleprompt.com",
+        "www.specpicks.com"
+      ],
+      "count": 1,
+      "line": 1764,
+      "snippet": "_PROXY_ALLOWED_HOSTS = {",
+      "w1": "_PROXY_ALLOWED_HOSTS SSRF allowlist. W1: build from site_registry domains (+ www.); keep it an allowlist."
+    },
+    {
+      "path": "framework/core/agent_base.py",
+      "scope": "AgentBase.post_run",
+      "kind": "tuple",
+      "size": 3,
+      "tokens": [
+        "aisleprompt-",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 515,
+      "snippet": "for prefix in (\"specpicks-\", \"aisleprompt-\", \"reusable-agents-\"):",
+      "w1": "Derives the site from an agent-id prefix. W1: site_registry.site_for_agent() (the framework's own 'reusable-agents-' prefix stays a framework constant)."
+    },
+    {
+      "path": "framework/core/article_link_guard.py",
+      "scope": "render_link_directive",
+      "kind": "block",
+      "size": 0,
+      "tokens": [
+        "/product/B08W8BFG9B?tag=specpicks-articles-20)",
+        "?tag=specpicks-articles-20",
+        "https://aisleprompt.com"
+      ],
+      "count": 1,
+      "line": 963,
+      "snippet": "site_root: str = \"https://aisleprompt.com\",",
+      "w1": "The implementer's link directive defaults site_root to one site and hard-codes the other site's Associates tag (?tag=specpicks-articles-20) in the product-link example and the suggested-ASIN lines, so any other site with min_products > 0 is told to use SpecPicks' tracking tag. W1/W2: take the tag (and site_root) from the site's link-guard config or site_registry and drop the one-site default; change build-aider-invocation.py's fallback with it (see not_detected)."
+    },
+    {
+      "path": "framework/core/completion_email.py",
+      "scope": "send_completion_email",
+      "kind": "dict",
+      "size": 2,
+      "tokens": [
+        "AislePrompt",
+        "SpecPicks",
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 558,
+      "snippet": "special = {\"aisleprompt\": \"AislePrompt\", \"specpicks\": \"SpecPicks\"}",
+      "w1": "Site display labels for the email subject. W1: site_registry label."
+    },
+    {
+      "path": "framework/core/implementation_queue.py",
+      "scope": "queue_recs",
+      "kind": "tuple",
+      "size": 4,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 66,
+      "snippet": "if p not in (\"aisleprompt\", \"specpicks\", \"agent\", \"opportunity\"):",
+      "w1": "Subject-tag heuristic skips site segments of the agent id. W1: skip any site_registry id (split_agent_id())."
+    },
+    {
+      "path": "framework/core/priority.py",
+      "scope": "<module>",
+      "kind": "dict",
+      "size": 5,
+      "tokens": [
+        "aisleprompt-article-proposal-agent",
+        "aisleprompt-head-to-head-agent",
+        "specpicks-article-proposal-agent",
+        "specpicks-head-to-head-agent"
+      ],
+      "count": 1,
+      "line": 83,
+      "snippet": "\"tiers\": {",
+      "w1": "DEFAULT_CONFIG tiers 2/3 list the two sites' content agents. W1: per-site content_tier from site_registry (RuntimePicks: tier 4); equivalence test keeps AislePrompt/SpecPicks tiers."
+    },
+    {
+      "path": "framework/core/priority.py",
+      "scope": "<module>",
+      "kind": "tuple",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 392,
+      "snippet": "_STARVATION_SITES = (",
+      "w1": "_STARVATION_SITES. W1: site_registry.starvation_sites() (RuntimePicks: starvation false)."
+    },
+    {
+      "path": "framework/core/verifications.py",
+      "scope": "_build_top5_target_page",
+      "kind": "ifexp:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 174,
+      "snippet": "url = rec.get(\"public_url\") or f\"{domain}/recipes/q/{slug}\" if site == \"aisleprompt\" else f\"{domain}/best/best-{slug}\"",
+      "w1": "Public URL shape chosen by site, other site by default. W1: per-site URL template from site.yaml / site_registry."
+    },
+    {
+      "path": "framework/core/verifications.py",
+      "scope": "_build_internal_link",
+      "kind": "ifexp:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 206,
+      "snippet": "target_path = f\"/best/best-{slug}\" if site == \"aisleprompt\" else f\"/recipes/q/{slug}\"",
+      "w1": "Target path chosen by site, other site by default. W1: per-site URL template from site.yaml / site_registry."
+    },
+    {
+      "path": "framework/core/verifications.py",
+      "scope": "_build_catalog_audit",
+      "kind": "ifexp",
+      "size": 2,
+      "tokens": [
+        "aisleprompt",
+        "aisleprompt.com",
+        "specpicks.com"
+      ],
+      "count": 1,
+      "line": 448,
+      "snippet": "domain = \"aisleprompt.com\" if site == \"aisleprompt\" else \"specpicks.com\"",
+      "w1": "Domain chosen by site: a third site's recs would be verified against the other site's domain. W1: site_registry domain."
+    },
+    {
+      "path": "framework/core/verifications.py",
+      "scope": "_build_catalog_audit",
+      "kind": "ifexp:implicit-other",
+      "size": 2,
+      "tokens": [
+        "aisleprompt"
+      ],
+      "count": 1,
+      "line": 469,
+      "snippet": "path_template = \"/kitchen/{id}\" if site == \"aisleprompt\" else \"/products/{id}\"",
+      "w1": "Product path template chosen by site. W1: per-site product path template from site.yaml."
+    },
+    {
+      "path": "framework/core/verifications.py",
+      "scope": "backfill_missing",
+      "kind": "tuple",
+      "size": 3,
+      "tokens": [
+        "aisleprompt-",
+        "specpicks-"
+      ],
+      "count": 1,
+      "line": 667,
+      "snippet": "for prefix in (\"specpicks-\", \"aisleprompt-\", \"reusable-agents-\"):",
+      "w1": "Derives the site from an agent-id prefix. W1: site_registry.site_for_agent() (the framework's own 'reusable-agents-' prefix stays a framework constant)."
+    },
+    {
+      "path": "framework/ui/src/pages/AgentList.tsx",
+      "scope": "APPLICATION_EMOJI",
+      "kind": "object",
+      "size": 10,
+      "tokens": [
+        "aisleprompt",
+        "specpicks"
+      ],
+      "count": 1,
+      "line": 14,
+      "snippet": "const APPLICATION_EMOJI: Record<string, string> = {",
+      "w1": "Cosmetic filter-pill emoji; a third site just gets no emoji. W1: serve label/emoji from site_registry via the API, or keep as cosmetic. Dashboard deploy needed after the change."
+    }
+  ],
+  "not_detected": [
+    {
+      "path": "agents/indexnow-submitter/agent.py",
+      "where": "INDEXNOW_TS_APP_DIR defaults to the specpicks repo",
+      "why_not_detected": "names one site only (a default, not an enumeration)",
+      "w1": "The IndexNow default: take the TS app dir from config (or a site_registry repo_path) instead of one site's repo."
+    },
+    {
+      "path": "agents/indexnow-submitter/submit.sh",
+      "where": "INDEXNOW_APP_DIR defaults to the specpicks repo",
+      "why_not_detected": "names one site only (a default, not an enumeration)",
+      "w1": "Same default as agent.py; change both together."
+    },
+    {
+      "path": "agents/agent-doctor/agent.py",
+      "where": "repo search roots for runbooks, source dirs and manifests list the specpicks repo next to the framework repos",
+      "why_not_detected": "names one site only",
+      "w1": "Build the search roots from every registered site's repo_path (site_registry)."
+    },
+    {
+      "path": "agents/digest-rollup-agent/agent.py",
+      "where": "SITE_QUERIES (revenue section) covers specpicks only",
+      "why_not_detected": "names one site only",
+      "w1": "Move SITE_QUERIES to config keyed by site so another affiliate site can opt in."
+    },
+    {
+      "path": "agents/implementer/run.sh",
+      "where": "SEO_AGENT_CONFIG is derived from $REPO_ROOT/examples/sites/$RESPONDER_SITE.yaml",
+      "why_not_detected": "no site literal: relies on the examples/sites/<site>.yaml symlink convention",
+      "w1": "Use the site's seo_site_yaml from site_registry; F15c adds the examples/sites/runtimepicks.yaml symlink as the fallback."
+    },
+    {
+      "path": "agents/implementer/build-aider-invocation.py",
+      "where": "the link directive's site_root falls back to \"https://aisleprompt.com\" when the site's link-guard config sets none",
+      "why_not_detected": "names one site only (a default, not an enumeration)",
+      "w1": "Take site_root from site_registry (the site's domain), together with the render_link_directive entry, so no site inherits another site's root."
+    },
+    {
+      "path": "install/requeue-deferred.py",
+      "where": "the subject-tag stop-word tuple (a copy of implementation_queue.py's), REC_EMITTING_AGENTS (per-site producer ids) and _site_for_agent's prefix if-chain",
+      "why_not_detected": "outside the scan roots (framework/, agents/)",
+      "w1": "Change with the implementation_queue.py queue_recs entry and the dispatcher's producer ids so the copies cannot drift: derive them from site_registry."
+    },
+    {
+      "path": "install/seed-default-goals.sh",
+      "where": "the goal-seeding loops over each per-site producer pair (progressive-improvement, competitor-research, seo-opportunity)",
+      "why_not_detected": "outside the scan roots (framework/, agents/)",
+      "w1": "Seed goals for every site in site_registry (producer templates) instead of a hard-coded pair, or the new site's producers start with no goals."
+    },
+    {
+      "path": "install/reconcile-deploy-status.py",
+      "where": "SITE_APP_RG maps each site to its Azure app and resource group",
+      "why_not_detected": "outside the scan roots (framework/, agents/)",
+      "w1": "Read the app and resource group from site_registry or the site's site.yaml deployer block."
+    }
+  ]
+}
