@@ -1,0 +1,83 @@
+{
+  "schema_version": "1",
+  "agent_id": "amazon-price-refresh-agent",
+  "_comment": "Engine defaults. A per-site instance (<site>-price-refresh) seeds these same goals under its own id at registration (install/seed-default-goals.sh or PUT /api/agents/<id>/goals); every target_metric is a key of the engine's RunResult.metrics, so progress records itself each run.",
+  "goals": [
+    {
+      "id": "goal-indexable-pages-fresh-priced",
+      "title": "At least 90% of indexable product pages show a fresh Amazon price",
+      "description": "Share of the site's indexable pages (metrics.indexable_sql, default the refresh catalog) whose cache row was priced by Creators inside the quotable window (24h minus the HTML cache age, metrics.max_html_cache_age_s; ~23.8h at the kit defaults) at $1 or more. A page without a fresh price shows no price and no Offer, and its CTA converts worse. Emitted key: fresh_priced_pct (0-100). Out-of-stock listings count against it, so a stall here can also mean the catalog needs pruning, not more refresh.",
+      "target_metric": "fresh_priced_pct",
+      "metric": {"name": "fresh_priced_pct", "current": 0, "target": 90, "direction": "increase", "unit": "%"},
+      "directives": [
+        "Compare fresh_checked_pct with fresh_priced_pct: a small gap means the refresh keeps up and the unpriced pages are out of stock or unbuyable on Amazon (a catalog problem); a large gap with low fresh_checked_pct means the budget or the gates are too tight",
+        "If budget_calls is clamped below max_calls_per_run, raise this consumer's share in config/amazon-creators-budget.json rather than the gates"
+      ]
+    },
+    {
+      "id": "goal-no-stale-amazon-price-held",
+      "title": "No Amazon price is held past 24 hours",
+      "description": "Cache rows still holding a price older than the purge horizon after the run's purge step, other than the rows that run deliberately spared (rows it asked about and could not refresh, kept while still inside the quotable window; counted in spared_rows). The license allows non-image Amazon content to be cached for at most 24h and the site must never show a price that old. The purge runs once per run, so its horizon is 24h minus the cron period minus a run (purge_horizon_hours; 19.5h on a 4h cron): a row it leaves is still under 24h when the next run purges. This is 0 after every successful run and rises only while purges are skipped (the purge waits for a successful run); each such row passes 24h within one more cron period. Emitted key: stale_price_rows.",
+      "target_metric": "stale_price_rows",
+      "metric": {"name": "stale_price_rows", "current": 0, "target": 0, "direction": "decrease", "unit": "rows"},
+      "directives": [
+        "When this is above 0, read purge_skipped and the summary: the purge skips after a Creators failure, a run Creators never answered, an early stop, a throttle or a tripped not_found guard; fix that cause, never the purge rule",
+        "Check stale_api_rows (every Amazon-sourced column, not only the price) and api_rows_past_24h (rows already past the license limit: a run that skipped its purge fails while it is above 0)",
+        "If the run log warns that the purge ran past schedule.max_run_minutes, raise max_run_minutes (it lowers the horizon) or shorten the run"
+      ]
+    },
+    {
+      "id": "goal-demand-pages-fresh",
+      "title": "Pages people and assistants use stay fresh (98%)",
+      "description": "Share of the demand-tier ASINs (verified-human clicks, assistant fetches, pick ASINs) present in the catalog whose last Creators answer is inside the quotable window (24h minus the HTML cache age). These are the pages that earn clicks and get quoted. Emitted key: demand_fresh_pct (0-100).",
+      "target_metric": "demand_fresh_pct",
+      "metric": {"name": "demand_fresh_pct", "current": 0, "target": 98, "direction": "increase", "unit": "%"},
+      "directives": [
+        "A tier below 98% (fresh_pct_<tier>) with candidates_long_tail > 0 means the long tail is taking calls first only if the tier gates are wrong: check the gates against schedule.cron_period_hours (gate_buffer_violations)",
+        "Watch demand_signal_errors: a failed click or AI-traffic read empties its group for that run"
+      ]
+    },
+    {
+      "id": "goal-never-blank-on-failed-run",
+      "title": "A failed or partial run never blanks a price, title or image",
+      "description": "Amazon values NULLed (purged rows plus not_found rows written) during a run whose Creators sweep failed, went unanswered (every batch rejected, or a 429 from the first call), stopped early or was throttled, plus rows the run asked about and could not refresh (a failed batch, an omitted ASIN, an answer that could not be stored) that its purge NULLed while a visitor could still see them. On 2026-11-11 one LWA token timeout left about 3.8k pages of the reference site without a price for 6 hours. The engine writes only fresh answers, purges only after a successful run, and spares the rows a run could not refresh while they are still inside the quotable window, so this must stay 0. It is counted from the ages the purge itself returns, not assumed. Emitted key: blanked_on_failed_run.",
+      "target_metric": "blanked_on_failed_run",
+      "metric": {"name": "blanked_on_failed_run", "current": 0, "target": 0, "direction": "decrease", "unit": "rows"},
+      "directives": [
+        "Any value above 0 is an engine regression: stop the instance before its next tick (set enabled=false on its registry entry from the dashboard or PUT /api/agents/<id>, or stop its systemd timer) and fix the gating. The storage setting by_agent_id.<id>.enabled=false in config/price-refresh-priority-config.json is only the demand-ranking off switch: the engine keeps writing and purging with it"
+      ]
+    },
+    {
+      "id": "goal-due-rows-refreshed-before-purge",
+      "title": "Due pages are re-checked before the purge blanks them",
+      "description": "Catalog rows this run's purge NULLed while a visitor could still see them (inside the quotable window): rows that fell due and that no run answered before the purge horizon, because the budget ran out before them or because a gate leaves no run between falling due and the horizon. Each one is a page that loses its price, title and image for up to a cron period. Rows the run asked about and could not refresh are spared and not counted here; rows of products the catalog no longer lists are not counted either. Emitted key: blanked_due_rows.",
+      "target_metric": "blanked_due_rows",
+      "metric": {"name": "blanked_due_rows", "current": 0, "target": 0, "direction": "decrease", "unit": "rows"},
+      "directives": [
+        "If gate_buffer_violations > 0, fix the gate first: a gate whose first re-check lands past the purge horizon (e.g. a 16h long tail on a 4h cron, first re-checked at ~20.5h against 19.5h) blanks every row its first due run cannot reach; a gate at least a run under the next multiple of the cron period (15.5h) gives a run of slack",
+        "Otherwise compare due_backlog with budget_calls x 10: a backlog the budget cannot clear in two runs needs a larger share for this consumer in config/amazon-creators-budget.json (keep the shares summing to <= 1.0), or a smaller catalog"
+      ]
+    },
+    {
+      "id": "goal-within-creators-share",
+      "title": "Stay inside this site's Creators budget share",
+      "description": "Calls this consumer made today divided by its share of total_calls_per_day (config/amazon-creators-budget.json). The credential is shared with other sites' refreshes; overspending starves them late in the UTC day. Emitted key: creators_calls_vs_share.",
+      "target_metric": "creators_calls_vs_share",
+      "metric": {"name": "creators_calls_vs_share", "current": 0, "target": 1.0, "direction": "decrease", "unit": "ratio"},
+      "directives": [
+        "Above 1.0 means the ledger was unreadable or another process charged this consumer: check the ledger before raising the share"
+      ]
+    },
+    {
+      "id": "goal-creators-throttles-low",
+      "title": "At most 50 Creators throttles a day",
+      "description": "HTTP 429 answers charged to this consumer today (amazon_creators usage ledger, retried ones included). A run that hits a persistent 429 stops early and skips its purge; one that hits it on its first call fails. Emitted key: creators_throttled_today.",
+      "target_metric": "creators_throttled_today",
+      "metric": {"name": "creators_throttled_today", "current": 0, "target": 50, "direction": "decrease", "unit": "429s/day"},
+      "directives": [
+        "Sustained throttling means the account-wide quota is smaller than the shares assume: lower total_calls_per_day in config/amazon-creators-budget.json instead of retrying harder",
+        "Move this instance's cron minute away from other Creators consumers if throttles cluster at one time of day"
+      ]
+    }
+  ]
+}

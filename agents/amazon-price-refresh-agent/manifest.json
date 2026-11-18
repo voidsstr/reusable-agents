@@ -1,0 +1,21 @@
+{
+  "id": "amazon-price-refresh-agent",
+  "name": "Amazon Price Refresh",
+  "description": "Engine for cache-model sites: re-prices the ASINs buyers land on first (clicked, assistant-fetched, pick ASINs, then the long tail) through the Amazon Creators API getItems call within the site's own budget share, upserts price, availability, title, image and detailPageURL into the site's amazon_item_cache, and after a successful run NULLs every Amazon-sourced column past a purge horizon (24h minus the cron period and a run) so nothing is stored for 24h. A failed, partial or unanswered run never blanks data: the rows a run asked about and could not refresh keep their values while still displayable, and the next run re-asks them. Every value (catalog view, priority groups, consumer, resources, columns, schedule) comes from the site's site.yaml; per-site instances are config-only directories in the site repos.",
+  "category": "seo",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "AGENT.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/amazon-price-refresh-agent",
+    "config_env": "PRICE_REFRESH_CONFIG",
+    "config_block": "price_refresh",
+    "config_schema": "agents/amazon-price-refresh-agent/price-refresh-config.schema.json",
+    "created_at": "2026-11-17T19:28:00Z"
+  },
+  "runnable_modes": ["cron", "manual"]
+}

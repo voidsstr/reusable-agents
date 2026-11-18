@@ -1,0 +1,6 @@
+# Agent-specific Python deps. The framework itself + storage SDK + FastAPI
+# are installed once at the framework level — agents only need to list
+# extras they import directly.
+PyYAML          # the site.yaml config
+jsonschema      # price-refresh-config.schema.json validation
+psycopg2-binary # the site's Postgres (cache table, catalog view, demand signals)

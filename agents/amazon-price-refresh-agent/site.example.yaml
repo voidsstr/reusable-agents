@@ -1,0 +1,117 @@
+# Example per-site config for agents/amazon-price-refresh-agent (the engine).
+#
+# A site uses the engine through a config-only directory in its own repo,
+# e.g. <site repo>/agents/price-refresh/, holding:
+#   - site.yaml        a `price_refresh:` block like the one below;
+#   - manifest.json    id "<site>-price-refresh", cron "5 */4 * * *", and
+#       entry_command: PRICE_REFRESH_CONFIG=<site repo>/agents/price-refresh/site.yaml
+#                      python3 /home/voidsstr/development/reusable-agents/agents/amazon-price-refresh-agent/agent.py
+#   - AGENT.md         and 3-7 goals bound to the metrics in the engine's AGENT.md.
+#
+# The values below are the launch plan for a cache-model affiliate site
+# (catalog view = products LEFT JOIN amazon_item_cache; clicked, assistant-
+# fetched and pick ASINs at 12h; the long tail re-checked every ~16h on a
+# 4-hourly cron), under a placeholder site name.
+# framework/tests/test_amazon_price_refresh_agent.py validates this file, so
+# it stays a working template.
+price_refresh:
+  site: example-site
+
+  database:
+    # NAME of the env var holding the site's DSN (never the DSN). Optional
+    # once the site is in the site registry (its dsn_env is the default).
+    dsn_env: DATABASE_URL_EXAMPLE_SITE
+    statement_timeout_ms: 60000
+
+  creators:
+    consumer: example-site-price-refresh   # its own line in config/amazon-creators-budget.json
+    partner_tag: example-site-20           # the site's own Associates tag
+    max_calls_per_run: 250                 # 10 ASINs per call; the daily share clamps it further
+    resources: auto                        # price + availability + condition + buy box + title + image (what the enabled columns need)
+
+  schedule:
+    cron_period_hours: 4                   # required: the instance manifest's "5 */4 * * *"
+    max_run_minutes: 30                    # tick to purge; with the period it sets the purge horizon
+    # Failed runs in a row a gate must absorb and still re-check its rows
+    # inside the quotable window (24h minus the HTML cache age). The 12h
+    # demand groups and the 15.5h long tail re-check at ~16.5h, and at
+    # ~20.5h after one failed run.
+    tolerate_failed_runs: 1
+    long_tail_tolerate_failed_runs: 1
+
+  demand_priority:
+    display_hours: 24
+    catalog:
+      # products LEFT JOIN amazon_item_cache: an ASIN with no cache row has a
+      # NULL fetched_at and ranks as never checked.
+      table: v_refresh_catalog
+      asin_col: asin
+      fresh_cols: [fetched_at]                # the default (the cache's fetched_at column)
+      where: "c.is_active"
+      asin_regex: "^B[0-9A-Z]{9}$"
+    sources:
+      human_clicks:
+        table: outbound_clicks
+        spec:
+          time_col: clicked_at
+          ua_col: user_agent
+          ip_col: ip_address
+          referer_col: source_page
+          country_col: country
+          bot_flag_col: is_bot
+        match: {target: amazon, via: beacon}   # the verified-human beacon series
+        group_col: asin
+      ai_traffic:
+        prefixes: ["/product/"]
+        config:
+          live_fetch_sources: [chatgpt-user, perplexity-user, claude-user]   # answer-time fetchers only
+          fetch_days: 30
+    groups:
+      - {name: clicked, kind: human_clicks, window_days: 30, gate_hours: 12}
+      - {name: assistant-fetched, kind: ai_traffic, gate_hours: 12}
+      # The pick builder publishes {"asins": [...]} here after each run. A
+      # site without it can use a sql group over its merch tables instead:
+      #   {name: picks, kind: sql, gate_hours: 12, sql: "SELECT p.asin FROM ladder_slots s JOIN products p ON p.id = s.product_id"}
+      - {name: picks, kind: storage_list, key: agents/example-site-pick-builder/state/pick-asins.json, gate_hours: 12}
+    # 15.5h, not 16h. Rows are answered minutes after a tick, so a gate G is
+    # first re-checked (floor(G / 4) + 1) x 4h later: 16h re-checks at ~20h
+    # (+ a run), already past the 19.5h purge horizon, so a row that run
+    # cannot reach (the budget runs out) is blanked by that same run. 15.5h
+    # re-checks at ~16h, the cadence a "16h gate" was meant to give, and a
+    # row the budget misses keeps its values until the next run re-asks it.
+    # The cost is ~25% more long-tail calls than ~20h re-checks. The gate
+    # check (gate_buffer_violations) flags a gate with no run of slack.
+    long_tail: {enabled: true, gate_hours: 15.5}
+
+  cache:
+    table: amazon_item_cache
+    key_col: asin
+    fetched_at_col: fetched_at
+    outcome_col: outcome
+    consumer_col: consumer
+    # columns: every field maps to the column of the same name by default; map
+    # one to null if the table does not have it (it is then neither requested,
+    # written nor purged). price cannot be disabled. browse_node_ids and
+    # product_group are off unless mapped to a column: derive a category once
+    # into your own table instead of caching Amazon's.
+    purge:
+      # Amazon license: non-image content is cached at most 24h. The purge
+      # runs once per run, so a row just under the horizon at one purge goes
+      # at the next: the horizon is 24h minus the cron period minus a run
+      # (19.5h here). 'auto' derives it; a larger number fails validation.
+      # Rows a run asked about and could not refresh (failed batch, omitted
+      # ASIN, unstorable answer) are spared while still inside the quotable
+      # window; the next run re-asks them.
+      max_age_hours: auto
+    not_found_guard:
+      max_share: 0.5
+      min_answered: 20
+
+  metrics:
+    # Denominator of fresh_priced_pct. Default: the refresh catalog. A site
+    # whose indexable PDPs are a subset names them here (first column = ASIN).
+    indexable_sql: ""
+    min_quotable_price: 1.0
+    # The kit's maxHtmlCacheAgeSeconds (s-maxage 600 + max-age 60 at its
+    # defaults): prices count as fresh only within 24h minus this.
+    max_html_cache_age_s: 660

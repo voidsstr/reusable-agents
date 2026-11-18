@@ -1,0 +1,99 @@
+{
+  "_comment": "Synthetic Creators getItems answers for framework/tests/test_amazon_price_refresh_agent.py. Shaped like the live API as framework/core/amazon_creators.py documents it (camelCase resources, offersV2 listings, price.money envelopes, savingBasis, browseNodeInfo, classifications, a per-ASIN errors array). No live call produced them.",
+  "items": {
+    "B0AAAAAAA1": {
+      "asin": "B0AAAAAAA1",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA1?tag=example-site-20&linkCode=ogi&th=1&psc=1",
+      "itemInfo": {
+        "title": {"displayValue": "Example Widget Pro 2000, 120-Piece Kit", "label": "Title", "locale": "en_US"},
+        "classifications": {
+          "productGroup": {"displayValue": "Home Improvement", "label": "ProductGroup", "locale": "en_US"},
+          "binding": {"displayValue": "Tools & Home Improvement", "label": "Binding", "locale": "en_US"}
+        }
+      },
+      "images": {"primary": {"large": {"url": "https://m.media-amazon.com/images/I/41ExampleAAL._SL500_.jpg", "height": 500, "width": 375}}},
+      "browseNodeInfo": {"browseNodes": [
+        {"id": "1000000001", "displayName": "Widgets", "contextFreeName": "Widgets"},
+        {"id": "1000000002", "displayName": "Widget Kits", "contextFreeName": "Widget Kits"},
+        {"id": "1000000001", "displayName": "Widgets", "contextFreeName": "Widgets"}
+      ]},
+      "offersV2": {"listings": [
+        {
+          "price": {
+            "money": {"amount": 1299.0, "currency": "USD", "displayAmount": "$1,299.00"},
+            "savingBasis": {"money": {"amount": 1599.0, "currency": "USD", "displayAmount": "$1,599.00"},
+                            "savingBasisType": "LIST_PRICE"}
+          },
+          "availability": {"type": "IN_STOCK", "message": "In Stock"},
+          "condition": {"value": "New"},
+          "isBuyBoxWinner": true
+        }
+      ]}
+    },
+    "B0AAAAAAA2": {
+      "asin": "B0AAAAAAA2",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA2?tag=example-site-20",
+      "itemInfo": {"title": {"displayValue": "Example Widget Mini (Discontinued Color)"}},
+      "images": {"primary": {"large": {"url": "https://m.media-amazon.com/images/I/31ExampleBBL._SL500_.jpg", "height": 500, "width": 500}}},
+      "offersV2": {"listings": [
+        {"availability": {"type": "OUT_OF_STOCK", "message": "Currently unavailable."}}
+      ]}
+    },
+    "B0AAAAAAA3": {
+      "asin": "B0AAAAAAA3",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA3?tag=example-site-20",
+      "itemInfo": {"title": {"displayValue": "Example Widget Max, Renewed"}},
+      "images": {"primary": {"large": {"url": "https://m.media-amazon.com/images/I/51ExampleCCL._SL500_.jpg", "height": 433, "width": 500}}},
+      "offersV2": {"listings": [
+        {
+          "price": {"money": {"amount": 771.2, "currency": "USD", "displayAmount": "$771.20"}},
+          "availability": {"type": "IN_STOCK_SCARCE", "message": "Only 2 left in stock - order soon."},
+          "condition": {"value": "Used"},
+          "isBuyBoxWinner": true
+        }
+      ]}
+    },
+    "B0AAAAAAA4": {
+      "asin": "B0AAAAAAA4",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA4?tag=example-site-20",
+      "itemInfo": {"title": {"displayValue": "Example Widget Plus (Price Shown in Cart)"}},
+      "offersV2": {"listings": [
+        {
+          "availability": {"type": "IN_STOCK", "message": "In Stock"},
+          "condition": {"value": "New"},
+          "isBuyBoxWinner": true,
+          "violatesMAP": true
+        }
+      ]}
+    },
+    "B0AAAAAAA5": {
+      "asin": "B0AAAAAAA5",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA5?tag=example-site-20",
+      "itemInfo": {"title": {"displayValue": "Example Widget Import"}},
+      "offersV2": {"listings": [
+        {
+          "price": {"money": {"amount": 65900.0, "currency": "INR", "displayAmount": "₹65,900.00"}},
+          "availability": {"type": "IN_STOCK", "message": "In Stock"},
+          "condition": {"value": "New"},
+          "isBuyBoxWinner": true
+        }
+      ]}
+    },
+    "B0AAAAAAA6": {
+      "asin": "B0AAAAAAA6",
+      "detailPageURL": "https://www.amazon.com/dp/B0AAAAAAA6?tag=example-site-20",
+      "itemInfo": {"title": {"displayValue": "Example Widget 2027 Edition"}},
+      "offersV2": {"listings": [
+        {
+          "price": {"money": {"amount": 399.99, "currency": "USD", "displayAmount": "$399.99"}},
+          "availability": {"type": "PREORDER", "message": ""},
+          "condition": {"value": "New"},
+          "isBuyBoxWinner": true
+        }
+      ]}
+    }
+  },
+  "errors": {
+    "B0AAAAAAA7": "The ItemId B0AAAAAAA7 is not accessible through the Creators API."
+  }
+}

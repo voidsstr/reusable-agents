@@ -1,0 +1,184 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/voidsstr/reusable-agents/agents/amazon-price-refresh-agent/price-refresh-config.schema.json",
+  "title": "Amazon price-refresh engine: one site's price_refresh block",
+  "description": "The `price_refresh` block of a per-site site.yaml read by agents/amazon-price-refresh-agent (env PRICE_REFRESH_CONFIG=<path>[#dotted.key]). Every value is optional unless noted; the engine's defaults (price_refresh_settings.DEFAULTS) fill the rest. Engine-owned blocks reject unknown keys so a typo fails at startup instead of being ignored. `demand_priority` is passed verbatim to framework/core/price_refresh_priority.py, which owns its keys. Keys starting with '_' are comments.",
+  "type": "object",
+  "additionalProperties": false,
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "site": {
+      "type": "string",
+      "description": "Site name as framework/core/site_registry.py knows it. Feeds the price_refresh_priority by_site layer and the DSN fallback. Default: the site owning the agent id in the registry."
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dsn_env": {
+          "type": "string",
+          "description": "NAME of the env var holding the site's Postgres DSN (never the DSN itself). Default: the site's dsn_env in the site registry."
+        },
+        "statement_timeout_ms": {"type": "integer", "minimum": 0, "description": "Session statement_timeout for the agent's connection (0 = the role's own)."},
+        "connect_timeout_s": {"type": "integer", "minimum": 1},
+        "write_retries": {"type": "integer", "minimum": 0, "maximum": 10, "description": "Re-runs of a cache write after a deadlock or serialization failure."},
+        "write_retry_backoff_s": {"type": "number", "minimum": 0, "maximum": 60},
+        "application_name": {"type": "string", "maxLength": 63, "description": "Postgres application_name (default: the agent id)."}
+      }
+    },
+    "creators": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consumer": {
+          "type": "string",
+          "description": "The Creators budget line (config/amazon-creators-budget.json shares) this site's refresh is charged to. Default '<site>-price-refresh'."
+        },
+        "partner_tag": {"type": "string", "description": "The site's own Associates tag (e.g. '<site>-20'). Required unless partner_tag_env is set: requests and the stored detailPageURL carry it."},
+        "partner_tag_env": {"type": "string", "description": "Env var holding the partner tag, as an alternative to partner_tag."},
+        "marketplace": {"type": "string", "description": "Marketplace domain (default AMAZON_CREATORS_MARKETPLACE, else www.amazon.com)."},
+        "resources": {
+          "description": "'auto' (PRICE_RESOURCES plus what the enabled cache columns need) or an explicit list, which must include PRICE_RESOURCES and every resource an enabled cache column needs (an answer replaces every enabled column, so a missing resource would write NULL over it each run).",
+          "oneOf": [
+            {"type": "string", "enum": ["auto"]},
+            {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}
+          ]
+        },
+        "expected_currency": {"type": "string", "pattern": "^[A-Za-z]{3}$"},
+        "max_calls_per_run": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Ceiling per run; the consumer's remaining daily share clamps it further. 10 ASINs per call."},
+        "max_consecutive_errors": {"type": "integer", "minimum": 1, "maximum": 50},
+        "min_interval_s": {"type": "number", "minimum": 0, "maximum": 30, "description": "Minimum spacing between Creators requests."}
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The instance's schedule. cron_period_hours is required (checked after the defaults merge).",
+      "properties": {
+        "cron_period_hours": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 23,
+          "description": "Required. The instance manifest's cron period in hours (e.g. 4 for '5 */4 * * *'). The purge runs once per run, so the purge horizon is 24h minus this minus max_run_minutes; the gate check uses it too."
+        },
+        "max_run_minutes": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 240,
+          "description": "The longest a run may take from its tick to its purge (default 30). Lowers the purge horizon; a run that takes longer logs a warning."
+        },
+        "tolerate_failed_runs": {"type": "integer", "minimum": 0, "maximum": 6, "description": "Failed runs in a row each demand group's gate must absorb and still re-check its rows inside the quotable window (default 1)."},
+        "long_tail_tolerate_failed_runs": {"type": "integer", "minimum": 0, "maximum": 6, "description": "The same for the long tail (default 0; the template's 15.5h tail on a 4h cron absorbs one, re-checking at ~20.5h after a failed run, while a 16h tail would reach ~24.5h)."}
+      }
+    },
+    "demand_priority": {
+      "type": "object",
+      "description": "framework/core/price_refresh_priority.py site config: enabled, display_hours, statement_timeout_ms, catalog {table, asin_col, fresh_cols, where, params, asin_regex}, sources {human_clicks, ai_traffic}, groups, extra_groups, group_overrides, long_tail {enabled, gate_hours}. catalog.table is required (the site's refresh catalog view). The engine turns `enabled` on by default; storage by_agent_id.<id>.enabled=false switches the instance to plain oldest-first.",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "display_hours": {"type": "number", "exclusiveMinimum": 0, "maximum": 24},
+        "catalog": {
+          "type": "object",
+          "required": ["table"],
+          "properties": {
+            "table": {"type": "string", "minLength": 1},
+            "asin_col": {"type": "string"},
+            "fresh_cols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "where": {"type": "string"},
+            "params": {"type": "object"},
+            "asin_regex": {"type": "string"}
+          }
+        },
+        "groups": {"type": "array", "items": {"type": "object"}},
+        "extra_groups": {"type": "array", "items": {"type": "object"}},
+        "long_tail": {
+          "type": "object",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "gate_hours": {"type": "number", "minimum": 0}
+          }
+        }
+      },
+      "required": ["catalog"]
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"type": "string", "enum": ["cache"], "description": "Only 'cache' (upsert a per-ASIN Amazon cache table) is implemented."},
+        "table": {"type": "string", "minLength": 1},
+        "key_col": {"type": "string", "minLength": 1},
+        "fetched_at_col": {"type": "string", "minLength": 1},
+        "outcome_col": {"type": ["string", "null"]},
+        "consumer_col": {"type": ["string", "null"]},
+        "columns": {
+          "type": "object",
+          "description": "Logical field -> the table's column; null disables a field (not requested, written or purged). price cannot be disabled. browse_node_ids and product_group are null by default (opt in by naming a column; the license review keeps them out of the cache).",
+          "additionalProperties": false,
+          "properties": {
+            "title": {"type": ["string", "null"]},
+            "image_url": {"type": ["string", "null"]},
+            "image_w": {"type": ["string", "null"]},
+            "image_h": {"type": ["string", "null"]},
+            "detail_page_url": {"type": ["string", "null"]},
+            "price": {"type": "string"},
+            "list_price": {"type": ["string", "null"]},
+            "currency": {"type": ["string", "null"]},
+            "availability": {"type": ["string", "null"]},
+            "availability_type": {"type": ["string", "null"]},
+            "condition": {"type": ["string", "null"]},
+            "is_buybox_winner": {"type": ["string", "null"]},
+            "map_hidden": {"type": ["string", "null"]},
+            "browse_node_ids": {"type": ["string", "null"]},
+            "product_group": {"type": ["string", "null"]}
+          }
+        },
+        "casts": {
+          "type": "object",
+          "description": "Field -> SQL type cast applied to its parameter (default browse_node_ids: text[]).",
+          "additionalProperties": {"type": ["string", "null"]}
+        },
+        "extra_purge_columns": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Further Amazon-sourced columns of the table that another writer fills; the purge NULLs them too."
+        },
+        "max_text_chars": {"type": "integer", "minimum": 16, "maximum": 100000},
+        "purge": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_age_hours": {
+              "description": "The purge horizon: age past which every API column is NULLed. 'auto' (default) = 24h minus schedule.cron_period_hours minus schedule.max_run_minutes, the largest value that keeps every stored value under 24h when the purge runs once per run (19.5h on a 4h cron). A number above that fails validation. Rows the run asked about and could not refresh are spared while still inside the quotable window (the next run re-asks them).",
+              "anyOf": [
+                {"type": "number", "exclusiveMinimum": 0, "maximum": 24},
+                {"type": "string", "enum": ["auto"]}
+              ]
+            }
+          }
+        },
+        "not_found_guard": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "not_found answers NULL a whole row, so they are written only after the sweep finished, and not at all when more than max_share of at least min_answered answers were not_found (an integration fault, not a catalog event).",
+          "properties": {
+            "max_share": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            "min_answered": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "indexable_sql": {"type": "string", "description": "Trusted SELECT whose first column is the ASIN of every indexable page (fresh_priced_pct denominator). Default: the refresh catalog."},
+        "min_quotable_price": {"type": "number", "minimum": 0},
+        "max_html_cache_age_s": {"type": "integer", "minimum": 0, "maximum": 7200, "description": "The longest time rendered HTML can sit in a cache: the affiliate kit's maxHtmlCacheAgeSeconds (s-maxage + max-age + SSR cache; 660 at its defaults). A price is quotable only within demand_priority.display_hours minus this; it sets the window of fresh_priced_pct / demand_fresh_pct and the gate check's limit."},
+        "tier_freshness": {"type": "boolean", "description": "Report per-tier freshness (one read-only catalog scan per run)."}
+      }
+    }
+  }
+}
