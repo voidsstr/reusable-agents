@@ -1,0 +1,40 @@
+{
+  "_comment": "Test profile for framework.core.spec_sources: robot vacuums. It exists to prove the primitive is niche-agnostic: different fields, units (Pa, mAh, mL, dB, min) and labels, same code.",
+  "fields": {
+    "model_number": {"kind": "text", "normalize": "alnum"},
+    "suction_pa": {"kind": "quantity", "unit": "Pa", "min": 100, "max": 50000, "required": true, "hints": ["suction", "\\bPa\\b"]},
+    "battery_mah": {"kind": "quantity", "unit": "mAh", "min": 500, "max": 20000, "required": true, "hints": ["battery", "mAh"]},
+    "dustbin_ml": {"kind": "quantity", "unit": "mL", "min": 50, "max": 5000},
+    "noise_db_max": {"kind": "quantity", "unit": "dB", "min": 30, "max": 100},
+    "runtime_min": {"kind": "quantity", "unit": "min", "min": 10, "max": 1000, "required": true},
+    "charge_time_h": {"kind": "quantity", "unit": "h", "min": 0.5, "max": 24},
+    "rated_power_w": {"kind": "quantity", "unit": "W", "min": 5, "max": 2000},
+    "dimensions_mm": {"kind": "dimensions", "unit": "mm", "min": 50, "max": 1000, "rel_tol": 0.02}
+  },
+  "rules": [],
+  "extractor_sets": {
+    "robot-spec-table": [
+      {"name": "spec-table", "kind": "pairs", "confidence": 0.9, "fields": {
+        "suction_pa": {"labels": ["suction", "vacuum power"]},
+        "battery_mah": {"labels": ["^battery"]},
+        "dustbin_ml": {"labels": ["dust ?(?:bin|box)"]},
+        "noise_db_max": {"labels": ["noise"], "pick": "max"},
+        "runtime_min": {"labels": ["working time", "run ?time"], "pick": "max"},
+        "charge_time_h": {"labels": ["charging time"]},
+        "rated_power_w": {"labels": ["rated power"]},
+        "dimensions_mm": {"labels": ["size of robot", "^dimensions?\\b"]}
+      }},
+      {"name": "structured-data", "kind": "jsonld", "confidence": 0.8, "fields": {
+        "model_number": {"properties": ["mpn", "model", "sku"]}
+      }},
+      {"name": "marketing", "kind": "regex", "confidence": 0.75, "fields": {
+        "runtime_min": {"patterns": ["\\bup to\\s+(?P<value>\\d+\\s*minutes)\\b"]},
+        "battery_mah": {"patterns": ["(?P<value>\\d[\\d,]*\\s*mAh)\\s+battery"]}
+      }}
+    ]
+  },
+  "default_extractors": ["robot-spec-table"],
+  "brands": {
+    "ecovacs": {"aliases": ["ecovacs", "deebot"], "hosts": ["ecovacs.com"]}
+  }
+}

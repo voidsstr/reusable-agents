@@ -1,0 +1,102 @@
+{
+  "_comment": "Provenance of the spec_sources test fixtures. Every document fixture is a TRIMMED excerpt of a public manufacturer (or manual-mirror) document fetched once with a plain GET on 2026-11-17, after checking that host's robots.txt allows it. Trimming removed scripts, images, style/data/aria attributes and unrelated page sections; kept text is verbatim. Tests load documents through this file so each one is parsed with its real URL and source kind. 'synthetic' fixtures were hand-written and never fetched.",
+  "documents": [
+    {
+      "id": "pecron-manual",
+      "file": "docs/pecron-e2000lfp-manual-eu.layout.txt",
+      "format": "layout-text",
+      "url": "https://cdn.shopify.com/s/files/1/0626/0241/2120/files/pecron_E2000LFP_-20230227.pdf?v=1732849752",
+      "kind": "manual-pdf",
+      "brand": "pecron",
+      "model": "Pecron E2000LFP",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "application/pdf", "bytes": 5143490, "last_modified": "Tue, 17 Nov 2026 23:42:27 GMT"},
+      "note": "Official user manual (EU 220-240 V edition, 36 pages), linked from https://eu.pecron.com/pages/e2000lfp-user-manual. Converted with poppler 'pdftotext -layout'; kept the English SPECIFICATIONS / OUTPUT SPECS / INPUT SPECS page (a column-layout table), the first solar-charging paragraph and the FAQ. The US edition (https://cdn.shopify.com/s/files/1/0509/5263/4556/files/PECRON_E2000LFP_user_manual_100V_120V_TT30-R_-20231206.pdf) was also fetched but its text is outlined (no text layer), so pdftotext returns nothing: a real case for the 'no-text-layer' flag."
+    },
+    {
+      "id": "jackery-product-page",
+      "file": "docs/jackery-explorer-1000-v2-product-page.html",
+      "format": "html",
+      "url": "https://www.jackery.com/products/jackery-explorer-1000-v2",
+      "kind": "manufacturer-page",
+      "brand": "jackery",
+      "model": "Jackery Explorer 1000 v2 (JE-1000D)",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "text/html; charset=utf-8", "bytes": 2384666, "etag": "W/\"sfr:computation:v2:65ad9d0068f2b63f4e0762227f3cf3837d1d5b65ca89071d85395084add08b80:62b1a0a3e6f38515e1ba729bee211379\""},
+      "note": "Tech Specs block only: the station, then the start of the bundled SolarSaga 200W panel block (a second 'Weight' row, used by the scope test). Its 'DC Input' row lists two bands (12-16V car, 16-60V solar); read as one input window it gives 12-60 V."
+    },
+    {
+      "id": "jackery-faq",
+      "file": "docs/jackery-explorer-1000-v2-faq.html",
+      "format": "html",
+      "url": "https://www.jackery.com/blogs/jackery-faqs/explorer-1000-v2-basic-information",
+      "kind": "manufacturer-faq",
+      "brand": "jackery",
+      "model": "Jackery Explorer 1000 v2 (JE-1000D)",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "text/html; charset=utf-8", "bytes": 1683328, "etag": "W/\"sfr:computation:v2:dd2a54fb39590c84611a44793f8fb13d0ca42b55930d12ebb75cf99dc44f0dc9:62b1a0a3e6f38515e1ba729bee211379\""},
+      "note": "16 of the specification table's rows, verbatim. States the solar input as 16-60V and a UPS switchover 'within 20 ms'. Together with the product page this is the design's PV-input conflict (12-60 V vs 16-60 V)."
+    },
+    {
+      "id": "jackery-eu-manual",
+      "file": "docs/jackery-explorer-1000-manual-eu.layout.txt",
+      "format": "layout-text",
+      "url": "https://r.jackery.net/productGuide/Jackery%20Explorer%201000%20v2%20User%20Manual.pdf",
+      "kind": "manual-pdf",
+      "brand": "jackery",
+      "model": "Jackery Explorer 1000 (JE-1000F, EU/UK)",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "application/pdf", "bytes": 41039365, "etag": "\"71a033eb03f6d1197eb503055808e3af\"", "last_modified": "Sat, 31 Oct 2026 08:21:33 GMT"},
+      "note": "The manual the v2 product page links to is the EU/UK edition for a DIFFERENT variant (JE-1000F, 1024 Wh, 230 V, UPS within 10 ms). Kept the UPS section and the SPECIFICATIONS page (two-column layout). Used to show that a wrong-variant source surfaces as conflicts (model number, capacity, AC voltage) instead of silently mixing in. r.jackery.net answers robots.txt with 403 (RFC 9309: unavailable, so crawling is allowed). The 41 MB size is why the fetcher's default max_bytes is 64 MB."
+    },
+    {
+      "id": "fossibot-product-page",
+      "file": "docs/fossibot-f2400-product-page.html",
+      "format": "html",
+      "url": "https://www.fossibot.com/products/fossibot-f2400",
+      "kind": "manufacturer-page",
+      "brand": "fossibot",
+      "model": "FOSSiBOT F2400",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "text/html; charset=utf-8", "bytes": 425120, "etag": "W/\"sfr:computation:v2:afc51a239d2e217edbc4ea7b85566a6a4a0aaa090f349561d210335555a7efe8:ec95c12b54f108f176b456ff592d8c18\""},
+      "note": "Product JSON-LD (name/sku/mpn/brand only), feature bullets ('10ms uninterruptible home backup UPS'), the Specifications grid and FAQ answers Q1 and Q7. The page contradicts itself on cycle life (bullet 4,000+ vs table 3,500+)."
+    },
+    {
+      "id": "fossibot-manual",
+      "file": "docs/fossibot-f2400-manual.html",
+      "format": "html",
+      "url": "https://www.manualslib.tech/guide/791338/fossibot-f2400-manual.html",
+      "kind": "manual-pdf",
+      "brand": "fossibot",
+      "model": "FOSSiBOT F2400",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "text/html; charset=UTF-8", "bytes": 256834},
+      "note": "Text of the official F2400 manual as transcribed by a manual mirror, because the official PDF (https://cdn.shopifycdn.net/s/files/1/0550/6066/0296/files/FOSSiBOT-F2400.pdf, 32 pages) has no text layer. States the UPS switchover as 'within about 8 milliseconds' (the product page says 10 ms) and the size as 396 x 284 x 321 mm (the page says 386 mm)."
+    },
+    {
+      "id": "ecovacs-spec",
+      "file": "docs/ecovacs-deebot-n10-spec.html",
+      "format": "html",
+      "url": "https://www.ecovacs.com/sg/deebot-robotic-vacuum-cleaner/deebot-n10",
+      "kind": "manufacturer-page",
+      "brand": "ecovacs",
+      "model": "ECOVACS DEEBOT N10",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "content_type": "text/html; charset=utf-8", "bytes": 103898, "etag": "\"s881mttw1g285f\""},
+      "note": "A robot vacuum (a different niche) to prove the primitive is niche-agnostic: <dl> spec rows whose units sit in the label ('Dust Bin Capacity (ml)' = 420, 'Noise Value (dBA )' = 65/66/71/74)."
+    }
+  ],
+  "synthetic": [
+    {
+      "file": "amazon/synthetic-amazon-detail-page.html",
+      "note": "Hand-written imitation of retail listing markers (canonical link, productTitle, Best Sellers Rank) for the refusal tests. Never fetched: the primitive refuses Amazon before any request."
+    }
+  ],
+  "robots": [
+    {"file": "robots/jackery.com.robots.txt", "url": "https://www.jackery.com/robots.txt", "note": "Shopify default rules: wildcards, $-free patterns, an indented 'Disallow: /zh/', separate adsbot-google group."},
+    {"file": "robots/manuals.plus.robots.txt", "url": "https://manuals.plus/robots.txt", "note": "Multi-agent groups, Crawl-Delay, '$' anchors, specific groups that do not inherit '*'. One webmaster-verification comment line removed."},
+    {"file": "robots/ecovacs.com.robots.txt", "url": "https://www.ecovacs.com/robots.txt", "note": "'Disallow:/x' without a space, patterns starting with '*', Allow/Disallow longest-match ties."},
+    {"file": "robots/eufy.com.robots.txt", "url": "https://www.eufy.com/robots.txt", "note": "'Disallow: /*.json' (Shopify JSON endpoints off-limits)."},
+    {"file": "robots/cdn.shopify.com.robots.txt", "url": "https://cdn.shopify.com/robots.txt", "note": "Where manufacturer manual PDFs are hosted; allows them."}
+  ]
+}

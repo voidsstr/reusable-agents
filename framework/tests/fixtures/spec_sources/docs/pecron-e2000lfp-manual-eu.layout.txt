@@ -1,0 +1,83 @@
+SPECIFICATIONS
+
+                                                                                                                           E2000 LFP
+
+
+
+
+  Capacity         Battery Type         Charging Time          Protections     Temperature          Dimension        Net Weight
+                                                             Over-Voltage,       0℃~45℃/
+   1920Wh         LiFePO4 Battery            3.5~4H          Overheat,          32℉~113℉          L16.1*W10*H11.6   Around 48.5lb
+ (25.6V75Ah)      Retain 80%+              (Standard)        Overload,           (Charging)              in         Around 22Kg
+                  Original Capacity          1.5~2H                             -20℃~45℃/         L409*W256*H297
+                                                             Short-Circuit,     -4℉~113℉
+                  At 3500 Cycles         (Fast Charging)     Self-Recovery                              mm
+                                                                               (Discharging)
+
+
+OUTPUT SPECS
+
+
+   AC Out *3              USB-A *4                  USB-C *2          DC 5525 Output *2        Cigar Port *1    Wireless Charger *1
+
+ Pure sine wave            5V-2A*3                  (5V,9V,12V,           DC 12V-3A            DC 12V-10A            Max 15W
+   220V~240V             (5V,9V,12V,                Max 18W)*1
+  Rated 2000W            Max 18W)*1               (5V,9V,12V,20V,
+                                                   Max 100W)*1
+
+
+INPUT SPECS
+
+
+
+             GX16MF *2                                      5521 *1
+
+      DC Charging(32V~95V)                           DC Charging(12V~18V)
+       Max 1200W(600W*2)                                  Max 100W
+
+
+
+
+USING SOLAR PANELS TO CHARGE THE E2000 LFP
+1. 1x DC5521 Charging Port: PV/DC 12V~18V, 100W maximum; VOC(open circuit voltage) of solar panel must be less than 25V;
+2. 2x GX16MF-5 Charging Port: PV(operating voltage) range 32V~95V, 600W maximum; VOC(open circuit voltage) of solar
+  panel/array must be less than 95V, otherwise, it will damage the unit! Do not wire more than two 36V solar panels in series,
+  or more than four 18V solar panels in series.
+  (18V/36V stands for Vmp, the operating voltage, of the solar panel)
+
+
+
+
+                                                                                                       1x DC5521 Charging Port:
+                                                                                                       PV12V~18V-100W Maximum Input
+
+
+
+
+                          E2000 LFP
+
+
+
+
+                                                                   2x GX16MF-5 Charging Port:
+                                                                   PV32~95V-600W Maximum Input
+
+FAQS
+Q1： What kind of battery is used in E2000 LFP? How long it can last?
+ A： E2000 LFP utilizes high quality UL certified automotive LiFePO4 battery, it can retain 80% of its original capacity at 3500
+    complete charge cycles.
+Q2： What devices can E2000 LFP power?
+ A： E2000 LFP can power most devices with power consumption less than 2000 watts.
+Q3： Can the E2000 LFP be used as UPS?
+ A： The UPS function is not supported.
+Q4： Can the E2000 LFP be charged while discharging?
+ A： Yes, E2000 LFP can run devices while it is being charged. The battery will eventually run out if the discharging is greater
+    than the charging during the pass through charging.
+Q5： How to calculate the E2000 LFP running time?
+ A： Running Time=Total Capacity(1920Wh) * 0.85 (Depth of Discharge)/Loading Power(Watts)
+Q6： Can I use the E2000 LFP indoors and charge the E2000 LFP indoors?
+ A： Yes, the E2000 LFP is safe to use indoors.
+Q7： Does E2000 LFP have built-in MPPT controller?
+ A： Yes, there are two independent 600W(PV 32V-95V) MPPT charge controllers inside, and one step up 100W(PV 18V) MPPT
+    charge controller, The Voc ( Open Circuit Voltage) of the solar panels should not exceed 95V.
+Q8： How to store the E2000 LFP?

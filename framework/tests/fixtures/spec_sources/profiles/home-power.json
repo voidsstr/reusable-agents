@@ -1,0 +1,132 @@
+{
+  "_comment": "Test profile for framework.core.spec_sources: portable power stations. Niche VALUES only (fields, rules, label/regex extractors, brands); the module has no knowledge of this niche. A deployment would place this object under profiles.<name> in the storage config config/spec-sources-config.json and select it with by_site.<site>.profile. Label regexes are matched against the lower-cased label; value regexes against the normalised (NFKC) value text. The solar input ceilings (pv_voc_max, pv_w_max, pv_a_max) feed conservative compatibility verdicts, so their conflicts are settled by an operator (adjudicate: human), never by a model picking the less conservative number.",
+  "fields": {
+    "model_number": {"kind": "text", "normalize": "alnum", "description": "Manufacturer model number of this exact variant", "hints": ["model"]},
+    "capacity_wh": {"kind": "quantity", "unit": "Wh", "min": 50, "max": 60000, "rel_tol": 0.01, "required": true,
+                    "description": "Rated battery capacity", "hints": ["capacity", "\\bWh\\b"]},
+    "chemistry": {"kind": "enum", "required": true, "description": "Battery cell chemistry",
+                  "values": {"LiFePO4": ["lifepo4", "lithium iron phosphate", "\\blfp\\b"],
+                             "NMC": ["\\bnmc\\b", "nickel manganese cobalt"],
+                             "Li-ion": ["li-?ion", "lithium[- ]ion"]},
+                  "hints": ["chemistry", "battery type", "lifepo"]},
+    "cycle_life": {"kind": "count", "min": 100, "max": 20000, "description": "Rated charge cycles", "hints": ["cycle"]},
+    "ac_cont_w": {"kind": "quantity", "unit": "W", "min": 50, "max": 30000, "required": true,
+                  "description": "Continuous (rated) AC output power", "hints": ["rated", "ac output"]},
+    "ac_surge_w": {"kind": "quantity", "unit": "W", "min": 50, "max": 60000,
+                   "description": "Peak / surge AC output power", "hints": ["surge", "peak", "instantaneous"]},
+    "ac_voltage": {"kind": "quantity", "unit": "V", "min": 90, "max": 260, "abs_tol": 1, "description": "AC output voltage"},
+    "ups_supported": {"kind": "bool", "description": "Whether the unit offers a UPS / bypass switchover",
+                      "values": {"false": ["not supported", "does not support", "^no\\b"],
+                                 "true": ["^yes\\b", "\\bups\\b", "uninterruptible"]}},
+    "ups_ms": {"kind": "quantity", "unit": "ms", "min": 0, "max": 1000,
+               "description": "UPS switchover time to battery", "hints": ["\\bUPS\\b", "uninterruptible", "switch"]},
+    "pv_v_min": {"kind": "quantity", "unit": "V", "min": 0, "max": 600,
+                 "description": "Lowest solar (PV) input voltage accepted", "hints": ["solar", "\\bPV\\b", "MPPT", "DC input"]},
+    "pv_voc_max": {"kind": "quantity", "unit": "V", "min": 5, "max": 1000, "required": true, "adjudicate": "human",
+                   "description": "Highest solar (PV) input / open-circuit voltage accepted", "hints": ["solar", "\\bPV\\b", "VOC", "MPPT"]},
+    "pv_w_max": {"kind": "quantity", "unit": "W", "min": 10, "max": 30000, "adjudicate": "human",
+                 "description": "Maximum solar input power"},
+    "pv_a_max": {"kind": "quantity", "unit": "A", "min": 0.5, "max": 200, "adjudicate": "human",
+                 "description": "Maximum solar input current"},
+    "weight_kg": {"kind": "quantity", "unit": "kg", "min": 0.5, "max": 500, "rel_tol": 0.03, "hints": ["weight"]},
+    "dimensions_mm": {"kind": "dimensions", "unit": "mm", "min": 10, "max": 3000, "rel_tol": 0.02, "hints": ["dimension"]},
+    "charge_temp_min_c": {"kind": "quantity", "unit": "degC", "min": -40, "max": 30, "abs_tol": 0.5},
+    "discharge_temp_min_c": {"kind": "quantity", "unit": "degC", "min": -40, "max": 30, "abs_tol": 0.5},
+    "fan_noise_db": {"kind": "quantity", "unit": "dB", "min": 10, "max": 120}
+  },
+  "rules": [
+    {"name": "surge-at-least-continuous", "kind": "gte", "a": "ac_surge_w", "b": "ac_cont_w"},
+    {"name": "pv-window-ordered", "kind": "lt", "a": "pv_v_min", "b": "pv_voc_max"}
+  ],
+  "extractor_sets": {
+    "station-spec-table": [
+      {"name": "spec-table", "kind": "pairs", "confidence": 0.9, "fields": {
+        "model_number": {"labels": ["^(product )?model(?: no\\.?| number)?$"]},
+        "capacity_wh": {"labels": ["^(battery |rated )?capacity$", "^rated capacity of battery pack$"]},
+        "chemistry": {"labels": ["cell chemistry", "type of battery", "^battery type$", "^type$", "^cell type$"]},
+        "cycle_life": {"labels": ["cycle ?life", "^lifecycle$", "^cycle times$"]},
+        "ac_cont_w": {"labels": ["^ac total output$", "^ac output$", "ac output specification", "^\\d\\s*[x×]\\s*ac$"],
+                      "value_regex": ["(?P<value>\\d[\\d,.]*\\s*W)\\s*(?:rated|in total|total)\\b",
+                                      "\\brated\\s+(?P<value>\\d[\\d,.]*\\s*W)\\b"]},
+        "ac_surge_w": {"labels": ["^surge power$", "maximum instantaneous output power", "^peak power$",
+                                  "^ac total output$", "^\\d\\s*[x×]\\s*ac$"],
+                       "value_regex": ["(?P<value>\\d[\\d,.]*\\s*W)\\s*surge",
+                                       "^(?P<value>\\d[\\d,.]*\\s*W)\\s*$"]},
+        "ac_voltage": {"labels": ["^ac output$", "^\\d\\s*[x×]\\s*ac$", "ac output specification"]},
+        "ups_ms": {"labels": ["\\bups\\b"],
+                   "value_regex": "\\bwithin\\s+(?:about\\s+|approximately\\s+)?(?P<value>\\d+(?:\\.\\d+)?)\\s*(?P<unit>ms|milliseconds?)\\b"},
+        "pv_v_min": {"labels": ["^dc input$", "solar (?:power )?input", "^pv input", "^mppt input", "dc8020 ports"],
+                     "exclude_labels": ["\\bcar\\b"], "pick": "min"},
+        "pv_voc_max": {"labels": ["^dc input$", "solar (?:power )?input", "^pv input", "^mppt input", "dc8020 ports"],
+                       "exclude_labels": ["\\bcar\\b"], "pick": "max"},
+        "pv_w_max": {"labels": ["^dc input$", "solar (?:power )?input", "^pv input", "^mppt input", "dc8020 ports"],
+                     "exclude_labels": ["\\bcar\\b"], "pick": "max"},
+        "pv_a_max": {"labels": ["^dc input$", "solar (?:power )?input", "^pv input", "^mppt input", "dc8020 ports"],
+                     "exclude_labels": ["\\bcar\\b"], "pick": "max"},
+        "weight_kg": {"labels": ["^(?:net |product )?weight$"]},
+        "dimensions_mm": {"labels": ["^(?:product )?dimensions?\\b", "^size$"]},
+        "charge_temp_min_c": {"labels": ["^charg(?:e|ing) temperature$", "temperature range for product charging"], "pick": "range_lo"},
+        "discharge_temp_min_c": {"labels": ["^discharg(?:e|ing) temperature", "^discharge temperature range$"], "pick": "range_lo"},
+        "fan_noise_db": {"labels": ["noise"]}
+      }}
+    ],
+    "station-text": [
+      {"name": "ups-not-supported", "kind": "regex", "confidence": 0.85, "fields": {
+        "ups_supported": {"constant": "false",
+                          "patterns": ["\\bUPS\\b[^.\\n]{0,40}\\bnot\\s+supported", "does\\s+not\\s+(?:have|support)\\s+(?:a\\s+|the\\s+)?UPS\\b"]}
+      }},
+      {"name": "marketing-and-prose", "kind": "regex", "confidence": 0.8, "fields": {
+        "ups_ms": {"patterns": ["(?<![\\d.])(?P<value>[1-9]\\d*(?:\\.\\d+)?)\\s*(?P<unit>ms|milliseconds?)\\b[^\\n]{0,60}\\bUPS\\b",
+                                "\\bUPS\\b[\\s\\S]{0,400}?\\bwithin\\s+(?:about\\s+|approximately\\s+)?(?P<value>[1-9]\\d*(?:\\.\\d+)?)\\s*(?P<unit>ms|milliseconds?)\\b"]},
+        "ups_supported": {"constant": "true",
+                          "patterns": ["(?<![\\d.])[1-9]\\d*(?:\\.\\d+)?\\s*(?:ms|milliseconds?)\\b[^\\n]{0,60}\\bUPS\\b",
+                                       "\\bUPS\\b[\\s\\S]{0,400}?\\bwithin\\s+(?:about\\s+)?[1-9]\\d*(?:\\.\\d+)?\\s*(?:ms|milliseconds?)\\b"]},
+        "ac_cont_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)\\s+AC\\b(?!\\s*(?:input|charg))", "\\brated\\s+(?P<value>\\d[\\d,]*\\s*W)\\b"]},
+        "ac_surge_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)\\s*surge"]},
+        "capacity_wh": {"patterns": ["(?P<value>\\d[\\d,.]*\\s*Wh)\\s+capacity"]},
+        "cycle_life": {"patterns": ["(?P<value>\\d[\\d,]*)\\+?\\s*(?:life\\s+|complete\\s+charge\\s+)?cycles\\b"]},
+        "pv_voc_max": {"patterns": ["\\bmaximum voltage\\s+(?P<value>\\d+(?:\\.\\d+)?\\s*V)\\b"]}
+      }}
+    ]
+  },
+  "default_extractors": ["station-spec-table", "station-text"],
+  "brands": {
+    "jackery": {
+      "aliases": ["jackery"],
+      "hosts": ["jackery.com", "jackery.net"],
+      "use": [
+        "station-spec-table",
+        "station-text"
+      ]
+    },
+    "pecron": {
+      "aliases": ["pecron"],
+      "hosts": ["pecron.com"],
+      "extractors": [
+        {"name": "manual-main-solar-input", "kind": "regex", "confidence": 0.9, "fields": {
+          "pv_v_min": {"patterns": ["GX16MF[^\\n]*?range\\s*(?P<lo>\\d+(?:\\.\\d+)?)\\s*V\\s*[~-]\\s*(?P<hi>\\d+(?:\\.\\d+)?)\\s*V"],
+                       "pick": "range_lo", "unit": "V"},
+          "pv_voc_max": {"patterns": ["GX16MF-5 Charging Port:[\\s\\S]{0,200}?less than\\s*(?P<value>\\d+(?:\\.\\d+)?\\s*V)\\b",
+                                      "Voc[^\\n]{0,60}?should not exceed\\s*(?P<value>\\d+(?:\\.\\d+)?\\s*V)\\b"]},
+          "pv_w_max": {"patterns": ["GX16MF[\\s\\S]{0,300}?\\bMax\\s*(?P<value>\\d[\\d,]*\\s*W)"]}
+        }},
+        {"name": "manual-temperature-column", "kind": "pairs", "confidence": 0.9, "fields": {
+          "charge_temp_min_c": {"labels": ["^temperature$"], "pick": "range_lo", "unit": "degC",
+                                "value_regex": "(?P<lo>-?\\d+(?:\\.\\d+)?)\\s*°C\\s*~[^()]*\\(Charging\\)"},
+          "discharge_temp_min_c": {"labels": ["^temperature$"], "pick": "range_lo", "unit": "degC",
+                                   "value_regex": "\\(Charging\\)\\s*(?P<lo>-?\\d+(?:\\.\\d+)?)\\s*°C"}
+        }}
+      ]
+    },
+    "fossibot": {
+      "aliases": ["fossibot", "fossi bot"],
+      "hosts": ["fossibot.com"],
+      "extractors": [
+        {"name": "faq-pv-requirements", "kind": "pairs", "confidence": 0.85, "fields": {
+          "pv_v_min": {"labels": ["^work(?:ing)? voltage$"], "pick": "range_lo"},
+          "pv_voc_max": {"labels": ["^work(?:ing)? voltage$"], "pick": "range_hi"}
+        }}
+      ]
+    }
+  }
+}

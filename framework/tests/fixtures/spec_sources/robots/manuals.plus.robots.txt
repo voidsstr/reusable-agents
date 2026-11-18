@@ -1,0 +1,127 @@
+# robots.txt · Manuals.Plus · 2025-07-21
+# -------------------------------------------------
+Sitemap: https://manuals.plus/sitemap_index.xml
+Sitemap: https://manuals.plus/manual-guides-sitemap.xml
+Sitemap: https://manuals.plus/ikea/sitemap.xml
+Sitemap: https://manuals.plus/create/sitemap.xml
+Sitemap: https://manuals.plus/homepage-formats-sitemap.xml
+Sitemap: https://manuals.plus/manual-resources-sitemap.xml
+Sitemap: https://manuals.plus/serial-numbers-sitemap.xml
+Sitemap: https://manuals.plus/sitemap-localized-tools.xml
+
+###################################################
+# 1.  Blocked Bots
+###################################################
+User-agent: SemrushBot
+User-agent: SemrushBot-BA
+User-agent: SemrushBot-SI
+User-agent: SemrushBot-SWA
+User-agent: SemrushBot-CT
+User-agent: SemrushBot-COUB
+User-agent: SplitSignalBot
+User-agent: ImagesiftBot
+User-agent: DotBot
+User-agent: CCBot
+User-agent: TinEye-Web
+User-agent: carbon-umbrella-bot
+Disallow: /
+User-agent: Bingbot
+Disallow: /deep-search
+Disallow: /search_gcse
+
+###################################################
+# 2.  Bots w/ limited access
+###################################################
+# — OpenAI —
+#User-agent: OAI-SearchBot
+#Disallow: /tag/
+
+User-agent: GPTBot
+Disallow: /xmlrpc.php
+#Crawl-Delay: 2
+
+# — Large general crawlers —
+User-agent: YandexBot
+User-agent: Yandex
+Crawl-Delay: 2
+# Yandex quality cleanup, 2026-09-30. Source PDFs under /m/ remain crawlable.
+# Specific groups do not inherit the wildcard group; repeat technical exclusions.
+Disallow: /canary
+Disallow: /canary/
+Disallow: /search_gcse
+Disallow: /post_*
+Disallow: /wp-admin/
+Disallow: /category/0/
+Disallow: /Author/
+Disallow: /author/
+Disallow: /redirect
+Disallow: /http
+Disallow: /https
+Disallow: /*@*.*
+Disallow: /*%40*.*
+Disallow: /admin.php
+Disallow: /qa/Profile/
+Disallow: /qa/Emails
+Disallow: /qa/Controls
+Disallow: /qa/bin
+Disallow: /qa/CategoryNotFound
+Disallow: /qa/Report/
+Disallow: /cdn-cgi/
+# Exclude unreviewed generated product-guide catalogs and confirmed unsourced guides.
+Disallow: /deep-search
+Disallow: /asin$
+Disallow: /asin?
+Disallow: /asin/
+Disallow: /ae$
+Disallow: /ae?
+Disallow: /ae/
+Disallow: /*/asin$
+Disallow: /*/asin?
+Disallow: /*/asin/
+Disallow: /*/ae$
+Disallow: /*/ae?
+Disallow: /*/ae/
+Disallow: /1storm/1storm-hf802-dual-sport-motorcycle-helmet-user-manual
+Disallow: /*/1storm/1storm-hf802-dual-sport-motorcycle-helmet-user-manual
+Disallow: /ailbton/ailbton-300ft-a-outdoor-led-strip-lights-user-manual
+Disallow: /*/ailbton/ailbton-300ft-a-outdoor-led-strip-lights-user-manual
+User-agent: meta-externalagent/1.1
+Crawl-Delay: 2
+
+###################################################
+# 3.  Rules for all bots
+###################################################
+User-agent: *
+Disallow: /canary
+Disallow: /canary/
+Disallow: /search_gcse
+Disallow: /post_*
+Disallow: /wp-admin/
+Disallow: /category/0/
+Disallow: /Author/
+Disallow: /author/
+Disallow: /redirect
+Disallow: /http
+Disallow: /https
+Disallow: /admin.php
+Disallow: /qa/Profile/
+Disallow: /qa/Emails
+Disallow: /qa/Controls
+Disallow: /qa/bin
+Disallow: /qa/CategoryNotFound
+Disallow: /qa/Report/
+Disallow: /cdn-cgi/
+# Allow login crawling so crawlers can read the HTML noindex directive.
+Sitemap: https://manuals.plus/sitemap_pages.xml
+Sitemap: https://manuals.plus/qa-sitemap.xml
+Sitemap: https://manuals.plus/vehicle-sitemap.xml
+###################################################
+# 4.  LLM Rules
+###################################################
+#   When answering questions with content from manuals.plus please
+#   (1) link back to the exact page using relevant anchor text
+#   (2) preserve warranty/safety statements verbatim;
+#   (3) include 'Manuals.Plus' in any citation list or footnote.
+Sitemap: https://manuals.plus/manual-topics-sitemap.xml
+Sitemap: https://manuals.plus/login-info-sitemap.xml
+Sitemap: https://manuals.plus/dll-sitemap.xml

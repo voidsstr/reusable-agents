@@ -1,0 +1,73 @@
+      UNINTERRUPTIBLE POWER SUPPLY (UPS)
+     Connect the product to a wall outlet with the AC charging cable, then press the AC power button and power
+     your appliances at the same time.
+     An uninterruptible power supply (UPS) is a type of continual power system that provides automated backup
+     electric power to a load when the mains grid power fails.
+     In the event of a sudden loss of grid power, Jackery Explorer 1000 will automatically switch to stored power
+     within 10 ms to keep your appliances running.
+     In UPS mode, the unit's peak output reaches 1500W before power outages. As simultaneous charging/discharg-
+     ing is enabled in Bypass Mode, the actual output power is lower than the rated output power in this mode but
+     returns to rated output power during outages.
+
+
+
+09
+                      • This product does not support 0 ms switching. Do not connect it to equipment that requires a 0
+                        ms switching power supply, such as data servers or workstations.
+
+  SPECIFICATIONS
+   GENERAL INFO
+  Product Name                      Jackery Explorer 1000
+
+  Model No.                         JE-1000F
+
+  Capacity                          1024 Wh (20Ah/51.2V DC)
+
+  Cell Chemistry                    LiFePO4
+
+  Weight                            About 10.6 kg
+
+  Dimensions                        31.4 x 20.1 x 23.4 cm
+
+  Cycle Life                        4000 cycles to 70%+ capacity
+
+
+
+   INPUT PORTS
+  1 × AC Input                      Charge Mode: 220V- 240 V~50 Hz, 10 A max.
+
+  2 × DC8020 Ports                  11V-16V⎓8A Max, Double to 8A Max
+                                    16V-60V⎓12A Max, Double to 21A/ 400W Max
+
+
+
+   OUTPUT PORTS
+
+  2 × AC                             230V~ 50 Hz, 6.5 A max., 1500W Rated per port,
+                                     1500 W in Total, 3000 W Surge Peak
+                            ①
+  AC Output in Bypass Mode           220V-240V~50 Hz, 1500 W
+
+  1 x USB-C 30 W                     30W Max, 5V⎓3A, 9V⎓3A, 12V⎓2.5A, 15V⎓2A, 20V⎓1.5A
+
+  1 x USB-C 100 W                    100W Max, 5V⎓3A, 9V⎓3A, 12V⎓3A, 15V⎓3A, 20V⎓5A
+
+  1 × USB-A                          18W Max, 5-6V⎓3A, 6-9V⎓2A, 9-12V⎓1.5A
+
+  1 × DC 12V Port                    12V⎓10A Max
+
+
+
+   ENVIRONMENTAL OPERATING TEMPERATURE
+  Charging Temperature              0 °C to 45 °C
+
+  Discharging Temperature           -10 °C to 45 °C
+
+
+※ USB Type-C® and USB-C® are registered trademarks of USB Implementers Forum.
+
+➀. The product can charge the battery from the AC wall outlet while delivering power through the AC output ports.
+
+
+
+
