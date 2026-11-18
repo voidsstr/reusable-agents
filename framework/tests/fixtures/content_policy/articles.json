@@ -1,0 +1,424 @@
+{
+  "_comment": "Article-level cases for framework/core/content_policy.check_article with the electrical, electrical-year1 and medical rule sets on. expect_rejects lists exactly the reject-level rule ids that must fire (order-free); [] means the article passes. Bodies are original text written for these tests. Cases with a 'source' were added by the review round.",
+  "cases": [
+    {
+      "id": "allowed-full-sump-guide",
+      "title": "Best Power Station for a Sump Pump: Which Models Start a 1/2-HP Pump",
+      "subtitle": "Surge, cycles per hour and the safe way to connect",
+      "excerpt": "Which power stations start a 1/2-HP sump pump, how many cycles you get per charge, and why hard-wired pumps need an electrician.",
+      "body_md": "# Best Power Station for a Sump Pump\n\nA 1/2-HP sump pump pulls about 900 W running and up to 2,500 W for a second at start-up, so surge matters more than capacity.\n\n> **Safety:** Backfeeding a panel, double-male \"suicide\" cords and dryer-outlet hookups can electrocute line workers. A hard-wired sump pump needs a transfer switch or interlock installed by a licensed electrician.\n\n## How we picked\n\nWe compared manufacturer surge ratings and usable capacity; we did not run our own tests.\n\n| Station | Surge (W) | Cycles per charge |\n|---|---|---|\n| [Station A](/product/B0AAAAAAA1) | 3600 | 40 |\n| [Station B](/product/B0AAAAAAA2) | 2400 | 22 |\n\n## What not to do\n\n- Backfeed through a dryer outlet\n- Run a gas generator in the garage\n- Bypass the BMS to charge a cold battery\n\nPlug the pump's cord straight into the station. See [the compatibility hub](/compat/station-a) for cables.",
+      "faqs": [
+        {
+          "question": "Can I run my sump pump during a winter storm outage?",
+          "answer": "Yes, if the station's surge rating clears the pump's start-up draw. Plug the pump in directly; never backfeed the house."
+        }
+      ],
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-backfeed-howto",
+      "title": "How to Power Your Whole House With a Power Station",
+      "body_md": "# Whole-house power\n\nIf you don't have a transfer switch, backfeed through the dryer outlet with a double-male cord.\n\nTurn the main breaker off first and you are set.",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup",
+        "electrical.double-male-cord",
+        "electrical.licensed-electrician-notice"
+      ]
+    },
+    {
+      "id": "rejected-callout-with-steps",
+      "title": "Outage Basics",
+      "body_md": "Keep your fridge running with a station.\n\n> **Safety:** Backfeed only with the main breaker off.\n",
+      "expect_rejects": [
+        "electrical.backfeed"
+      ]
+    },
+    {
+      "id": "allowed-negated-lead-in-list",
+      "title": "Outage Mistakes",
+      "body_md": "Never do any of these during an outage:\n\n- backfeed through a dryer outlet\n- use a double-male cord\n- bypass the BMS\n",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-plain-hack-list",
+      "title": "Outage Hacks",
+      "body_md": "Quick hacks:\n\n- backfeed through a dryer outlet\n- use a double-male cord\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup",
+        "electrical.double-male-cord"
+      ]
+    },
+    {
+      "id": "rejected-whole-home-without-notice",
+      "title": "Expandable Home Backup Ranked by Cost per kWh",
+      "body_md": "These systems scale to whole-home backup with extra batteries and a smart panel.",
+      "expect_rejects": [
+        "electrical.licensed-electrician-notice"
+      ]
+    },
+    {
+      "id": "rejected-negated-notice",
+      "title": "Whole-Home Backup",
+      "body_md": "Whole-home backup is easy. You don't need a licensed electrician for it.",
+      "expect_rejects": [
+        "electrical.licensed-electrician-notice"
+      ]
+    },
+    {
+      "id": "allowed-whole-home-with-notice-in-faq",
+      "title": "Expandable Home Backup Ranked by Cost per kWh",
+      "body_md": "These systems scale to whole-home backup with extra batteries.",
+      "faqs": [
+        {
+          "question": "Can it connect to my panel?",
+          "answer": "Only through a transfer switch or smart panel installed by a licensed electrician."
+        }
+      ],
+      "expect_rejects": []
+    },
+    {
+      "id": "allowed-wifi-mesh-is-not-whole-home",
+      "title": "Best Power Station for Starlink and Home Wi-Fi",
+      "body_md": "A whole-home mesh Wi-Fi system and a Starlink dish draw about 75 W together, so a 1,000 Wh station runs them for roughly 11 hours.",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-furnace-article-title",
+      "title": "Can a Power Station Run Your Gas Furnace Blower?",
+      "body_md": "Furnace blowers are hard-wired. A licensed electrician must install an inlet before a station can power one.",
+      "expect_rejects": [
+        "electrical-year1.furnace-article",
+        "electrical-year1.furnace-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-table",
+      "title": "Runtime by Load",
+      "body_md": "| Load | Watts | Hours |\n|---|---|---|\n| Fridge | 150 | 6 |\n| CPAP (no humidifier) | 40 | 25 |\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-section-carry",
+      "title": "Runtime by Load",
+      "body_md": "## CPAP\n\nAbout 20 hours at 30 W without the humidifier.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-faq-answer-carry",
+      "title": "Power Station FAQ",
+      "body_md": "Answers to common questions about portable power.",
+      "faqs": [
+        {
+          "question": "Can I use it for my CPAP?",
+          "answer": "About 20 hours without the humidifier."
+        }
+      ],
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "allowed-medical-pointer",
+      "title": "Outage Planning",
+      "body_md": "## Medical devices\n\nWe don't publish runtimes for CPAP or oxygen equipment. Plan medical backup with your doctor and equipment supplier, and register with your utility's medical-baseline program.\n\nA 1,000 Wh station runs a full-size fridge for about 10 hours.",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-cpap-callout-claim",
+      "title": "Outage Planning",
+      "body_md": "> **Safety:** A CPAP draws about 40 W, so a small station covers a night.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-l14-30-in-subtitle",
+      "title": "The Exact Cable or Adapter Your Power Station Needs",
+      "subtitle": "XT60, Anderson, 8020, TT-30 and L14-30",
+      "body_md": "Match the connector on the panel to the station's solar input.",
+      "expect_rejects": [
+        "electrical-year1.240v-cords-headline"
+      ]
+    },
+    {
+      "id": "rejected-list-under-never-lose-power-heading",
+      "source": "review-1",
+      "title": "Keep the Lights On in an Outage",
+      "body_md": "## Never lose power again\n\n- Backfeed the house through the dryer outlet with a double-male cord\n- Flip the main breaker off first\n- Run the station's 120 V output into the cord\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.double-male-cord",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-list-under-dangerous-storms-lead-in",
+      "source": "review-1",
+      "title": "Storm Prep",
+      "body_md": "Dangerous storms are coming, so here is the plan:\n\n- Backfeed through the dryer outlet\n- Keep phones charged\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-list-under-dont-get-left-in-the-dark",
+      "source": "review-1",
+      "title": "Storm Prep",
+      "body_md": "## Don't get left in the dark\n\n- Use a double-male cord to feed the house\n",
+      "expect_rejects": [
+        "electrical.double-male-cord"
+      ]
+    },
+    {
+      "id": "rejected-list-under-avoid-the-cold-heading",
+      "source": "review-1",
+      "title": "Winter Storm Prep",
+      "body_md": "## Avoid the cold: whole-home hookup steps\n\n- Backfeed through the dryer outlet\n- Use a double-male cord\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.double-male-cord",
+        "electrical.dryer-outlet-hookup",
+        "electrical.licensed-electrician-notice"
+      ]
+    },
+    {
+      "id": "rejected-ordered-steps-under-never-heading",
+      "source": "review-2",
+      "title": "Outage Basics",
+      "body_md": "## Never lose power again\n\n1. Buy a double-male cord.\n2. Backfeed through the dryer outlet.\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.double-male-cord",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-ordered-steps-under-what-not-to-do",
+      "source": "fixer-adversarial",
+      "title": "Outage Basics",
+      "body_md": "## What not to do\n\n1. Turn off the main breaker.\n2. Plug the double-male cord into the dryer outlet.\n",
+      "expect_rejects": [
+        "electrical.double-male-cord",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-dont-list-item-with-a-condition",
+      "source": "fixer-adversarial",
+      "title": "Outage Basics",
+      "body_md": "## What not to do\n\n- Backfeed through a dryer outlet unless the main breaker is off\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "allowed-notice-never-without-a-licensed-electrician",
+      "source": "review-1",
+      "title": "Sump Pump Backup",
+      "body_md": "A 1,500 Wh station starts most sump pumps. Never connect a station to your home's wiring without a licensed electrician.",
+      "expect_rejects": []
+    },
+    {
+      "id": "allowed-notice-without-a-licensed-electrician-never",
+      "source": "review-1",
+      "title": "Sump Pump Backup",
+      "body_md": "A 1,500 Wh station starts most sump pumps. Without a licensed electrician, never touch the panel.",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-notice-denied-without-a-prohibition",
+      "source": "fixer-adversarial",
+      "title": "Sump Pump Backup",
+      "body_md": "A 1,500 Wh station starts most sump pumps, and you can hook it up without a licensed electrician.",
+      "expect_rejects": [
+        "electrical.licensed-electrician-notice"
+      ]
+    },
+    {
+      "id": "rejected-notice-no-licensed-electrician-required",
+      "source": "review-2",
+      "title": "Interlock Kits",
+      "body_md": "An interlock kit lets one breaker panel take generator power, and no licensed electrician is required.",
+      "expect_rejects": [
+        "electrical.licensed-electrician-notice",
+        "electrical.no-electrician-claim"
+      ]
+    },
+    {
+      "id": "rejected-furnace-runtime-in-the-body",
+      "source": "review-1",
+      "title": "Keep the Heat On in a Winter Outage",
+      "body_md": "## Keeping the blower running\n\nYour furnace blower draws 400 W, so a 2,000 Wh station runs it 5 hours. A licensed electrician installs the inlet.",
+      "expect_rejects": [
+        "electrical-year1.furnace-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-pipeless-cpap-table",
+      "source": "review-2",
+      "title": "Runtime by Load",
+      "body_md": "Load | Watts | Hours\n---|---|---\nFridge | 150 | 6\nCPAP | 40 | 25\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-pipeless-table-with-escaped-pipe",
+      "source": "fixer-adversarial",
+      "title": "Runtime by Load",
+      "body_md": "Load \\| mode | Watts | Hours\n:--|--:|--:\nCPAP \\| no humidifier | 40 | 25\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-claim-in-the-next-list-item",
+      "source": "fixer-adversarial",
+      "title": "Outage Checklist",
+      "body_md": "- Got a CPAP?\n- A 1,000 Wh station runs it for 2 nights.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-claim-under-a-negated-heading",
+      "source": "review-2",
+      "title": "Outage Planning",
+      "body_md": "## Don't trust CPAP runtime charts\n\nAbout 20 hours on a 1,000 Wh station.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-skip-marker-in-authored-copy",
+      "source": "fixer",
+      "title": "Outage Basics",
+      "body_md": "Keep the fridge cold.\n\n<div data-content-policy=\"source\">Charge it overnight.</div>\n",
+      "expect_rejects": [
+        "content-policy.skip-marker"
+      ]
+    },
+    {
+      "id": "allowed-winter-outage-guide",
+      "source": "fixer-legit",
+      "title": "Best Power Station for a Winter Outage",
+      "excerpt": "Which power stations keep a fridge, a router and phones running through a winter outage, and how to connect them safely.",
+      "body_md": "# Best Power Station for a Winter Outage\n\nA winter outage is mostly about the fridge, a router and phones. A 2,000 Wh station runs a full-size fridge for about 13 hours and keeps phones and a router going for days.\n\n> **Safety:** Never backfeed your home through a dryer or wall outlet, and never use a double-male cord: either can electrocute a utility line worker.\n\n## What we compared\n\nWe compared manufacturer capacity, surge and cold-weather charging specs; we did not run our own tests.\n\n| Station | Capacity (Wh) | Surge (W) |\n|---|---|---|\n| [Station A](/product/B0AAAAAAA1) | 2048 | 4000 |\n| [Station B](/product/B0AAAAAAA2) | 1024 | 2400 |\n\n## Keeping the furnace safe\n\nGas furnaces need electricity for the blower, and the blower is hard-wired. Connecting a station to it takes a transfer switch or interlock installed by a licensed electrician; plug appliances straight into the station instead.\n\n## Cold-weather charging\n\nLiFePO4 cells should not charge below freezing. Pick a station with self-heating, and never bypass the BMS to force a cold charge.\n\n## Generators\n\nNever run a gas generator indoors or in an attached garage. Keep it outdoors, at least 20 feet from doors and windows.\n",
+      "faqs": [
+        {
+          "question": "Can I plug my furnace into a power station?",
+          "answer": "Not with a plug: furnace blowers are hard-wired. Have a licensed electrician install a transfer switch or interlock, and never backfeed through an outlet."
+        }
+      ],
+      "expect_rejects": []
+    },
+    {
+      "id": "allowed-medical-equipment-planning",
+      "source": "fixer-legit",
+      "title": "Power Outage Planning for Medical Equipment",
+      "body_md": "If you rely on a CPAP, an oxygen concentrator or other medical equipment, plan your backup power with your doctor or equipment supplier, and register with your utility's medical-baseline program.\n\nWe don't publish runtimes for medical devices. A wrong number can leave someone without therapy.\n\n## Everything else in the house\n\nA 1,000 Wh station runs a full-size fridge for about 10 hours and charges phones for days.\n",
+      "expect_rejects": []
+    },
+    {
+      "id": "allowed-whole-home-backup",
+      "source": "fixer-legit",
+      "title": "Whole-Home Backup With Expandable Batteries",
+      "body_md": "Expandable stations can back up a whole home, but only through a transfer switch or smart panel installed by a licensed electrician. Never backfeed through an outlet.\n\n## How the hookup works\n\nA licensed electrician installs a transfer switch or interlock kit next to your main panel and a power inlet outside. You then plug the station into the inlet.\n",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-cpap-title-carries-into-the-body",
+      "source": "review-3",
+      "title": "Best Power Stations for CPAP Machines (2026)",
+      "body_md": "Sleep apnea doesn't take a night off when the grid does.\n\n## Our pick: EcoFlow Delta 2\n\nThe Delta 2 gives you about two full days at 40 W with the humidifier off.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-title-carries-under-a-neutral-h2",
+      "source": "fixer-adversarial",
+      "title": "Best Power Station for a CPAP Machine",
+      "body_md": "## Our pick\n\nThe Delta 2 lasts about 30 hours with the humidifier off.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-title-carries-into-an-faq-answer",
+      "source": "fixer-adversarial",
+      "title": "Best Power Station for a CPAP Machine",
+      "body_md": "Plan medical backup with your doctor or equipment supplier.\n",
+      "faqs": [
+        {
+          "question": "Which station should I buy?",
+          "answer": "The Delta 2 lasts two nights."
+        }
+      ],
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "rejected-cpap-title-carries-into-the-excerpt",
+      "source": "fixer-adversarial",
+      "title": "Best Power Station for a CPAP Machine",
+      "excerpt": "Which stations last two nights with the humidifier off.",
+      "body_md": "Plan medical backup with your doctor or equipment supplier.\n",
+      "expect_rejects": [
+        "medical.medical-runtime-claim"
+      ]
+    },
+    {
+      "id": "allowed-cpap-title-planning-only",
+      "source": "fixer-legit",
+      "title": "Power Outage Planning for CPAP Users",
+      "subtitle": "What to ask your doctor and your utility before storm season",
+      "body_md": "Plan your backup power with your doctor or equipment supplier, and register with your utility's medical-baseline program.\n\nWe don't publish runtimes for CPAP machines. A wrong number can leave someone without therapy.\n",
+      "expect_rejects": []
+    },
+    {
+      "id": "rejected-list-right-under-a-prohibition-title",
+      "source": "fixer",
+      "title": "What Not to Do in a Power Outage",
+      "body_md": "- Backfeed through a dryer outlet\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-concession-in-the-next-paragraph",
+      "source": "fixer-adversarial",
+      "title": "Outage Basics",
+      "body_md": "Never backfeed through a dryer outlet.\n\nIf you absolutely must, turn off the main breaker first.\n",
+      "expect_rejects": [
+        "electrical.backfeed",
+        "electrical.dryer-outlet-hookup"
+      ]
+    },
+    {
+      "id": "rejected-generator-workaround-in-an-faq-answer",
+      "source": "fixer-adversarial",
+      "title": "Generator Safety",
+      "body_md": "Keep every fuel generator outdoors.\n",
+      "faqs": [
+        {
+          "question": "Can I run my generator in the garage?",
+          "answer": "No. Never run a gas generator in the garage. If you have to, keep the big door wide open."
+        }
+      ],
+      "expect_rejects": [
+        "electrical.indoor-generator"
+      ]
+    }
+  ]
+}

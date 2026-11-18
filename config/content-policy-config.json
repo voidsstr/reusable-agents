@@ -1,0 +1,432 @@
+{
+  "schema_version": "1",
+  "_comment": "Content policy (framework/core/content_policy.py): named rule sets a site OPTS INTO. The repo default opts nobody in (default.rule_sets = [], sites = {}), so no existing site is affected. A site opts in from the storage copy at config/content-policy-config.json (laid over this file: rule_sets merge per set, sites per site, default/callouts/negation key by key), e.g. sites.<site> = {\"rule_sets\": [\"electrical\", \"electrical-year1\", \"medical\"]}. Each rule: id, label, action (reject|warn|off), patterns (regexes, case-insensitive), optional require_any (another regex must match the same sentence), unless (exempting constructions BOUND to the match: overlapping it or touching it with at most three glue words, e.g. 'have a licensed electrician' right before 'install a transfer switch'; a mention elsewhere in the sentence exempts nothing), negation (default true: a prohibition that governs the match exempts it: 'never backfeed' passes, 'backfeed through the dryer outlet' and 'never backfeed without shutting off the main' fail), negation_target (anchor|claim; claim: the patterns name a subject, each require_any hit is a claim about it and the claim is what is judged), question_exempt (default true; how-to and rhetorical questions are never exempt), callout_exempt (default true: a short '> **Safety:** ...' blockquote may NAME a banned practice but never give steps or call it safe), carry_heading_subject (default false; true or a list of regexes: a heading or FAQ question that names such a subject carries it to its section / answer, so '## CPAP' + 'About 20 hours.' is a CPAP claim), carry_block_subject (claim rules, default true when carry_heading_subject is set: a subject named anywhere in a paragraph, list item or table row makes the whole block a candidate), fields (title|subtitle|excerpt|body|faqs; rendered pages map <title>/<h1> to title, meta descriptions to excerpt, the page to body; an article's title is a level-1 heading over the whole article, as the rendered <h1> is over the page, so a subject the title names carries into the article for rules that carry heading subjects), why and fix (shown to the author in the re-queue addendum). required_notices: when a trigger appears anywhere, a notice_patterns match that states the requirement must appear somewhere ('you don't need a licensed electrician' does not count, 'never ... without a licensed electrician' does); suggested_text goes into the addendum. rule_overrides ({\"<set>.<id>\" or \"<set>\": action}) in default or a site block retune a rule without editing the set. concession (anchor rules, default true): a match the copy exempts followed within negation.concession_window sentences (default 2, same section) by a sentence that opens with a concession opener ('If you must,', 'In a pinch,', 'Still,', 'Here's how to do it:') and gives an instruction or calls the practice workable ('it works') is a violation of the rule ('Never backfeed. If you absolutely must, turn off the main first.'); concession_subjects (regexes) let a sentence that only names the subject open that window ('Gas generators belong outdoors.'), and then only a concession_claims match counts ('In a pinch, the garage works'). negation: the engine's vocabulary is generic English; the top-level block may replace (<key>) or extend (extra_<key>) strong_cues, weak_cues, permission_phrases, idioms, hazard_states, hazard_harms, hazard_predicates, imperative_verbs, noun_exclusions, safe_instructions, concession_openers, and set max_gap_words and concession_window (0 turns concessions off); a rule set's own negation block extends them (extra_<key> only) while a site uses the set, which is where niche vocabulary lives. callouts.html_skip_re marks third-party data on rendered pages (data-content-policy=\"source\"); authored copy carrying it is rejected. publish_gate holds the framework/cli/article_publish_gate.py settings (default block, per-site override): rows in draft_status ('pending') are the gate's queue; 'draft', 'archived' and any other status are human holds it never promotes. Rule sets electrical / electrical-year1 / medical encode the RuntimePicks design (binding amendments 1 and 8).",
+  "default": {
+    "rule_sets": [],
+    "rule_overrides": {},
+    "publish_gate": {
+      "draft_status": "pending",
+      "published_status": "published",
+      "window_hours": 6,
+      "drafts_window_hours": 0,
+      "window_column": "",
+      "publisher_dsn_env": "",
+      "publisher_role": "",
+      "database_name": "",
+      "guard_function": "{table}_publish_guard",
+      "verify_guard": true,
+      "requeue_agent_id": "{site}-article-publish-gate",
+      "requeue_subject_tag": "refresh",
+      "requeue_max_attempts": 3,
+      "enforce_checks": [
+        "claims_guard",
+        "content_policy"
+      ],
+      "written_by_like": [],
+      "faqs_column": "faqs",
+      "limit": 200
+    }
+  },
+  "sites": {},
+  "callouts": {
+    "markdown_label_re": "^\\W{0,4}(?:electrical\\s+)?(?:safety(?:\\s+(?:note|notice|warning|first))?|warning|caution|danger)\\s*[:.!—–-]",
+    "html_class_re": "(?:^|\\s)(?:safety-callout|callout-safety|content-policy-safety)(?:\\s|$)",
+    "html_attr_re": "\\bdata-(?:content-policy|callout)\\s*=\\s*[\\\"']?safety",
+    "html_skip_re": "\\bdata-content-policy\\s*=\\s*[\\\"']?(?:skip|source)\\b",
+    "jsonld_skip_types": [
+      "Product",
+      "ProductGroup",
+      "Offer",
+      "AggregateOffer",
+      "ItemList",
+      "ListItem",
+      "BreadcrumbList",
+      "Organization",
+      "Brand",
+      "Person",
+      "ImageObject",
+      "WebSite",
+      "SearchAction",
+      "AggregateRating",
+      "Rating",
+      "Review"
+    ],
+    "max_chars": 700
+  },
+  "negation": {},
+  "rule_sets": {
+    "electrical": {
+      "description": "Home-electrical safety for outage / backup-power content. Permanent (not a year-1 boundary).",
+      "rules": [
+        {
+          "id": "backfeed",
+          "label": "backfeeding a home through an outlet",
+          "action": "reject",
+          "patterns": [
+            "(?<!anti-)(?<!anti)\\bback[- ]?feed(?:s|ing|ed|er|ers)?\\b(?!\\s+(?:protection|prevention|protected|lockouts?|breaker\\s+locks?))",
+            "\\b(?:plug|connect|hook)\\w*\\s+(?:[\\w'’-]+\\s+){0,5}?(?:in(?:to)?|to)\\s+(?:(?:a|an|the|your|any)\\s+)?(?:(?:wall|household|home|house|regular|standard|nearby|kitchen|garage|indoor|living[- ]room)\\s+)?(?:outlets?|receptacles?|sockets?|wall\\s+plugs?)\\s+(?:to|and|so\\s+(?:it|you)\\s+(?:can|will))\\s+(?:back-?feed|power|energi[sz]e|feed|run|supply|electrify)\\s+(?:(?:the|your|a|an|any|all)\\s+)?(?:(?:whole|entire)\\s+)?(?:(?:of\\s+)?(?:the|your)\\s+)?(?:house|home|panel|breaker\\s+(?:box|panel)|electrical\\s+(?:panel|system)|circuits?|wiring|load\\s+cent(?:er|re))",
+            "\\b(?:send|feed|push|pump|run)\\w*\\s+(?:[\\w'’-]+\\s+){0,4}?(?:power|electricity|output|current)\\s+(?:back\\s+)?(?:in)?to\\s+(?:the|your|a|an)\\s+(?:(?:wall|house|home|household)\\s+)?(?:outlets?|receptacles?|panel|breaker\\s+(?:box|panel)|wiring|house|home)\\b"
+          ],
+          "why": "Backfeeding a home through an outlet energises the utility side (it can electrocute line workers), bypasses the breakers, and is illegal under the NEC.",
+          "fix": "Remove the instruction. Tell readers to plug appliances into the station directly, or to have a licensed electrician install a transfer switch or interlock."
+        },
+        {
+          "id": "double-male-cord",
+          "label": "double-male ('suicide') cords",
+          "action": "reject",
+          "patterns": [
+            "\\bdouble[- ]?male\\b",
+            "\\bmale[- ]to[- ]male\\s+(?:(?:extension|power|ac|generator)\\s+)?(?:cords?|cables?|plugs?|adapters?)\\b",
+            "\\bsuicide\\s+(?:cords?|cables?|plugs?|adapters?)\\b",
+            "\\bwidow[- ]?maker\\s+(?:cords?|cables?|plugs?)\\b"
+          ],
+          "why": "A double-male cord has live exposed prongs and is the usual way homes get backfed.",
+          "fix": "Delete the cord recommendation; if the copy warns about it, phrase it as 'Never use a double-male cord'."
+        },
+        {
+          "id": "dryer-outlet-hookup",
+          "label": "dryer / range outlet hookups",
+          "action": "reject",
+          "patterns": [
+            "\\b(?:clothes\\s+)?(?:dryer|range|stove|oven|welder|welding)[\\s-]+(?:outlet|receptacle|socket|plug)s?\\b"
+          ],
+          "why": "Feeding a home or a station through a 240 V dryer or range outlet is a backfeed and a 240 V hookup.",
+          "fix": "Remove it. A station connects to a home only through a transfer switch or interlock installed by a licensed electrician."
+        },
+        {
+          "id": "diy-transfer-wiring",
+          "label": "DIY transfer-switch, interlock, inlet or panel wiring",
+          "action": "reject",
+          "patterns": [
+            "\\b(?:install|installing|wire|wiring|connect|connecting|mount|mounting|hook\\s+up|hooking\\s+up|add|adding|put\\s+in|fit|fitting)\\s+(?:[\\w'’-]+\\s+){0,6}?(?:transfer\\s+switch(?:es)?|interlock(?:\\s+(?:kits?|plates?|devices?))?|(?:power|generator)\\s+inlets?(?:\\s+box(?:es)?)?|inlet\\s+box(?:es)?|sub-?panels?|critical[- ]loads?\\s+panels?|(?:electrical|breaker|main|service)\\s+panels?|panel\\s*boards?|breaker\\s+box(?:es)?|load\\s+cent(?:er|re)s?)\\b",
+            "\\b(?:transfer\\s+switch(?:es)?|interlock(?:\\s+kits?)?|inlet\\s+box(?:es)?|(?:power|generator)\\s+inlets?|sub-?panels?)\\s+(?:[\\w'’-]+\\s+){0,3}?(?:installation|install|wiring)\\b",
+            "\\b(?:remove|take\\s+off|open|unscrew)\\s+(?:the\\s+)?(?:panel|dead[- ]?front|breaker[- ]box|load[- ]cent(?:er|re))\\s+cover\\b",
+            "\\b(?:neutral|ground(?:ing)?)\\s+(?:bar|bus(?:\\s*bar)?)\\b",
+            "\\b(?:double|two)[- ]pole\\s+breakers?\\b",
+            "\\bromex\\b"
+          ],
+          "unless": [
+            "\\b(?:have|hire|get|ask|call|pay|let|use|contact|needs?|requires?|requiring|calls?\\s+for)\\s+(?:an?\\s+|your\\s+|the\\s+)?(?:licensed|qualified|certified|master)\\s+electricians?(?:\\s+to)?\\b",
+            "\\b(?:licensed|qualified|certified|master)\\s+electricians?\\s+(?:(?:should|must|will|can|could|may|has\\s+to|have\\s+to|needs?\\s+to|is\\s+required\\s+to|are\\s+required\\s+to)\\s+(?:always\\s+|also\\s+|then\\s+|first\\s+)?)?(?:install|wire|fit|mount|connect|add|put\\s+in|hook\\s+up|replace|bond|remove|open|run)\\w*\\b",
+            "\\b(?:by|from)\\s+(?:an?\\s+|your\\s+|the\\s+)?(?:licensed|qualified|certified|master)\\s+electricians?\\b",
+            "\\b(?:never|don['’]t|do\\s+not|must\\s+not|should\\s+not|shouldn['’]t)\\s+(?:ever\\s+)?(?:try\\s+to\\s+)?(?:install|wire|connect|hook\\s+up|add|put\\s+in|mount|fit|open|remove)\\b[^.;:!?]{0,80}?\\bwithout\\s+(?:first\\s+)?(?:hiring\\s+|calling\\s+|using\\s+)?(?:an?\\s+|your\\s+)?(?:licensed|qualified|certified|master)\\s+electricians?\\b"
+          ],
+          "why": "Panel, inlet and transfer-switch wiring is licensed work; DIY steps in an outage article get people killed. Only a construction that makes the electrician do the work ('have a licensed electrician install ...', '... installed by a licensed electrician') exempts a mention; a licensed electrician named elsewhere in the sentence does not.",
+          "fix": "Replace the steps with: 'Have a licensed electrician install a transfer switch or interlock.'",
+          "unless_in_clause": [
+            "\\b(?:installed|wired|fitted|mounted|connected|hooked\\s+up|put\\s+in|done|handled|performed|added)\\s+(?:only\\s+)?by\\s+(?:an?\\s+|your\\s+|the\\s+)?(?:licensed|qualified|certified|master)\\s+electricians?\\b"
+          ]
+        },
+        {
+          "id": "electrician-not-needed",
+          "label": "DIY panel / inlet / transfer-switch work ('yourself', 'if you're handy')",
+          "action": "reject",
+          "question_exempt": false,
+          "patterns": [
+            "\\b(?:install|wire|connect|hook\\s+up|add|put\\s+in|mount|fit)\\w*\\s+(?:[\\w'’-]+\\s+){0,5}?(?:transfer\\s+switch(?:es)?|interlock(?:\\s+kits?)?|(?:power|generator)?\\s*inlets?(?:\\s+box(?:es)?)?|sub-?panels?|(?:electrical|breaker|main|service|home|house)\\s+panels?|furnace|sump\\s+pump|well\\s+pump)\\s+(?:[\\w'’-]+\\s+){0,5}?(?:without\\s+(?:an?\\s+|hiring\\s+an?\\s+|calling\\s+an?\\s+)?(?:licensed\\s+)?electrician|yourself|themselves|himself|herself|on\\s+(?:your|their|his|her)\\s+own|DIY|in\\s+an?\\s+(?:afternoon|hour|weekend|evening)|in\\s+(?:\\d+|a\\s+few|under\\s+an?)\\s+(?:minutes|hours))\\b",
+            "\\b(?:if|when)\\s+you(?:['’]re|\\s+are)\\s+(?:comfortable|handy|confident|experienced|skilled|good)\\b[^.;!?]{0,80}?\\b(?:install|wire|connect|hook\\s+up|add|put\\s+in|mount|fit)\\w*\\s+(?:[\\w'’-]+\\s+){0,5}?(?:transfer\\s+switch(?:es)?|interlock(?:\\s+kits?)?|(?:power|generator)?\\s*inlets?(?:\\s+box(?:es)?)?|sub-?panels?|(?:electrical|breaker|main|service|home|house)\\s+panels?|furnace|sump\\s+pump|well\\s+pump)",
+            "\\b(?:handy|experienced|confident|capable)\\s+(?:owners?|homeowners?|readers?|DIYers?|folks|people|users?|buyers?|types)\\s+(?:can|could|may|will)\\s+(?:easily\\s+|safely\\s+|probably\\s+)?(?:install|wire|connect|hook\\s+up|add|put\\s+in|mount|fit)\\w*\\b"
+          ],
+          "why": "Connecting anything to a home's wiring is licensed, permitted work.",
+          "fix": "Say it needs a licensed electrician (and usually a permit)."
+        },
+        {
+          "id": "no-electrician-claim",
+          "label": "saying home-wiring work needs no electrician",
+          "action": "reject",
+          "negation": false,
+          "question_exempt": false,
+          "patterns": [
+            "\\b(?:no|don['’]t\\s+need\\s+an?|do\\s+not\\s+need\\s+an?|without\\s+an?)\\s+(?:licensed\\s+)?electrician\\s+(?:[\\w'’-]+\\s+){0,3}?to\\s+(?:install|wire|connect|hook\\s+up|add|put\\s+in|mount|fit)\\w*\\s+(?:[\\w'’-]+\\s+){0,4}?(?:transfer\\s+switch(?:es)?|interlock(?:\\s+kits?)?|(?:power|generator)?\\s*inlets?(?:\\s+box(?:es)?)?|sub-?panels?|(?:electrical|breaker|main|service|home|house)\\s+panels?|furnace|sump\\s+pump|well\\s+pump)",
+            "\\b(?:DIY|do-it-yourself)\\s+(?:transfer\\s+switch|interlock|inlet|sub-?panel|(?:electrical|breaker|main)\\s+panel)\\s+(?:install|installation|wiring|hookup|job|project)",
+            "\\bno\\s+(?:licensed\\s+|qualified\\s+)?electricians?\\s+(?:is\\s+|are\\s+)?(?:needed|required|necessary)\\b",
+            "\\b(?:licensed\\s+)?electricians?\\s+(?:isn['’]t|is\\s+not|aren['’]t|are\\s+not|not)\\s+(?:really\\s+)?(?:needed|required|necessary)\\b",
+            "\\bno\\s+need\\s+(?:for|to\\s+(?:hire|call|pay))\\s+(?:an?\\s+)?(?:licensed\\s+)?electricians?\\b",
+            "\\b(?:skip|save\\s+(?:on|the\\s+cost\\s+of))\\s+(?:the\\s+|an?\\s+)?(?:licensed\\s+)?electricians?\\b"
+          ],
+          "require_any": [
+            "\\b(?:transfer\\s+switch\\w*|interlock\\w*|inlets?|sub-?panels?|panels?|breakers?|wiring|wired?|hard-?wired?|install\\w*|hook\\w*\\s+up|furnaces?|sump|well\\s+pumps?|circuits?|outlets?|receptacles?|back-?feed\\w*)\\b"
+          ],
+          "why": "Connecting anything to a home's wiring is licensed, permitted work.",
+          "fix": "Say it needs a licensed electrician (and usually a permit)."
+        },
+        {
+          "id": "bms-bypass",
+          "label": "bypassing or disabling battery protection",
+          "action": "reject",
+          "patterns": [
+            "\\b(?:bypass|bypassing|bypassed|disable|disabling|disabled|defeat|defeating|override|overriding|jump|jumping|jumper|short|shorting|remove|removing|hack|hacking|trick|tricking)\\s+(?:[\\w'’-]+\\s+){0,3}?(?:the\\s+)?(?:BMS|battery\\s+management\\s+(?:system|board|circuit)|(?:low|cold)[- ]temp(?:erature)?\\s+(?:charg(?:e|ing)\\s+)?(?:cut-?off|protection|lockout)|(?:over|under)[- ]?(?:voltage|current|charge|discharge|temperature)\\s+(?:protection|cut-?off)|thermal\\s+(?:cut-?off|fuse|protection))\\b",
+            "\\b(?:BMS|battery\\s+management\\s+system)\\s+(?:[\\w'’-]+\\s+){0,3}?(?:bypass|bypassed|disabled|removed|jumped|defeated)\\b"
+          ],
+          "why": "The BMS is what stops a lithium pack from overheating, overcharging or charging below freezing.",
+          "fix": "Remove it; describe what the protection does and pick a unit with self-heating instead."
+        },
+        {
+          "id": "indoor-generator",
+          "label": "running a fuel generator indoors or in a garage",
+          "action": "reject",
+          "patterns": [
+            "\\b(?:run|running|ran|use|using|operate|operating|start|starting|keep|keeping|put|putting|place|placing|set\\s+up|setting\\s+up)\\s+(?:[\\w'’-]+\\s+){0,4}?(?:gas(?:oline)?|propane|dual[- ]fuel|tri[- ]fuel|diesel|fuel[- ]powered|portable|inverter|standby)\\s+generators?\\s+(?:[\\w'’-]+\\s+){0,5}?(?:indoors|inside\\s+(?:the\\s+|your\\s+|a\\s+)?(?:house|home|garage|basement|apartment|tent|camper|rv)|in\\s+(?:the|your|a|an)\\s+(?:attached\\s+)?(?:house|home(?!\\s+(?:lab|office|server|network|theater|gym))|garage|basement|crawl\\s*space|living\\s+room|kitchen|bedroom|tent|camper|rv|apartment|shed|enclosed\\s+(?:space|area|porch)))",
+            "\\b(?:gas(?:oline)?|propane|dual[- ]fuel|tri[- ]fuel|diesel|fuel[- ]powered|portable|inverter|standby)\\s+generators?\\s+(?:[\\w'’-]+\\s+){0,5}?(?:indoors|inside\\s+(?:the\\s+|your\\s+|a\\s+)?(?:house|home|garage|basement|apartment|tent|camper|rv)|in\\s+(?:the|your|a|an)\\s+(?:attached\\s+)?(?:house|home(?!\\s+(?:lab|office|server|network|theater|gym))|garage|basement|crawl\\s*space|living\\s+room|kitchen|bedroom|tent|camper|rv|apartment|shed|enclosed\\s+(?:space|area|porch)))",
+            "\\bindoor\\s+(?:gas(?:oline)?|propane|fuel|diesel)\\s+generators?\\b",
+            "\\b(?:run|running|use|using|operate|operating|start|starting|keep|keeping|put|putting|place|placing)\\s+(?:the|your|a|an)\\s+generators?\\s+(?:[\\w'’-]+\\s+){0,4}?(?:indoors\\b|inside\\s+(?:the\\s+|your\\s+|an?\\s+)?(?:house|home|garage|basement|apartment|tent|camper|rv)|in\\s+(?:the|your|an?)\\s+(?:attached\\s+)?(?:garage|basement|crawl\\s*space|living\\s+room|kitchen|bedroom|tent|apartment|house|shed|home(?!\\s+(?:lab|office|server|network|theater|gym))))"
+          ],
+          "why": "Generator exhaust kills by carbon monoxide within minutes, including in garages with the door open.",
+          "fix": "Say fuel generators run only outdoors, 20+ feet from the house; a power station is the indoor option. Never follow the warning with a workaround ('If you must, keep the door open').",
+          "concession_subjects": [
+            "\\b(?:gas(?:oline)?|propane|dual[- ]fuel|tri[- ]fuel|diesel|fuel[- ]powered|portable|inverter|standby)\\s+generators?\\b"
+          ],
+          "concession_claims": [
+            "\\b(?:the|your|an?)\\s+(?:attached\\s+|detached\\s+|closed\\s+|empty\\s+)?(?:garage|basement|cellar|crawl\\s*space|shed|carport|porch|tent|camper|rv|living\\s+room|kitchen|bedroom|house|home|apartment|cabin|barn)\\s+(?:(?:usually|generally|still|probably|should|can|will|might|may)\\s+)?(?:works?|do(?:es)?\\s+the\\s+(?:job|trick)|is\\s+(?:(?:usually|generally|probably|perfectly|still|totally|technically)\\s+)?(?:fine|ok|okay|safe|acceptable|alright|an?\\s+option))\\b",
+            "\\b(?:indoors|inside)\\s+(?:(?:usually|generally|still|probably)\\s+)?(?:works?|is\\s+(?:\\w+\\s+)?(?:fine|ok|okay|safe|acceptable|alright|an?\\s+option))\\b",
+            "\\b(?:run|running|use|using|operate|operating|keep|keeping|put|putting|place|placing|start|starting|set\\s+up|setting\\s+up|leave|leaving|move|moving)\\s+(?:it|one|them|the\\s+(?:unit|generator|genny))\\s+(?:[\\w'’-]+\\s+){0,3}?(?:indoors|inside|in\\s+(?:the|your|a|an)\\s+(?:attached\\s+)?(?:garage|basement|cellar|crawl\\s*space|shed|carport|porch|tent|camper|rv|living\\s+room|kitchen|bedroom|house|home|apartment|cabin|barn))\\b",
+            "\\b(?:it|they|one)(?:['’]s|['’]re|\\s+is|\\s+are)?\\s+(?:(?:usually|generally|probably|perfectly|still|totally|technically)\\s+)?(?:fine|ok|okay|safe|acceptable|alright)\\s+(?:to\\s+(?:run|use|operate|keep|leave)\\s+)?(?:indoors|inside|in\\s+(?:the|your|a|an)\\s+(?:attached\\s+)?(?:garage|basement|cellar|crawl\\s*space|shed|carport|porch|tent|camper|rv|living\\s+room|kitchen|bedroom|house|home|apartment|cabin|barn))\\b",
+            "\\b(?:keep|leave|prop|crack)\\w*\\s+(?:the\\s+|a\\s+|your\\s+)?(?:(?:big|garage|overhead|bay|side|back)\\s+)?(?:doors?|windows?)\\s+(?:wide\\s+)?open\\b"
+          ]
+        }
+      ],
+      "required_notices": [
+        {
+          "id": "licensed-electrician-notice",
+          "label": "the licensed-electrician notice",
+          "action": "reject",
+          "triggers": [
+            "\\b(?:whole|entire)[- ](?:home|house)\\b(?!\\s+(?:mesh|wi-?fi|network|router|speakers?|audio|vacuum|fans?|humidifier|air\\s+purifier))",
+            "\\bfurnaces?\\b",
+            "\\bsump(?:[- ]pumps?)?\\b",
+            "\\btransfer\\s+switch(?:es)?\\b",
+            "\\binterlock(?:\\s+kits?)?\\b",
+            "\\b(?:power|generator)\\s+inlets?\\b",
+            "\\b(?:main|electrical|breaker|service|home(?!\\s+solar)|house)\\s+panels?\\b",
+            "\\bhard-?wired?\\s+(?:(?:to|into|in)\\s+(?:the|your|a)\\s+(?:house|home|panel|circuit|wall|wiring)|(?:furnaces?|sump\\s+pumps?|well\\s+pumps?|water\\s+heaters?|appliances?|loads?|circuits?|blowers?))\\b"
+          ],
+          "notice_patterns": [
+            "\\b(?:licensed|qualified|certified|master)\\s+electricians?\\b"
+          ],
+          "message": "Whenever the copy discusses whole-home, furnace, sump or panel connection it must say that connecting a station to home wiring takes a licensed electrician.",
+          "suggested_text": "Safety: plug appliances straight into the power station. Connecting one to a furnace, a hard-wired sump pump or your home's wiring needs a transfer switch or interlock installed by a licensed electrician; never backfeed through an outlet."
+        }
+      ],
+      "negation": {
+        "_comment": "Electrical vocabulary for the negation engine, active only while a site uses this rule set.",
+        "extra_strong_cues": [
+          "against\\s+(?:the\\s+)?(?:code|NEC)",
+          "a\\s+code\\s+violation"
+        ],
+        "extra_hazard_states": [
+          "a\\s+(?:code\\s+violation|fire\\s+hazard|shock\\s+hazard|fire\\s+risk|shock\\s+risk|electrocution\\s+(?:hazard|risk)|leading\\s+cause\\s+of\\s+\\w+)",
+          "against\\s+(?:the\\s+)?(?:code|NEC)"
+        ],
+        "extra_hazard_harms": [
+          "electrocut\\w*",
+          "shock\\w*",
+          "overheat\\w*",
+          "energi[sz]e\\s+(?:the\\s+)?(?:utility|power|service)\\s+lines?"
+        ],
+        "extra_hazard_predicates": [
+          "\\belectrocutes?\\b",
+          "\\b(?:violates?|breaks?)\\s+(?:\\w+\\s+){0,2}(?:code|NEC)\\b"
+        ],
+        "extra_imperative_verbs": [
+          "backfeed",
+          "back-feed",
+          "splice",
+          "solder"
+        ],
+        "extra_noun_exclusions": [
+          "stations?",
+          "banks?",
+          "supply",
+          "supplies",
+          "outages?",
+          "cords?",
+          "strips?",
+          "switch(?:es)?",
+          "plants?",
+          "tools?",
+          "users?",
+          "loads?",
+          "draws?",
+          "ratings?",
+          "kits?",
+          "protection",
+          "lines?",
+          "times?"
+        ],
+        "extra_safe_instructions": [
+          "\\b(?:hire|call|have|get|ask|use|contact|pay)\\s+(?:an?\\s+|your\\s+|the\\s+)?(?:licensed|qualified|certified|master)\\s+electricians?\\b",
+          "\\bplug\\s+(?:[\\w'’-]+\\s+){0,4}?(?:directly|straight)\\s+into\\s+(?:the|your|a)\\s+(?:power\\s+)?(?:station|generator|unit)\\b",
+          "\\b(?:keep|run|place|put|operate|use|set\\s+up)\\s+(?:[\\w'’-]+\\s+){0,3}?generators?\\s+(?:[\\w'’-]+\\s+){0,4}?(?:outdoors|outside)\\b",
+          "\\binstall\\s+(?:[\\w'’-]+\\s+){0,2}?(?:carbon\\s+monoxide|CO)\\s+(?:alarms?|detectors?)\\b",
+          "\\b(?:keep|run|place|put|operate|use|set\\s+up|move)\\s+(?:it|one|them)\\s+(?:[\\w'’-]+\\s+){0,2}?(?:outdoors|outside|(?:at\\s+least\\s+)?\\d+\\s*\\+?\\s*(?:feet|foot|ft|meters?|m)\\s+(?:away\\s+)?from)\\b",
+          "\\b(?:pick|choose|buy|get|look\\s+for|go\\s+with)\\s+(?:an?\\s+|the\\s+|one\\s+)?(?:[\\w'’-]+\\s+){0,3}?(?:power\\s+)?stations?\\b"
+        ]
+      }
+    },
+    "electrical-year1": {
+      "description": "Year-1 boundary (RuntimePicks binding amendment 8): no 240 V / L14-30 / L5-30 / 14-50 cords or their compatibility, and no furnace article or furnace runtime claim. Drop this set from a site's rule_sets when the boundary is lifted.",
+      "rules": [
+        {
+          "id": "240v-cords",
+          "label": "240 V / L14-30 / L5-30 / 14-50 cords, adapters and hookups",
+          "action": "reject",
+          "fields": [
+            "body",
+            "faqs"
+          ],
+          "patterns": [
+            "\\b(?:NEMA\\s*)?(?:L14|L5|L6)[-–‑\\s]?(?:20|30)[RP]?\\b",
+            "\\bNEMA\\s*(?:14|10|6)[-–‑\\s]?(?:20|30|50)[RP]?\\b",
+            "\\b(?:14|10|6)[-–‑](?:30|50)[RP]\\b",
+            "\\b(?:14|10|6)[-–‑](?:30|50)\\s+(?:(?:dryer|range|stove|welder|RV|generator|camper)\\s+)?(?:outlets?|receptacles?|plugs?|cords?|adapters?|cables?|inlets?|hookups?|service|connections?|extension|pigtails?|whips?|pedestals?)\\b",
+            "\\b(?:240|220|230)\\s*-?\\s*(?:V|VAC|volts?)\\b(?=[^.;!?]{0,60}?\\b(?:cords?|cables?|plugs?|adapters?|extension|splitters?|twist[- ]lock|hook-?ups?|pigtails?)\\b)",
+            "\\b(?:cords?|cables?|plugs?|adapters?|inlets?|splitters?|twist[- ]lock)\\s+(?:[\\w'’-]+\\s+){0,3}?(?:240|220|230)\\s*-?\\s*(?:V|VAC|volts?)\\b"
+          ],
+          "require_any": [
+            "\\b(?:cords?|cables?|adapters?|extensions?|splitters?|pigtails?|whips?|inlets?|hook-?ups?|hooking\\s+up|plug(?:s|ged|ging)?\\s+(?:[\\w'’-]+\\s+){0,3}?in(?:to)?|connect\\w*|feed\\w*|wir(?:e|es|ed|ing)|install\\w*|campgrounds?|RV\\s+parks?|pedestals?|shore\\s+power|dryers?|ranges?|stoves?|welders?|transfer\\s+switch\\w*|interlocks?|compatib\\w*|fits?|works?\\s+with|use\\s+(?:it\\s+|them\\s+)?with|EV\\s+charg\\w*)\\b"
+          ],
+          "why": "Year 1 excludes 240 V cords and connectors (L14-30, L5-30, L6-30, 14-50, 14-30, 10-30, 6-50) and their compatibility: they are the generator-inlet / panel side of a home hookup. A station's own spec ('a 240 V L14-30 outlet') is a fact and passes; a cord, adapter, inlet or hookup with it does not.",
+          "fix": "Remove the 240 V cord, adapter or hookup and its compatibility claim; keep 120 V (5-15, 5-20, TT-30) content."
+        },
+        {
+          "id": "240v-cords-headline",
+          "label": "240 V connectors in a title, subtitle or description",
+          "action": "reject",
+          "fields": [
+            "title",
+            "subtitle",
+            "excerpt"
+          ],
+          "patterns": [
+            "\\b(?:NEMA\\s*)?(?:L14|L5|L6)[-–‑\\s]?(?:20|30)[RP]?\\b",
+            "\\bNEMA\\s*(?:14|10|6)[-–‑\\s]?(?:20|30|50)[RP]?\\b",
+            "\\b(?:14|10|6)[-–‑](?:30|50)[RP]\\b",
+            "\\b(?:14|10|6)[-–‑](?:30|50)\\s+(?:(?:dryer|range|stove|welder|RV|generator|camper)\\s+)?(?:outlets?|receptacles?|plugs?|cords?|adapters?|cables?|inlets?|hookups?|service|connections?|extension|pigtails?|whips?|pedestals?)\\b",
+            "\\b(?:240|220|230)\\s*-?\\s*(?:V|VAC|volts?)\\b(?=[^.;!?]{0,60}?\\b(?:cords?|cables?|plugs?|adapters?|extension|splitters?|twist[- ]lock|hook-?ups?|pigtails?)\\b)",
+            "\\b(?:cords?|cables?|plugs?|adapters?|inlets?|splitters?|twist[- ]lock)\\s+(?:[\\w'’-]+\\s+){0,3}?(?:240|220|230)\\s*-?\\s*(?:V|VAC|volts?)\\b"
+          ],
+          "why": "A headline that names a 240 V connector promises the excluded year-1 content.",
+          "fix": "Drop the 240 V connector from the headline (and the article's 240 V cord content)."
+        },
+        {
+          "id": "240v-mention",
+          "label": "240 V / split-phase output mentioned",
+          "action": "warn",
+          "patterns": [
+            "\\b(?:240|220|230)\\s*-?\\s*(?:V|VAC|volts?)\\b",
+            "\\bsplit[- ]phase\\b"
+          ],
+          "why": "240 V and split-phase output usually means a panel connection; review the copy.",
+          "fix": "Make sure the copy carries no hookup steps and says panel connection needs a licensed electrician."
+        },
+        {
+          "id": "furnace-article",
+          "label": "a furnace article",
+          "action": "reject",
+          "negation": false,
+          "question_exempt": false,
+          "fields": [
+            "title"
+          ],
+          "patterns": [
+            "\\bfurnaces?\\b"
+          ],
+          "why": "Year 1 publishes no furnace article: furnace blowers are hard-wired and the safe hookup is excluded.",
+          "fix": "Drop the article (or retitle it away from furnaces after the year-1 review)."
+        },
+        {
+          "id": "furnace-runtime-claim",
+          "label": "furnace runtime or power claims",
+          "action": "reject",
+          "negation_target": "claim",
+          "question_exempt": false,
+          "callout_exempt": false,
+          "fields": [
+            "subtitle",
+            "excerpt",
+            "body",
+            "faqs"
+          ],
+          "carry_heading_subject": [
+            "\\bfurnaces?\\b",
+            "\\b(?:furnace|HVAC|forced[- ]air)\\s+(?:blowers?|fans?|motors?|systems?)\\b"
+          ],
+          "patterns": [
+            "\\bfurnaces?\\b",
+            "\\b(?:furnace|HVAC|forced[- ]air)\\s+(?:blowers?|fans?|motors?|systems?)\\b"
+          ],
+          "require_any": [
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:[-–]|to)?\\s*(?:\\d+(?:[.,]\\d+)?\\s*)?(?:hours?|hrs?|h|nights?|days?|minutes?|mins?)\\b(?![-\\s]+(?:supply|supplies|kits?|old|warranty|returns?|shipping|window|forecast)\\b)",
+            "\\b(?:all|through\\s+the|one|a|two|three|several|multiple)\\s+nights?\\b",
+            "\\bovernight\\b",
+            "(?<!-)\\b(?:run|runs|running|ran|powers|powering|powered(?!\\s+by\\b)|lasts?|lasting|supports?|sustains?|handles?|covers?|keeps?\\s+(?:[\\w'’-]+\\s+){1,3}?(?:running|going|on|powered)|keep\\s+(?:it|them)\\s+(?:running|going|on))\\b(?!-)(?!\\s+(?:stations?|banks?|supply|supplies|outages?|sources?|cords?|strips?|bars?|buttons?|outlets?|plans?|grid|company|companies|lines?|out)\\b)",
+            "\\b(?:will|can|could|would|should|may|might|to|cannot|can['’]t|won['’]t)\\s+(?:easily\\s+|also\\s+|still\\s+|safely\\s+|reliably\\s+)?power\\b",
+            "\\bruntimes?\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:(?-i:W|Wh|kWh|A|Ah|mAh)|watts?|amps?|watt[- ]hours?)\\b",
+            "\\benough\\s+(?:power|capacity|juice|battery|charge)\\b",
+            "\\bhow\\s+long\\b",
+            "(?<!\\bonce\\s)(?<!\\btwice\\s)(?<!\\btimes\\s)(?<!\\bper\\s)(?<!\\bevery\\s)(?<!\\beach\\s)\\b(?:(?:half\\s+)?an?|a\\s+(?:few|couple(?:\\s+of)?|dozen)|(?:a\\s+)?couple\\s+of|several|many|dozens\\s+of|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}(?:\\s+(?:or|to)\\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4})?)(?:\\s+(?:full|whole|half|straight|solid|more|extra|additional|entire|long|consecutive|uninterrupted)){0,2}(?:\\s+|\\s*-\\s*)(?:hours?|hrs?|days?|nights?|minutes?|mins?|weeks?|weekends?)\\b(?![-\\s]+(?:supply|supplies|kits?|old|warranty|returns?|shipping|window|forecast)\\b)",
+            "\\b(?:hours|days|nights|weeks)\\s+of\\s+(?:[\\w'’-]+\\s+){0,2}?(?:use|usage|therapy|power|runtime|run\\s*time|backup|operation|sleep|breathing|oxygen)\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*-\\s*(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?|watt[- ]hours?|watts?|amps?|(?-i:W|Wh|kWh|A|Ah|mAh))\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?)\\b",
+            "\\b(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}|a\\s+few|a\\s+couple(?:\\s+of)?|several|hundreds\\s+of|thousands\\s+of|dozens\\s+of)(?:\\s+|\\s*-\\s*)(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?|watt[- ]hours?|watts?|amps?)\\b",
+            "\\b(?:\\d+(?:[.,]\\d+)?\\s*(?:%|percent\\b|per\\s*cent\\b)|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}\\s+(?:percent|per\\s*cent)\\b)",
+            "\\b(?:half|a\\s+(?:quarter|third|fifth|tenth)|(?:one|two|three|four)[\\s-](?:quarters?|thirds?|fifths?|tenths?))\\s+(?:of\\s+)?(?:the\\s+|its\\s+|your\\s+|a\\s+|their\\s+)?(?:battery|charge|capacity|pack)\\b"
+          ],
+          "why": "Year 1 publishes no furnace content: furnace blowers are hard-wired, and a runtime number invites a DIY hookup.",
+          "fix": "Remove the furnace runtime or power claim; say furnace blowers are hard-wired and need a transfer switch or interlock installed by a licensed electrician."
+        }
+      ]
+    },
+    "medical": {
+      "description": "No runtime or power claims for medical devices (CPAP, oxygen and other life-support equipment, by type or by model name). A claim rule: the device may be named; a number, duration or 'it runs / powers it' next to it may not.",
+      "rules": [
+        {
+          "id": "medical-runtime-claim",
+          "label": "CPAP / oxygen / medical-device runtime or power claims",
+          "action": "reject",
+          "negation_target": "claim",
+          "question_exempt": false,
+          "callout_exempt": false,
+          "carry_heading_subject": [
+            "\\b(?:C-?PAPs?|Bi-?PAPs?|APAPs?|Auto-?PAPs?|BiLevel|sleep\\s+apnea\\s+(?:machines?|devices?|equipment|therapy))\\b",
+            "\\b(?:oxygen|O2)\\s+(?:concentrators?|machines?|generators?|therap(?:y|ies)|tanks?|equipment|suppl(?:y|ies))\\b",
+            "\\b(?:home|supplemental)\\s+oxygen\\b",
+            "\\b(?:ventilators?|nebuli[sz]ers?|dialysis(?:\\s+machines?)?|feeding\\s+pumps?|suction\\s+machines?|life[- ](?:support|sustaining)\\s+(?:equipment|devices?|machines?))\\b",
+            "\\b(?:ResMed|AirSense|AirMini|AirCurve|DreamStation|Respironics|Inogen|SimplyGo|OxyGo|EverFlo|SeQual|Trilogy\\s+(?:Evo|100|200)|Lofta)\\b",
+            "\\b(?:Transcend\\s+(?:3|365|micro|mini|auto|CPAP)|Z[12]\\s+(?:auto|travel)|Luna\\s+(?:G3|II|2)|Breas\\s+Z[12]|CAIRE\\s+(?:FreeStyle|Eclipse|Companion)|FreeStyle\\s+Comfort|Invacare\\s+(?:Platinum|Perfecto|XPO|SOLO))\\b"
+          ],
+          "patterns": [
+            "\\b(?:C-?PAPs?|Bi-?PAPs?|APAPs?|Auto-?PAPs?|BiLevel|sleep\\s+apnea\\s+(?:machines?|devices?|equipment|therapy))\\b",
+            "\\b(?:oxygen|O2)\\s+(?:concentrators?|machines?|generators?|therap(?:y|ies)|tanks?|equipment|suppl(?:y|ies))\\b",
+            "\\b(?:home|supplemental|medical)\\s+oxygen\\b",
+            "\\b(?:ventilators?|nebuli[sz]ers?|dialysis(?:\\s+machines?)?|feeding\\s+pumps?|suction\\s+machines?|life[- ](?:support|sustaining)\\s+(?:equipment|devices?|machines?))\\b",
+            "\\bmedical\\s+(?:devices?|equipment)\\b",
+            "\\b(?:ResMed|AirSense|AirMini|AirCurve|DreamStation|Respironics|Inogen|SimplyGo|OxyGo|EverFlo|SeQual|Trilogy\\s+(?:Evo|100|200)|Lofta)\\b",
+            "\\b(?:Transcend\\s+(?:3|365|micro|mini|auto|CPAP)|Z[12]\\s+(?:auto|travel)|Luna\\s+(?:G3|II|2)|Breas\\s+Z[12]|CAIRE\\s+(?:FreeStyle|Eclipse|Companion)|FreeStyle\\s+Comfort|Invacare\\s+(?:Platinum|Perfecto|XPO|SOLO))\\b"
+          ],
+          "require_any": [
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:[-–]|to)?\\s*(?:\\d+(?:[.,]\\d+)?\\s*)?(?:hours?|hrs?|h|nights?|days?|minutes?|mins?)\\b(?![-\\s]+(?:supply|supplies|kits?|old|warranty|returns?|shipping|window|forecast)\\b)",
+            "\\b(?:all|through\\s+the|one|a|two|three|several|multiple)\\s+nights?\\b",
+            "\\bovernight\\b",
+            "(?<!-)\\b(?:run|runs|running|ran|powers|powering|powered(?!\\s+by\\b)|lasts?|lasting|supports?|sustains?|handles?|covers?|keeps?\\s+(?:[\\w'’-]+\\s+){1,3}?(?:running|going|on|powered)|keep\\s+(?:it|them)\\s+(?:running|going|on))\\b(?!-)(?!\\s+(?:stations?|banks?|supply|supplies|outages?|sources?|cords?|strips?|bars?|buttons?|outlets?|plans?|grid|company|companies|lines?|out)\\b)",
+            "\\b(?:will|can|could|would|should|may|might|to|cannot|can['’]t|won['’]t)\\s+(?:easily\\s+|also\\s+|still\\s+|safely\\s+|reliably\\s+)?power\\b",
+            "\\bruntimes?\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:(?-i:W|Wh|kWh|A|Ah|mAh)|watts?|amps?|watt[- ]hours?)\\b",
+            "\\benough\\s+(?:power|capacity|juice|battery|charge)\\b",
+            "\\bhow\\s+long\\b",
+            "(?<!\\bonce\\s)(?<!\\btwice\\s)(?<!\\btimes\\s)(?<!\\bper\\s)(?<!\\bevery\\s)(?<!\\beach\\s)\\b(?:(?:half\\s+)?an?|a\\s+(?:few|couple(?:\\s+of)?|dozen)|(?:a\\s+)?couple\\s+of|several|many|dozens\\s+of|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}(?:\\s+(?:or|to)\\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4})?)(?:\\s+(?:full|whole|half|straight|solid|more|extra|additional|entire|long|consecutive|uninterrupted)){0,2}(?:\\s+|\\s*-\\s*)(?:hours?|hrs?|days?|nights?|minutes?|mins?|weeks?|weekends?)\\b(?![-\\s]+(?:supply|supplies|kits?|old|warranty|returns?|shipping|window|forecast)\\b)",
+            "\\b(?:hours|days|nights|weeks)\\s+of\\s+(?:[\\w'’-]+\\s+){0,2}?(?:use|usage|therapy|power|runtime|run\\s*time|backup|operation|sleep|breathing|oxygen)\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*-\\s*(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?|watt[- ]hours?|watts?|amps?|(?-i:W|Wh|kWh|A|Ah|mAh))\\b",
+            "\\b\\d+(?:[.,]\\d+)?\\s*(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?)\\b",
+            "\\b(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}|a\\s+few|a\\s+couple(?:\\s+of)?|several|hundreds\\s+of|thousands\\s+of|dozens\\s+of)(?:\\s+|\\s*-\\s*)(?:kilowatt[- ]hours?|kilowatts?|amp[- ]hours?|watt[- ]hours?|watts?|amps?)\\b",
+            "\\b(?:\\d+(?:[.,]\\d+)?\\s*(?:%|percent\\b|per\\s*cent\\b)|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)(?:(?:\\s+and)?[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen)){0,4}\\s+(?:percent|per\\s*cent)\\b)",
+            "\\b(?:half|a\\s+(?:quarter|third|fifth|tenth)|(?:one|two|three|four)[\\s-](?:quarters?|thirds?|fifths?|tenths?))\\s+(?:of\\s+)?(?:the\\s+|its\\s+|your\\s+|a\\s+|their\\s+)?(?:battery|charge|capacity|pack)\\b"
+          ],
+          "why": "We publish no runtime, wattage or 'it will power it' claims for CPAP, oxygen or other medical devices: a wrong number can strand a patient without therapy.",
+          "fix": "Remove the claim and keep numbers, durations and 'it runs / powers it' out of any sentence, paragraph, list item, table row or section that names a medical device; when the title names one, that is the whole article (better: keep the device out of the title). If the article mentions medical devices at all, tell readers to plan medical backup with their doctor or equipment supplier and to register with their utility's medical-baseline program."
+        }
+      ]
+    }
+  }
+}
