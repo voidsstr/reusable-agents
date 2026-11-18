@@ -1,0 +1,140 @@
+{
+  "_comment": "Compat-graph fixture catalog. Each model is a list of spec_sources candidates (field, value, unit, source, verbatim snippet); the tests consolidate them with framework.core.spec_sources.consolidate() and feed the resulting SpecSet to compat_graph.ModelSpec.from_specset, i.e. through the same interface a spec-extractor agent uses. Provenance and the real/synthetic split: SOURCES.json. Expected verdicts are under `cases` and are evaluated with the repo config's home-power profile.",
+  "sources": {
+    "jackery-faq": {"url": "https://www.jackery.com/blogs/jackery-faqs/explorer-1000-v2-basic-information", "kind": "manufacturer-faq", "publisher": "jackery.com", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "c256d83463315d1703dbe11bf767d82f835dfe44cdaffb32517deeaf40a98416", "source_id": 101},
+    "pecron-manual": {"url": "https://cdn.shopify.com/s/files/1/0626/0241/2120/files/pecron_E2000LFP_-20230227.pdf?v=1732849752", "kind": "manual-pdf", "publisher": "pecron.com", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "8587a9b30c16b94a7e07fb56ae9b8f6a8f5e7e0abfa7805fd7d366e49676cc64", "source_id": 102},
+    "fossibot-page": {"url": "https://www.fossibot.com/products/fossibot-f2400", "kind": "manufacturer-page", "publisher": "fossibot.com", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "92124c55652c2c51cae84695f870464a8195e7580c7a3aefa5c51b4d1e5cac00", "source_id": 103},
+    "ecoflow-220w-page": {"url": "https://us.ecoflow.com/products/nextgen-220w-bifacial-portable-solar-panel", "kind": "manufacturer-page", "publisher": "us.ecoflow.com", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "2221e10aa288be6a718fa8e92614f1a0ac59989742dc75676ac9a51510a11656", "source_id": 104},
+    "jackery-accessory-menu": {"url": "https://www.jackery.com/products/jackery-solarsaga-100-air", "kind": "manufacturer-page", "publisher": "jackery.com", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "fb6d8f4c206c289b2f84bb0e00c852db974034368f952c379e4be6803cd5d3ae", "source_id": 105},
+    "example-panels-12": {"url": "https://panels.example/example-100w-dc8020", "kind": "manufacturer-page", "publisher": "panels.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "1212121212121212121212121212121212121212121212121212121212121212", "source_id": 212},
+    "example-panels-13": {"url": "https://panels.example/example-400w-rigid", "kind": "manufacturer-page", "publisher": "panels.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "1313131313131313131313131313131313131313131313131313131313131313", "source_id": 213},
+    "example-panels-14": {"url": "https://panels.example/example-200w-dc8020", "kind": "manual-pdf", "publisher": "panels.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "1414141414141414141414141414141414141414141414141414141414141414", "source_id": 214},
+    "example-panels-15": {"url": "https://panels.example/example-100w-mc4", "kind": "manufacturer-page", "publisher": "panels.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "1515151515151515151515151515151515151515151515151515151515151515", "source_id": 215},
+    "example-adapters-21": {"url": "https://adapters.example/mc4-to-dc8020", "kind": "manufacturer-page", "publisher": "adapters.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "2121212121212121212121212121212121212121212121212121212121212121", "source_id": 221},
+    "example-adapters-22": {"url": "https://adapters.example/l14-30-cord", "kind": "manufacturer-page", "publisher": "adapters.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222", "source_id": 222},
+    "example-robot-kit": {"url": "https://robots.example/n10-replacement-kit", "kind": "manufacturer-page", "publisher": "robots.example", "fetched_at": "2026-11-17T00:00:00Z", "content_sha256": "6161616161616161616161616161616161616161616161616161616161616161", "source_id": 261}
+  },
+  "fields": {
+    "model_number": {"kind": "text", "normalize": "alnum"},
+    "pv_v_min": {"kind": "quantity", "unit": "V", "min": 0, "max": 1000},
+    "pv_voc_max": {"kind": "quantity", "unit": "V", "min": 5, "max": 1000},
+    "pv_a_max": {"kind": "quantity", "unit": "A", "min": 0.5, "max": 200},
+    "pv_w_max": {"kind": "quantity", "unit": "W", "min": 10, "max": 30000},
+    "pv_current_limited": {"kind": "bool", "values": {"true": ["current limit"], "false": ["^no$"]}},
+    "pv_input_connectors": {"kind": "text"},
+    "voc": {"kind": "quantity", "unit": "V", "min": 1, "max": 1500},
+    "vmp": {"kind": "quantity", "unit": "V", "min": 1, "max": 1500},
+    "isc": {"kind": "quantity", "unit": "A", "min": 0.05, "max": 100},
+    "rated_w": {"kind": "quantity", "unit": "W", "min": 1, "max": 2000},
+    "temp_coeff_voc_pct_c": {"kind": "quantity", "unit": "%/degC", "min": -1.0, "max": 0.5},
+    "cell_type": {"kind": "text"},
+    "connector": {"kind": "text"},
+    "connector_a": {"kind": "text"},
+    "connector_b": {"kind": "text"},
+    "max_a": {"kind": "quantity", "unit": "A", "min": 0.1, "max": 500},
+    "max_v": {"kind": "quantity", "unit": "V", "min": 1, "max": 2000}
+  },
+  "models": [
+    {"model_id": 1, "kind": "station", "brand": "Jackery", "name": "Explorer 1000 v2", "aliases": ["JE-1000D"], "candidates": [
+      {"field": "model_number", "text": "JE-1000D", "source": "jackery-faq", "snippet": "Product Model JE-1000D"},
+      {"field": "pv_v_min", "value": 16, "unit": "V", "source": "jackery-faq", "snippet": "DC Input Specification (Solar Power Input Specification) Supports 16–60V"},
+      {"field": "pv_voc_max", "value": 60, "unit": "V", "source": "jackery-faq", "snippet": "DC Input Specification (Solar Power Input Specification) Supports 16–60V"},
+      {"field": "pv_a_max", "value": 10.5, "unit": "A", "source": "jackery-faq", "snippet": "Single Port Usage: Current Limit 10.5A, Max. Input Power 200W"},
+      {"field": "pv_w_max", "value": 200, "unit": "W", "source": "jackery-faq", "snippet": "Single Port Usage: Current Limit 10.5A, Max. Input Power 200W"},
+      {"field": "pv_current_limited", "bool": true, "source": "jackery-faq", "snippet": "Single Port Usage: Current Limit 10.5A"},
+      {"field": "pv_input_connectors", "text": "DC8020", "source": "jackery-faq", "snippet": "Input Port for Charging Product with Solar Panel DC8020"}
+    ]},
+    {"model_id": 2, "kind": "station", "brand": "Pecron", "name": "E2000LFP", "candidates": [
+      {"field": "pv_v_min", "value": 32, "unit": "V", "source": "pecron-manual", "snippet": "2x GX16MF-5 Charging Port: PV(operating voltage) range 32V~95V, 600W maximum"},
+      {"field": "pv_voc_max", "value": 95, "unit": "V", "source": "pecron-manual", "snippet": "VOC(open circuit voltage) of solar panel/array must be less than 95V"},
+      {"field": "pv_w_max", "value": 600, "unit": "W", "source": "pecron-manual", "snippet": "2x GX16MF-5 Charging Port: PV(operating voltage) range 32V~95V, 600W maximum"},
+      {"field": "pv_input_connectors", "text": "GX16MF-5", "source": "pecron-manual", "snippet": "2x GX16MF-5 Charging Port"}
+    ]},
+    {"model_id": 3, "kind": "station", "brand": "FOSSiBOT", "name": "F2400", "candidates": [
+      {"field": "pv_v_min", "value": 11.5, "unit": "V", "source": "fossibot-page", "snippet": "PV input requirements for F2400: Work Voltage: 11.5-50V"},
+      {"field": "pv_voc_max", "value": 50, "unit": "V", "source": "fossibot-page", "snippet": "PV input requirements for F2400: Work Voltage: 11.5-50V"},
+      {"field": "pv_w_max", "value": 500, "unit": "W", "source": "fossibot-page", "snippet": "Input Power: 500W Max."}
+    ]},
+    {"model_id": 4, "kind": "station", "brand": "Jackery", "name": "Explorer 2000 Plus", "candidates": []},
+    {"model_id": 11, "kind": "panel", "brand": "EcoFlow", "name": "NextGen 220W Bifacial Portable Solar Panel", "candidates": [
+      {"field": "voc", "value": 21.5, "unit": "V", "source": "ecoflow-220w-page", "snippet": "Open Circuit Voltage 21.5V (Vmp 18.4V)"},
+      {"field": "vmp", "value": 18.4, "unit": "V", "source": "ecoflow-220w-page", "snippet": "Open Circuit Voltage 21.5V (Vmp 18.4V)"},
+      {"field": "isc", "value": 12.4, "unit": "A", "source": "ecoflow-220w-page", "snippet": "Short Circuit Current 12.4A (Imp 11.9A) Front Side"},
+      {"field": "rated_w", "value": 220, "unit": "W", "source": "ecoflow-220w-page", "snippet": "Rated Power 220W (±5W) Front/175W Rear"},
+      {"field": "cell_type", "text": "N Type TOPCon monocrystalline silicon", "source": "ecoflow-220w-page", "snippet": "Cell Type N Type TOPCon monocrystalline silicon"},
+      {"field": "connector", "text": "Photovoltaic connectors", "source": "ecoflow-220w-page", "snippet": "Connector Type Photovoltaic connectors"}
+    ]},
+    {"model_id": 12, "kind": "panel", "brand": "Example", "name": "Example 100W DC8020 panel", "candidates": [
+      {"field": "voc", "value": 24.0, "unit": "V", "source": "example-panels-12", "snippet": "Open-circuit voltage (Voc): 24.0 V"},
+      {"field": "vmp", "value": 19.8, "unit": "V", "source": "example-panels-12", "snippet": "Maximum power voltage (Vmp): 19.8 V"},
+      {"field": "isc", "value": 5.6, "unit": "A", "source": "example-panels-12", "snippet": "Short-circuit current (Isc): 5.6 A"},
+      {"field": "rated_w", "value": 100, "unit": "W", "source": "example-panels-12", "snippet": "Rated power: 100 W"},
+      {"field": "temp_coeff_voc_pct_c", "value": -0.30, "unit": "%/degC", "source": "example-panels-12", "snippet": "Temperature coefficient of Voc: -0.30 %/°C"},
+      {"field": "cell_type", "text": "Monocrystalline", "source": "example-panels-12", "snippet": "Cell type: Monocrystalline"},
+      {"field": "connector", "text": "DC8020", "source": "example-panels-12", "snippet": "Output connector: DC8020"}
+    ]},
+    {"model_id": 13, "kind": "panel", "brand": "Example", "name": "Example 400W rigid panel", "candidates": [
+      {"field": "voc", "value": 49.5, "unit": "V", "source": "example-panels-13", "snippet": "Voc 49.5 V"},
+      {"field": "vmp", "value": 41.5, "unit": "V", "source": "example-panels-13", "snippet": "Vmp 41.5 V"},
+      {"field": "isc", "value": 10.3, "unit": "A", "source": "example-panels-13", "snippet": "Isc 10.3 A"},
+      {"field": "rated_w", "value": 400, "unit": "W", "source": "example-panels-13", "snippet": "Pmax 400 W"},
+      {"field": "temp_coeff_voc_pct_c", "value": -0.27, "unit": "%/degC", "source": "example-panels-13", "snippet": "Temperature coefficient of Voc -0.27 %/°C"},
+      {"field": "cell_type", "text": "Monocrystalline PERC", "source": "example-panels-13", "snippet": "Cell type: Monocrystalline PERC"},
+      {"field": "connector", "text": "MC4", "source": "example-panels-13", "snippet": "Connector: MC4"}
+    ]},
+    {"model_id": 14, "kind": "panel", "brand": "Example", "name": "Example 200W DC8020 panel", "candidates": [
+      {"field": "voc", "value": 23.4, "unit": "V", "source": "example-panels-14", "snippet": "Open circuit voltage 23.4 V"},
+      {"field": "vmp", "value": 19.5, "unit": "V", "source": "example-panels-14", "snippet": "Operating voltage 19.5 V"},
+      {"field": "isc", "value": 11.6, "unit": "A", "source": "example-panels-14", "snippet": "Short circuit current 11.6 A"},
+      {"field": "rated_w", "value": 200, "unit": "W", "source": "example-panels-14", "snippet": "Peak power 200 W"},
+      {"field": "connector", "text": "DC8020", "source": "example-panels-14", "snippet": "Output: DC8020"}
+    ]},
+    {"model_id": 15, "kind": "panel", "brand": "Example", "name": "Example 100W MC4 panel", "candidates": [
+      {"field": "voc", "value": 22.8, "unit": "V", "source": "example-panels-15", "snippet": "Voc: 22.8 V"},
+      {"field": "vmp", "value": 18.9, "unit": "V", "source": "example-panels-15", "snippet": "Vmp: 18.9 V"},
+      {"field": "isc", "value": 5.9, "unit": "A", "source": "example-panels-15", "snippet": "Isc: 5.9 A"},
+      {"field": "rated_w", "value": 100, "unit": "W", "source": "example-panels-15", "snippet": "Rated power: 100 W"},
+      {"field": "temp_coeff_voc_pct_c", "value": -0.29, "unit": "%/degC", "source": "example-panels-15", "snippet": "Voc temperature coefficient: -0.29 %/°C"},
+      {"field": "cell_type", "text": "Monocrystalline", "source": "example-panels-15", "snippet": "Monocrystalline cells"},
+      {"field": "connector", "text": "MC4", "source": "example-panels-15", "snippet": "Connector: MC4"}
+    ]},
+    {"model_id": 21, "kind": "adapter", "brand": "Example", "name": "Example MC4 to DC8020 adapter", "candidates": [
+      {"field": "connector_a", "text": "MC4", "source": "example-adapters-21", "snippet": "MC4 male/female pair to DC8020"},
+      {"field": "connector_b", "text": "DC8020", "source": "example-adapters-21", "snippet": "MC4 male/female pair to DC8020"},
+      {"field": "max_a", "value": 15, "unit": "A", "source": "example-adapters-21", "snippet": "Rated 15 A / 60 V DC"},
+      {"field": "max_v", "value": 60, "unit": "V", "source": "example-adapters-21", "snippet": "Rated 15 A / 60 V DC"}
+    ]},
+    {"model_id": 22, "kind": "cable", "brand": "Example", "name": "Example L14-30 generator cord", "candidates": [
+      {"field": "connector_a", "text": "NEMA L14-30P", "source": "example-adapters-22", "snippet": "NEMA L14-30P to L14-30R"},
+      {"field": "connector_b", "text": "NEMA L14-30R", "source": "example-adapters-22", "snippet": "NEMA L14-30P to L14-30R"}
+    ]},
+    {"model_id": 31, "kind": "battery", "brand": "Jackery", "name": "Battery Pack 2000 Plus", "candidates": []}
+  ],
+  "fit_records": [
+    {"a": 4, "b": 31, "relation": "expands", "verdict": "fits", "source": "jackery-accessory-menu", "statement": "Battery Pack 2000 Plus Compatible with 2000 Plus"},
+    {"a": 1, "b": 21, "relation": "adapter_for", "verdict": "fits", "source": "example-adapters-21", "statement": "Compatible with Jackery Explorer 1000 v2 (DC8020 solar input)"},
+    {"a": 1, "b": 22, "relation": "adapter_for", "verdict": "fits", "source": "example-adapters-22", "statement": "For stations with an L14-30 outlet"}
+  ],
+  "cases": {
+    "fitting-pair": {"a": 1, "b": 12, "ruleset": "solar-charging", "verdict": "fits", "via": null, "factor_method": "temperature-coefficient", "voltage_factor": 1.195, "cold_voc_v": 28.68, "series": 1, "parallel": 2, "max_series": 1},
+    "cold-voltage-failure": {"a": 1, "b": 13, "ruleset": "solar-charging", "verdict": "over_limit", "via": null, "factor_method": "temperature-coefficient", "voltage_factor": 1.1755, "cold_voc_v": 58.1873, "series": 1, "parallel": 1, "code": "cold-voc-insufficient-headroom"},
+    "unknown-tc-pair": {"a": 1, "b": 14, "ruleset": "solar-charging", "verdict": "fits", "via": null, "factor_method": "nec-690.7a", "voltage_factor": 1.25, "cold_voc_v": 29.25, "series": 1, "parallel": 1},
+    "adapter-path": {"a": 1, "b": 15, "ruleset": "solar-charging", "verdict": "fits_with_adapter", "via": 21, "factor_method": "temperature-coefficient", "voltage_factor": 1.1885, "cold_voc_v": 54.1956, "series": 2, "parallel": 1, "max_series": 2},
+    "unknown-tc-real-panel": {"a": 1, "b": 11, "ruleset": "solar-charging", "verdict": "fits_with_adapter", "via": 21, "factor_method": "nec-690.7a", "voltage_factor": 1.25, "cold_voc_v": 26.875, "series": 1, "parallel": 1, "max_series": 2},
+    "real-two-in-series-over-at-minus-40": {"a": 3, "b": 11, "ruleset": "solar-charging", "verdict": "unknown", "option": [2, 1], "option_code": "cold-voc-exceeds-max", "option_cold_voc_v": 53.75},
+    "real-manual-allows-four-in-series": {"a": 2, "b": 11, "ruleset": "solar-charging", "verdict": "unknown", "option": [4, 1], "option_code": "cold-voc-exceeds-max", "option_cold_voc_v": 107.5},
+    "expansion-listed": {"a": 4, "b": 31, "ruleset": "expansion-battery", "verdict": "fits", "confidence": "manufacturer-listed"},
+    "excluded-cord": {"a": 1, "b": 22, "ruleset": "adapter-fit", "skipped": "excluded-connector:l14-30:22"}
+  },
+  "robots": {
+    "models": [
+      {"model_id": 51, "kind": "robot", "brand": "ECOVACS", "name": "DEEBOT N10"},
+      {"model_id": 52, "kind": "robot", "brand": "ECOVACS", "name": "DEEBOT N10 PLUS"},
+      {"model_id": 53, "kind": "robot", "brand": "ECOVACS", "name": "DEEBOT N8"},
+      {"model_id": 61, "kind": "consumable", "brand": "Example", "name": "Example N10 replacement kit"}
+    ],
+    "list": {"subject": 61, "source": "example-robot-kit", "text": "Compatible with: DEEBOT N10, N10 PLUS and DEEBOT X1 OMNI"},
+    "expect_fits": [51, 52],
+    "expect_unresolved": ["DEEBOT X1 OMNI"]
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "schema_version": "1",
+  "_comment": "Compatibility graph (framework/core/compat_graph.py): rule KINDS are code, RULES are versioned data. Resolution, lowest to highest: the module DEFAULTS (conservative electrical defaults: design temperature -40 °C, NEC 690.7(A) factors, >= 5 % cold-voltage headroom, at most one adapter, every edge-relevant check unknown when an input is missing) <- `defaults` <- `profiles.<profile>` <- `by_site.<site>` <- the caller's site_cfg <- `by_agent_id.<agent-id>`. Dicts deep-merge, lists replace; rules, rulesets and connectors are dicts keyed by id, so a later layer can bump ONE rule's version. The profile is the first `profile` key found in by_agent_id, site_cfg, by_site, then defaults. A storage copy at config/compat-graph-config.json replaces this repo file wholesale. Safety floors live in code and cannot be loosened here: headroom >= 0.05, default design temperature <= -40 °C (a per-ZIP minimum may be warmer, and CompatGraph.plan refuses to write edges computed warmer than the default), NEC factors >= the code table and never smaller in a colder band, max_adapters <= 1 (a parallel branch connector counts against it, so a path through an adapter offers no parallel strings), the cold-voltage check is never skipped, no fit statement (manufacturer or manual) is ever stored with a configuration that fails the cold-voltage check or a connector/adapter rating, whatever on_disagreement says, and a fit statement is never extrapolated past a check that could not run (a missing maximum input current keeps one string, flagged computed-check-incomplete with a 'not checked' assumption). Nothing here runs by itself: no site selects a profile until by_site.<site>.profile is set (operator wiring). Bumping a rule's or ruleset's `version` makes every edge of the rulesets that use it stale; the next build rewrites them (CompatGraph.plan).",
+  "_shape": {
+    "climate": "{default_min_c: -40 (clamped to <= -40), zip_min_c: {<zip5>|<zip3>: degC} (ASHRAE extreme annual mean minimum dry bulb; a zip3 entry must be the COLDEST value within that prefix; empty = -40 everywhere), zip_source, zip3_fallback: true, plausible_c: [-70, 30]}",
+    "tables.nec_690_7_a": "extra [band_low_c, factor] rows merged into the code's NEC Table 690.7(A) by band (extend below -40 here). A row can only raise a factor: the code table's own factor always applies, the merged table is made monotone (colder never smaller), below -40 the factor is >= 1.25, and a row that would lower a factor is reported as a problem",
+    "kind_defaults.<kind>": "default params per rule kind: max_voltage_cold {headroom, tc_plausible_pct_per_c: [-0.6, -0.2], non_crystalline_patterns}; min_voltage {vmp_factor, on_missing}; max_current {isc_factor (1.25 = NEC 690.8(A)(1)), on_missing}; connector_path {max_adapters, adapter_kinds, adapter_fields, fit_source_kinds (manufacturer source kinds only), fallback_alias_sides: [a|b], endorse_relation, no_path: unknown|fail, check_ratings, on_missing}; manufacturer_list {on_disagreement: prefer_manufacturer|most_conservative|unknown (non-safety disagreements only), source_kinds}",
+    "connectors.<id>": "{label, family, aliases: [regex, case-insensitive; must name the connector specifically], fallback_aliases: [regex; generic wording used only on the connector rule's fallback_alias_sides and only when nothing specific matched], mates_with: [id], max_a, max_v (null = rating unknown, not checked; a known rating with an unknown cold voltage or design current makes the check unknown), series: bool, parallel: bool (can a PANEL whose output is this connector be wired that way without conversion)}",
+    "connector_text": "{ambiguous_patterns: [regex]}: a piece of connector text matching one (\"requires an MC4 adapter\") or naming two connectors resolves to nothing",
+    "policy": "{exclude_connectors: [id] (never a path; adapters/cables carrying one ANYWHERE in their connector text are excluded with all their edges), exclude_connector_model_kinds, connector_fields, exclude_models: [{field, op: gte|gt|lte|lt|eq|ne|in|matches|truthy, value, kinds}] (numeric ops on text match when any number in it does: '120/240V' is >= 200)}",
+    "rules.<id>": "{kind: manufacturer_list|max_voltage_cold|min_voltage|max_current|connector_path|watts_clip, version, description, a_fields: {role: spec field}, b_fields: {role: spec field}, params: {...kind params}}. Roles: max_voltage_cold a.max_v, b.voc, b.tc (%/°C) | b.tc_mv (mV/°C), b.technology; min_voltage a.min_v, b.vmp; max_current a.max_a and/or a.current_limited (bool), b.isc; watts_clip a.max_w, b.rated_w; connector_path a.connectors, b.connectors",
+    "rulesets.<id>": "{version, relation, a_kinds: [kind], b_kinds: [kind], rules: [rule id], arrays: {max_series, max_parallel, max_units} (1..12; omit for single units), pairs: all|listed (default listed when every rule is manufacturer_list), store_verdicts: [verdict], enabled}. One edge per (a, b, relation, ruleset); rule_version = '<ruleset>@<v>[<rule>@<v>,...]e<ENGINE_VERSION>'",
+    "store_verdicts": "default verdicts written to compat_edges (unknown is never in the default)",
+    "texts.<code>": "assumption wording with {placeholders}; shown next to every verdict. Also role.<a|b>.<role> (how a 'not checked' reason names a missing value, e.g. role.a.max_a = 'the station's maximum solar input current') and connector-unresolved / connector-no-documented-path (why a connection is unproven)",
+    "writer": "{table: compat_edges, columns: {edge field: column}, page_size}",
+    "by_site.<site>": "{profile: <name>, climate: {zip_min_c: {...}}, rulesets: {<id>: {enabled: false}}, ...}"
+  },
+  "defaults": {},
+  "profiles": {
+    "home-power": {
+      "_comment": "Portable power stations, solar panels, expansion batteries, cables and adapters (binding amendments 6 and 8 of the third-site design). Field names are the site's spec_sources field registry: stations pv_v_min, pv_voc_max, pv_a_max, pv_w_max, pv_current_limited (bool: the maker documents input current limiting), pv_input_connectors; panels voc, vmp, isc, rated_w, temp_coeff_voc_pct_c (%/°C; absent = NEC factor, labelled), cell_type, connector; adapters/cables connector_a, connector_b, max_a, max_v. Year 1 excludes 240 V cords (L14-30, L5-30, 14-50 and the other 240 V NEMA/California-standard plugs listed below, or any ac_voltage reading >= 200 V) and every edge through them, and grid-interactive models. Connector ratings are left null where the rating is not a published standard value: a null rating is not checked. Aliases name a connector specifically; 'Anderson' alone (SB50 is a different connector) and generic 'PV/solar connector' wording do not resolve, except that the generic wording reads as MC4 on a PANEL with nothing more specific.",
+      "connectors": {
+        "mc4": {"label": "MC4", "family": "pv", "aliases": ["\\bmc[- ]?4\\b"], "fallback_aliases": ["^(?:photovoltaic|pv|solar)\\s+connectors?$"], "max_a": 30, "max_v": 600, "series": true, "parallel": true},
+        "anderson-pp45": {"label": "Anderson Powerpole (PP45)", "family": "anderson", "aliases": ["\\bpower ?poles?\\b", "\\bpp ?-?45\\b"], "max_a": 45, "max_v": 600, "series": false, "parallel": true},
+        "dc8020": {"label": "DC8020", "family": "dc-barrel", "aliases": ["\\bdc ?8020\\b", "\\bdc ?8 ?mm\\b", "\\b8 ?mm dc\\b"], "series": false, "parallel": true},
+        "dc7909": {"label": "DC7909", "family": "dc-barrel", "aliases": ["\\bdc ?7909\\b", "\\b7\\.9 ?mm\\b"], "series": false, "parallel": true},
+        "dc5521": {"label": "DC5521", "family": "dc-barrel", "aliases": ["\\bdc ?5521\\b", "\\b5\\.5 ?(?:x|mm ?x) ?2\\.1 ?mm\\b"], "series": false, "parallel": false},
+        "xt60": {"label": "XT60", "family": "xt", "aliases": ["\\bxt[- ]?60\\b(?![- ]?i)"], "mates_with": ["xt60i"], "series": false, "parallel": false},
+        "xt60i": {"label": "XT60i", "family": "xt", "aliases": ["\\bxt[- ]?60[- ]?i\\b"], "mates_with": ["xt60"], "series": false, "parallel": false},
+        "gx16": {"label": "GX16 aviation", "family": "aviation", "aliases": ["\\bgx ?16(?:mf)?(?:-\\d+)?\\b"], "series": false, "parallel": false},
+        "car-12v": {"label": "12 V car socket", "family": "vehicle", "aliases": ["\\bcar (?:port|outlet|socket|charger)\\b", "\\bcigarette lighter\\b", "\\b12 ?v (?:car|auxiliary)\\b"], "series": false, "parallel": false},
+        "nema-5-15": {"label": "NEMA 5-15", "family": "ac-120", "aliases": ["\\bnema ?5-15[pr]?\\b"], "series": false, "parallel": false},
+        "nema-5-20": {"label": "NEMA 5-20", "family": "ac-120", "aliases": ["\\bnema ?5-20[pr]?\\b"], "series": false, "parallel": false},
+        "tt-30": {"label": "TT-30", "family": "ac-rv", "aliases": ["\\btt-?30[pr]?\\b"], "series": false, "parallel": false},
+        "l5-30": {"label": "NEMA L5-30", "family": "ac-120-locking", "aliases": ["\\b(?:nema ?)?l5-?30[pr]?\\b"], "series": false, "parallel": false},
+        "l14-30": {"label": "NEMA L14-30", "family": "ac-240", "aliases": ["\\b(?:nema ?)?l14-?30[pr]?\\b"], "series": false, "parallel": false},
+        "nema-14-50": {"label": "NEMA 14-50", "family": "ac-240", "aliases": ["\\b(?:nema ?)?14-50[pr]?\\b"], "series": false, "parallel": false},
+        "nema-14-30": {"label": "NEMA 14-30", "family": "ac-240", "aliases": ["\\b(?:nema ?)?14-30[pr]?\\b"], "series": false, "parallel": false},
+        "nema-10-30": {"label": "NEMA 10-30", "family": "ac-240", "aliases": ["\\b(?:nema ?)?10-30[pr]?\\b"], "series": false, "parallel": false},
+        "nema-10-50": {"label": "NEMA 10-50", "family": "ac-240", "aliases": ["\\b(?:nema ?)?10-50[pr]?\\b"], "series": false, "parallel": false},
+        "nema-6-15": {"label": "NEMA 6-15", "family": "ac-240", "aliases": ["\\b(?:nema ?)?6-15[pr]?\\b"], "series": false, "parallel": false},
+        "nema-6-20": {"label": "NEMA 6-20", "family": "ac-240", "aliases": ["\\b(?:nema ?)?6-20[pr]?\\b"], "series": false, "parallel": false},
+        "nema-6-30": {"label": "NEMA 6-30", "family": "ac-240", "aliases": ["\\b(?:nema ?)?6-30[pr]?\\b"], "series": false, "parallel": false},
+        "nema-6-50": {"label": "NEMA 6-50", "family": "ac-240", "aliases": ["\\b(?:nema ?)?6-50[pr]?\\b"], "series": false, "parallel": false},
+        "l6-20": {"label": "NEMA L6-20", "family": "ac-240-locking", "aliases": ["\\b(?:nema ?)?l6-?20[pr]?\\b"], "series": false, "parallel": false},
+        "l6-30": {"label": "NEMA L6-30", "family": "ac-240-locking", "aliases": ["\\b(?:nema ?)?l6-?30[pr]?\\b"], "series": false, "parallel": false},
+        "l14-20": {"label": "NEMA L14-20", "family": "ac-240-locking", "aliases": ["\\b(?:nema ?)?l14-?20[pr]?\\b"], "series": false, "parallel": false},
+        "cs6365": {"label": "California Standard 50 A (CS6364/CS6365)", "family": "ac-240-locking", "aliases": ["\\bcs ?636[45]c?\\b"], "series": false, "parallel": false}
+      },
+      "policy": {
+        "exclude_connectors": ["l14-30", "l5-30", "nema-14-50", "nema-14-30", "nema-10-30", "nema-10-50", "nema-6-15", "nema-6-20", "nema-6-30", "nema-6-50", "l6-20", "l6-30", "l14-20", "cs6365"],
+        "exclude_connector_model_kinds": ["adapter", "cable", "cord"],
+        "connector_fields": ["connector", "connectors", "connector_a", "connector_b", "output_connectors", "input_connectors"],
+        "exclude_models": [
+          {"field": "ac_voltage", "op": "gte", "value": 200, "kinds": ["adapter", "cable", "cord"]},
+          {"field": "max_v_ac", "op": "gte", "value": 200, "kinds": ["adapter", "cable", "cord"]},
+          {"field": "grid_interactive", "op": "truthy"}
+        ]
+      },
+      "rules": {
+        "mfr-list": {"kind": "manufacturer_list", "version": 1, "description": "Manufacturer fit statements (compatible panels, expansion batteries, cables). Preferred over computed verdicts; a computed disagreement is flagged and shown."},
+        "pv-cold-voc": {"kind": "max_voltage_cold", "version": 2, "description": "v2 = binding amendment 6: design temperature -40 °C (or the per-ZIP extreme minimum), the panel's Voc temperature coefficient or else the NEC 690.7(A) factor (x1.25 at -40 °C), and a fit needs >= 5 % headroom under pv_voc_max. v1 was the pre-review draft (-20 °C, -0.28 %/°C assumed, no headroom) and never shipped.", "a_fields": {"max_v": "pv_voc_max"}, "b_fields": {"voc": "voc", "tc": "temp_coeff_voc_pct_c", "technology": "cell_type"}, "params": {"headroom": 0.05}},
+        "pv-min-voltage": {"kind": "min_voltage", "version": 1, "description": "The string's operating voltage (n x Vmp) must reach the station's minimum solar input voltage.", "a_fields": {"min_v": "pv_v_min"}, "b_fields": {"vmp": "vmp"}},
+        "pv-max-current": {"kind": "max_current", "version": 1, "description": "m x Isc must not exceed the station's maximum solar input current, unless the station documents current limiting.", "a_fields": {"max_a": "pv_a_max", "current_limited": "pv_current_limited"}, "b_fields": {"isc": "isc"}},
+        "pv-connector": {"kind": "connector_path", "version": 1, "description": "Direct connector match, or one adapter whose connectors are manufacturer data. Generic panel wording ('Photovoltaic connectors') may read as MC4 on the panel side only, and only when nothing specific is named; station text must name its port.", "a_fields": {"connectors": "pv_input_connectors"}, "b_fields": {"connectors": "connector"}, "params": {"adapter_kinds": ["adapter", "cable"], "endorse_relation": "adapter_for", "no_path": "unknown", "fallback_alias_sides": ["b"]}},
+        "pv-watts": {"kind": "watts_clip", "version": 1, "description": "Informational: panel watts beyond the station's maximum solar input are clipped.", "a_fields": {"max_w": "pv_w_max"}, "b_fields": {"rated_w": "rated_w"}}
+      },
+      "rulesets": {
+        "solar-charging": {"version": 1, "description": "Which panels charge which stations, in which series/parallel configuration, at the coldest design temperature.", "relation": "charges_from", "a_kinds": ["station"], "b_kinds": ["panel"], "rules": ["mfr-list", "pv-cold-voc", "pv-min-voltage", "pv-max-current", "pv-connector", "pv-watts"], "arrays": {"max_series": 4, "max_parallel": 4, "max_units": 4}, "store_verdicts": ["fits", "fits_with_adapter", "fits_in_series", "fits_in_parallel", "over_limit"]},
+        "expansion-battery": {"version": 1, "description": "Expansion batteries, from manufacturer lists only.", "relation": "expands", "a_kinds": ["station"], "b_kinds": ["battery"], "rules": ["mfr-list"], "store_verdicts": ["fits", "no_fit"]},
+        "adapter-fit": {"version": 1, "description": "Which products a cable or adapter is documented for (cable/adapter pages list manufacturer fit data only).", "relation": "adapter_for", "a_kinds": ["station", "panel"], "b_kinds": ["adapter", "cable"], "rules": ["mfr-list"], "store_verdicts": ["fits", "no_fit"]}
+      },
+      "texts": {
+        "headroom": "Counts as a fit only with at least {headroom_pct}% headroom under the station's {max_v} V maximum solar input voltage (at most {allowed_v} V).",
+        "voc-tc": "Panel open-circuit voltage corrected for the cold with its published temperature coefficient ({tc} %/°C): x{factor}.",
+        "voc-nec": "The panel maker publishes no temperature coefficient, so the NEC 690.7(A) cold-voltage factor x{factor} is applied.",
+        "voc-tc-rejected": "The panel's published temperature coefficient ({tc} %/°C) is outside the plausible range, so the larger of its factor and the NEC 690.7(A) factor (x{factor}) is applied.",
+        "cell-type-assumed": "Panel cell type not published: crystalline silicon assumed for the NEC factor.",
+        "current-limited": "The station documents solar input current limiting, so extra panel current is not drawn.",
+        "current-checked": "Panel short-circuit current {design_a} A checked against the station's {max_a} A maximum solar input current.",
+        "per-input": "Limits apply to one solar input; the station's inputs are not combined.",
+        "watts-clipped": "{array_w} W of panels; the station uses at most {max_w} W of solar input.",
+        "parallel-connector": "{parallel} panels in parallel need a parallel (branch) connector.",
+        "adapter": "Connects through one adapter: {via_name}.",
+        "role.a.max_v": "the station's maximum solar input voltage",
+        "role.a.min_v": "the station's minimum solar input voltage",
+        "role.a.max_a": "the station's maximum solar input current",
+        "role.a.current_limited": "a statement that the station limits its solar input current",
+        "role.a.max_w": "the station's maximum solar input power",
+        "role.a.connectors": "the station's solar input connector",
+        "role.b.voc": "the panel's open-circuit voltage",
+        "role.b.vmp": "the panel's maximum-power voltage",
+        "role.b.isc": "the panel's short-circuit current",
+        "role.b.rated_w": "the panel's rated power",
+        "role.b.connectors": "the panel's connector",
+        "connector-unresolved": "a connector is named in a way we cannot match to one connector type",
+        "connector-no-documented-path": "the station and panel connectors do not mate and no manufacturer-documented adapter joins them"
+      }
+    },
+    "robot-consumables": {
+      "_comment": "Robot vacuums/mops and their model-keyed consumables (filters, brushes, bags, pads). Fitment comes ONLY from manufacturer fit lists (FitRecords built with compat_graph.fit_records_from_list against a ModelIndex of the site's robot models); a name that does not resolve to exactly one model is reported, never guessed.",
+      "rules": {
+        "mfr-list": {"kind": "manufacturer_list", "version": 1, "description": "Manufacturer and retailer-of-record fit lists published by the brand."}
+      },
+      "rulesets": {
+        "consumable-fitment": {"version": 1, "description": "Which consumables fit which robot models.", "relation": "consumable_for", "a_kinds": ["robot"], "b_kinds": ["consumable"], "rules": ["mfr-list"], "store_verdicts": ["fits", "no_fit"]}
+      }
+    }
+  },
+  "by_site": {},
+  "by_agent_id": {}
+}

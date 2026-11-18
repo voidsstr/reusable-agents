@@ -1,0 +1,49 @@
+{
+  "_comment": "Provenance of the compat_graph fixtures (catalog.json). REAL values are copied verbatim from public manufacturer pages or manuals; the snippet next to every candidate in catalog.json is the exact text the number came from. SYNTHETIC models use the reserved .example domains and invented numbers chosen to land on the boundaries the rules care about; they never claim to describe a real product. Nothing here is Amazon content.",
+  "real": [
+    {
+      "source": "jackery-faq",
+      "url": "https://www.jackery.com/blogs/jackery-faqs/explorer-1000-v2-basic-information",
+      "fetched_on": "2026-11-17",
+      "excerpt": "framework/tests/fixtures/spec_sources/docs/jackery-explorer-1000-v2-faq.html (the spec_sources fixture; content_sha256 in catalog.json is the sha256 of that trimmed excerpt)",
+      "used_for": "Jackery Explorer 1000 v2 (JE-1000D) station: solar input 16-60 V, 'Single Port Usage: Current Limit 10.5A, Max. Input Power 200W' (a documented input current limit), solar input port DC8020."
+    },
+    {
+      "source": "pecron-manual",
+      "url": "https://cdn.shopify.com/s/files/1/0626/0241/2120/files/pecron_E2000LFP_-20230227.pdf?v=1732849752",
+      "fetched_on": "2026-11-17",
+      "excerpt": "framework/tests/fixtures/spec_sources/docs/pecron-e2000lfp-manual-eu.layout.txt",
+      "used_for": "Pecron E2000LFP GX16MF-5 solar ports: operating 32-95 V, 600 W, 'VOC ... must be less than 95V'. The same manual says 'Do not wire more than two 36V solar panels in series, or more than four 18V solar panels in series': four 18 V-class panels (Voc about 21.5 V) reach 107.5 V at -40 °C with the NEC factor, so the conservative rule rejects a configuration the manual allows. Neither a maximum PV current nor current limiting is stated."
+    },
+    {
+      "source": "fossibot-page",
+      "url": "https://www.fossibot.com/products/fossibot-f2400",
+      "fetched_on": "2026-11-17",
+      "excerpt": "framework/tests/fixtures/spec_sources/docs/fossibot-f2400-product-page.html",
+      "used_for": "FOSSiBOT F2400: 'PV input requirements for F2400: Work Voltage: 11.5-50V Input Power: 500W Max.' No maximum PV current and no input connector type are stated, so its edges stay unknown; two 21.5 V panels in series are 43 V at 25 °C but 53.75 V at -40 °C, over its 50 V limit."
+    },
+    {
+      "source": "ecoflow-220w-page",
+      "url": "https://us.ecoflow.com/products/nextgen-220w-bifacial-portable-solar-panel",
+      "requested_url": "https://us.ecoflow.com/products/220w-bifacial-portable-solar-panel",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "bytes": 1029145},
+      "content_sha256": "2221e10aa288be6a718fa8e92614f1a0ac59989742dc75676ac9a51510a11656",
+      "robots": "https://us.ecoflow.com/robots.txt (Shopify defaults; /products/ allowed)",
+      "used_for": "EcoFlow NextGen 220W bifacial panel: 'Rated Power 220W (±5W) Front', 'Cell Type N Type TOPCon monocrystalline silicon', 'Connector Type Photovoltaic connectors', 'Open Circuit Voltage 21.5V (Vmp 18.4V)', 'Short Circuit Current 12.4A (Imp 11.9A) Front Side'. The page publishes NO temperature coefficient: the real unknown-tc case (NEC 690.7(A) factor x1.25 at -40 °C)."
+    },
+    {
+      "source": "jackery-accessory-menu",
+      "url": "https://www.jackery.com/products/jackery-solarsaga-100-air",
+      "fetched_on": "2026-11-17",
+      "http": {"status": 200, "bytes": 1805428},
+      "content_sha256": "fb6d8f4c206c289b2f84bb0e00c852db974034368f952c379e4be6803cd5d3ae",
+      "used_for": "The manufacturer's own accessory menu: 'Battery Pack 2000 Plus Compatible with 2000 Plus' (a manufacturer_list fit statement for the expansion-battery relation)."
+    }
+  ],
+  "synthetic": [
+    {"source": "example-panels", "models": [12, 13, 14, 15], "note": "Invented panels. 12: DC8020, published tc -0.30 %/°C (the fitting pair). 13: 400 W rigid, Voc 49.5 V, tc -0.27 %/°C: 58.19 V at -40 °C, under a 60 V maximum but inside the 5 % headroom band (the cold-voltage failure; at 25 °C it is only 49.5 V). 14: DC8020, no tc published (the unknown-tc pair). 15: MC4 panel with tc (the adapter path)."},
+    {"source": "example-adapters", "models": [21, 22], "note": "21: an MC4-to-DC8020 adapter whose connectors come from its maker's page (manufacturer fit data), rated 15 A / 60 V, endorsed for model 1 by an adapter_for record. 22: an L14-30 generator cord, which year-1 policy excludes with every edge."},
+    {"source": "example-robot-kit", "models": [52, 53, 61], "note": "Robot-consumable fitment: an invented replacement kit whose page lists 'Compatible with: DEEBOT N10, N10 PLUS and DEEBOT X1 OMNI'. 51 (DEEBOT N10) is the real model of the spec_sources robot fixture; 52/53 are placeholders; X1 OMNI is not in the index and must be reported, not guessed."}
+  ]
+}
