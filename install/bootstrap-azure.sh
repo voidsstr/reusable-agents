@@ -89,6 +89,11 @@ az storage container create \
     --output none 2>/dev/null || true
 echo "  ✓ ready"
 
+# Tier and expire run history nobody reads; never config/ or registry/
+# (install/azure-storage-lifecycle.sh has the why).
+bash "$(cd "$(dirname "$0")" && pwd)/azure-storage-lifecycle.sh" \
+    --account-name "$ACCOUNT_NAME" --resource-group "$RG" --container "$CONTAINER"
+
 echo ""
 echo "AZURE_STORAGE_CONNECTION_STRING:"
 echo ""

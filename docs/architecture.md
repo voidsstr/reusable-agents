@@ -346,20 +346,40 @@ returns the **oldest** slice. Use `run-index.json`, or
 2026-08-14 this made `peer_runs.latest_run_ts()` report a three-month-old
 run as current.
 
-**Retention.** Framework code never deletes run-dirs, but Azure does.
-Lifecycle rule `agents-runhistory-tier-then-delete` on `nscagentstorage`
-has `prefixMatch` `agents/`. In Azure's syntax that is the container
-name, so the rule covers every key in the container: Cool after 30 days
-without modification, Archive after 120, delete after 365 (policy read
-2026-09-23; `config/priority-config.json` was already Cool). An Archive
-blob cannot be read or written until it is rehydrated. That is where the
-`BlobArchived` errors in agent logs come from. For example,
-`aisleprompt-progressive-improvement-agent`'s `goals/changes.jsonl` was
-last written 2026-05-05 and tiered to Archive on 2026-09-02. `touch-agent-manifests.timer`
-(`framework.cli.touch_manifests`) rewrites every `manifest.json` weekly
-to keep manifests out of Archive. After 10 of 83 manifests were
-archived, registry writes broke fleet-wide on 2026-09-08. Any other
-long-lived config blob that nobody rewrites is exposed to the same rule.
+**Retention.** Framework code never deletes run-dirs, but Azure does,
+through the lifecycle rule `agents-tier-by-last-access` on
+`nscagentstorage` (`install/azure-storage-lifecycle.sh`; live since
+2026-11-17, and `bootstrap-azure.sh` applies it to new accounts). It
+covers `agents/`, `framework/`, `digest-queue/`, `digest-archive/`,
+`decommissioned/` and `host-migration/`. Blobs age by LAST ACCESS, a read
+or a write; last-access tracking is on. They go Cool after 30 days (back
+to Hot on the next read), Archive after 120 and are deleted after 365. A
+doc an agent reads every run therefore never ages. `config/` and
+`registry/` are never tiered. A new top-level prefix is not tiered until
+it is added to the script's `TIERED_PREFIXES`. AWS mirrors the rule with
+Intelligent-Tiering on the agents bucket (`install/deploy-aws.sh`).
+
+The rule it replaced, `agents-runhistory-tier-then-delete`, had
+`prefixMatch` `agents/`. That is the container name, so it covered every
+key, and it aged blobs by last MODIFICATION. Docs that are read but never
+rewritten went to Archive. An Archive blob cannot be read or written
+until it is rehydrated, which is where the `BlobArchived` errors in agent
+logs come from, and readers fell back to their defaults. Examples:
+- `config/priority-config.json`, `code-editor-config.json` and
+  `implementer-allowed-handlers.json`;
+- `goals/changes.jsonl`, `state/accumulator.json` and goal
+  `timeseries-cache.json` files;
+- several `run-index.json` and `status.json` docs;
+- 10 of 83 manifests, which broke registry writes fleet-wide on
+  2026-09-08. `touch-agent-manifests.timer` (`framework.cli.touch_manifests`)
+  dates from then and is now a backstop.
+
+The archived live docs of registered agents were rehydrated on
+2026-11-17. Rehydrating does not reset a blob's access time. A doc
+archived under the old rule therefore stays archived until it is
+rehydrated (`az storage blob set-tier --tier Hot --rehydrate-priority
+High`, about an hour) or rewritten. Once something reads it, it never
+returns to Archive.
 
 ## Storage hierarchy (Azure Blob)
 

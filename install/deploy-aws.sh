@@ -197,6 +197,30 @@ phase_provision() {
       --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
     aws s3api put-bucket-encryption --bucket "$b" \
       --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+    # Agent storage lifecycle, the AWS side of install/azure-storage-lifecycle.sh
+    # (2026-11-17): tier what nobody reads, never make a live object unreadable,
+    # never tier config/ or registry/. S3 cannot condition on last access, so
+    # this uses Intelligent-Tiering's instant-access tiers: an object drops a
+    # tier after 30 and 90 days without access and moves back up on its next
+    # read. The opt-in Archive/Deep Archive tiers stay off, so nothing ever needs
+    # a restore. No current object expires, because an age-based expiry deletes
+    # live state (the Azure incident). Noncurrent versions expire after 365 days.
+    # Objects under 128 KiB are not transitioned (they gain nothing).
+    if [ "$name" = "agents" ]; then
+      lc="$(mktemp)"
+      python3 - > "$lc" <<'PY'
+import json
+tiered = ["agents", "framework", "digest-queue", "digest-archive", "decommissioned", "host-migration"]
+rules = [{"ID": f"tier-by-access-{p}", "Status": "Enabled",
+          "Filter": {"And": {"Prefix": f"{p}/", "ObjectSizeGreaterThan": 131072}},
+          "Transitions": [{"Days": 0, "StorageClass": "INTELLIGENT_TIERING"}]} for p in tiered]
+rules.append({"ID": "expire-noncurrent-versions-365d", "Status": "Enabled", "Filter": {"Prefix": ""},
+              "NoncurrentVersionExpiration": {"NoncurrentDays": 365}})
+print(json.dumps({"Rules": rules}))
+PY
+      aws s3api put-bucket-lifecycle-configuration --bucket "$b" --lifecycle-configuration "file://$lc"
+      rm -f "$lc"
+    fi
     put_state "S3_${name//-/_}" "$b"
   done
 

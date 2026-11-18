@@ -1112,10 +1112,19 @@ readers such as `human_clicks.load_config()` and `placement_watch.load_config()`
 return `{}` and silently fall back to defaults. If the click filter is
 archived, goal counts jump about 5x; if the placement-watch config is archived,
 nothing is watched. Fix: rewrite the doc from its last known content (git, the
-`improvements.json` trail, or its `_note`/`_history`), re-read it to confirm,
-and escalate the lifecycle exemption once (operator: storage lifecycle policy).
-Seen 2026-11-11 on `config/priority-config.json`, a conversion optimizer's
-goals doc and a goal tracker's run-index.
+`improvements.json` trail, or its `_note`/`_history`) or rehydrate it (`az
+storage blob set-tier --tier Hot --rehydrate-priority High`, about an hour),
+then re-read it to confirm. Seen 2026-11-11 on `config/priority-config.json`, a
+conversion optimizer's goals doc and a goal tracker's run-index. **The cause is
+fixed (2026-11-17), so do not escalate the policy again.** The lifecycle rule is
+now `agents-tier-by-last-access` (`install/azure-storage-lifecycle.sh`):
+- `config/` and `registry/` are never tiered;
+- everything else ages by last read or write, so a doc agents read cannot reach
+  Archive.
+
+A doc archived before 2026-11-17 stays archived until rehydrated: rehydration
+does not reset access time. If a NEW top-level prefix is archiving live docs,
+add it to the script's `TIERED_PREFIXES` or `NEVER_TIERED_PREFIXES`.
 
 When a NEW recurring incident is diagnosed and fixed, ADD it here so the
 next session gets the fast path.
