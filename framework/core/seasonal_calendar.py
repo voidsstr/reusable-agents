@@ -759,6 +759,15 @@ def active_signal(today: datetime.date | None = None,
     for occ in occasions:
         if occ.audience != "general" and occ.audience != audience:
             continue
+        # A multi-day window that started last year and is still running
+        # (Dec 26 .. Jan 20) is NOW in January. Without this the occasion
+        # went silent on Jan 1, the same spill current_window() handles.
+        prev = event_window(occ, today.year - 1)
+        if prev is not None and prev.start <= today <= prev.end:
+            out.append(ActiveOccasion(
+                occasion=occ, when=prev.start,
+                delta_days=(prev.start - today).days, window="now"))
+            continue
         # Try this year + next year so occasions in January don't get
         # missed in December.
         for year in (today.year, today.year + 1):

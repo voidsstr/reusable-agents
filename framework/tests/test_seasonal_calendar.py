@@ -157,6 +157,21 @@ def test_next_occasion_reangles_to_black_friday():
                             horizon_days=30) is None
 
 
+def test_active_signal_window_spanning_new_year_stays_now_in_january():
+    occ = sc.Occasion(id="new-year-meal-prep", label="New Year meal-prep reset",
+                      month_day="12-26", length_days=26)
+    def window(day):
+        hits = [a for a in sc.active_signal(day, occasions=[occ]) if a.occasion.id == occ.id]
+        return hits[0].window if hits else None
+    assert window(dt.date(2026, 12, 15)) == "imminent"
+    assert window(dt.date(2026, 12, 31)) == "now"
+    assert window(dt.date(2027, 1, 1)) == "now"     # used to go silent here
+    assert window(dt.date(2027, 1, 20)) == "now"    # last day of the window
+    hit = [a for a in sc.active_signal(dt.date(2027, 1, 5), occasions=[occ])][0]
+    assert hit.when == dt.date(2026, 12, 26)
+    assert window(dt.date(2027, 1, 24)) is None     # past the 3-day slack, gone
+
+
 def test_ended_sale_drops_out_of_now_window():
     # The +/-3-day NOW slack used to keep "SHIP NOW: Prime Big Deal Days"
     # in the proposer prompt on Oct 8-9, after the sale had closed.
