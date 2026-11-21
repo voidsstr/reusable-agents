@@ -102,6 +102,93 @@ def test_home_power_excludes_every_240_v_cord_it_can_recognise(doc, vals, reason
     assert g.excluded_reason(rv) == ""
 
 
+EN_DASH, NB_HYPHEN = "\u2013", "\u2011"     # NFKC turns the non-breaking hyphen into U+2010
+# How makers write 240 V cords: Unicode dashes, a space between the groups,
+# or 240 V wording that names no plug. text -> the reason prefix.
+HOT_CORD_TEXTS = {
+    f"NEMA L14{EN_DASH}30P": "excluded-connector:l14-30",
+    f"L14{NB_HYPHEN}30R": "excluded-connector:l14-30",
+    f"NEMA 14{EN_DASH}50R": "excluded-connector:nema-14-50",
+    f"L5{EN_DASH}30P": "excluded-connector:l5-30",
+    f"6{EN_DASH}50R": "excluded-connector:nema-6-50",
+    "NEMA L14 30P": "excluded-connector:l14-30",
+    "NEMA 14 50P": "excluded-connector:nema-14-50",
+    "30A 240V twist-lock": "excluded-model:{field}:matches:",
+    "4-prong 30 amp generator plug": "excluded-model:{field}:matches:",
+    "30 Amp 240V twist-lock": "excluded-model:{field}:matches:",
+    "4-prong 30A twist lock plug": "excluded-model:{field}:matches:",
+    "Twist Lock, 30 Amp": "excluded-model:{field}:matches:",
+    "120/240V": "excluded-model:{field}:matches:",
+    "30A 125/250V": "excluded-model:{field}:matches:",
+    "220-240V": "excluded-model:{field}:matches:",
+}
+# Unresolved or universal-input text is not 240 V wording, and numbers are not plugs.
+COOL_CORD_TEXTS = (
+    "USB-C", "Anderson SB50", "MC4", "MC4 extension, 1000V DC", "AC adapter 100-240V",
+    "100 - 240 V", "100V to 240V", "GX16 aviation (twist-lock)", "GX16 5A twist lock",
+    "MC4 locking connectors, 30A 1000V DC", "Anderson SB50 50A", "XT90 40A", "30Ah",
+    "MC4 extension cable, 620 mm", "XT60 (max 650 W)", "Anderson PP45 1450 W",
+    "DC8020 to MC4 (1030 mm)", "XT60 (620 mm lead)",
+)
+
+
+@pytest.mark.parametrize("kind", ["adapter", "cable", "cord"])
+def test_home_power_fails_closed_on_240_v_cord_spellings(doc, kind):
+    """Amendment 8 holds however the maker spells the plug, in every connector
+    field. Exclusion only removes edges, so it fails closed; text that is
+    merely unresolved is never a reason by itself."""
+    g = cg.CompatGraph(cg.resolve_config(site_cfg={"profile": "home-power"}, file_cfg=doc),
+                       clock=lambda: "2026-11-17T00:00:00Z")
+    fields = g._policy["connector_fields"]
+    assert {"connector", "connector_a", "connector_b", "output_connectors"} <= set(fields)
+    for text, reason in HOT_CORD_TEXTS.items():
+        for f in fields:
+            got = g.excluded_reason(cg.ModelSpec.from_values(9, kind, {f: text}))
+            assert got.startswith(reason.format(field=f)), (f, text, got)
+    for text in COOL_CORD_TEXTS:
+        for f in fields:
+            assert g.excluded_reason(cg.ModelSpec.from_values(9, kind, {f: text})) == "", (f, text)
+    for pair in (("TT-30P", "TT-30R"), ("NEMA 5-15P", "TT-30R")):
+        rv = cg.ModelSpec.from_values(9, kind, {"connector_a": pair[0], "connector_b": pair[1],
+                                                "ac_voltage": "120V"})
+        assert g.excluded_reason(rv) == "", pair
+
+    # End to end: a manufacturer adapter_for statement never stores an edge for
+    # such a cord (an ASCII-only exclusion stored a 'fits' edge for these).
+    if kind not in g.rulesets["adapter-fit"].b_kinds:
+        return
+    src = {"source_url": "https://maker.example/c", "source_kind": "manufacturer-page", "source_id": 1}
+    station = cg.ModelSpec.from_values(1, "station", {"pv_voc_max": 60}, source=src)
+    rec = cg.FitRecord(a=1, b=22, relation="adapter_for", source_url="https://maker.example/c",
+                       source_kind="manufacturer-page")
+
+    def evaluate(connector_a):
+        cord = cg.ModelSpec.from_values(22, kind, {"connector_a": connector_a, "connector_b": "TT-30R"},
+                                        source=src)
+        return g.evaluate_pair(station, cord, ruleset="adapter-fit", records=[rec])
+
+    ok = evaluate("DC8020")                                   # the same statement for a plain cable
+    assert isinstance(ok, cg.Edge) and (ok.verdict, ok.store) == (cg.FITS, True)
+    for text in (f"NEMA L14{EN_DASH}30P", f"L14{NB_HYPHEN}30R", "NEMA L14 30P", "30A 240V twist-lock"):
+        out = evaluate(text)
+        assert isinstance(out, cg.Skip) and out.reason.startswith("excluded-"), (text, out)
+    assert evaluate(f"NEMA L14{EN_DASH}30P").reason == "excluded-connector:l14-30:22"
+
+
+def test_home_power_wording_rules_cover_cords_only(doc):
+    """The 240 V wording rules carry kinds: a station or panel whose own
+    connector text mentions 240 V keeps its edges (grid_interactive is the
+    station rule)."""
+    g = cg.CompatGraph(cg.resolve_config(site_cfg={"profile": "home-power"}, file_cfg=doc))
+    rules = [m for m in g._policy["exclude_models"] if m["op"] == "matches"]
+    assert sorted(m["field"] for m in rules) == sorted(g._policy["connector_fields"])
+    assert all(sorted(m["kinds"]) == ["adapter", "cable", "cord"] for m in rules)
+    station = cg.ModelSpec.from_values(1, "station",
+                                       {"output_connectors": "120/240V, 4-prong 30A twist-lock"})
+    panel = cg.ModelSpec.from_values(2, "panel", {"connector": "MC4 (250V DC)"})
+    assert g.excluded_reason(station) == "" and g.excluded_reason(panel) == ""
+
+
 @pytest.mark.parametrize("text,ids", [
     ("DC 8mm Ports", ("dc8020",)), ("8mm DC", ("dc8020",)), ("XT60i", ("xt60i",)),
     ("XT-60", ("xt60",)), ("Anderson Powerpole", ("anderson-pp45",)), ("Anderson PP45", ("anderson-pp45",)),

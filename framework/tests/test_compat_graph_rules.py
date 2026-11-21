@@ -659,6 +659,45 @@ def test_policy_scans_every_connector_mention_even_in_ambiguous_text():
         "excluded-connector:l14-30"
 
 
+# U+2010 hyphen, U+2011 non-breaking hyphen (NFKC: U+2010), U+2012 figure dash,
+# U+2013 en dash, U+2014 em dash, U+2015 horizontal bar.
+UNICODE_DASHES = ["\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015"]
+
+
+@pytest.mark.parametrize("dash", UNICODE_DASHES)
+def test_connector_text_reads_unicode_hyphens_and_dashes_as_a_hyphen(dash):
+    tax = cg.ConnectorTaxonomy(TAX)
+    assert tax.resolve(f"TT{dash}30R") == (("tt-30",), ())
+    assert tax.mentions(f"L14{dash}30P to TT-30R") == {"l14-30", "tt-30"}
+    # inside longer text the alias, not the exact-id match, has to read it
+    assert tax.resolve(f"XT{dash}60 port, DC7909") == (("xt60", "dc7909"), ())
+
+
+@pytest.mark.parametrize("dash", UNICODE_DASHES)
+def test_an_excluded_connector_spelled_with_a_unicode_dash_is_still_excluded(dash):
+    g = make_graph(("mfr",), ruleset={"a_kinds": ["station"], "b_kinds": ["cable"],
+                                      "relation": "adapter_for"},
+                   cfg={"policy": {"exclude_connectors": ["l14-30"]}})
+    cord = adapter(22, f"NEMA L14{dash}30P", "TT-30R", kind="cable")
+    assert g.excluded_reason(cord) == "excluded-connector:l14-30"
+    rec = cg.FitRecord(a=1, b=22, relation="adapter_for", source_url="https://maker.example/c",
+                       source_kind="manufacturer-page")
+    out = g.evaluate_pair(station(), cord, ruleset="solar", records=[rec])
+    assert isinstance(out, cg.Skip) and out.reason == "excluded-connector:l14-30:22"
+
+
+@pytest.mark.parametrize("dash", UNICODE_DASHES)
+def test_policy_matches_rules_read_unicode_dashes_as_a_hyphen(dash):
+    g = make_graph(("mfr",), ruleset={"a_kinds": ["station"], "b_kinds": ["cable"],
+                                      "relation": "adapter_for"},
+                   cfg={"policy": {"exclude_models": [
+                       {"field": "connector_a", "op": "matches", "value": r"\btwist-lock\b",
+                        "kinds": ["cable"]}]}})
+    assert g.excluded_reason(adapter(22, f"30A twist{dash}lock", "TT-30R", kind="cable")) == \
+        r"excluded-model:connector_a:matches:\btwist-lock\b"
+    assert g.excluded_reason(adapter(23, "30A twist lock", "TT-30R", kind="cable")) == ""
+
+
 def test_fallback_aliases_apply_only_on_the_configured_side():
     g = solar_conn(params={"conn": {"fallback_alias_sides": ["b"]}},
                    cfg={"connectors": {"mc4": {"fallback_aliases": [r"^pv connectors?$"]}}})

@@ -249,7 +249,11 @@ _REPO_CONFIG = (Path(__file__).resolve().parents[2]
 #    limits only where it is no worse than at the statement's configuration,
 #    "not checked" assumptions and the computed-check-incomplete flag; B's own
 #    connector decides wiring and its rating is checked when A's is unknown.
-ENGINE_VERSION = "3"
+# 4: connector text (taxonomy aliases and policy exclusion scans) and policy
+#    "matches" rules read Unicode hyphens and dashes (U+2010..U+2015) as "-":
+#    "NEMA L14–30P" with an en dash resolves, and is excluded, like
+#    "NEMA L14-30P".
+ENGINE_VERSION = "4"
 
 # Verdicts (compat_edges.verdict).
 FITS = "fits"
@@ -672,6 +676,19 @@ def _alnum(s: str) -> str:
     return re.sub(r"[^0-9a-z]+", "", ss.normalize_text(str(s)).casefold())
 
 
+# U+2010 hyphen .. U+2015 horizontal bar (NFKC already turns U+2011, the
+# non-breaking hyphen, into U+2010; normalize_text folds U+2212). Maker text
+# writes "L14–30P" with an en dash while aliases and policy regexes are
+# written with "-". The same class spec_sources folds for evidence quotes.
+_DASHES_RE = re.compile("[\u2010-\u2015]")
+
+
+def _fold_dashes(s: str) -> str:
+    """Unicode hyphens and dashes as an ASCII '-' (applied after
+    ``normalize_text``)."""
+    return _DASHES_RE.sub("-", s)
+
+
 # ---------------------------------------------------------------------------
 # NEC 690.7(A) and the cold-voltage factor
 # ---------------------------------------------------------------------------
@@ -1075,10 +1092,12 @@ class ConnectorTaxonomy:
     ``fallback_aliases`` are generic wording ("PV connector") that a caller
     may allow on one side only; they count only when nothing specific matched
     in the same piece of text, so "XT60 solar connector" is XT60, never MC4.
-    Text is split into pieces at list separators; a piece that names more
-    than one connector, or matches an ``ambiguous_patterns`` entry ("requires
-    an MC4 adapter"), resolves to nothing: guessing a port is how a buyer is
-    told a panel plugs in directly when it needs an adapter."""
+    Text is normalised (Unicode hyphens and dashes read as "-", so aliases
+    are written with "-") and split into pieces at list separators; a piece
+    that names more than one connector, or matches an ``ambiguous_patterns``
+    entry ("requires an MC4 adapter"), resolves to nothing: guessing a port
+    is how a buyer is told a panel plugs in directly when it needs an
+    adapter."""
 
     def __init__(self, entries: Optional[Mapping[str, Mapping[str, Any]]] = None, *,
                  ambiguous_patterns: Optional[Sequence[str]] = None):
@@ -1131,7 +1150,7 @@ class ConnectorTaxonomy:
         for item in _as_list(value):
             if item is None:
                 continue
-            text = ss.normalize_text(str(item))
+            text = _fold_dashes(ss.normalize_text(str(item)))
             out += [p.strip() for p in re.split(r"\s*(?:[,;|/+&]|\band\b|\bor\b)\s*", text)
                     if p and p.strip()]
         return out
@@ -3526,7 +3545,7 @@ def _policy_match(rule: Mapping[str, Any], value: Any) -> bool:
     if op == "truthy":
         return _truthy(value) is True
     if op == "matches":
-        return bool(rule["_rx"].search(ss.normalize_text(str(value))))
+        return bool(rule["_rx"].search(_fold_dashes(ss.normalize_text(str(value)))))
     if op == "in":
         vals = {str(x).casefold() for x in _as_list(target)}
         return any(str(v).casefold() in vals for v in _as_list(value))
