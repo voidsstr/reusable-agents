@@ -378,8 +378,9 @@ cat <<EOF
   then fill in site.json (segment tags), CLAUDE.md (niche safety boundary) and $POLICY_FILE,
   and read vendor/affiliate-kit/deploy/README.md before provisioning anything.
   Keep this site's implementer dispatches disabled: the implementer's claude path applies no
-  path scope, so nothing yet keeps it out of vendor/, site.json, $POLICY_FILE or the gate policy
-  (agents/README.md, "Prerequisite").
+  path scope, so nothing yet keeps it out of vendor/, site.json, $POLICY_FILE, deploy.env or the
+  gate policy, and the deploy stages read deploy.env from the live checkout (agents/README.md,
+  "Prerequisite").
 EOF
 if [[ -n $RULE_SETS ]]; then
     cat <<EOF

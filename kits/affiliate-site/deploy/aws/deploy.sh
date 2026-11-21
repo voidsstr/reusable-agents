@@ -35,7 +35,9 @@
 #
 # Exit: 0 ok; 1 a stage failed; 2 usage or config error; 3 the service or the
 # image does not exist yet; 4 the smoke check failed (after a release in this
-# run: rolled back with --rollback-on-smoke-failure, else the release serves).
+# run: rolled back with --rollback-on-smoke-failure unless that rollback failed
+# or had nothing to put back, when the new image may still serve; without the
+# flag the release serves).
 set -euo pipefail
 # shellcheck source=../lib/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../lib/common.sh"

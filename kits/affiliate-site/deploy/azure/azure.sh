@@ -58,6 +58,29 @@ az_adopt_app() {
     --tags "affiliate-kit=$KD_KIT_VERSION" "$KD_OWNER_TAG=$APP_NAME" -o none || kd_die "tagging the Container App failed" 1
 }
 
+# az_image_users VAR: the Container Apps and Container Apps jobs in this
+# subscription, other than this site's app (APP_NAME in AZ_RESOURCE_GROUP, by
+# resource id), that run an image from AZ_REGISTRY/AZ_REPO (any tag or digest,
+# init containers included): one resource id per line, empty when none. ACR
+# repositories carry no tags, so this is what tells a repository this site
+# alone uses (teardown --with-images) from one deploy.env merely names. A
+# failed query stops the script. Under --dry-run: none, unless
+# KIT_DEPLOY_DRY_EXISTING lists image-users.
+az_image_users() {
+  local _iu_apps _iu_jobs _iu_out=""
+  local q='[].{id: id, images: [properties.template.containers[].image, properties.template.initContainers[].image]}'
+  kd_probe_strict _iu_apps image-users-apps az containerapp list --query "$q" -o json
+  kd_probe_strict _iu_jobs image-users-jobs az containerapp job list --query "$q" -o json
+  if ((KD_DRY_RUN)); then
+    if kd_dry_listed "${KIT_DEPLOY_DRY_EXISTING:-}" image-users; then _iu_out="<image-users>"; fi
+  else
+    _iu_out=$(printf '%s\n%s\n' "$_iu_apps" "$_iu_jobs" | "$KD_PYTHON" -I "$KD_TOOL" image-users \
+      --registry "$AZ_REGISTRY" --repository "$AZ_REPO" --exclude-app "$AZ_RESOURCE_GROUP/$APP_NAME") \
+      || kd_die "cannot tell which Container Apps run images from $AZ_REGISTRY/$AZ_REPO; nothing was deleted" 1
+  fi
+  printf -v "$1" '%s' "$_iu_out"
+}
+
 # az_db_host VAR: AZ_DB_HOST, else the flexible server's FQDN.
 az_db_host() {
   local _dh_host=$AZ_DB_HOST

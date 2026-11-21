@@ -182,6 +182,42 @@ describe('a generated site, offline', () => {
     }
   }, NPM_TIMEOUT);
 
+  it('its kit-integrity test fails when Dockerfile.azure is not what deploy.sh would build: a body edit, or an image key changed in deploy.env', () => {
+    // Both keep Dockerfile.azure's first line (the kit version deploy-config.test.ts pins),
+    // so only the render check sees them; deploy.sh's own check would refuse the build.
+    const dockerfile = path.join(site, 'Dockerfile.azure');
+    const deployEnv = path.join(site, 'deploy.env');
+    const originalDockerfile = fs.readFileSync(dockerfile, 'utf8');
+    const originalEnv = fs.readFileSync(deployEnv, 'utf8');
+    const jest = () => run('node', [path.join(site, 'node_modules/jest/bin/jest.js'), '--ci', '--colors=false', 'tests/unit/kit-integrity.test.ts',
+      '-t', 'Dockerfile.azure is the vendored template'], { cwd: site, env: ANCHOR_ENV_CLEARED, timeoutMs: NPM_TIMEOUT });
+    try {
+      expect(describeRun(jest())).toMatch(/^exit 0/);
+      const asRoot = originalDockerfile.replace(/^USER node$/m, 'USER root');
+      expect(asRoot).not.toBe(originalDockerfile);
+      fs.writeFileSync(dockerfile, asRoot);
+      const edited = jest();
+      expect(edited.status).toBe(1);
+      expect(edited.stderr).toContain('Dockerfile.azure is not the vendored kit template rendered with deploy.env');
+      expect(edited.stderr).toContain('render-dockerfile.sh --env deploy.env --write');
+      fs.writeFileSync(dockerfile, originalDockerfile);
+      const node24 = originalEnv.replace(/^NODE_IMAGE=.*$/m, 'NODE_IMAGE=node:24-alpine');
+      expect(node24).not.toBe(originalEnv);
+      fs.writeFileSync(deployEnv, node24);
+      const env = jest();
+      expect(env.status).toBe(1);
+      expect(env.stderr).toContain('render-dockerfile.sh --env deploy.env --write');
+      // An invalid deploy.env is named as such, not as a missed re-render.
+      fs.writeFileSync(deployEnv, `${originalEnv}NOT_A_DEPLOY_KEY=1\n`);
+      const invalid = jest();
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toContain('deploy.env is invalid');
+    } finally {
+      fs.writeFileSync(dockerfile, originalDockerfile);
+      fs.writeFileSync(deployEnv, originalEnv);
+    }
+  }, NPM_TIMEOUT);
+
   it('its deploy-config test fails when the kit is synced but the Dockerfile is not re-rendered', () => {
     const file = path.join(site, 'Dockerfile.azure');
     const original = fs.readFileSync(file, 'utf8');

@@ -21,6 +21,8 @@ that needs real parsing or a careful check lives here, stdlib only
   ecs-taskdef       ECS Fargate task definition (secrets by ARN reference only)
   scaling-policy    Application Auto Scaling target-tracking policy document
   dns-check         DNS-over-HTTPS check of the records a managed certificate needs
+  image-users       which Container Apps / jobs (az ... list JSON) run images
+                    from one registry repository
 
 Secret handling (every subcommand): a secret value is read from a file, never
 from argv; it is never printed; diagnostics name fields, not values; files
@@ -51,7 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -962,6 +964,65 @@ def cmd_dns_check(args: argparse.Namespace) -> int:
     return EXIT_OK if not bad else EXIT_MISMATCH
 
 
+# ─── image users (teardown --with-images) ─────────────────────────────────────
+
+def _strings(value: object) -> Iterator[str]:
+    """Every string in a nested list (None and non-strings skipped)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def image_users(items: object, registry: str, repository: str, exclude_app: str = "") -> List[str]:
+    """Resource ids in `items` ([{id, images}], az's --query output) that run an
+    image from REGISTRY/REPOSITORY: any tag or digest, never a repository that
+    merely starts with the same name. `exclude_app` (RESOURCE_GROUP/NAME) is the
+    site's own Container App, matched by resource id, case-insensitively."""
+    repo = f"{registry.strip().lower()}/{repository.strip().lower()}"
+    skip = ""
+    if exclude_app:
+        group, _, name = exclude_app.partition("/")
+        if not group or not name:
+            raise ToolError(f"--exclude-app must be RESOURCE_GROUP/NAME (got {exclude_app!r})")
+        skip = f"/resourcegroups/{group.lower()}/providers/microsoft.app/containerapps/{name.lower()}"
+    if not isinstance(items, list):
+        raise ToolError("expected a JSON list of {id, images} objects")
+    users = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ToolError("expected a JSON list of {id, images} objects")
+        rid = str(item.get("id") or "")
+        if skip and rid.lower().endswith(skip):
+            continue
+        for image in _strings(item.get("images")):
+            ref = image.strip().lower()
+            if ref == repo or ref.startswith(repo + ":") or ref.startswith(repo + "@"):
+                users.add(rid or "(a resource without an id)")
+    return sorted(users)
+
+
+def cmd_image_users(args: argparse.Namespace) -> int:
+    """stdin: one or more JSON lists (az containerapp list, then job list); print each user's id."""
+    text = sys.stdin.read()
+    decoder = json.JSONDecoder()
+    at, users = 0, set()
+    while True:
+        while at < len(text) and text[at].isspace():
+            at += 1
+        if at >= len(text):
+            break
+        try:
+            doc, at = decoder.raw_decode(text, at)
+        except ValueError as exc:
+            raise ToolError(f"stdin is not JSON: {exc}") from None
+        users.update(image_users(doc, args.registry, args.repository, args.exclude_app or ""))
+    for rid in sorted(users):
+        print(rid)
+    return EXIT_OK
+
+
 # ─── CLI ──────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1073,6 +1134,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--doh", help="DNS-over-HTTPS JSON endpoint (default: Cloudflare, then Google)")
     s.add_argument("--timeout", type=float, default=10.0)
     s.set_defaults(fn=cmd_dns_check)
+
+    s = sub.add_parser("image-users", help="resource ids (from az list JSON on stdin) running images from a repository")
+    s.add_argument("--registry", required=True, help="login server, e.g. myacr.azurecr.io")
+    s.add_argument("--repository", required=True)
+    s.add_argument("--exclude-app", help="RESOURCE_GROUP/NAME of the site's own Container App")
+    s.set_defaults(fn=cmd_image_users)
     return p
 
 

@@ -217,6 +217,21 @@ describe('--rollback-on-smoke-failure (real mode)', () => {
     expect(r.stderr).toContain(`rolled back: kitexample serves ${PRIOR} again`);
   }, 60_000);
 
+  it('azure: a rollback that fails itself says the new image may still be serving, prints the way back, and still exits 4', () => {
+    // Only the rollback's update fails (responses match in order, by substring).
+    // deploy/README.md leaves rg out of the deployer's vars, so the deployer never
+    // reads the serving image to turn this exit 4 into a success.
+    setResponses(sb, [{ match: `--image ${PRIOR}`, exit: 1, stderr: 'ERROR: (InternalServerError) boom\n' }, ...azure]);
+    const r = runScript(sb, 'azure/deploy.sh', ['--env', quickSmoke(), '--only', 'release,smoke', '--image-tag', 't9', '--rollback-on-smoke-failure']);
+    expect(r.status).toBe(4);
+    const updates = azCalls(r).filter((c) => c.startsWith('containerapp update'));
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toContain(`--image ${PRIOR} `);
+    expect(r.stderr).toContain(`the rollback to ${PRIOR} failed: kittestacrdoesnotexist.azurecr.io/kitexample:t9 may still be serving`);
+    expect(r.stderr).toContain('--only release,smoke --image-tag 20261101-000000');
+    expect(r.stderr).not.toContain('rolled back:');
+  }, 60_000);
+
   it('azure: without the flag the release keeps serving, the way back is printed, exit 4', () => {
     setResponses(sb, azure);
     const r = runScript(sb, 'azure/deploy.sh', ['--env', quickSmoke(), '--only', 'release,smoke', '--image-tag', 't9']);
@@ -259,7 +274,25 @@ describe('--rollback-on-smoke-failure (real mode)', () => {
     expect(updates[0]).toContain(`--task-definition ${NEW_TD} `);
     expect(updates[1]).toContain(`--task-definition ${OLD_TD} `);
     expect(r.stderr).toContain(`rolled back: kitexample runs ${OLD_TD} again`);
-  }, 60_000);
+
+    // The same, with the rollback's own update failing: still exit 4, and it says the new release may still serve.
+    setResponses(sb, [
+      { match: `--service kitexample --task-definition ${OLD_TD} `, exit: 254, stderr: 'An error occurred (ServerException) when calling the UpdateService operation\n' },
+      { match: '--include TAGS', stdout: 'kitexample\n' },
+      { match: 'describe-task-definition', stdout: '123456789012.dkr.ecr.us-east-1.amazonaws.com/kitexample:20261101-000000\n' },
+      { match: 'ecr describe-images', stdout: 'sha256:0123\n' },
+      { match: "services[?status=='ACTIVE'].serviceName", stdout: 'kitexample\n' },
+      { match: '--query services[0].taskDefinition', stdout: `${OLD_TD}\n` },
+      { match: 'secretsmanager describe-secret', stdout: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:nsc/kitexample-AbCdEf\n' },
+      { match: 'register-task-definition', stdout: `${NEW_TD}\n` },
+      { match: "deployments[?status=='PRIMARY']", stdouts: [`${NEW_TD}\tCOMPLETED\n`] },
+    ]);
+    const failed = runScript(sb, 'aws/deploy.sh', ['--env', f, '--only', 'release,smoke', '--image-tag', 't9', '--rollback-on-smoke-failure']);
+    expect(failed.status).toBe(4);
+    expect(failed.calls.filter((c) => c.tool === 'aws' && c.argv[1] === 'update-service')).toHaveLength(2);
+    expect(failed.stderr).toContain(`the rollback to ${OLD_TD} failed: 123456789012.dkr.ecr.us-east-1.amazonaws.com/kitexample:t9 may still be serving`);
+    expect(failed.stderr).not.toContain('rolled back:');
+  }, 90_000);
 });
 
 describe('existence probes (real mode)', () => {

@@ -16,23 +16,36 @@ tracker, ...) live in reusable-agents; nothing here forks one.
 - `implementer-scope.yaml` is the implementer block every per-site
   `site.yaml` that dispatches to the implementer must carry, and reusable-agents
   `examples/sites/{{SLUG}}.yaml` too (copy it in whole): it keeps `vendor/**`,
-  `site.json`, `{{POLICY_FILE}}` and the gate policy (`tests/ui/gate.config.ts`)
-  out of every dispatch kind, and the page manifest out of deploy repairs,
-  but only where it is applied: on the implementer's framework-chain path and
-  by the deployer to its repairs. The implementer's default claude path
-  commits without any scope check (reusable-agents
-  `agents/implementer/README.md`, "Path scope"), so there those files and the
-  gate wiring are protected only by instructions. The deploy gate's kit
-  checks (`tests/run-local-suite.sh`: the manifest, then the kit release in
-  reusable-agents) catch an edited `vendor/affiliate-kit` only while the shim
-  itself is untouched and the claimed kit version is committed in
-  reusable-agents; nothing in this repository catches an edited `site.json`,
-  policy or gate policy.
+  `site.json`, `{{POLICY_FILE}}`, `deploy.env` and the gate policy
+  (`tests/ui/gate.config.ts`) out of every dispatch kind, and the page
+  manifest out of deploy repairs, but only where it is applied: on the
+  implementer's framework-chain path and by the deployer to its repairs. The
+  implementer's default claude path commits without any scope check
+  (reusable-agents `agents/implementer/README.md`, "Path scope"), so there
+  those files and the gate wiring are protected only by instructions. The
+  deploy gate's kit checks (`tests/run-local-suite.sh`: the manifest, then the
+  kit release in reusable-agents) catch an edited `vendor/affiliate-kit` only
+  while the shim itself is untouched and the claimed kit version is committed
+  in reusable-agents; nothing in this repository catches an edited
+  `site.json`, policy, gate policy or `deploy.env`.
+- `deploy.env` and `vendor/affiliate-kit/deploy` are read from the **live
+  checkout**, committed or not: the deployer gates and builds a clean checkout
+  of the commit, but runs the push, deploy and rollback stages
+  (`vendor/affiliate-kit/deploy/<cloud>/deploy.sh --env deploy.env`) in this
+  repository's working tree. `deploy.env` sets `MIGRATE_COMMAND` (run with the
+  owner's DSN), the container env, the replica counts and `SMOKE_PATHS`, so an
+  uncommitted edit there ships with a release whose diff looks clean.
 - **Prerequisite: keep this site's implementer dispatches disabled.** Register
   or enable no agent whose recommendations dispatch to the implementer for
   this site (the SEO opportunity agent, article proposals, head-to-heads,
-  catalog audits) until either the implementer's claude path applies this
-  scope to its own commits (reverting or refusing an excluded path), or the
-  reusable-agents deployer refuses a release whose diff since the last green
-  deploy touches an excluded path (reusable-agents
-  `kits/affiliate-site/CHANGELOG.md`, "Known issues").
+  catalog audits) until either
+  - the implementer's claude path applies this scope to its own sessions,
+    reverting or refusing an excluded path in the working tree as well as in
+    the commit (an edit left uncommitted still reaches the deploy stages), or
+  - the reusable-agents deployer refuses a release whose diff since the last
+    green deploy touches an excluded path, and also refuses while the live
+    checkout's `deploy.env` or `vendor/affiliate-kit` differs from the commit
+    it ships (or runs the push, deploy and rollback stages from its clean
+    checkout)
+
+  (reusable-agents `kits/affiliate-site/CHANGELOG.md`, "Known issues").

@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
-  cloudCalls, dryCommands, expectNoSecrets, makeSandbox, oneCommand, removeSandbox, runScript, sqlBlocks, type RunResult,
+  cloudCalls, dryCommands, expectNoSecrets, makeSandbox, oneCommand, removeSandbox, runScript, setResponses, sqlBlocks, type RunResult,
   type Sandbox,
 } from './harness';
 
@@ -385,6 +385,101 @@ describe('azure/teardown.sh', () => {
     const wrong = runScript(sb, 'azure/teardown.sh', ['--env', sb.envFile, '--confirm', 'someothersite']);
     expect(wrong.status).toBe(2);
     expect(wrong.calls).toEqual([]);
+  });
+
+  it('--with-images first asks which Container Apps and jobs run images from the repository, and stops if any other does', () => {
+    const ok = dry('azure/teardown.sh', ['--with-images']);
+    expect(ok.status).toBe(0);
+    const q = "--query '[].{id: id, images: [properties.template.containers[].image, properties.template.initContainers[].image]}' -o json";
+    expect(ok.stdout).toContain(`[dry-run] (probe) az containerapp list ${q}`);
+    expect(ok.stdout).toContain(`[dry-run] (probe) az containerapp job list ${q}`);
+    expect(ok.stdout.indexOf('az containerapp job list')).toBeLessThan(ok.stdout.indexOf('[dry-run] az containerapp delete'));
+    const r = runScript(sb, 'azure/teardown.sh', ['--env', sb.envFile, '--dry-run', '--with-images', '--with-certificates'],
+      { KIT_DEPLOY_DRY_EXISTING: 'image-users' });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('repository kitexample in kittestacrdoesnotexist is in use by other Container Apps or jobs');
+    expect(dryCommands(r.stdout).filter((l) => !l.includes('(probe)') && !l.includes('affiliate-kit deploy'))).toEqual([]);
+  });
+
+  it('--with-certificates reads the certificates this site\'s app binds before deleting the app', () => {
+    const r = dry('azure/teardown.sh', ['--with-certificates']);
+    const bound = r.stdout.indexOf("[dry-run] (probe) az containerapp hostname list --name kitexample --resource-group kit-test-rg-does-not-exist --query '[].certificateId' -o tsv");
+    expect(bound).toBeGreaterThan(0);
+    expect(bound).toBeLessThan(r.stdout.indexOf('[dry-run] az containerapp delete'));
+    // Without the app there is nothing bound: only failed attempts would go.
+    const gone = runScript(sb, 'azure/teardown.sh', ['--env', sb.envFile, '--dry-run', '--with-certificates'], { KIT_DEPLOY_DRY_MISSING: 'app' });
+    expect(gone.status).toBe(0);
+    expect(dryCommands(gone.stdout, 'az containerapp env certificate delete')).toEqual([]);
+    expect(gone.stderr).toContain('kit-example.test: keeping managed certificate <certificates:kit-example.test>');
+  });
+});
+
+describe('azure/teardown.sh: real mode against stubs (what the guards read)', () => {
+  const ID = (rg: string, kind: string, name: string) => `/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/${rg}/providers/Microsoft.App/${kind}/${name}`;
+  const own = { id: ID('KIT-TEST-RG-DOES-NOT-EXIST', 'containerApps', 'kitexample'), images: [['kittestacrdoesnotexist.azurecr.io/kitexample:t1'], null] };
+  const base = [
+    { match: 'account show', stdout: '00000000-0000-0000-0000-000000000000\n' },
+    { match: 'tags."affiliate-kit-app"', stdout: 'kitexample\n' },
+    { match: '--query name -o tsv', stdout: 'kitexample\n' },
+    { match: 'acr repository show', stdout: 'kitexample\n' },
+    { match: 'containerapp job list', stdout: '[]\n' },
+  ];
+  const azCalls = (r: RunResult) => r.calls.filter((c) => c.tool === 'az').map((c) => c.argv.join(' '));
+  const teardown = (args: string[]) => runScript(sb, 'azure/teardown.sh', ['--env', sb.envFile, '--confirm', 'kitexample', ...args]);
+
+  it('--with-images: another app or job running an image from the repository (any tag, a digest, an init container) stops it', () => {
+    for (const other of [
+      { id: ID('another-rg', 'containerApps', 'kitexample'), images: [['kittestacrdoesnotexist.azurecr.io/kitexample:20261101-000000'], null] },
+      { id: ID('kit-test-rg-does-not-exist', 'containerApps', 'agents'), images: [['nginx'], ['kittestacrdoesnotexist.azurecr.io/kitexample@sha256:0123']] },
+    ]) {
+      setResponses(sb, [{ match: 'containerapp list', stdout: `${JSON.stringify([own, other])}\n` }, ...base]);
+      const r = teardown(['--with-images']);
+      expect([other.id, r.status]).toEqual([other.id, 2]);
+      expect(r.stderr).toContain(other.id);
+      expect(azCalls(r).filter((c) => / delete /.test(` ${c} `))).toEqual([]);
+    }
+    const job = { id: ID('kit-test-rg-does-not-exist', 'jobs', 'kitexample'), images: [['kittestacrdoesnotexist.azurecr.io/kitexample'], null] };
+    setResponses(sb, [{ match: 'containerapp list', stdout: `${JSON.stringify([own])}\n` },
+      { match: 'containerapp job list', stdout: `${JSON.stringify([job])}\n` }, ...base]);
+    const r = teardown(['--with-images']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(job.id);
+  });
+
+  it('--with-images: the site\'s own app (by resource id) and look-alike repositories do not count; the repository goes', () => {
+    const lookalike = { id: ID('kit-test-rg-does-not-exist', 'containerApps', 'kitexample-x'), images: [['kittestacrdoesnotexist.azurecr.io/kitexample-x:t1'], null] };
+    setResponses(sb, [{ match: 'containerapp list', stdout: `${JSON.stringify([own, lookalike])}\n` }, ...base]);
+    const r = teardown(['--with-images']);
+    expect(r.status).toBe(0);
+    const calls = azCalls(r);
+    expect(calls.filter((c) => c.startsWith('containerapp delete'))).toHaveLength(1);
+    expect(calls.filter((c) => c.startsWith('acr repository delete'))).toEqual([
+      'acr repository delete --name kittestacrdoesnotexist --repository kitexample --yes -o none']);
+  });
+
+  it('a query that fails stops it before anything is deleted', () => {
+    setResponses(sb, [{ match: 'containerapp list', exit: 1, stderr: 'ERROR: (AuthorizationFailed) no read access\n' }, ...base]);
+    const r = teardown(['--with-images']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('a read-only query failed');
+    expect(azCalls(r).filter((c) => / delete /.test(` ${c} `))).toEqual([]);
+  });
+
+  it('--with-certificates deletes the certificates the app binds and failed attempts, and keeps any other', () => {
+    const envId = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/kit-test-rg-does-not-exist/providers/Microsoft.App/managedEnvironments/kit-test-env-does-not-exist/managedCertificates';
+    setResponses(sb, [
+      { match: 'hostname list', stdout: `${envId}/mc-apex-bound\n${envId}/mc-www-bound\n` },
+      { match: "subjectName=='kit-example.test'", stdout: 'mc-apex-bound\tSucceeded\nmc-apex-other\tSucceeded\n' },
+      { match: "subjectName=='www.kit-example.test'", stdout: 'mc-www-bound\tSucceeded\nmc-www-failed\tFailed\n' },
+      ...base,
+    ]);
+    const r = teardown(['--with-certificates']);
+    expect(r.status).toBe(0);
+    const calls = azCalls(r);
+    expect(calls.findIndex((c) => c.startsWith('containerapp hostname list'))).toBeLessThan(calls.findIndex((c) => c.startsWith('containerapp delete')));
+    expect(calls.filter((c) => c.startsWith('containerapp env certificate delete')).map((c) => c.match(/--certificate (\S+)/)?.[1]))
+      .toEqual(['mc-apex-bound', 'mc-www-bound', 'mc-www-failed']);
+    expect(r.stderr).toContain('kit-example.test: keeping managed certificate mc-apex-other (Succeeded)');
   });
 });
 

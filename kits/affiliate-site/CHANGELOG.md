@@ -139,6 +139,18 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   connection limits and statement timeouts, the `s-maxage` <= 600 rule checked
   before a build and after a release, `Dockerfile.azure.tmpl` with
   `render-dockerfile.sh`, and `predeploy-gate.sh`. See `deploy/README.md`.
+- The deployer block in `deploy/README.md` leaves `rg` out of `deploy.vars`,
+  so the deployer never reads the serving image to turn a failed kit deploy
+  (for instance exit 4 after a smoke failure whose rollback failed) into a
+  success; `unit/deploy/deployerBlock.test.ts` checks the block against the
+  deployer's post-flight condition.
+- Teardown deletes only this site's resources on shared infrastructure: on
+  AWS the ACM certificate and the host-header rule (found by `SITE_DOMAIN`)
+  and, with `--with-images`, the ECR repository must carry this site's tag
+  (provision tags them, and `--adopt-existing` takes over untagged ones); on
+  Azure `--with-images` stops when another Container App or job runs an image
+  from the repository, and `--with-certificates` deletes only the
+  certificates the site's app binds, plus failed attempts.
 
 #### Scaffold and sync (K7)
 
@@ -231,22 +243,32 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   on the claude path the session commits by itself with no scope check
   (reusable-agents `agents/implementer/README.md`, "Path scope"). There
   `vendor/**` (with its `MANIFEST.sha256`), `site.json`, the niche policy
-  file, `tests/ui/gate.config.ts` and the gate wiring can all be edited and
-  committed. The site's own checks narrow this but do not close it: the gate
-  shim and `kit-integrity.test.ts` refuse a vendored copy that differs from
-  its kit version in reusable-agents, so a rewritten manifest no longer
-  passes, but both are files in the site, the anchor only warns for a kit
-  version no commit holds yet, and nothing in a site checks `site.json`, the
-  policy or `gate.config.ts` (`composeGateConfig` refuses a waiver only when
-  the page manifest sets it).
+  file, `tests/ui/gate.config.ts`, `deploy.env` and the gate wiring can all
+  be edited and committed. The site's own checks narrow this but do not
+  close it: the gate shim and `kit-integrity.test.ts` refuse a vendored copy
+  that differs from its kit version in reusable-agents, so a rewritten
+  manifest no longer passes, but both are files in the site, the anchor only
+  warns for a kit version no commit holds yet, and nothing in a site checks
+  `site.json`, the policy, `gate.config.ts` (`composeGateConfig` refuses a
+  waiver only when the page manifest sets it) or `deploy.env`.
+  `deploy.env` and `vendor/affiliate-kit/deploy` are also read from the live
+  checkout, committed or not: the deployer gates and builds a clean checkout
+  of the commit, but runs the push, deploy and rollback stages in the site's
+  working tree (`implementer.repo_path`), and `deploy.env` sets
+  `MIGRATE_COMMAND` (run with the owner's DSN), the container env, the
+  replica counts and `SMOKE_PATHS`. An edit left uncommitted there ships with
+  a release whose diff is clean, and no scope check sees it.
   **Prerequisite: a kit site's implementer dispatches stay disabled** (no
   agent that dispatches to the implementer for it registered or enabled,
   starting with S12's `agents/seo-opportunity-agent/site.yaml` and A1's
   registration) until either
-  - the implementer's claude path applies `ScopePolicy` to its own commits
-    (reverts or refuses excluded paths), or
+  - the implementer's claude path applies `ScopePolicy` to its own sessions:
+    it reverts or refuses excluded paths in the working tree, not only in the
+    commit, or
   - the deployer refuses a release whose diff since the last green deploy
-    touches an excluded path.
+    touches an excluded path, and also refuses while the live checkout's
+    `deploy.env` or `vendor/affiliate-kit` differs from the commit it ships
+    (or runs the push, deploy and rollback stages from its clean checkout).
   Independently, the deployer should run `install/sync-site-kit.sh
   <worktree> --verify-anchored` from its own checkout before a kit site's
   gate and refuse the release on exit 1, and on exit 4 once the kit is

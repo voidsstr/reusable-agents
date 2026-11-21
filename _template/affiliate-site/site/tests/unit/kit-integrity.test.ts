@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { KIT_VERSION as KIT_VERSION_EXPORT } from '../../vendor/affiliate-kit/server/src';
 
@@ -15,7 +16,10 @@ import { KIT_VERSION as KIT_VERSION_EXPORT } from '../../vendor/affiliate-kit/se
  * also requires the copy to be byte-identical to the kit version it claims
  * there (install/sync-site-kit.sh --verify-anchored), which a rewritten
  * manifest does not pass. The deploy gate runs both checks before every run
- * (tests/run-local-suite.sh).
+ * (tests/run-local-suite.sh). Last, Dockerfile.azure must be the vendored
+ * kit's template rendered with deploy.env (render-dockerfile.sh --check, the
+ * check deploy.sh runs before it builds), so a missed re-render fails here,
+ * not at the deployer's build stage after a full gate run.
  *
  * Neither stops a session that also rewrites this test or the gate shim, or
  * that claims a kit version no commit holds yet (the anchored check only
@@ -134,6 +138,33 @@ describe('vendor/affiliate-kit is the kit release it claims (reusable-agents)', 
     // eslint-disable-next-line no-console
     console.warn(`vendor/affiliate-kit was NOT anchored to reusable-agents (checked against its own manifest only): ${unanchored}`);
   }, 150_000);
+});
+
+describe('Dockerfile.azure is the vendored template rendered with deploy.env', () => {
+  it('render-dockerfile.sh --check passes (deploy.sh refuses to build anything else)', () => {
+    // A scratch HOME: deploy.env's SECRETS_FILE (~/.reusable-agents/secrets.env)
+    // is never read by a unit test.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kit-integrity-home-'));
+    const r = (() => {
+      try {
+        return spawnSync('bash', [path.join(VENDOR, 'deploy', 'render-dockerfile.sh'), '--env', path.join(ROOT, 'deploy.env'), '--check'], {
+          cwd: ROOT, encoding: 'utf8', timeout: 60_000, env: { ...process.env, HOME: home },
+        });
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    })();
+    if (r.status === 0) return;
+    const said = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+    const rerender = 'bash vendor/affiliate-kit/deploy/render-dockerfile.sh --env deploy.env --write';
+    if (r.status === 3) {
+      noProblems([said], `Dockerfile.azure is not the vendored kit template rendered with deploy.env, so deploy.sh would refuse to build it: run \`${rerender}\` and commit the result`);
+    }
+    if (r.status === 2) {
+      noProblems([said], `deploy.env is invalid (the deploy scripts read the same file): fix it, then run \`${rerender}\` and commit the result`);
+    }
+    noProblems([`exited ${r.status ?? r.signal}: ${said}`], 'render-dockerfile.sh --check did not run:');
+  }, 90_000);
 });
 
 describe('the vendored kit version', () => {

@@ -16,12 +16,15 @@
 #   --confirm-database DB  with --with-database: must equal DB_NAME (not
 #                        needed with --dry-run)
 #
-# Only this site's resources go: a service, target group or secret without
-# this site's affiliate-kit-app tag stops the teardown before anything is
-# deleted, and the database and roles are dropped only when each one that
-# exists carries this site's affiliate-kit marker. The shared foundation (VPC,
-# ALB and its listeners, cluster, RDS instance, IAM roles, log group) is never
-# touched.
+# Only this site's resources go: a service, target group, secret, ACM
+# certificate or host-header rule (both found by SITE_DOMAIN, on the shared
+# HTTPS listener), or with --with-images an ECR repository, without this
+# site's affiliate-kit-app tag stops the teardown before anything is deleted
+# (provision.sh tags each when it creates it; --adopt-existing tags one that
+# predates the kit), and the database and roles are dropped only when each one
+# that exists carries this site's affiliate-kit marker. The shared foundation
+# (VPC, ALB and its listeners, cluster, RDS instance, IAM roles, log group) is
+# never touched.
 # Refuses to run under bash -x (it would print secret values).
 #
 # Exit: 0 ok; 1 a step failed; 2 usage or config error (or another site's resource).
@@ -84,6 +87,22 @@ aws_target_group tg
 kd_probe_exists sec secret aws secretsmanager describe-secret --region "$AWS_REGION" --secret-id "$AWS_SECRET_ID" \
   --query ARN --output text
 [[ -z $sec ]] || aws_require_secret_owned
+# Found by SITE_DOMAIN: every teardown deletes the rule and takes the
+# certificate off the shared listener, so both must be this site's.
+aws_listener l443 443
+aws_certificate cert
+[[ -z $cert ]] || aws_require_cert_owned "$cert"
+rule=""
+if [[ -n $l443 ]]; then
+  aws_host_rule rule "$l443"
+  [[ -z $rule ]] || aws_require_rule_owned "$rule"
+fi
+repo=""
+if ((with_images)); then
+  kd_probe_exists repo ecr-repository aws ecr describe-repositories --region "$AWS_REGION" --repository-names "$AWS_REPO" \
+    --query 'repositories[0].repositoryUri' --output text
+  [[ -z $repo ]] || aws_require_repo_owned
+fi
 
 kd_phase "ECS service $APP_NAME"
 if [[ -n $svc ]]; then
@@ -110,10 +129,7 @@ for td in "${td_list[@]}"; do
 done
 
 kd_phase "load balancer"
-aws_listener l443 443
-aws_certificate cert
 if [[ -n $l443 ]]; then
-  aws_host_rule rule "$l443"
   if [[ -n $rule ]]; then
     kd_run aws elbv2 delete-rule --region "$AWS_REGION" --rule-arn "$rule" || kd_die "delete-rule failed" 1
   fi
@@ -140,8 +156,6 @@ fi
 
 if ((with_images)); then
   kd_phase "images"
-  kd_probe_exists repo ecr-repository aws ecr describe-repositories --region "$AWS_REGION" --repository-names "$AWS_REPO" \
-    --query 'repositories[0].repositoryUri' --output text
   if [[ -n $repo ]]; then
     kd_run aws ecr delete-repository --region "$AWS_REGION" --repository-name "$AWS_REPO" --force \
       --query repository.repositoryName --output text || kd_die "delete-repository failed" 1

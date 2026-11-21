@@ -71,12 +71,18 @@ Every script takes `--env deploy.env`, `--dry-run` and `--help`.
   resource group, environment, registry and AWS foundation are shared with
   other sites, so the scripts mark what they create: a `COMMENT 'affiliate-kit
   app=<APP_NAME>'` on the four roles and the database, an `affiliate-kit-app`
-  tag on the Container App, the ECS service, the Secrets Manager secret and the
-  target group. A role, database or resource that `deploy.env` names but that
-  lacks this site's marker (another site's, or a typo) stops provision,
-  deploy and teardown before anything is changed. To take over objects that
-  predate the kit, run the provision phase with `--adopt-existing`, which marks
-  them; objects marked for another kit site are never adopted.
+  tag on the Container App, the ECS service, the Secrets Manager secret, the
+  target group, the ACM certificate, the HTTPS listener's host-header rule and
+  the ECR repository. A role, database or resource that `deploy.env` names (or
+  that `SITE_DOMAIN` finds: the certificate and the rule) but that lacks this
+  site's marker (another site's, or a typo) stops provision, deploy and
+  teardown before anything is changed. To take over objects that predate the
+  kit, run the provision phase with `--adopt-existing`, which marks them;
+  objects marked for another kit site are never adopted. ACR repositories and
+  managed certificates carry no tags, so Azure teardown proves them otherwise:
+  `--with-images` stops when any other Container App or job in the
+  subscription runs an image from the repository, and `--with-certificates`
+  deletes only the certificates this site's app binds (and failed attempts).
 - **A failed query is not "absent".** Existence checks treat only az/aws
   not-found errors as "does not exist"; any other failure (network, auth,
   throttling) stops the script, so a transient error never sends it down a
@@ -122,10 +128,15 @@ stored (`--restart` restarts the active revision so it reads them).
 
 **Kit updates.** The rendered `Dockerfile.azure` carries the kit version, and
 `deploy.sh` refuses to build a render that differs from the template. Whenever
-the vendored kit (or `deploy.env`'s image keys) changes, run
-`render-dockerfile.sh --env deploy.env --write` and commit the result in the
-same change; `render-dockerfile.sh --check` in the site's kit-integrity test
-catches a missed one before a deploy does.
+the vendored kit (or `deploy.env`'s image keys: `APP_NAME`, `NODE_IMAGE`,
+`TARGET_PORT`, `SERVER_ENTRY`, `BUILD_SCRIPT`, `HEALTH_PATH`,
+`DOCKER_EXTRA_PATHS`) changes, run `render-dockerfile.sh --env deploy.env
+--write` and commit the result in the same change. A scaffolded site's
+`tests/unit/kit-integrity.test.ts` runs `render-dockerfile.sh --check`, so a
+missed re-render fails its unit tests before a deploy does (the deployer's gate
+builds the committed file, and only the build stage after it runs the check),
+and its `deploy-config.test.ts` also pins the kit version on the rendered
+file's first line.
 
 ## Routine deploys
 
@@ -147,26 +158,39 @@ deployer:
     cmd: bash vendor/affiliate-kit/deploy/azure/deploy.sh --env deploy.env --image-tag {tag} --only push
   deploy:
     cmd: bash vendor/affiliate-kit/deploy/azure/deploy.sh --env deploy.env --image-tag {tag} --only migrate,release,smoke --rollback-on-smoke-failure
-    vars: {app: <APP_NAME>, rg: <AZ_RESOURCE_GROUP>, image: <AZ_ACR>.azurecr.io/<APP_NAME>}
+    vars: {app: <APP_NAME>, image: <AZ_ACR>.azurecr.io/<APP_NAME>}
   smoke_check:
     base_url: https://<SITE_DOMAIN>
     paths: [/, /health, /robots.txt, /llms.txt, /sitemap.xml]
   rollback:
-    capture_cmd: az containerapp show --name {app} --resource-group {rg} --query "properties.template.containers[0].image" -o tsv
+    capture_cmd: az containerapp show --name {app} --resource-group <AZ_RESOURCE_GROUP> --query "properties.template.containers[0].image" -o tsv
     cmd: bash vendor/affiliate-kit/deploy/azure/deploy.sh --env deploy.env --only release --image-tag {prior_image}
 ```
 
 (`--image-tag` also takes a full reference to the site's own repository, which
 is what `{prior_image}` is.)
 
-`--rollback-on-smoke-failure` matters here. When `deploy.cmd` fails, the
-deployer looks at the image the app serves, and if it ends with the new tag it
-records the deploy as a success. Its own smoke check only looks at status
-codes. So a failed kit smoke check (the live HTML cache rule) must not leave
-the new image serving: with the flag, a smoke failure after the release
-releases the previous image again and exits 4, and the deployer sees the
-failure. The rollback command has no smoke stage, so a rollback that released
-cleanly is not reported as failed (and never "rolls back the rollback").
+**`vars` has no `rg`, on purpose.** When `deploy.cmd` exits non-zero and
+`vars` has both `app` and `rg`, the deployer reads the image of the app's
+active revision, and if it ends with the new tag it records the deploy as a
+success (its override for an az call that timed out after Azure accepted the
+release). Its own smoke check only looks at status codes, so a failure only
+the kit's smoke check sees (the live HTML cache rule, `Age`, the CDN headers,
+the extra `SMOKE_PATHS`) would be recorded as a success whenever the new image
+is still serving, as it is when the automatic rollback itself fails (exit 4,
+"... may still be serving"). Without `rg` the deployer never runs that check:
+every non-zero exit of the kit deploy is a failed deploy. `app` stays, because
+the deployer serializes deploys per `vars.app` and `{app}` fills the capture
+command; the resource group is written into `capture_cmd` instead. The cost is
+the timeout override: such a release is recorded as failed and the next
+deployer run does it again, the safe direction for the price window.
+
+`--rollback-on-smoke-failure` is still wanted: a smoke failure after the
+release puts the previous image back before exiting 4, so a failed check
+does not leave the new image serving. The rollback command has no smoke
+stage, so a rollback that released cleanly is not reported as failed (and
+never "rolls back the rollback"). `unit/deploy/deployerBlock.test.ts` checks
+this block, and fails if the deployer's post-flight condition changes.
 
 `release` refuses to run when the ingress target port differs from
 `TARGET_PORT` (the SpecPicks 2026-09-16 incident: the new revision never
@@ -250,11 +274,27 @@ bash vendor/affiliate-kit/deploy/azure/teardown.sh --env deploy.env --confirm <A
   [--with-database --confirm-database <DB_NAME>]
 ```
 
-A Container App (on AWS: a service, target group or secret) without this
-site's tag stops the teardown before anything is deleted, and the drop SQL
-checks the database and role markers before its first `DROP`. The resource
-group, environment, registry, Postgres server, ALB, cluster and RDS instance
-are never touched. (SpecPicks' `teardown.sh --all` deleted the whole
+Everything is checked before the first delete:
+
+- Azure: a Container App without this site's tag stops the teardown.
+  `--with-images` also stops it when any other Container App or Container Apps
+  job in the subscription (matched by resource id, so a same-named app in
+  another group counts) runs an image from `AZ_REGISTRY/APP_NAME`, any tag or
+  digest, init containers included: ACR repositories carry no tags, and the
+  registry is shared. `--with-certificates` reads the certificates the app
+  binds before deleting it, then deletes those and failed attempts for
+  `SITE_HOSTNAMES`; any other certificate for those names is kept, with a
+  warning (after the app is gone, only failed attempts go).
+- AWS: a service, target group, secret, ACM certificate or host-header rule
+  (the last two found by `SITE_DOMAIN`, checked on every teardown because the
+  rule is deleted and the certificate taken off the shared listener) without
+  this site's tag stops the teardown, and with `--with-images` so does an
+  untagged ECR repository.
+- Both: the drop SQL checks the database and role markers before its first
+  `DROP`.
+
+The resource group, environment, registry, Postgres server, ALB, cluster and
+RDS instance are never touched. (SpecPicks' `teardown.sh --all` deleted the whole
 resource group, which on the shared `nsc-apps` group means every site; there is
 no such mode here.)
 
@@ -274,9 +314,11 @@ probes are printed too and answered with placeholders: existence probes say
 that is not this site's); `3` the operator has to act (DNS records,
 certificate validation, a missing secret or image) and re-run; `4`
 (`deploy.sh`) the smoke check failed: after a release in the same run, with
-`--rollback-on-smoke-failure` the previous image serves again, without it the
-new one does; `70` internal error (a secret reached a command line; nothing
-was run).
+`--rollback-on-smoke-failure` the previous image serves again unless the
+rollback itself failed (the message then says the new image may still be
+serving, and prints the command that puts the previous one back) or there was
+no previous image to put back; without the flag the new one serves; `70`
+internal error (a secret reached a command line; nothing was run).
 
 ## Tests
 

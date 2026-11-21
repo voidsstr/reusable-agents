@@ -276,13 +276,88 @@ describe('aws/provision.sh: ownership', () => {
   });
 });
 
-describe('aws/teardown.sh: ownership and confirmation', () => {
-  it.each([['service-owner-tag'], ['tg-owner-tag'], ['secret-owner-tag']])('refuses when %s is missing, before deleting anything', (tag) => {
-    const r = runScript(sb, 'aws/teardown.sh', ['--env', sb.envFile, '--dry-run', '--with-certificates', '--with-images'],
-      { KIT_DEPLOY_DRY_MISSING: tag });
+describe('aws/provision.sh: the certificate, the host-header rule and the ECR repository are this site\'s too', () => {
+  const changes = (out: string) => dryCommands(out).filter((l) => !l.includes('(probe)') && !l.includes('affiliate-kit deploy'));
+
+  it('refuses an existing certificate for SITE_DOMAIN without this site\'s tag; --adopt-existing tags it first', () => {
+    const env = { KIT_DEPLOY_DRY_EXISTING: 'certificate', KIT_DEPLOY_DRY_MISSING: 'cert-owner-tag' };
+    const r = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'domain'], env);
     expect(r.status).toBe(2);
-    expect(r.stderr).toContain('was not created by the kit for kitexample');
-    expect(dryCommands(r.stdout).filter((l) => !l.includes('(probe)') && !l.includes('affiliate-kit deploy'))).toEqual([]);
+    expect(r.stderr).toContain("ACM certificate <certificate> for kit-example.test exists but was not created by the kit for kitexample");
+    expect(r.stdout).toContain("(probe) aws acm list-tags-for-certificate --region us-east-1 --certificate-arn '<certificate>' --query 'Tags[?Key=='\\''affiliate-kit-app'\\''].Value | [0]' --output text");
+    expect(changes(r.stdout)).toEqual([]);
+    const a = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'domain', '--adopt-existing'], env);
+    expect(a.status).toBe(0);
+    const tag = oneCommand(a.stdout, 'aws acm add-tags-to-certificate ');
+    expect(tag).toContain("--certificate-arn '<certificate>' --tags Key=affiliate-kit-app,Value=kitexample");
+    // Tagged before the certificate goes onto a listener.
+    expect(a.stdout.indexOf('[dry-run] aws elbv2 create-listener')).toBeGreaterThan(a.stdout.indexOf(tag));
+  });
+
+  it('refuses another site\'s host-header rule on the shared listener before modify-rule could re-point it', () => {
+    const env = { KIT_DEPLOY_DRY_EXISTING: 'listener-443,host-rule', KIT_DEPLOY_DRY_MISSING: 'rule-owner-tag' };
+    const r = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'domain'], env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("the HTTPS listener's host-header rule <host-rule> for kit-example.test exists but was not created by the kit");
+    expect(r.stdout).toContain("(probe) aws elbv2 describe-tags --region us-east-1 --resource-arns '<host-rule>' --query 'TagDescriptions[0].Tags[?Key=='\\''affiliate-kit-app'\\''].Value | [0]' --output text");
+    expect(changes(r.stdout)).toEqual([]);
+    const a = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'domain', '--adopt-existing'], env);
+    expect(a.status).toBe(0);
+    const tag = oneCommand(a.stdout, 'aws elbv2 add-tags ');
+    expect(tag).toContain("--resource-arns '<host-rule>' --tags Key=affiliate-kit-app,Value=kitexample");
+    expect(a.stdout.indexOf(tag)).toBeLessThan(a.stdout.indexOf('[dry-run] aws elbv2 modify-rule'));
+  });
+
+  it('refuses an existing ECR repository without this site\'s tag in the app phase; --adopt-existing tags it first', () => {
+    const env = { KIT_DEPLOY_DRY_EXISTING: 'target-group,ecr-repository', KIT_DEPLOY_DRY_MISSING: 'ecr-owner-tag' };
+    const r = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'app'], env);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('ECR repository kitexample exists but was not created by the kit for kitexample');
+    // ListTagsForResource answers {"tags": [{"Key", "Value"}]}.
+    expect(r.stdout).toContain("(probe) aws ecr list-tags-for-resource --region us-east-1 --resource-arn '<ecr-repository-arn>' --query 'tags[?Key=='\\''affiliate-kit-app'\\''].Value | [0]' --output text");
+    expect(changes(r.stdout)).toEqual([]);
+    const a = runScript(sb, 'aws/provision.sh', ['--env', sb.envFile, '--dry-run', 'app', '--adopt-existing'], env);
+    expect(a.status).toBe(0);
+    expect(oneCommand(a.stdout, 'aws ecr tag-resource ')).toContain("--resource-arn '<ecr-repository-arn>' --tags Key=affiliate-kit-app,Value=kitexample");
+  });
+
+  it('a fresh provision checks none of them (nothing exists to belong to another site)', () => {
+    const r = dry('aws/provision.sh', ['domain', 'app']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/list-tags-for-certificate|ecr list-tags-for-resource|add-tags-to-certificate|ecr tag-resource/);
+  });
+});
+
+describe('aws/teardown.sh: ownership and confirmation', () => {
+  it.each([['service-owner-tag'], ['tg-owner-tag'], ['secret-owner-tag'], ['cert-owner-tag'], ['rule-owner-tag'], ['ecr-owner-tag']])(
+    'refuses when %s is missing, before deleting anything', (tag) => {
+      const r = runScript(sb, 'aws/teardown.sh', ['--env', sb.envFile, '--dry-run', '--with-certificates', '--with-images'],
+        { KIT_DEPLOY_DRY_MISSING: tag });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('was not created by the kit for kitexample');
+      expect(dryCommands(r.stdout).filter((l) => !l.includes('(probe)') && !l.includes('affiliate-kit deploy'))).toEqual([]);
+    });
+
+  it('the certificate and the rule are checked on every teardown (the rule is deleted and the certificate detached), the repository only with --with-images', () => {
+    for (const tag of ['cert-owner-tag', 'rule-owner-tag']) {
+      const r = runScript(sb, 'aws/teardown.sh', ['--env', sb.envFile, '--dry-run'], { KIT_DEPLOY_DRY_MISSING: tag });
+      expect([tag, r.status]).toEqual([tag, 2]);
+      expect(dryCommands(r.stdout).filter((l) => !l.includes('(probe)') && !l.includes('affiliate-kit deploy'))).toEqual([]);
+    }
+    const noImages = runScript(sb, 'aws/teardown.sh', ['--env', sb.envFile, '--dry-run'], { KIT_DEPLOY_DRY_MISSING: 'ecr-owner-tag' });
+    expect(noImages.status).toBe(0);
+    expect(noImages.stdout).not.toContain('ecr list-tags-for-resource');
+    expect(dryCommands(noImages.stdout, 'aws ecr delete-repository')).toEqual([]);
+  });
+
+  it('a teardown where the service, target group and secret are gone still proves the certificate and rule are this site\'s', () => {
+    const r = runScript(sb, 'aws/teardown.sh', ['--env', sb.envFile, '--dry-run', '--with-certificates', '--with-images'],
+      { KIT_DEPLOY_DRY_MISSING: 'service,target-group,secret,cert-owner-tag' });
+    expect(r.status).toBe(2);
+    expect(dryCommands(r.stdout, 'aws elbv2 delete-rule')).toEqual([]);
+    expect(dryCommands(r.stdout, 'aws elbv2 remove-listener-certificates')).toEqual([]);
+    expect(dryCommands(r.stdout, 'aws acm delete-certificate')).toEqual([]);
+    expect(dryCommands(r.stdout, 'aws ecr delete-repository')).toEqual([]);
   });
 
   it('a real --with-database run needs --confirm-database DB_NAME', () => {

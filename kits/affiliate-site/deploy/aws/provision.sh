@@ -27,16 +27,19 @@
 #               private subnets, circuit breaker with rollback) and Application
 #               Auto Scaling MIN..MAX on CPU (AWS_CPU_TARGET_PERCENT)
 #
-# The service, the secret and the target group are tagged affiliate-kit-app=
+# The service, the secret, the target group, the ACM certificate, the
+# host-header rule and the ECR repository are tagged affiliate-kit-app=
 # APP_NAME when created here; an existing one without that tag (another
-# site's) stops the phase before it is changed.
+# site's) stops the phase before it is changed. The certificate and the rule
+# are found by SITE_DOMAIN (the rule on the shared HTTPS listener).
 #
 # Options:
 #   --image-tag TAG        app: the image to start the service with (default: latest)
 #   --write-new-dsns FILE  database: as in azure/provision.sh
 #   --restart              secrets: force a new deployment afterwards
 #   --adopt-existing       database, secrets, domain, app: take over roles, a
-#                          database, a service, secret or target group that
+#                          database, a service, secret, target group, ACM
+#                          certificate, host-header rule or ECR repository that
 #                          exist without the kit's marker, marking them as this
 #                          site's (as in azure/provision.sh). Never another kit site's
 #   --dry-run              print every aws / psql command instead of running it
@@ -192,10 +195,18 @@ phase_domain() {
   local -a hosts=() sans=() fields=()
   read -ra hosts <<< "$SITE_HOSTNAMES"
   for p in "${hosts[@]}"; do [[ $p == "$SITE_DOMAIN" ]] || sans+=("$p"); done
-  # An existing target group must be this site's before anything is requested or changed.
+  # An existing target group, certificate and host-header rule must be this
+  # site's before anything is requested or changed: the certificate goes onto
+  # the shared listener, and modify-rule would point the rule at this site.
   aws_target_group tg
   [[ -z $tg ]] || aws_require_tg_owned "$tg" adopt
   aws_certificate cert
+  [[ -z $cert ]] || aws_require_cert_owned "$cert" adopt
+  aws_listener l443 443
+  if [[ -n $l443 ]]; then
+    aws_host_rule rule "$l443"
+    [[ -z $rule ]] || aws_require_rule_owned "$rule" adopt
+  fi
   if [[ -z $cert ]]; then
     token="kit_${APP_NAME//-/_}"
     local -a req=(aws acm request-certificate --region "$AWS_REGION" --domain-name "$SITE_DOMAIN"
@@ -282,6 +293,7 @@ phase_domain() {
       --conditions "$conditions" --actions "$actions" --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" \
       --query 'Rules[0].RuleArn' --output text || kd_die "create-rule failed" 1
   else
+    aws_require_rule_owned "$rule" adopt
     kd_run aws elbv2 modify-rule --region "$AWS_REGION" --rule-arn "$rule" --conditions "$conditions" \
       --actions "$actions" --query 'Rules[0].RuleArn' --output text || kd_die "modify-rule failed" 1
   fi
@@ -304,6 +316,8 @@ phase_app() {
       --image-scanning-configuration scanOnPush=true --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" \
       --query repository.repositoryUri --output text || kd_die "create-repository failed" 1
     kd_dry_created ecr-repository
+  else
+    aws_require_repo_owned adopt
   fi
   kd_probe_value digest image aws ecr describe-images --region "$AWS_REGION" --repository-name "$AWS_REPO" \
     --image-ids "imageTag=$tag" --query 'imageDetails[0].imageDigest' --output text

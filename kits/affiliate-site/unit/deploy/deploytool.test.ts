@@ -312,6 +312,35 @@ describe('render-dockerfile', () => {
   });
 });
 
+describe('image-users (azure/teardown.sh --with-images)', () => {
+  const id = (rg: string, kind: string, name: string) => `/subscriptions/s/resourceGroups/${rg}/providers/Microsoft.App/${kind}/${name}`;
+  const args = ['image-users', '--registry', 'acr.azurecr.io', '--repository', 'kitexample', '--exclude-app', 'site-rg/kitexample'];
+  const users = (...docs: unknown[]) => runTool(args, { input: docs.map((d) => JSON.stringify(d)).join('\n') });
+
+  it('names every other app or job that runs an image from the repository: any tag, a digest, no tag, an init container', () => {
+    const r = users(
+      [
+        { id: id('SITE-RG', 'containerApps', 'kitexample'), images: [['acr.azurecr.io/kitexample:t1'], null] },
+        { id: id('other-rg', 'containerApps', 'kitexample'), images: [['ACR.azurecr.io/kitexample:t2'], null] },
+        { id: id('site-rg', 'containerApps', 'b'), images: [['nginx'], ['acr.azurecr.io/kitexample@sha256:0123']] },
+        { id: id('site-rg', 'containerApps', 'c'), images: [['acr.azurecr.io/kitexample-x:t1', 'other.azurecr.io/kitexample:t1'], null] },
+        { id: id('site-rg', 'containerApps', 'd'), images: [null, null] },
+      ],
+      [{ id: id('site-rg', 'jobs', 'kitexample'), images: [['acr.azurecr.io/kitexample'], null] }],
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim().split('\n')).toEqual([id('other-rg', 'containerApps', 'kitexample'), id('site-rg', 'containerApps', 'b'), id('site-rg', 'jobs', 'kitexample')]);
+  });
+
+  it('prints nothing when only the site\'s own app uses it, and refuses input it cannot read', () => {
+    expect(users([{ id: id('site-rg', 'containerApps', 'kitexample'), images: [['acr.azurecr.io/kitexample:t1'], null] }], []).stdout).toBe('');
+    expect(runTool(args, { input: '' }).stdout).toBe('');
+    expect(runTool(args, { input: 'ERROR: not json' }).status).toBe(2);
+    expect(runTool(args, { input: '{"id": "x"}' }).status).toBe(2);
+    expect(runTool(['image-users', '--registry', 'r', '--repository', 'p', '--exclude-app', 'no-slash'], { input: '[]' }).status).toBe(2);
+  });
+});
+
 describe('JSON documents', () => {
   const taskdef = ['ecs-taskdef', '--family', 'site', '--container-name', 'site', '--image', 'acct.dkr.ecr/site:1',
     '--cpu-units', '512', '--memory-mib', '1024', '--port', '8080', '--exec-role-arn', 'arn:aws:iam::1:role/e',

@@ -142,6 +142,58 @@ aws_adopt_tg() {
     --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" || kd_die "tagging the target group failed" 1
 }
 
+# The ACM certificate and the host-header rule are found by SITE_DOMAIN, on the
+# shared HTTPS listener, and the ECR repository by AWS_REPO: provision.sh tags
+# each one when it creates it, so teardown deletes (and the domain phase
+# changes) only this site's.
+aws_require_cert_owned() {  # CERTIFICATE_ARN [adopt]
+  [[ $AWS_OWNED != *" certificate "* ]] || return 0
+  local tag fn=""
+  [[ ${2:-} == adopt ]] && fn=aws_adopt_cert
+  AWS_ADOPT_ARN=$1
+  kd_probe_strict tag cert-owner-tag aws acm list-tags-for-certificate --region "$AWS_REGION" --certificate-arn "$1" \
+    --query "Tags[?Key=='$KD_OWNER_TAG'].Value | [0]" --output text
+  aws__owned certificate "ACM certificate $1 for $SITE_DOMAIN" "$tag" "$fn"
+}
+
+aws_adopt_cert() {
+  kd_run aws acm add-tags-to-certificate --region "$AWS_REGION" --certificate-arn "$AWS_ADOPT_ARN" \
+    --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" || kd_die "tagging the certificate failed" 1
+}
+
+aws_require_rule_owned() {  # RULE_ARN [adopt]
+  [[ $AWS_OWNED != *" host-rule "* ]] || return 0
+  local tag fn=""
+  [[ ${2:-} == adopt ]] && fn=aws_adopt_rule
+  AWS_ADOPT_ARN=$1
+  kd_probe_strict tag rule-owner-tag aws elbv2 describe-tags --region "$AWS_REGION" --resource-arns "$1" \
+    --query "TagDescriptions[0].Tags[?Key=='$KD_OWNER_TAG'].Value | [0]" --output text
+  aws__owned host-rule "the HTTPS listener's host-header rule $1 for $SITE_DOMAIN" "$tag" "$fn"
+}
+
+aws_adopt_rule() {
+  kd_run aws elbv2 add-tags --region "$AWS_REGION" --resource-arns "$AWS_ADOPT_ARN" \
+    --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" || kd_die "tagging the host-header rule failed" 1
+}
+
+aws_require_repo_owned() {  # [adopt]
+  [[ $AWS_OWNED != *" ecr-repository "* ]] || return 0
+  local tag arn fn=""
+  [[ ${1:-} == adopt ]] && fn=aws_adopt_repo
+  kd_probe_strict arn ecr-repository-arn aws ecr describe-repositories --region "$AWS_REGION" --repository-names "$AWS_REPO" \
+    --query 'repositories[0].repositoryArn' --output text
+  AWS_ADOPT_ARN=$arn
+  # ListTagsForResource answers {"tags": [{"Key": ..., "Value": ...}]}: a lower-case list of capitalised pairs.
+  kd_probe_strict tag ecr-owner-tag aws ecr list-tags-for-resource --region "$AWS_REGION" --resource-arn "$arn" \
+    --query "tags[?Key=='$KD_OWNER_TAG'].Value | [0]" --output text
+  aws__owned ecr-repository "ECR repository $AWS_REPO" "$tag" "$fn"
+}
+
+aws_adopt_repo() {
+  kd_run aws ecr tag-resource --region "$AWS_REGION" --resource-arn "$AWS_ADOPT_ARN" \
+    --tags "Key=$KD_OWNER_TAG,Value=$APP_NAME" || kd_die "tagging the ECR repository failed" 1
+}
+
 # aws_secret_arn VAR: the full ARN of AWS_SECRET_ID (an ARN-shaped placeholder under --dry-run).
 aws_secret_arn() {
   local _sa_arn

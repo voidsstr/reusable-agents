@@ -28,21 +28,35 @@
 # implementer's claude path, its default: the session commits by itself and
 # nothing checks this scope (reusable-agents agents/implementer/README.md,
 # "Path scope"). There vendor/** (with its MANIFEST.sha256), site.json, the
-# niche policy, tests/ui/gate.config.ts and the gate wiring are protected only
-# by instructions. The site's own checks narrow that and no more: the deploy
-# gate refuses a vendor/affiliate-kit that differs from the kit version it
-# claims as reusable-agents holds it (at a commit, or in the working tree),
-# but the gate shim that runs the check is a file in the site, and the check
-# only warns for a kit version no commit holds yet; nothing in the site checks
-# site.json, the policy or gate.config.ts (it refuses waivers only in the
-# page manifest).
+# niche policy, tests/ui/gate.config.ts, deploy.env and the gate wiring are
+# protected only by instructions. The site's own checks narrow that and no
+# more: the deploy gate refuses a vendor/affiliate-kit that differs from the
+# kit version it claims as reusable-agents holds it (at a commit, or in the
+# working tree), but the gate shim that runs the check is a file in the site,
+# and the check only warns for a kit version no commit holds yet; nothing in
+# the site checks site.json, the policy or gate.config.ts (it refuses waivers
+# only in the page manifest).
+#
+# deploy.env and vendor/affiliate-kit/deploy are also read from the LIVE
+# checkout, committed or not: the deployer gates and builds a clean checkout
+# of the commit, but runs the push, deploy and rollback stages
+# (vendor/affiliate-kit/deploy/<cloud>/deploy.sh --env deploy.env) in this
+# repository's working tree. deploy.env sets MIGRATE_COMMAND (run with the
+# owner's DSN), the container env, the replica counts and SMOKE_PATHS, so an
+# uncommitted edit there ships with a release whose diff is clean.
 #
 # PREREQUISITE: keep this site's implementer dispatches disabled (no agent
 # that dispatches to the implementer for it registered or enabled) until
-# either the implementer's claude path applies this scope to its own commits
-# (reverts or refuses excluded paths), or the deployer refuses a release whose
-# diff since the last green deploy touches an excluded path (reusable-agents
-# kits/affiliate-site/CHANGELOG.md, Known issues).
+# either
+#   - the implementer's claude path applies this scope to its own sessions:
+#     it reverts or refuses excluded paths in the working tree too (an edit
+#     left uncommitted still reaches the deploy stages), not only in the
+#     commit; or
+#   - the deployer refuses a release whose diff since the last green deploy
+#     touches an excluded path AND refuses while the live checkout's
+#     deploy.env or vendor/affiliate-kit differs from the commit it ships (or
+#     runs the push, deploy and rollback stages from its clean checkout)
+# (reusable-agents kits/affiliate-site/CHANGELOG.md, Known issues).
 implementer:
   repo_path: {{SITE_DIR}}
   branch: main
