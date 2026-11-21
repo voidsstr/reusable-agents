@@ -94,7 +94,8 @@ describe('the template', () => {
     // The comment block as prose: no '--' prefixes, one space between words.
     const header = TEMPLATE.slice(0, TEMPLATE.indexOf('SET LOCAL')).replace(/^--\s?/gm, '').replace(/\s+/g, ' ');
     for (const rule of [/holds TRIGGER on editorial_articles/, /GRANT ALL/, /session_replication_role/, /pg_restore --disable-triggers/,
-      /dedicated owner role/, /publisher DSN/, /SECURITY DEFINER/, /sorts AFTER the guard/, /dropped or renamed/]) {
+      /dedicated owner role/, /publisher DSN/, /SECURITY DEFINER/, /sorts AFTER the guard/, /dropped or renamed/,
+      /NOT DEFERRABLE constraint trigger/, /cannot be swapped by CREATE OR REPLACE TRIGGER/, /refuses every publish while a trigger runs a function/]) {
       expect(header).toMatch(rule);
     }
   });
@@ -114,7 +115,7 @@ describe('renderPublishTrigger', () => {
     expect(sql).toMatch(/content columns\s+'title', 'subtitle', 'excerpt', 'body_md', 'faqs', 'outbound_citations', 'category'/);
   });
 
-  it('is: both timeouts, install checks, the guard and the recheck with their comments, both triggers, ENABLE ALWAYS', () => {
+  it('is: both timeouts, install checks, the guard and the recheck with their comments, the guard trigger, the recheck as a constraint trigger, ENABLE ALWAYS', () => {
     // .code blanks quoted literals and comments: the shape of each statement.
     const stmts = splitSqlStatements(sql).filter((s) => s.code);
     expect(stmts.map((s) => s.code.replace(/\s+/g, ' ').trim())).toEqual([
@@ -126,7 +127,9 @@ describe('renderPublishTrigger', () => {
       expect.stringMatching(new RegExp(`^CREATE OR REPLACE FUNCTION ${PUBLISH_RECHECK_FUNCTION}\\(\\)`)),
       expect.stringMatching(new RegExp(`^COMMENT ON FUNCTION ${PUBLISH_RECHECK_FUNCTION}\\(\\)`)),
       expect.stringMatching(new RegExp(`^CREATE OR REPLACE TRIGGER ${PUBLISH_GUARD_TRIGGER} BEFORE INSERT OR UPDATE`)),
-      expect.stringMatching(new RegExp(`^CREATE OR REPLACE TRIGGER ${PUBLISH_RECHECK_TRIGGER} AFTER INSERT OR UPDATE`)),
+      // Constraint triggers take no OR REPLACE.
+      `DROP TRIGGER IF EXISTS ${PUBLISH_RECHECK_TRIGGER} ON editorial_articles`,
+      expect.stringMatching(new RegExp(`^CREATE CONSTRAINT TRIGGER ${PUBLISH_RECHECK_TRIGGER} AFTER INSERT OR UPDATE ON editorial_articles NOT DEFERRABLE FOR EACH ROW`)),
       `ALTER TABLE editorial_articles ENABLE ALWAYS TRIGGER ${PUBLISH_GUARD_TRIGGER}, ENABLE ALWAYS TRIGGER ${PUBLISH_RECHECK_TRIGGER}`,
     ]);
     expect(sql).toContain("SET LOCAL lock_timeout = '5s';\nSET LOCAL statement_timeout = '15min';\n");
@@ -137,7 +140,8 @@ describe('renderPublishTrigger', () => {
     expect(sql).toContain("content_columns CONSTANT text[] := ARRAY['title', 'subtitle', 'excerpt', 'body_md', 'faqs', 'outbound_citations', 'category']::text[];");
     expect(sql).toContain('IF current_user = publisher THEN');
     expect(sql).toMatch(/BEFORE INSERT OR UPDATE ON editorial_articles\s+FOR EACH ROW EXECUTE FUNCTION editorial_articles_publish_guard\(\)/);
-    expect(sql).toMatch(/AFTER INSERT OR UPDATE ON editorial_articles\s+FOR EACH ROW\s+WHEN \(NEW\.status = 'published'\)\s+EXECUTE FUNCTION editorial_articles_publish_recheck\(\)/);
+    expect(sql).toMatch(/CREATE CONSTRAINT TRIGGER editorial_articles_zzz_publish_recheck_trg\s+AFTER INSERT OR UPDATE ON editorial_articles\s+NOT DEFERRABLE\s+FOR EACH ROW\s+WHEN \(NEW\.status = 'published'\)\s+EXECUTE FUNCTION editorial_articles_publish_recheck\(\)/);
+    expect(sql).not.toMatch(/\bDEFERRABLE\b(?<!NOT DEFERRABLE)|INITIALLY DEFERRED/);
   });
 
   it('compares the content columns by name on each call, never by serializing the whole row', () => {
@@ -148,6 +152,17 @@ describe('renderPublishTrigger', () => {
     const recheck = sql.slice(sql.indexOf(`CREATE OR REPLACE FUNCTION ${PUBLISH_RECHECK_FUNCTION}`), sql.indexOf(`COMMENT ON FUNCTION ${PUBLISH_RECHECK_FUNCTION}`));
     expect(recheck).toContain(compare);
     expect(recheck).toContain("RAISE EXCEPTION 'publish guard:");
+  });
+
+  it("refuses the publisher's write while a trigger runs a function that neither the table owner (or a member) nor a superuser owns", () => {
+    const recheck = sql.slice(sql.indexOf(`CREATE OR REPLACE FUNCTION ${PUBLISH_RECHECK_FUNCTION}`), sql.indexOf(`COMMENT ON FUNCTION ${PUBLISH_RECHECK_FUNCTION}`));
+    expect(recheck).toContain('WHERE t.tgrelid = TG_RELID');
+    expect(recheck).toContain('AND NOT t.tgisinternal');
+    expect(recheck).toContain('AND NOT o.rolsuper');
+    expect(recheck).toContain("AND NOT pg_has_role(p.proowner, c.relowner, 'MEMBER')");
+    expect(recheck).toContain("broken := format('published by %s while trigger(s) %s run a function that neither the table owner (%s) nor a superuser owns'");
+    // Catalog names resolve in pg_catalog first, never to a temporary object.
+    expect(recheck).toContain('SET search_path = pg_catalog, pg_temp');
   });
 
   it('keeps the statuses quoted in the guard function, where the publish gate looks for them (guard_status)', () => {

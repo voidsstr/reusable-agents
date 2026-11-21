@@ -111,6 +111,13 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   `server/src/db`: the migration runner (kit files first, one ledger, one
   advisory lock), its command line, and the publish-guard template for
   content-policy sites. See `migrations/README.md`.
+- The publish guard's recheck is a `NOT DEFERRABLE` constraint trigger, so a
+  role holding `TRIGGER` cannot swap it with `CREATE OR REPLACE TRIGGER`, and
+  it refuses the publisher's writes while any trigger on `editorial_articles`
+  runs a function that neither the table owner (or a member of it) nor a
+  superuser owns: code such a role plants to run as the publisher publishes
+  nothing. Applying the migration drops and re-creates the recheck (an
+  `ACCESS EXCLUSIVE` lock, bounded by its 5 s `lock_timeout`).
 
 #### Deploy gate (K5)
 

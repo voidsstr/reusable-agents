@@ -159,9 +159,16 @@ It installs two triggers, both `ENABLE ALWAYS`, so
   (`editorial_articles_<...>` does; `set_*` and `trg_*` do not).
 - `editorial_articles_zzz_publish_recheck_trg` (AFTER, rows stored as
   published) raises when the row as written breaks the rules anyway, for
-  instance because a later-sorting BEFORE trigger changed it, and when a
-  write by the publisher changed its content. Such a write fails instead of
-  publishing unchecked content.
+  instance because a later-sorting BEFORE trigger changed it, when a write by
+  the publisher changed its content, and when the publisher writes while any
+  trigger on the table runs a function that neither the table owner (or a
+  member of it) nor a superuser owns. Such a write fails instead of publishing
+  unchecked content. It is a `NOT DEFERRABLE` constraint trigger: `CREATE OR
+  REPLACE TRIGGER`, which needs only the `TRIGGER` privilege, cannot swap it,
+  and dropping, renaming or disabling it needs the table owner. Constraint
+  triggers take no `OR REPLACE`, so applying the migration drops and creates
+  it again (an `ACCESS EXCLUSIVE` lock on the table until the migration
+  commits; the migration's 5 s `lock_timeout` bounds the wait).
 
 `framework/cli/article_publish_gate.py` promotes drafts through a separate
 connection as the publisher role. A promote that returns the draft status
@@ -171,10 +178,21 @@ to mean anything (installing it warns about the first three it can see):
 - no role but the table owner holds `TRIGGER` on `editorial_articles`.
   `GRANT ALL`, `ALTER DEFAULT PRIVILEGES ... GRANT ALL` and membership of the
   owner role all include it. A role that can create a trigger can make its own
-  writes pass the BEFORE guard (the recheck stops those) and can plant code
-  that runs as whoever writes the row next, the publisher included (nothing
-  stops that). Grant `SELECT`, `INSERT`, `UPDATE` by name; the kit's deploy
-  provisioning does;
+  writes pass the BEFORE guard, or replace the guard outright (`CREATE OR
+  REPLACE TRIGGER`), and can plant code that runs as whoever writes the row
+  next, the publisher included. The recheck stops all of those from
+  publishing: it judges the row as written, and it refuses every publish while
+  a trigger runs a function that neither the owner (or a member of it) nor a
+  superuser owns. But until such a trigger is gone nothing can be published,
+  and a guard replaced by a temporary function vanishes when its session ends:
+  from then on the writes the guard would have turned into drafts fail, and
+  the publish gate refuses to run, until this migration's guard is applied
+  again. Grant `SELECT`, `INSERT`, `UPDATE` by name; the kit's deploy
+  provisioning does. When a publish fails this way, the error names each
+  trigger with its function and that function's owner: for a trigger of the
+  site's own, `ALTER FUNCTION ... OWNER TO` the table owner (after the table
+  changes owner, the guard and recheck functions too); otherwise drop the
+  trigger and revoke `TRIGGER`;
 - no BEFORE trigger sorts after the guard (above);
 - the author and app roles cannot `SET session_replication_role`
   (`GRANT SET ON PARAMETER`, PostgreSQL 15+, or a managed admin group that

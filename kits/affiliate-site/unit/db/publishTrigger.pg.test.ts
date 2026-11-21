@@ -94,6 +94,28 @@ async function statusOf(pool: Pool, slug: string): Promise<string> {
   return (await pool.query('SELECT status FROM editorial_articles WHERE slug = $1', [slug])).rows[0]?.status;
 }
 
+/** A session logged in as `role` itself (not SET ROLE), as a role an operator granted something to would connect. */
+async function holderSession(st: Site, role: { name: string; password: string }): Promise<Client> {
+  const c = new Client({ connectionString: urlFor(st.db.name, { user: role.name, password: role.password }) });
+  await c.connect();
+  return c;
+}
+
+/** Wait until the trigger is gone: a session's temporary objects are dropped as its backend exits, after the client has left. */
+async function waitForTriggerGone(st: Site, name: string, timeoutMs = 10_000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const r = await st.pool.query(
+      `SELECT count(*)::int AS n FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE t.tgrelid = 'editorial_articles'::regclass AND t.tgname = $1 AND p.pronamespace::regnamespace::text LIKE 'pg_temp%'`,
+      [name],
+    );
+    if (r.rows[0].n === 0) return;
+    if (Date.now() > until) throw new Error(`trigger ${name} still runs a temporary function after ${timeoutMs} ms`);
+    await new Promise((res) => setTimeout(res, 50));
+  }
+}
+
 /** Apply the rendered guard again (it is idempotent) and return the server notices it raised. */
 async function reinstallNotices(st: Site, params: Omit<PublishTriggerParams, 'publisherRole'> = {}): Promise<string[]> {
   const c = await st.pool.connect();
@@ -243,6 +265,17 @@ describePg('publish guard: the rules (real Postgres)', () => {
     expect(await reinstallNotices(s)).toEqual([]);
     expect(await def()).toEqual(before);
   });
+
+  it('the recheck is a NOT DEFERRABLE constraint trigger; the guard is a plain BEFORE trigger', async () => {
+    const r = await s.pool.query(`SELECT t.tgname, t.tgconstraint <> 0 AS constraint_trigger, pg_get_triggerdef(t.oid) AS def,
+        (SELECT c.condeferrable FROM pg_constraint c WHERE c.oid = t.tgconstraint) AS deferrable
+       FROM pg_trigger t WHERE t.tgrelid = 'editorial_articles'::regclass AND t.tgname LIKE 'editorial_articles_zzz_publish_%' ORDER BY t.tgname`);
+    expect(r.rows.map((x) => [x.tgname, x.constraint_trigger, x.deferrable])).toEqual([
+      [PUBLISH_GUARD_TRIGGER, false, null],
+      [PUBLISH_RECHECK_TRIGGER, true, false],
+    ]);
+    expect(r.rows[1].def).toMatch(/^CREATE CONSTRAINT TRIGGER editorial_articles_zzz_publish_recheck_trg AFTER INSERT OR UPDATE ON \S*editorial_articles NOT DEFERRABLE INITIALLY IMMEDIATE FOR EACH ROW WHEN/);
+  });
 });
 
 describePg('publish guard: installation and configuration (real Postgres)', () => {
@@ -339,7 +372,7 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
       .toEqual({ status: 'draft', body_md: 'Checked body' });
   }, 60_000);
 
-  it('a role holding TRIGGER (GRANT ALL) is named at install and cannot publish through a trigger of its own', async () => {
+  it('a role holding TRIGGER (GRANT ALL) is named at install, and its own writes cannot publish through a trigger of its own', async () => {
     const st = await setUpSite('kit_guard_trigpriv');
     sites.push(st);
     const holder = await st.db.createRole('kall', { login: true });
@@ -350,8 +383,7 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
     await asRole(st.pool, st.author, (c) => insertAs(c, 'held'));
     // Logged in as itself: a temp function needs no CREATE on any schema, and the
     // trigger vanishes with the session, so nothing would be left to find.
-    const c = new Client({ connectionString: urlFor(st.db.name, { user: holder.name, password: holder.password }) });
-    await c.connect();
+    const c = await holderSession(st, holder);
     try {
       await c.query(`CREATE FUNCTION pg_temp.republish() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN NEW.status := 'published'; RETURN NEW; END $f$`);
       await c.query('CREATE TRIGGER zzzz_republish BEFORE INSERT OR UPDATE ON editorial_articles FOR EACH ROW EXECUTE FUNCTION pg_temp.republish()');
@@ -359,13 +391,132 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
         .rejects.toThrow(new RegExp(`publish guard: editorial_articles row self was inserted as published by ${holder.name}`));
       await expect(c.query(`UPDATE editorial_articles SET status = 'published' WHERE slug = 'held'`))
         .rejects.toThrow(new RegExp(`publish guard: editorial_articles row held was made published by ${holder.name}`));
-      // A table owner's tools stay out of reach: TRIGGER cannot drop or disable the guard.
+      // A table owner's tools stay out of reach: TRIGGER cannot drop, rename or disable the
+      // recheck, and CREATE OR REPLACE TRIGGER (TRIGGER alone suffices) cannot swap a constraint trigger.
       await expect(c.query(`ALTER TABLE editorial_articles DISABLE TRIGGER ${PUBLISH_RECHECK_TRIGGER}`)).rejects.toThrow(/must be owner/);
+      await expect(c.query(`DROP TRIGGER ${PUBLISH_RECHECK_TRIGGER} ON editorial_articles`)).rejects.toThrow(/must be owner/);
+      await expect(c.query(`ALTER TRIGGER ${PUBLISH_RECHECK_TRIGGER} ON editorial_articles RENAME TO x`)).rejects.toThrow(/must be owner/);
+      await expect(c.query(`CREATE OR REPLACE TRIGGER ${PUBLISH_RECHECK_TRIGGER} AFTER INSERT OR UPDATE ON editorial_articles
+          FOR EACH ROW EXECUTE FUNCTION pg_temp.republish()`)).rejects.toThrow(/is a constraint trigger/);
     } finally {
       await c.end();
     }
     expect(await statusOf(st.pool, 'held')).toBe('draft');
     expect((await st.pool.query(`SELECT count(*)::int AS n FROM editorial_articles WHERE slug = 'self'`)).rows[0].n).toBe(0);
+  }, 60_000);
+
+  it('code a TRIGGER holder plants to run as the publisher publishes nothing: every publish fails while it exists', async () => {
+    const st = await setUpSite('kit_guard_plant');
+    sites.push(st);
+    const holder = await st.db.createRole('kplant', { login: true });
+    await st.pool.query(`GRANT ALL ON editorial_articles TO ${holder.name}`);
+    for (const sl of ['held', 'other']) await asRole(st.pool, st.author, (c) => insertAs(c, sl));
+    const c = await holderSession(st, holder);
+    try {
+      // A statement trigger that sorts first. While the publisher writes, it shadows the table
+      // in the publisher's session (the gate's next promote would hit the view) and publishes a
+      // draft the gate never checked; the nested write passes the guard as the publisher.
+      const plant = (catchNested: boolean) => `CREATE OR REPLACE FUNCTION pg_temp.plant() RETURNS trigger LANGUAGE plpgsql AS $f$
+        BEGIN
+          IF current_user = '${st.publisher}' AND pg_trigger_depth() = 1 THEN
+            CREATE TEMP VIEW editorial_articles AS SELECT * FROM public.editorial_articles;
+            ${catchNested
+    ? `BEGIN UPDATE public.editorial_articles SET status = 'published' WHERE slug = 'held'; EXCEPTION WHEN OTHERS THEN NULL; END;`
+    : `UPDATE public.editorial_articles SET status = 'published' WHERE slug = 'held';`}
+          END IF;
+          RETURN NULL;
+        END $f$`;
+      await c.query(plant(false));
+      await c.query('CREATE TRIGGER aaa_plant BEFORE UPDATE ON editorial_articles FOR EACH STATEMENT EXECUTE FUNCTION pg_temp.plant()');
+      for (const catchNested of [false, true]) {
+        await c.query(plant(catchNested));
+        await asRole(st.pool, st.publisher, async (p) => {
+          await expect(promote(p, 'other'))
+            .rejects.toThrow(new RegExp(`publish guard: editorial_articles row (held|other) was published by ${st.publisher} while trigger\\(s\\) aaa_plant \\(pg_temp_\\d+\\.plant\\(\\), owned by ${holder.name}\\) run a function that neither the table owner \\(\\S+\\) nor a superuser owns`));
+          expect((await p.query(`SELECT to_regclass('pg_temp.editorial_articles') AS v`)).rows[0].v).toBeNull();
+        });
+        expect([await statusOf(st.pool, 'held'), await statusOf(st.pool, 'other')]).toEqual(['draft', 'draft']);
+      }
+      // The error says how to resume.
+      const err = await asRole(st.pool, st.publisher, (p) => promote(p, 'other').then(() => null, (e: { hint?: string }) => e));
+      expect(err?.hint).toMatch(/ALTER FUNCTION \.\.\. OWNER TO the table owner.*otherwise drop the trigger and revoke TRIGGER/);
+    } finally {
+      await c.end();
+    }
+    // The plant goes with the holder's session; publishing resumes.
+    await waitForTriggerGone(st, 'aaa_plant');
+    expect(await asRole(st.pool, st.publisher, (p) => promote(p, 'other'))).toBe('published');
+    expect(await statusOf(st.pool, 'held')).toBe('draft');
+  }, 60_000);
+
+  it('a TRIGGER holder that swaps the BEFORE guard publishes nothing either; its session ends and the guard must be re-applied', async () => {
+    const st = await setUpSite('kit_guard_swap');
+    sites.push(st);
+    const holder = await st.db.createRole('kswap', { login: true });
+    await st.pool.query(`GRANT ALL ON editorial_articles TO ${holder.name}; GRANT USAGE ON SEQUENCE editorial_articles_id_seq TO ${holder.name}`);
+    for (const sl of ['held', 'other']) await asRole(st.pool, st.author, (c) => insertAs(c, sl));
+    const c = await holderSession(st, holder);
+    try {
+      await c.query(`CREATE FUNCTION pg_temp.noguard() RETURNS trigger LANGUAGE plpgsql AS $f$
+        BEGIN
+          IF current_user = '${st.publisher}' AND pg_trigger_depth() = 1 THEN
+            UPDATE public.editorial_articles SET status = 'published' WHERE slug = 'held';
+          END IF;
+          RETURN NEW;
+        END $f$`);
+      // CREATE OR REPLACE TRIGGER needs only the TRIGGER privilege: the plain guard can be swapped.
+      await c.query(`CREATE OR REPLACE TRIGGER ${PUBLISH_GUARD_TRIGGER} BEFORE INSERT OR UPDATE ON editorial_articles
+          FOR EACH ROW EXECUTE FUNCTION pg_temp.noguard()`);
+      // Its own writes still cannot publish: the recheck judges the row as written.
+      await expect(c.query(`UPDATE editorial_articles SET status = 'published' WHERE slug = 'held'`))
+        .rejects.toThrow(new RegExp(`row held was made published by ${holder.name}`));
+      await expect(c.query(`INSERT INTO editorial_articles (slug, title, body_md, category, status) VALUES ('self', 'T', 'B', 'guide', 'published')`))
+        .rejects.toThrow(new RegExp(`row self was inserted as published by ${holder.name}`));
+      // And the publisher's promote fails, naming the swapped guard.
+      await expect(asRole(st.pool, st.publisher, (p) => promote(p, 'other')))
+        .rejects.toThrow(new RegExp(`while trigger\\(s\\) ${PUBLISH_GUARD_TRIGGER} \\(pg_temp_\\d+\\.noguard\\(\\), owned by ${holder.name}\\)`));
+      expect([await statusOf(st.pool, 'held'), await statusOf(st.pool, 'other')]).toEqual(['draft', 'draft']);
+    } finally {
+      await c.end();
+    }
+    // The swapped guard went with the session: writes the guard would have drafted now fail
+    // at the recheck (a denial of service, not a publish) until the migration is applied again.
+    await waitForTriggerGone(st, PUBLISH_GUARD_TRIGGER);
+    await expect(asRole(st.pool, st.author, (a) => insertAs(a, 'after'))).rejects.toThrow(/row after was inserted as published by/);
+    await st.pool.query(renderPublishTrigger({ publisherRole: st.publisher }));
+    expect(await asRole(st.pool, st.author, (a) => insertAs(a, 'after'))).toBe('draft');
+    expect(await asRole(st.pool, st.publisher, (p) => promote(p, 'other'))).toBe('published');
+  }, 60_000);
+
+  it('triggers run by functions of the owner, a member of the owner or a superuser leave publishing alone; any other owner blocks it', async () => {
+    const st = await setUpSite('kit_guard_owners');
+    sites.push(st);
+    const owner = (await st.db.createRole('kown')).name;
+    const admin = (await st.db.createRole('kadm')).name;
+    await st.pool.query(`
+      ALTER TABLE editorial_articles OWNER TO ${owner};
+      GRANT ${owner} TO ${admin};
+      CREATE FUNCTION site_touch() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$;
+      ALTER FUNCTION site_touch() OWNER TO ${owner};
+      CREATE FUNCTION admin_touch() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NEW; END $f$;
+      ALTER FUNCTION admin_touch() OWNER TO ${admin};
+      CREATE TRIGGER editorial_articles_aa_min_update_trg BEFORE UPDATE ON editorial_articles
+        FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger();
+      CREATE TRIGGER editorial_articles_ab_site_trg BEFORE UPDATE ON editorial_articles FOR EACH ROW EXECUTE FUNCTION site_touch();
+      CREATE TRIGGER editorial_articles_ac_admin_trg AFTER UPDATE ON editorial_articles FOR EACH ROW EXECUTE FUNCTION admin_touch();`);
+    for (const sl of ['a', 'b']) await asRole(st.pool, st.author, (c) => insertAs(c, sl));
+    expect(await asRole(st.pool, st.publisher, (p) => promote(p, 'a'))).toBe('published');
+    // A function the author owns, attached by a superuser: the author's code would run as the publisher.
+    await st.pool.query(`
+      CREATE FUNCTION author_touch() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RETURN NULL; END $f$;
+      ALTER FUNCTION author_touch() OWNER TO ${st.author};
+      CREATE TRIGGER editorial_articles_ad_author_trg AFTER UPDATE ON editorial_articles FOR EACH ROW EXECUTE FUNCTION author_touch();`);
+    await expect(asRole(st.pool, st.publisher, (p) => promote(p, 'b')))
+      .rejects.toThrow(new RegExp(`while trigger\\(s\\) editorial_articles_ad_author_trg \\(public\\.author_touch\\(\\), owned by ${st.author}\\) run a function that neither the table owner \\(${owner}\\) nor a superuser owns`));
+    expect(await statusOf(st.pool, 'b')).toBe('draft');
+    // The remedy the hint names, for a trigger of the site's own.
+    await st.pool.query(`ALTER FUNCTION author_touch() OWNER TO ${owner}`);
+    expect(await asRole(st.pool, st.publisher, (p) => promote(p, 'b'))).toBe('published');
   }, 60_000);
 
   it('both triggers are ENABLE ALWAYS: replica mode still drafts, and the install names who may SET session_replication_role', async () => {

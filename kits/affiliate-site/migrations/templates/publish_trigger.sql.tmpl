@@ -53,14 +53,19 @@
 --       triggers, but a trigger whose name sorts after it (set_*, trg_*)
 --       fires later.
 --   editorial_articles_zzz_publish_recheck_trg  AFTER INSERT OR UPDATE of a row
---       stored as '{{published_status}}': re-checks the row as written and
---       raises an error when it breaks the rules, or when a write by
---       {{publisher_role}} changed its content. A BEFORE trigger that sorts
---       AFTER the guard (set_*, trg_*, ...) can change a row the guard already
---       judged; the recheck makes that write fail instead of publishing
---       unchecked content. Name every other BEFORE trigger so it sorts before
---       editorial_articles_zzz_publish_guard_trg; installing this migration
---       warns about any that does not.
+--       stored as '{{published_status}}', a NOT DEFERRABLE constraint trigger:
+--       re-checks the row as written and raises an error when it breaks the
+--       rules, or when a write by {{publisher_role}} changed its content or
+--       ran while any trigger on the table runs a function that neither the
+--       table owner (or a member of it) nor a superuser owns. A BEFORE trigger
+--       that sorts AFTER the guard (set_*, trg_*, ...) can change a row the
+--       guard already judged; the recheck makes that write fail instead of
+--       publishing unchecked content. Name every other BEFORE trigger so it
+--       sorts before editorial_articles_zzz_publish_guard_trg; installing this
+--       migration warns about any that does not. Being a constraint trigger,
+--       the recheck cannot be swapped by CREATE OR REPLACE TRIGGER (which
+--       needs only the TRIGGER privilege); dropping, renaming or disabling it
+--       needs the table's owner.
 -- A content column is compared on every call by name, so after a content
 -- column is dropped or renamed, guarded writes to a published row fail with
 -- an error (the page-view counter's fire-and-forget UPDATE included) rather
@@ -72,10 +77,17 @@
 -- deploy/ provisioning; the install warns about the first three it can see):
 --   * no role but the table owner holds TRIGGER on editorial_articles. GRANT ALL
 --     and ALTER DEFAULT PRIVILEGES ... GRANT ALL include it, and so does
---     membership of the owner role. A role that can create a trigger can make
---     its own writes pass this guard's BEFORE trigger, and can plant code that
---     runs as whoever writes the row next, the publisher included (the recheck
---     catches the first, not the second). Grant SELECT, INSERT, UPDATE by name.
+--     membership of the owner role. A role that can create a trigger can
+--     replace the BEFORE guard (CREATE OR REPLACE TRIGGER needs only that
+--     privilege) or add one that sorts after it, and can plant code that runs
+--     as whoever writes the row next, the publisher included. The recheck
+--     still refuses its own publishing writes, and refuses every publish while
+--     a trigger runs a function that neither the owner (or a member of it) nor
+--     a superuser owns, so the plant publishes nothing; but until the trigger
+--     is gone nothing can be published, and a guard replaced by a temporary
+--     function vanishes with its session, after which writes that would have
+--     become drafts fail and the gate refuses to run (re-apply this
+--     migration's guard). Grant SELECT, INSERT, UPDATE by name.
 --   * no BEFORE trigger on editorial_articles sorts after the guard (above).
 --   * the author and app roles cannot SET session_replication_role (GRANT SET
 --     ON PARAMETER, PostgreSQL 15+, or a managed admin group that has it).
@@ -102,9 +114,12 @@
 -- If {{publisher_role}} does not exist yet, this migration warns and nothing can
 -- be published until it does (fail closed).
 --
--- IDEMPOTENT: CREATE OR REPLACE throughout, then ENABLE ALWAYS again
--- (CREATE OR REPLACE TRIGGER resets a trigger to fire on origin only).
--- PostgreSQL 14 or later.
+-- IDEMPOTENT: CREATE OR REPLACE for the functions and the guard trigger; the
+-- recheck, a constraint trigger (which takes no OR REPLACE), is dropped and
+-- created again, which takes an ACCESS EXCLUSIVE lock on editorial_articles
+-- for the rest of this transaction (lock_timeout bounds the wait). Then ENABLE
+-- ALWAYS again (CREATE OR REPLACE TRIGGER and CREATE TRIGGER leave a trigger
+-- firing on origin only). PostgreSQL 14 or later.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '15min';
 
@@ -161,7 +176,7 @@ BEGIN
      AND r.oid <> (SELECT c.relowner FROM pg_class c WHERE c.oid = 'editorial_articles'::regclass)
      AND has_table_privilege(r.oid, 'editorial_articles'::regclass, 'TRIGGER');
   IF found IS NOT NULL THEN
-    RAISE WARNING 'publish guard: role(s) % can create triggers on editorial_articles (the TRIGGER privilege: GRANT ALL includes it, and so does membership of the owner role); a trigger runs as whoever writes the row, the publisher included. Revoke it and grant SELECT, INSERT, UPDATE by name', found;
+    RAISE WARNING 'publish guard: role(s) % can create triggers on editorial_articles (the TRIGGER privilege: GRANT ALL includes it, and so does membership of the owner role); a trigger runs as whoever writes the row, the publisher included, so the recheck refuses every publish while one runs a function that neither the owner nor a superuser owns. Revoke it and grant SELECT, INSERT, UPDATE by name', found;
   END IF;
   IF current_setting('server_version_num')::int >= 150000 THEN
     EXECUTE $q$
@@ -230,8 +245,10 @@ DECLARE
   publisher       CONSTANT name   := '{{publisher_role}}';
   public_status   CONSTANT text   := '{{published_status}}';
   content_columns CONSTANT text[] := ARRAY[{{content_columns}}]::text[];
-  changed boolean := false;
-  broken  text;
+  changed     boolean := false;
+  broken      text;
+  foreign_trg text;
+  hint        text := 'Only the publish gate publishes, and only content it checked. A BEFORE trigger that fires after editorial_articles_zzz_publish_guard_trg (triggers fire in name order) changed this row after the guard judged it, or the guard trigger is disabled.';
 BEGIN
   -- The trigger's WHEN clause passes only rows stored as published.
   IF TG_OP = 'UPDATE' AND (current_user = publisher OR OLD.status = public_status) THEN
@@ -243,6 +260,28 @@ BEGIN
   IF current_user = publisher THEN
     IF changed THEN
       broken := format('changed in a write by %s that left it %s', publisher, public_status);
+    ELSE
+      -- A trigger runs as whoever writes the row: during this write, as the
+      -- publisher, so one planted by a role holding TRIGGER could publish
+      -- rows the gate never checked (nested writes pass the guard as the
+      -- publisher). Publish only while every trigger on the table runs a
+      -- function owned by the table owner (or a member of it) or a superuser.
+      SELECT string_agg(format('%s (%s, owned by %s)', t.tgname, t.tgfoid::regprocedure, pg_get_userbyid(p.proowner)),
+                        ', ' ORDER BY t.tgname::text COLLATE "C")
+        INTO foreign_trg
+        FROM pg_trigger t
+        JOIN pg_proc p ON p.oid = t.tgfoid
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_roles o ON o.oid = p.proowner
+       WHERE t.tgrelid = TG_RELID
+         AND NOT t.tgisinternal
+         AND NOT o.rolsuper
+         AND NOT pg_has_role(p.proowner, c.relowner, 'MEMBER');
+      IF foreign_trg IS NOT NULL THEN
+        broken := format('published by %s while trigger(s) %s run a function that neither the table owner (%s) nor a superuser owns',
+                         publisher, foreign_trg, (SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = TG_RELID));
+        hint := 'A trigger runs as whoever writes the row, here the publisher, so nothing is published while one of these exists. For a trigger of the site''s own, ALTER FUNCTION ... OWNER TO the table owner (after the table changed owner, the guard and recheck functions too); otherwise drop the trigger and revoke TRIGGER on editorial_articles from every role but the owner.';
+      END IF;
     END IF;
   ELSIF TG_OP = 'INSERT' THEN
     broken := format('inserted as %s by %s', public_status, current_user);
@@ -254,21 +293,27 @@ BEGIN
   IF broken IS NOT NULL THEN
     RAISE EXCEPTION 'publish guard: editorial_articles row % was %', coalesce(to_jsonb(NEW) ->> 'slug', '?'), broken
       USING ERRCODE = 'check_violation',
-            HINT = 'Only the publish gate publishes, and only content it checked. A BEFORE trigger that fires after editorial_articles_zzz_publish_guard_trg (triggers fire in name order) changed this row after the guard judged it, or the guard trigger is disabled.';
+            HINT = hint;
   END IF;
   RETURN NULL;
 END
 $fn$;
 
 COMMENT ON FUNCTION editorial_articles_publish_recheck() IS
-  'Publish guard recheck (kit template publish_trigger.sql.tmpl), AFTER INSERT OR UPDATE of a row stored as {{published_status}}: raises when a role other than {{publisher_role}} left it published against the guard''s rules, or when a write by {{publisher_role}} changed its content ({{content_columns_plain}}).';
+  'Publish guard recheck (kit template publish_trigger.sql.tmpl), a constraint trigger AFTER INSERT OR UPDATE of a row stored as {{published_status}}: raises when a role other than {{publisher_role}} left it published against the guard''s rules, when a write by {{publisher_role}} changed its content ({{content_columns_plain}}), or when {{publisher_role}} wrote it while a trigger on the table runs a function that neither the table owner nor a superuser owns.';
 
 CREATE OR REPLACE TRIGGER editorial_articles_zzz_publish_guard_trg
   BEFORE INSERT OR UPDATE ON editorial_articles
   FOR EACH ROW EXECUTE FUNCTION editorial_articles_publish_guard();
 
-CREATE OR REPLACE TRIGGER editorial_articles_zzz_publish_recheck_trg
+-- A constraint trigger, so CREATE OR REPLACE TRIGGER (TRIGGER privilege only)
+-- cannot swap it, and NOT DEFERRABLE, so SET CONSTRAINTS cannot postpone it.
+-- Constraint triggers take no OR REPLACE: drop it and create it again.
+DROP TRIGGER IF EXISTS editorial_articles_zzz_publish_recheck_trg ON editorial_articles;
+
+CREATE CONSTRAINT TRIGGER editorial_articles_zzz_publish_recheck_trg
   AFTER INSERT OR UPDATE ON editorial_articles
+  NOT DEFERRABLE
   FOR EACH ROW
   WHEN (NEW.status = '{{published_status}}')
   EXECUTE FUNCTION editorial_articles_publish_recheck();

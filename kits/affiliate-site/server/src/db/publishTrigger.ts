@@ -13,12 +13,18 @@
  * Two triggers, both ENABLE ALWAYS so replica mode cannot skip them: the BEFORE
  * guard applies those rules, and an AFTER recheck raises when the row as
  * written breaks them anyway (a BEFORE trigger that sorts after the guard
- * changed it, such as one a role holding the TRIGGER privilege created to
- * publish its own writes), or when a write by the publisher changed published
- * content. Code a TRIGGER holder plants to run as the publisher is beyond any
- * trigger: the role contract (template header) forbids the privilege. The
- * template's header states the rules and the role requirements in full;
- * installing it warns about later-sorting BEFORE triggers, TRIGGER holders and
+ * changed it, such as one a role holding the TRIGGER privilege created, or
+ * swapped in for the guard, to publish its own writes), when a write by the
+ * publisher changed published content, and when the publisher writes while any
+ * trigger on the table runs a function that neither the table owner (or a
+ * member of it) nor a superuser owns: code a TRIGGER holder plants runs as the
+ * publisher during that write, so nothing is published until it is gone. The
+ * recheck is a NOT DEFERRABLE constraint trigger, which CREATE OR REPLACE
+ * TRIGGER (all the TRIGGER privilege allows) cannot swap; the role contract
+ * (template header) still forbids the privilege, which can replace the guard
+ * and so stop every write the guard would have drafted. The template's header
+ * states the rules and the role requirements in full; installing it warns
+ * about later-sorting BEFORE triggers, TRIGGER holders and
  * session_replication_role setters.
  *
  * The template's placeholders are a contract: framework/tests/
