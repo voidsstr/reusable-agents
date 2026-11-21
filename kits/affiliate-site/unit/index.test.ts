@@ -184,16 +184,23 @@ function clientSources(dir = path.join(KIT, 'client', 'src'), out: string[] = []
 
 describe('browser code (client/src)', () => {
   const files = clientSources();
+  const CLIENT_DIR = path.join(KIT, 'client', 'src') + path.sep;
+  /**
+   * The server files the bundle compiles in: the only imports outside
+   * client/src that unit/http/hygiene.test.ts allows it. links.ts's type-only
+   * import reaches siteContext.ts and aiCrawlerVerify.ts, which the bundle
+   * drops.
+   */
+  const BUNDLED_SERVER_FILES = new Set(['server/src/links.ts', 'server/src/http/clientContract.ts'].map((f) => path.join(KIT, f)));
+  const NODE_TYPINGS_RE = /[\\/]node_modules[\\/]@types[\\/]node[\\/]/;
 
-  // tsconfig.json type-checks client/src with Node's typings (the unit tests
-  // need them), so `process.env`, `Buffer` or `require` would pass there and
-  // then throw in the esbuild browser bundle. This re-checks client/src with
-  // DOM typings only. Client files import shared constants from server/src,
-  // whose type-only imports reach Node-typed modules (fs, net): those files
-  // report errors in this program by design, so only diagnostics located in
-  // client/src count. (TypeScript's `types` cannot be scoped per file, which
-  // is why this is a test rather than a tsconfig of its own.)
-  (files.length ? it : it.skip)('type-checks with DOM typings only (no Node globals)', () => {
+  /**
+   * client/src as the browser bundle sees it: DOM typings, the standard
+   * library of the bundle's ES2018 target (scripts/build-client.mjs), no
+   * @types. `overrides` replaces file texts (absolute path -> text), so the
+   * tests below can show what the check catches.
+   */
+  function browserProgram(overrides: Readonly<Record<string, string>> = {}): ts.Program {
     const parsed = ts.getParsedCommandLineOfConfigFile(path.join(KIT, 'tsconfig.json'), {}, {
       ...ts.sys,
       onUnRecoverableConfigFileDiagnostic: (d) => { throw new Error(ts.flattenDiagnosticMessageText(d.messageText, '\n')); },
@@ -202,17 +209,78 @@ describe('browser code (client/src)', () => {
     const options: ts.CompilerOptions = {
       ...parsed.options,
       types: [],
-      lib: ['lib.es2022.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'],
+      lib: ['lib.es2018.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'],
       noEmit: true,
     };
-    const program = ts.createProgram(files, options);
-    const clientDir = path.join(KIT, 'client', 'src') + path.sep;
-    const inClient = ts.getPreEmitDiagnostics(program)
-      .filter((d) => d.file && path.resolve(d.file.fileName).startsWith(clientDir))
+    const host = ts.createCompilerHost(options, true);
+    const readFile = host.readFile.bind(host);
+    host.readFile = (f) => overrides[path.resolve(f)] ?? readFile(f);
+    return ts.createProgram({ rootNames: files, options, host });
+  }
+
+  /**
+   * What would break in the bundle: any file of Node's typings in the
+   * program (they declare process, Buffer and require for every file), and
+   * every error located in client/src, in a bundled server file, or in no
+   * file at all. siteContext.ts and aiCrawlerVerify.ts use Node modules (fs,
+   * net), so their errors here are expected and do not count.
+   */
+  function browserIssues(program: ts.Program): { nodeTypings: string[]; errors: string[] } {
+    const nodeTypings = program.getSourceFiles().map((sf) => sf.fileName).filter((f) => NODE_TYPINGS_RE.test(f));
+    const errors = ts.getPreEmitDiagnostics(program)
+      .filter((d) => {
+        if (!d.file) return true;
+        const f = path.resolve(d.file.fileName);
+        return f.startsWith(CLIENT_DIR) || BUNDLED_SERVER_FILES.has(f);
+      })
       .map((d) => {
-        const { line, character } = (d.file as ts.SourceFile).getLineAndCharacterOfPosition(d.start ?? 0);
-        return `${path.relative(KIT, (d.file as ts.SourceFile).fileName)}(${line + 1},${character + 1}): ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`;
+        const text = ts.flattenDiagnosticMessageText(d.messageText, ' ');
+        if (!d.file) return text;
+        const { line, character } = d.file.getLineAndCharacterOfPosition(d.start ?? 0);
+        return `${path.relative(KIT, d.file.fileName)}(${line + 1},${character + 1}): ${text}`;
       });
-    expect(inClient).toEqual([]);
+    return { nodeTypings, errors };
+  }
+
+  // tsconfig.json type-checks client/src with Node's typings (the unit tests
+  // need them), so `process.env`, `Buffer` or `require` would pass there and
+  // then throw in the esbuild browser bundle (or, in a fallback path a real
+  // browser rarely takes, be swallowed). This re-checks what the bundle
+  // compiles, client/src plus links.ts and clientContract.ts, with DOM
+  // typings only. Node's typings must not reach the program at all: one type
+  // import from express or pg in any module links.ts reaches would bring
+  // Node's globals back for every file, silently. (TypeScript's `types`
+  // cannot be scoped per file, and links.ts's type import reaches Node-typed
+  // modules, so this is a test rather than a tsconfig of its own.)
+  (files.length ? it : it.skip)('type-checks with DOM typings only (no Node globals)', () => {
+    expect(browserIssues(browserProgram())).toEqual({ nodeTypings: [], errors: [] });
+  }, 60_000);
+
+  (files.length ? it : it.skip)('sees Node globals in the server files the bundle compiles in', () => {
+    const contract = path.join(KIT, 'server', 'src', 'http', 'clientContract.ts');
+    const links = path.join(KIT, 'server', 'src', 'links.ts');
+    const { nodeTypings, errors } = browserIssues(browserProgram({
+      [contract]: `${fs.readFileSync(contract, 'utf8')}\nexport const PROBE_GLOBAL = typeof global;\n`,
+      [links]: `${fs.readFileSync(links, 'utf8')}\nexport const PROBE_ENV = process.env.PROBE;\n`,
+    }));
+    expect(nodeTypings).toEqual([]);
+    expect(errors).toHaveLength(2);
+    expect(errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^server\/src\/http\/clientContract\.ts\(\d+,\d+\): Cannot find name 'global'/),
+      expect.stringMatching(/^server\/src\/links\.ts\(\d+,\d+\): Cannot find name 'process'/),
+    ]));
+  }, 60_000);
+
+  (files.length ? it : it.skip)('sees Node typings that a type-only import brings into the program', () => {
+    // An ordinary edit: a type from express in a module links.ts reaches. It
+    // silences every Node-global error, so only the typings check notices.
+    const verify = path.join(KIT, 'server', 'src', 'aiCrawlerVerify.ts');
+    const beacon = path.join(KIT, 'client', 'src', 'clickBeacon.ts');
+    const { nodeTypings, errors } = browserIssues(browserProgram({
+      [verify]: `import type { Request } from 'express';\nexport type ProbeRequest = Request;\n${fs.readFileSync(verify, 'utf8')}`,
+      [beacon]: `${fs.readFileSync(beacon, 'utf8')}\nexport const probeLater = (f: () => void): unknown => setImmediate(f);\n`,
+    }));
+    expect(errors).toEqual([]);
+    expect(nodeTypings.length).toBeGreaterThan(0);
   }, 60_000);
 });

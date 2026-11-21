@@ -144,11 +144,21 @@ describe('clientIp behind a proxying CDN (one trusted hop)', () => {
     expect(clientIp([CHATGPT_IP, CF_EDGE], null, cf)).toBe(CHATGPT_IP);
   });
 
-  it('a request that bypasses the CDN is judged by the address the platform saw, whatever it claims', () => {
+  it('a non-Cloudflare client that bypasses the CDN is judged by the address the platform saw, whatever it claims', () => {
     // Direct to the origin with a forged chain (and, say, a forged CF-Connecting-IP, which is never read).
     expect(clientIp(`${CHATGPT_IP}, ${CF_EDGE}, ${HOME}`, '10.0.0.1', cf)).toBe(HOME);
     expect(clientIp(`${CHATGPT_IP}, ${HOME}`, '10.0.0.1', cf)).toBe(HOME);
     expect(clientIp(HOME, '10.0.0.1', cf)).toBe(HOME);
+  });
+
+  it('a Worker that reaches an unlocked origin directly looks exactly like the CDN (why edge.cdn needs a locked origin)', () => {
+    // The Worker connects to the origin itself, from a Cloudflare address, with
+    // whatever X-Forwarded-For it wrote; the platform appends the Worker's
+    // address. That is the shape of a genuine proxied request (the first
+    // test), so the answer is the Worker's choice. Only an origin that accepts
+    // its own zone alone stops this (README, "Client address behind a CDN").
+    expect(clientIp(`${CHATGPT_IP}, ${CF_WORKER}`, '10.0.0.1', cf)).toBe(CHATGPT_IP);
+    expect(clientIp(`${CHATGPT_IP}, ${CF_EDGE}`, '10.0.0.1', cf)).toBe(CHATGPT_IP);
   });
 
   it('skips exactly one hop: a cross-zone Cloudflare Worker cannot choose its own address', () => {
@@ -247,6 +257,15 @@ describe('cidrPolicyIssue (static crawler ranges and trusted proxies)', () => {
     // A /12 that holds 169.254.0.0/16: the overlap check looks both ways.
     ['169.240.0.0/12', 'proxy', /non-public address space 169\.254\.0\.0\/16/],
     ['172.16.0.0/12', 'proxy', /non-public/],
+    // IPv4 written as IPv4-mapped IPv6: Node's BlockList matches IPv4 addresses
+    // against it, so it would skip the IPv4 floor and the non-public blocks.
+    ['::ffff:0:0/96', 'static', /^overlaps IPv4-mapped IPv6 space ::ffff:0:0\/96; write it as an IPv4 range$/],
+    ['::ffff:0:0/96', 'proxy', /IPv4-mapped/],
+    ['::ffff:a00:0/104', 'proxy', /IPv4-mapped/], // 10.0.0.0/8
+    ['::ffff:a04f:6800/117', 'static', /IPv4-mapped/], // Anthropic's 160.79.104.0/21
+    ['::FFFF:A04F:6800/117', 'static', /IPv4-mapped/],
+    ['0:0:0:0:0:ffff:a04f:6800/128', 'static', /IPv4-mapped/],
+    ['::8000:0:0/81', 'static', /IPv4-mapped/], // holds ::ffff:0:0/96
   ])('%s as a %s range', (cidr, kind, want) => {
     const issue = cidrPolicyIssue(cidr, kind === 'static' ? MIN_STATIC_RANGE_PREFIX : MIN_TRUSTED_PROXY_PREFIX);
     if (want) expect(issue).toMatch(want);
@@ -375,6 +394,13 @@ describe('static ranges (kit default: Anthropic outbound)', () => {
     expect(() => new AiCrawlerVerifier({ staticRanges: [range(['0.0.0.0/0'])] })).toThrow(/static range all: 0\.0\.0\.0\/0 is broader than \/16/);
     expect(() => new AiCrawlerVerifier({ staticRanges: [range(['10.1.0.0/16'])] })).toThrow(/non-public/);
     expect(() => new AiCrawlerVerifier({ staticRanges: [range(['::/0'])] })).toThrow(/broader than \/32/);
+  });
+
+  it('refuses a static range written as IPv4-mapped IPv6 (it would verify every IPv4 address)', () => {
+    const mapped = { id: 'm', sources: ['gptbot'], cidrs: ['::ffff:0:0/96'], evidenceUrl: 'https://example.com/x' };
+    expect(() => new AiCrawlerVerifier({ staticRanges: [mapped] })).toThrow(/static range m: ::ffff:0:0\/96 overlaps IPv4-mapped/);
+    // What it would have done: BlockList puts every IPv4 address inside it.
+    expect(trustedProxyMatcher(['::ffff:0:0/96']).has(HOME)).toBe(true);
   });
 });
 

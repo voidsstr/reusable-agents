@@ -387,9 +387,21 @@ const NON_PUBLIC_BLOCKS: ReadonlyArray<{ readonly net: string; readonly bits: nu
 });
 
 /**
+ * IPv4-mapped IPv6 space. Node's BlockList matches IPv4 addresses against an
+ * IPv6 subnet that overlaps it, so '::ffff:0:0/96' written as a range would be
+ * all of IPv4 and '::ffff:a00:0/104' would be 10.0.0.0/8, past both the IPv4
+ * prefix floor and the non-public blocks. No other IPv6 block aliases IPv4 in
+ * BlockList (NAT64, 6to4 and IPv4-compatible addresses do not).
+ */
+const IPV4_MAPPED_NET = '::ffff:0:0';
+const IPV4_MAPPED = new BlockList();
+IPV4_MAPPED.addSubnet(IPV4_MAPPED_NET, 96, 'ipv6');
+
+/**
  * Why `spec` cannot be an allowlist range (a static crawler range or a
  * trusted proxy), or null when it can: it must be a valid CIDR, no broader
- * than `minPrefix` for its family, and must not overlap non-public space.
+ * than `minPrefix` for its family, must not overlap non-public space, and an
+ * IPv6 range must not overlap IPv4-mapped space (IPv4 is written as IPv4).
  */
 export function cidrPolicyIssue(spec: string, minPrefix: Readonly<Record<IpFamily, number>>): string | null {
   const c = parseCidr(spec);
@@ -402,6 +414,9 @@ export function cidrPolicyIssue(spec: string, minPrefix: Readonly<Record<IpFamil
     if (b.family !== c.family) continue;
     // CIDR blocks are nested or disjoint: they overlap iff one holds the other's network address.
     if (b.list.check(c.ip, c.family) || mine.check(b.net, b.family)) return `overlaps non-public address space ${b.net}/${b.bits}`;
+  }
+  if (c.family === 'ipv6' && (IPV4_MAPPED.check(c.ip, 'ipv6') || mine.check(IPV4_MAPPED_NET, 'ipv6'))) {
+    return `overlaps IPv4-mapped IPv6 space ${IPV4_MAPPED_NET}/96; write it as an IPv4 range`;
   }
   return null;
 }

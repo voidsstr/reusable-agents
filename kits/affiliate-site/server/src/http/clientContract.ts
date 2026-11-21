@@ -4,9 +4,11 @@
  *
  * The browser bundle imports this file (and, for the link vocabulary it
  * shares with the server, links.ts), so it must stay pure: no imports, no
- * Node APIs, no DOM, no side effects. unit/http/clientBuild.test.ts builds
- * the bundle for the browser platform and fails if anything Node-only slips
- * in.
+ * Node APIs, no DOM, no side effects. unit/index.test.ts type-checks this
+ * file, links.ts and client/src with DOM typings only and fails on any Node
+ * global or Node typing; unit/http/hygiene.test.ts keeps this file free of
+ * imports; unit/http/clientBuild.test.ts builds the bundle for the browser
+ * platform and scans it for the commonest Node-only names.
  */
 
 /** Where the click beacon POSTs (navigator.sendBeacon, text/plain JSON). */

@@ -370,6 +370,15 @@ describe('cross-field rules', () => {
       ]);
   });
 
+  it('a trusted proxy or static range may not be IPv4 written as IPv4-mapped IPv6 (all of IPv4 would match it)', () => {
+    expect(issuesOf((j) => { j.edge.extraTrustedProxies = ['::ffff:0:0/96']; }))
+      .toEqual(["/edge/extraTrustedProxies/0 '::ffff:0:0/96' overlaps IPv4-mapped IPv6 space ::ffff:0:0/96; write it as an IPv4 range"]);
+    const r = { id: 'mapped', sources: ['gptbot'], cidrs: ['::ffff:0:0/96'], evidenceUrl: 'https://example.com/x' };
+    expect(issuesOf((j) => { j.aiCrawlers.extraStaticRanges = [r]; }))
+      .toEqual(["/aiCrawlers/extraStaticRanges/0/cidrs '::ffff:0:0/96' overlaps IPv4-mapped IPv6 space ::ffff:0:0/96; write it as an IPv4 range"]);
+    expect(() => parseWith((j) => { j.edge = { cdn: 'cloudflare', extraTrustedProxies: ['::ffff:a00:0/104'] }; })).toThrow(SiteContextError);
+  });
+
   it('caching may not eat the price window', () => {
     const issues = issuesOf((j) => {
       j.prices.freshnessHours = 1;

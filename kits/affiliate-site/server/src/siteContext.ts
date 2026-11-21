@@ -499,7 +499,7 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
         },
         "cidrs": {
           "type": "array",
-          "description": "Public address space only, no broader than /16 (IPv4) or /32 (IPv6): a range here verifies before the vendor lists do.",
+          "description": "Public address space only, no broader than /16 (IPv4) or /32 (IPv6), IPv4 ranges written as IPv4 (IPv4-mapped IPv6 is refused): a range here verifies before the vendor lists do.",
           "items": { "$ref": "#/$defs/cidr" },
           "minItems": 1,
           "maxItems": 100,
@@ -511,7 +511,7 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
     "edge": {
       "type": "object",
       "additionalProperties": false,
-      "description": "What sits in front of the app. The kit reads the visitor's address from X-Forwarded-For; behind a proxying CDN the right-most public hop is the CDN's edge, so name the CDN here and the kit skips exactly one hop inside its published ranges (siteClientIp). Default: none, the container app is the first hop.",
+      "description": "What sits in front of the app. The kit reads the visitor's address from X-Forwarded-For; behind a proxying CDN the right-most public hop is the CDN's edge, so name the CDN here and the kit skips exactly one hop inside its published ranges (siteClientIp). Default: none, the container app is the first hop. Set cdn or extraTrustedProxies only once the origin accepts requests from your own zone alone (Authenticated Origin Pulls with your own certificate, Cloudflare Tunnel, or a secret header your zone adds and the origin checks; allowing the CDN's IP ranges is not enough): a Worker or another customer of the proxy that reaches the origin directly arrives from those same ranges and chooses the logged address. The kit ships no origin check; see its README, Client address behind a CDN.",
       "properties": {
         "cdn": {
           "type": "string",
@@ -521,7 +521,7 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
         },
         "extraTrustedProxies": {
           "type": "array",
-          "description": "Further proxy ranges in front of the app, treated like the CDN's edge (still one hop). Public address space only, no broader than /12 (IPv4) or /24 (IPv6).",
+          "description": "Further proxy ranges in front of the app, treated like the CDN's edge (still one hop). Public address space only, no broader than /12 (IPv4) or /24 (IPv6); IPv4 ranges are written as IPv4 (IPv4-mapped IPv6 is refused).",
           "items": { "$ref": "#/$defs/cidr" },
           "uniqueItems": true,
           "maxItems": 50,

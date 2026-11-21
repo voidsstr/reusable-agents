@@ -156,8 +156,8 @@ Schema: `schema/site.schema.json` (JSON Schema 2020-12). Example:
 | `byline` | the editorial byline (no invented people) |
 | `theme` | light and dark palettes; every text pair must pass WCAG AA (4.5:1) on both `bg` and `surface` (cards), accents and focus rings 3:1 |
 | `crawlers` | robots policy per class (default: search allow, agent allow, training block), the user-agent tokens per class, disallowed paths. Amazon's Amzn-SearchBot is a search default and Amzn-User an agent default; Amazonbot ("may be used to train Amazon AI models") is a training default, so it is blocked unless a site lists its own tokens |
-| `aiCrawlers` | extra static vendor IP ranges (Anthropic's are kit defaults); public space only, no broader than /16 (IPv4) or /32 (IPv6) |
-| `edge` | `cdn`: `none` (default) or `cloudflare`; `extraTrustedProxies`. Behind a proxying CDN the kit skips exactly one X-Forwarded-For hop inside the CDN's published ranges to find the visitor (`siteClientIp`) |
+| `aiCrawlers` | extra static vendor IP ranges (Anthropic's are kit defaults); public space only, no broader than /16 (IPv4) or /32 (IPv6); IPv4 ranges written as IPv4 (IPv4-mapped IPv6 is refused) |
+| `edge` | `cdn`: `none` (default) or `cloudflare`; `extraTrustedProxies` (public, no broader than /12 or /24, IPv4 written as IPv4). Behind a proxying CDN the kit skips exactly one X-Forwarded-For hop inside the CDN's published ranges to find the visitor (`siteClientIp`). Set it only once the origin answers your own zone alone (see "Client address behind a CDN") |
 | `indexNow` | the public IndexNow key |
 | `cache` | `htmlSMaxAgeSeconds` (at most 600), browser `htmlMaxAgeSeconds`, in-process `ssrCacheSeconds` |
 | `prices` | `freshnessHours` (at most 24) |
@@ -189,7 +189,8 @@ or `www.` of it; source rules name each kind once, claim each exact path once
 and never use a reserved kind (`home`, `direct`, `other`); every `sourceTags`
 kind has a rule; the disclosure states the Operating Agreement section 5
 sentence; every theme pair passes its contrast ratio; static crawler and
-trusted-proxy ranges are public and narrow enough; and the price window left
+trusted-proxy ranges are public, narrow enough and (for IPv4) written as IPv4,
+not IPv4-mapped IPv6; and the price window left
 after the cache layers is at least an hour. The scaffold runs the same loader
 on a new site's `site.json` (`_template/affiliate-site/scaffold/validate_site_json.cjs`).
 
@@ -205,6 +206,30 @@ ranges (a cross-zone Worker arrives as `2a06:98c0:3600::103`), so skipping
 every trusted entry would let a Worker's author choose the logged address.
 `CF-Connecting-IP` is never read. Cloudflare's ranges are kit data
 (`CDN_EDGE_RANGES`, checked against cloudflare.com/ips on 2026-11-17).
+
+**Precondition: lock the origin to your own zone before setting `edge.cdn`.**
+A Worker that connects to the origin directly, instead of through your zone,
+also arrives from a Cloudflare address, and for such a subrequest the Worker
+controls the client IP headers. The kit cannot tell that request from a real
+proxied one, so it returns whatever address the Worker wrote to the left of
+its own: that address lands in `ai_traffic_log` and the click rows, and
+`botDetect`'s datacenter rule and the per-IP views of `kit_0004` read it.
+So set `edge.cdn` (or `extraTrustedProxies`, for any proxy service shared by
+many customers) only when the origin accepts requests from your own zone
+alone:
+
+- Authenticated Origin Pulls with **your own** certificate (zone-level or
+  per-hostname), or Cloudflare Tunnel. The global AOP certificate is shared by
+  every Cloudflare account, so it proves only that a request came through
+  Cloudflare, not through your zone.
+- Or a secret header that a Transform Rule in your zone adds and the origin
+  checks.
+
+Allowing only Cloudflare's IP ranges at the origin is not enough: Workers
+egress from those same ranges. The kit ships no origin-side check (no
+secret-header middleware, no client-certificate validation), so the lock is
+the deployment's to build and verify. The kit's deploy scripts create DNS-only
+records (`deploy/README.md`), where `edge.cdn` stays `none`.
 
 ## Amazon compliance built in
 

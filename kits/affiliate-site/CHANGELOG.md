@@ -56,9 +56,15 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   `ctx.edge.trustedProxyCidrs`; `CDN_EDGE_RANGES` (Cloudflare's published
   ranges, checked 2026-11-17); `clientIp(xff, remote, trusted)` skips exactly
   one trusted CDN hop; `siteClientIp`, `edgeProxyMatcher`,
-  `trustedProxyMatcher`.
+  `trustedProxyMatcher`. Set `edge` only once the origin accepts its own zone
+  alone (Authenticated Origin Pulls with the site's own certificate,
+  Cloudflare Tunnel, or a secret header the zone adds): a Worker that reaches
+  an unlocked origin directly chooses the logged address (README, "Client
+  address behind a CDN"). The kit ships no origin-side check.
 - `cidrPolicyIssue` with `MIN_STATIC_RANGE_PREFIX` (/16, /32) and
-  `MIN_TRUSTED_PROXY_PREFIX` (/12, /24); non-public space is refused.
+  `MIN_TRUSTED_PROXY_PREFIX` (/12, /24); non-public space is refused, and so
+  is any IPv6 range overlapping IPv4-mapped space (`::ffff:0:0/96`), which
+  Node's BlockList matches IPv4 addresses against: IPv4 is written as IPv4.
 - `ownTrackingId` (links) and `parsePriceAmount` (offer).
 - Amazon's Amzn-SearchBot and Amzn-User: classified by `classifyAiTraffic`,
   and robots defaults for search and agent respectively.
@@ -67,8 +73,10 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   `KIT_DRIFT_STRICT=1`. Covers 81 declarations, including the bots.json URL
   and the refresh and fetch timeouts.
 - `unit/index.test.ts`: the no-site-names guard walks every file the kit
-  ships (comments removed per language), and `client/src` is re-checked with
-  DOM typings only, so browser code cannot lean on Node globals.
+  ships (comments removed per language), and the browser bundle's sources
+  (`client/src` plus the `links.ts` and `clientContract.ts` it compiles in)
+  are re-checked with DOM typings and the ES2018 library only, failing on any
+  Node typing in that program, so browser code cannot lean on Node globals.
 
 #### HTTP middleware and browser bundle (K2)
 
@@ -255,8 +263,8 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
 - Amounts are parsed strictly in `quotablePrice`, `honestListPrice`,
   `priceLabel` and `priceHtml`: `parseFloat` read `'1,299.00'` as 1.
 - `clientIp` can skip one trusted CDN hop (SpecPicks has no CDN in front).
-- Static crawler ranges broader than /16 (IPv4) or /32 (IPv6), or in
-  non-public space, are refused.
+- Static crawler ranges broader than /16 (IPv4) or /32 (IPv6), in
+  non-public space, or written as IPv4-mapped IPv6, are refused.
 - Placement tags take precedence over an allowlisted segment `?tag=`.
 - `PRICE_FRESH_HOURS` below the one-hour minimum that `site.json` must keep is
   honoured, not fatal.
