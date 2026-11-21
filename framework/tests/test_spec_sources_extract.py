@@ -9,7 +9,9 @@ vacuum page from another niche runs through the same code with a different
 profile."""
 from __future__ import annotations
 
+import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -365,3 +367,104 @@ def test_input_ceiling_conflicts_go_to_a_human(power):
     assert c.conflict_id not in [x.conflict_id for x in q.plan(max_items=50)]
     model = ss.Decision(c.conflict_id, "jackery-explorer-1000-v2", "pv_voc_max", 0, "x", decided_by="opus")
     assert power.consolidate("jackery-explorer-1000-v2", cands, decisions=[model]).fields["pv_voc_max"].status == "conflict"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: dot-grouped thousands ('2.400 W' on EU-formatted pages)
+# leave a field missing, never wrong
+# ---------------------------------------------------------------------------
+
+GUARD = "(?<![\\d.,])"     # the profile's own guard in front of a label-free value group
+
+
+def _eu(s: str) -> str:
+    """The page as an EU-formatted English page writes it, with dot-grouped
+    thousands: '3,500' -> '3.500', '2400W' -> '2.400W'."""
+    s = re.sub(r"(?<![\d.,])(\d{1,3}),(\d{3})(?![\d,])", r"\1.\2", s)
+    return re.sub(r"(?<![\d.,])(\d)(\d{3})(?=\s?(?:W|Wh|mAh)\b)", r"\1.\2", s)
+
+
+def _without_guards(profile: dict) -> dict:
+    p = copy.deepcopy(profile)
+    stripped = 0
+    for exs in p["extractor_sets"].values():
+        for ex in exs:
+            for fopt in ex["fields"].values():
+                if isinstance(fopt.get("patterns"), list):
+                    stripped += sum(GUARD in x for x in fopt["patterns"])
+                    fopt["patterns"] = [x.replace(GUARD, "") for x in fopt["patterns"]]
+    assert stripped >= 4
+    return p
+
+
+@pytest.mark.parametrize("guarded", [True, False], ids=["profile-guards", "engine-only"])
+def test_eu_formatted_page_leaves_fields_missing_not_wrong(guarded):
+    # The real FOSSiBOT page with its figures dot-grouped: '2.400W AC ... (4.800W Surge)',
+    # '4.000+ Life Cycles', '3.500+ Cycles'. A value group that starts inside a number
+    # read 400 W, 800 W and 500 cycles, all in range and from one source.
+    profiles = dict(PROFILES)
+    if not guarded:          # a profile that forgets the guard: the engine holds on its own
+        profiles["home-power"] = _without_guards(PROFILES["home-power"])
+    engine = ss.SpecSources(ss.resolve_config(file_cfg={"profiles": profiles}, site_cfg={"profile": "home-power"}))
+    s = SOURCES["fossibot-product-page"]
+    html = (FX / s["file"]).read_text()
+    four = ("capacity_wh", "ac_cont_w", "ac_surge_w", "cycle_life")
+
+    def extract(page):
+        doc = ss.document_from_html(page, url=s["url"], kind=s["kind"], fetched_at=s["fetched_on"])
+        res = engine.extract(doc, brand="fossibot")
+        assert res.errors == []
+        return engine.consolidate("fossibot-f2400", res.candidates), res.candidates
+
+    spec, _ = extract(html)
+    assert [spec.values()[f] for f in four] == [2048.0, 2400.0, 4800.0, 3500]
+    spec, cands = extract(_eu(html))
+    v = spec.values()
+    assert [v.get(f) for f in four] == [None] * 4
+    # only whole figures, read as written ('2.400W' = 2.4 W) and rejected by the range check
+    assert sorted((c.field, c.value_num) for c in cands if c.field in four) == [
+        ("ac_surge_w", 4.8), ("capacity_wh", 2.048), ("capacity_wh", 2.048), ("cycle_life", 3.5)]
+    assert v["pv_w_max"] == 500.0 and spec.conflicts == []
+
+
+ACME = {"acme": {"inherit_defaults": False, "extractors": [
+    {"name": "prose", "kind": "regex", "fields": {
+        "ac_cont_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)\\s+AC\\b"]},
+        "ac_surge_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)[^\\n]{0,40}surge"]},
+        "cycle_life": {"patterns": ["\\d[\\d,]*(?=\\+?\\s*cycles\\b)"]},       # no group: the match is the value
+        "pv_v_min": {"patterns": ["(?P<lo>\\d+)\\s*-\\s*(?P<hi>\\d+)\\s*V\\b"], "pick": "range_lo", "unit": "V"}}},
+    {"name": "table", "kind": "pairs", "fields": {
+        "pv_w_max": {"labels": ["^solar input$"], "value_regex": "(?P<value>\\d[\\d,]*\\s*W)\\s*max"}}}]}}
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Nennleistung 2.200 W AC-Ausgang", {}),                                   # not 200 W
+    ("Nennleistung 2.200 W AC-Ausgang\nRated output: 2,200 W AC", {"ac_cont_w": [2200.0]}),
+    ("2.400 W AC output (4800W surge)", {"ac_surge_w": [4800.0]}),            # not 400 W: the next match
+    ("Rated for 3.500+ cycles", {}),                                           # not 500
+    ("Solar range 11.5-60V", {}),                                              # not 5 V
+    ("Solar Input: 1.200W Max", {}),                                           # not 200 W (value_regex)
+    ("Rated output: 2,200 W AC\nPeak: 4,400 W surge\nRated for 3,500+ cycles\nSolar range 12-60V\n"
+     "Solar Input: 1,200W Max",
+     {"ac_cont_w": [2200.0], "ac_surge_w": [4400.0], "cycle_life": [3500.0], "pv_v_min": [12.0],
+      "pv_w_max": [1200.0]}),
+])
+def test_config_regexes_never_read_a_value_from_inside_a_longer_number(text, expected):
+    engine = ss.SpecSources(cfg("home-power", brands=ACME))
+    assert engine.problems == []
+    doc = ss.document_from_text(text, url="https://www.acme.example/manuals/x2200.txt", kind="manual-pdf")
+    res = engine.extract(doc, brand="acme")
+    assert res.errors == []
+    got: dict = {}
+    for c in res.candidates:
+        got.setdefault(c.field, []).append(c.value_num)
+    assert got == expected
+
+
+def test_a_pick_max_row_with_an_ambiguous_dot_group_gives_no_value(power):
+    # 500 W, or 1.000 W = 1000 W? pick:max cannot tell, so pv_w_max stays missing
+    html = ("<html><body><main><h2>Specifications</h2><table><tr><td>Solar Input</td>"
+            "<td>12-60V⎓15A, 500W Max (single port); 1.000W Max (dual ports)</td></tr></table></main></body></html>")
+    doc = ss.document_from_html(html, url="https://www.jackery.com/products/x", kind="manufacturer-page")
+    got = {c.field: c.value_num for c in power.extract(doc, brand="jackery").candidates}
+    assert got == {"pv_v_min": 12.0, "pv_voc_max": 60.0, "pv_a_max": 15.0}

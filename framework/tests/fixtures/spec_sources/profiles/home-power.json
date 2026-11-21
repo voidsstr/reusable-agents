@@ -1,5 +1,5 @@
 {
-  "_comment": "Test profile for framework.core.spec_sources: portable power stations. Niche VALUES only (fields, rules, label/regex extractors, brands); the module has no knowledge of this niche. A deployment would place this object under profiles.<name> in the storage config config/spec-sources-config.json and select it with by_site.<site>.profile. Label regexes are matched against the lower-cased label; value regexes against the normalised (NFKC) value text. The solar input ceilings (pv_voc_max, pv_w_max, pv_a_max) feed conservative compatibility verdicts, so their conflicts are settled by an operator (adjudicate: human), never by a model picking the less conservative number.",
+  "_comment": "Test profile for framework.core.spec_sources: portable power stations. Niche VALUES only (fields, rules, label/regex extractors, brands); the module has no knowledge of this niche. A deployment would place this object under profiles.<name> in the storage config config/spec-sources-config.json and select it with by_site.<site>.profile. Label regexes are matched against the lower-cased label; value regexes against the normalised (NFKC) value text. A label-free value pattern starts with (?<![\\d.,]) so it never begins inside a longer number ('400 W' out of the dot-grouped '2.400 W'); the module skips such matches too, so this is a second line, not the only one. The solar input ceilings (pv_voc_max, pv_w_max, pv_a_max) feed conservative compatibility verdicts, so their conflicts are settled by an operator (adjudicate: human), never by a model picking the less conservative number.",
   "fields": {
     "model_number": {"kind": "text", "normalize": "alnum", "description": "Manufacturer model number of this exact variant", "hints": ["model"]},
     "capacity_wh": {"kind": "quantity", "unit": "Wh", "min": 50, "max": 60000, "rel_tol": 0.01, "required": true,
@@ -81,10 +81,10 @@
         "ups_supported": {"constant": "true",
                           "patterns": ["(?<![\\d.])[1-9]\\d*(?:\\.\\d+)?\\s*(?:ms|milliseconds?)\\b[^\\n]{0,60}\\bUPS\\b",
                                        "\\bUPS\\b[\\s\\S]{0,400}?\\bwithin\\s+(?:about\\s+)?[1-9]\\d*(?:\\.\\d+)?\\s*(?:ms|milliseconds?)\\b"]},
-        "ac_cont_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)\\s+AC\\b(?!\\s*(?:input|charg))", "\\brated\\s+(?P<value>\\d[\\d,]*\\s*W)\\b"]},
-        "ac_surge_w": {"patterns": ["(?P<value>\\d[\\d,]*\\s*W)\\s*surge"]},
-        "capacity_wh": {"patterns": ["(?P<value>\\d[\\d,.]*\\s*Wh)\\s+capacity"]},
-        "cycle_life": {"patterns": ["(?P<value>\\d[\\d,]*)\\+?\\s*(?:life\\s+|complete\\s+charge\\s+)?cycles\\b"]},
+        "ac_cont_w": {"patterns": ["(?<![\\d.,])(?P<value>\\d[\\d,]*\\s*W)\\s+AC\\b(?!\\s*(?:input|charg))", "\\brated\\s+(?P<value>\\d[\\d,]*\\s*W)\\b"]},
+        "ac_surge_w": {"patterns": ["(?<![\\d.,])(?P<value>\\d[\\d,]*\\s*W)\\s*surge"]},
+        "capacity_wh": {"patterns": ["(?<![\\d.,])(?P<value>\\d[\\d,.]*\\s*Wh)\\s+capacity"]},
+        "cycle_life": {"patterns": ["(?<![\\d.,])(?P<value>\\d[\\d,]*)\\+?\\s*(?:life\\s+|complete\\s+charge\\s+)?cycles\\b"]},
         "pv_voc_max": {"patterns": ["\\bmaximum voltage\\s+(?P<value>\\d+(?:\\.\\d+)?\\s*V)\\b"]}
       }}
     ]

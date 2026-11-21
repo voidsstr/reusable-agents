@@ -33,6 +33,11 @@ PIPELINE
                  request, and so is every redirect hop that lands on one;
                  so are non-http(s) schemes and hosts on private, loopback
                  or link-local networks (checked again at connect time).
+                 The interval, Crawl-delay and backoff live in the
+                 fetcher's memory, so they bind one PoliteFetcher only: a
+                 process fetches through one, and only one process may
+                 fetch a host at a time (callers keep to that, e.g. with a
+                 run lock).
 ``document``     :class:`SpecDocument` from HTML (text, label/value pairs,
                  JSON-LD), PDF (``pdftotext -layout``) or plain text. HTML is
                  read from ``<main>`` when the page has one, without ``<nav>``
@@ -156,7 +161,8 @@ _REPO_CONFIG = (Path(__file__).resolve().parents[2]
 
 # Bump when extraction semantics change so cached extractions re-run
 # (part of extraction_fingerprint()).
-EXTRACTOR_VERSION = "1"
+# 2: no value read from inside a longer number; ambiguous min/max picks.
+EXTRACTOR_VERSION = "2"
 
 SOURCE_KINDS = ("manufacturer-page", "manual-pdf", "manufacturer-faq",
                 "measured-test", "cert-listing", "manual-entry")
@@ -216,7 +222,7 @@ DEFAULTS: dict[str, Any] = {
         # but a cached copy younger than this may be used instead.
         "robots_stale_ok_h": 720.0,
         "robots_max_bytes": 512000,
-        "min_interval_s": 10.0,           # per host, between requests
+        "min_interval_s": 10.0,           # per host, between requests (per fetcher process: see PoliteFetcher)
         "host_min_interval_s": {},        # {host: seconds} overrides
         "max_crawl_delay_s": 120.0,       # a larger robots Crawl-delay defers the host
         "max_wait_s": 180.0,              # longest one fetch() sleeps for its host slot
@@ -747,6 +753,11 @@ _UNIT_ALIAS_RES = tuple((re.compile(p), sym, att) for p, sym, att in _UNIT_ALIAS
 #                          sheets than a dot-grouped "2.048 W")
 #   2,048 / 2,048.5        comma-grouped thousands
 #   1070 / 1.5 / 1,5       plain, decimal point or decimal comma
+# A dot-grouped "2.400 W" therefore reads 2.4 W, and the field's range check
+# rejects it: the field stays missing, never wrong. Two guards keep it that
+# way: a config regex never reads a value from inside a longer number ("400 W"
+# out of "2.400 W", see _whole_number_matches), and a min/max pick that the
+# thousands reading would change gives no value (see parse_field_value).
 _NUM_RE = re.compile(
     r"(?<![\d.,])"
     r"(?:(?<![A-Za-z0-9])(?P<sign>-))?"
@@ -1444,6 +1455,13 @@ class PoliteFetcher:
     """Fetches manufacturer pages and manuals within robots.txt and a
     per-host rate limit, with conditional GETs, a content-hash
     short-circuit and an on-disk cache (one body per URL, pruned).
+
+    The per-host interval (``min_interval_s``), a robots Crawl-delay and the
+    429/503 backoff are kept in this object's memory: they bind this fetcher
+    only, and another fetcher (in this process or another) has its own
+    budget. So a process fetches through one PoliteFetcher, and only one
+    process may fetch a host at a time: callers keep to that (e.g. with a
+    run lock) until host slots are shared across processes.
 
     Everything with a side effect is injectable for tests: ``transport``
     (HTTP), ``clock`` (UTC now), ``monotonic`` and ``sleep``. ``doc_cfg`` is
@@ -2829,6 +2847,26 @@ class ParsedValue:
 
 _PICKS = ("first", "last", "min", "max", "range_lo", "range_hi")
 
+_LONE_DOT_GROUP_RE = re.compile(r"\d{1,3}\.\d{3}")
+
+
+def _lone_dot_group(text: str, q: Quantity) -> bool:
+    """Whether ``q``'s number (found in ``text``) is one dot group such as
+    '1.000': a decimal as read, dot-grouped thousands in EU notation."""
+    m = _NUM_RE.match(text, q.start)
+    return m is not None and _LONE_DOT_GROUP_RE.fullmatch(m.group("num")) is not None
+
+
+def _pick_index(values: Sequence[float], pick: str) -> int:
+    """The index of the min / max value (the first one on a tie)."""
+    if pick == "min":
+        return min(range(len(values)), key=lambda k: (values[k], k))
+    return max(range(len(values)), key=lambda k: (values[k], -k))
+
+
+def _in_range(spec: FieldSpec, v: float) -> bool:
+    return (spec.min is None or v >= spec.min) and (spec.max is None or v <= spec.max)
+
 
 def parse_field_value(spec: FieldSpec, text: str, *, label: str = "", pick: str = "first",
                       default_unit: str = "",
@@ -2862,8 +2900,22 @@ def parse_field_value(spec: FieldSpec, text: str, *, label: str = "", pick: str 
                 return None
             q = qs[0]
         elif pick in ("min", "max"):
-            conv = [(q.to(spec.unit), i) for i, q in enumerate(qs)]
-            q = qs[(min(conv) if pick == "min" else max(conv, key=lambda x: (x[0], -x[1])))[1]]
+            conv = [q.to(spec.unit) for q in qs]
+            i = _pick_index(conv, pick)
+            # '500W Max (single port); 1.000W Max (dual ports)': read as
+            # written, max takes 500 W, but '1.000W' may be dot-grouped 1000 W.
+            # When a lone dot group's thousands reading (if within the field's
+            # range) would pick another quantity, give no value, not a wrong one.
+            norm = normalize_text(text)
+            alt = list(conv)
+            for k, q in enumerate(qs):
+                if _lone_dot_group(norm, q):
+                    t = convert(q.value * 1000.0, q.unit, spec.unit)
+                    if _in_range(spec, t):
+                        alt[k] = t
+            if _pick_index(alt, pick) != i:
+                return None
+            q = qs[i]
         elif pick == "last":
             q = qs[-1]
         else:
@@ -3016,17 +3068,63 @@ def _make_candidate(spec: FieldSpec, pv: ParsedValue, doc: SpecDocument, ex: Ext
                      rank=(ctx.index, k), components=pv.components)
 
 
+# A number a config regex reads must be whole. A value that starts right
+# after a digit, or after a '.' / ',' that follows one, starts inside a
+# longer number: '(?P<value>\d[\d,]*\s*W)\s+AC' finds '400 W AC' in
+# '2.400 W AC' (dot-grouped 2400 W), '\d+(?=\+?\s*cycles)' finds '500' in
+# '3.500+ cycles' and '(?P<lo>\d+)-' finds '5' in '11.5-60V'.
+_DIGIT_BEFORE_RE = re.compile(r"\d[.,]?$")
+_NUMBER_AT_RE = re.compile(r"[.,]?\d")
+_NUMERIC_KINDS = ("quantity", "count", "dimensions")
+
+
+def _starts_inside_number(text: str, pos: int) -> bool:
+    return (pos > 0 and _NUMBER_AT_RE.match(text, pos) is not None
+            and _DIGIT_BEFORE_RE.search(text[max(0, pos - 2):pos]) is not None)
+
+
+def _whole_number_matches(rx: re.Pattern, text: str) -> Iterator[re.Match]:
+    """``rx.finditer(text)`` without the matches whose value starts inside a
+    longer number. The value is what the extractors parse: the ``lo`` / ``hi``
+    groups that matched, else the ``value`` group, else the whole match.
+    After such a match the search resumes one character past its start, so a
+    whole number further on can still match."""
+    pos = 0
+    while pos <= len(text):
+        m = rx.search(text, pos)
+        if m is None:
+            return
+        gd = m.groupdict()
+        if gd.get("lo") is not None or gd.get("hi") is not None:
+            starts = [m.start(g) for g in ("lo", "hi") if gd.get(g) is not None]
+        elif gd.get("value") is not None:
+            starts = [m.start("value")]
+        else:
+            starts = [m.start()]
+        if any(_starts_inside_number(text, s) for s in starts):
+            pos = m.start() + 1
+            continue
+        yield m
+        pos = max(m.end(), m.start() + 1)
+
+
+def _value_matches(pat: str, text: str, flags: int, spec: FieldSpec) -> Iterator[re.Match]:
+    rx = re.compile(pat, flags)
+    return _whole_number_matches(rx, text) if spec.kind in _NUMERIC_KINDS else rx.finditer(text)
+
+
 def _parse_with_options(spec: FieldSpec, value: str, fopt: Mapping, label: str = "") -> Optional[ParsedValue]:
     """Parse a pair value with a field's extractor options. ``value_regex``
     (a regex or a list tried in order) narrows the value first: a ``value``
-    group (plus optional ``unit``), or ``lo``/``hi`` groups for ranges."""
+    group (plus optional ``unit``), or ``lo``/``hi`` groups for ranges. A
+    match whose number starts inside a longer one is skipped."""
     vr = fopt.get("value_regex")
     pick = str(fopt.get("pick", "first"))
     if vr:
         norm = normalize_text(value)
         m = None
         for pat in [vr] if isinstance(vr, str) else list(vr):
-            m = re.search(pat, norm, re.I | re.S)
+            m = next(_value_matches(pat, norm, re.I | re.S, spec), None)
             if m:
                 break
         if not m:
@@ -3108,7 +3206,10 @@ def _extract_regex(doc: SpecDocument, ex: ExtractorSpec, ctx: ExtractContext) ->
         flags = re.I | re.M | (re.S if fopt.get("dotall") else 0)
         k = 0
         for pat in [fopt["patterns"]] if isinstance(fopt.get("patterns"), str) else list(fopt.get("patterns") or []):
-            for m in re.finditer(pat, text, flags):
+            # a constant reads no number; any other match must hold a whole one
+            matches = (re.finditer(pat, text, flags) if "constant" in fopt
+                       else _value_matches(pat, text, flags, spec))
+            for m in matches:
                 gd = m.groupdict()
                 pick = str(fopt.get("pick", "first"))
                 if "constant" in fopt:

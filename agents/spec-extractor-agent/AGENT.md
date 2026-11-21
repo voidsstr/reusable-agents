@@ -117,6 +117,19 @@ exits immediately with `skipped_locked`. `signals()` returns None on
 purpose (elapsed time is an input: sources fall due); a run with nothing to
 do reports `short_circuited`.
 
+The lock is also what keeps one fetching process per instance: the
+per-host interval, robots Crawl-delay and 429/503 backoff live in one
+process's `PoliteFetcher`, so two processes would each fetch a host at the
+full rate. `--dry-run` fetches live, so it takes the same lock. It needs
+the instance id (`--agent-id <site>-spec-extractor`, the cron unit's
+`AGENT_ID`) or `database.lock_key` (exit 2 otherwise: the engine id would
+name a different lock), and exits 3 without fetching while a run holds it.
+A cron tick that starts while a dry run holds the lock is skipped
+(`skipped_locked`), so its due sources wait for the next tick (about 12 h).
+Another site's instance locks in its own site DB and does not exclude this
+one: before two instances share hosts or a fetch cache dir, host slots must
+be shared across processes.
+
 * **Forcing a run.** `AGENT_FORCE_RUN=1` (`short_circuit.force_run_requested`)
   bypasses the in-run short-circuits: every source fetched this run is
   re-extracted, every model re-consolidated (writes stay diff-based) and
@@ -392,13 +405,17 @@ A=agents/spec-extractor-agent/agent.py
 python3 $A --config     --site-yaml <site.yaml>    # resolved settings + per-kind fields / required
 python3 $A --print-sql  --site-yaml <site.yaml>    # the contract SQL
 python3 $A --plan       --site-yaml <site.yaml>    # READ-ONLY session: due sources and why
-python3 $A --dry-run    --site-yaml <site.yaml> --model-id 42   # LIVE polite fetch + extract +
-                                                                # consolidate on a READ-ONLY session:
-                                                                # no DB / queue / LLM writes
+python3 $A --dry-run    --site-yaml <site.yaml> --agent-id <site>-spec-extractor --model-id 42
+                        # LIVE polite fetch + extract + consolidate on a READ-ONLY session:
+                        # no DB / queue / LLM writes; holds the instance's run lock
 ```
 
 `--spec-config-file` / `--compat-config-file` read local JSON instead of
-the storage configs.
+the storage configs. Exit codes: 0 done; 1 config problems, the site DB
+unreachable or a failed dry run; 2 invalid config, or `--dry-run` without
+the instance id (`--agent-id`, `$AGENT_ID` or `database.lock_key`); 3
+`--dry-run` while a run holds the instance's lock (nothing fetched; try
+again after the run).
 
 ## Safety
 
@@ -406,7 +423,8 @@ the storage configs.
   Amazon-looking pages are refused by the primitive; the writer drops any
   row whose source is Amazon as a second line (`amazon_sourced_values`).
 * robots.txt is always honoured; one fetcher enforces the per-host
-  interval; failures back off.
+  interval within its process, and the run lock keeps one fetching process
+  per instance (a cron run or a `--dry-run`); failures back off.
 * Never blanks data: a failed, gone or blocked source keeps its last good
   values; only a refused (Amazon) source loses them.
 * LLM use is off unless the site enables it, and then only with verbatim

@@ -288,3 +288,34 @@ def test_dimensions_spelled_out_in_inches_or_feet():
 def test_thousands_separators(text, value, unit):
     q = ss.find_quantities(text)[0]
     assert (q.value, q.unit) == (pytest.approx(value), unit)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: a lone dot group in a min / max pick
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,pick", [
+    # '1.000W' reads as 1.0 W, so max would take the 500 W; dot-grouped it is 1000 W
+    ("12-60V⎓15A, 500W Max (single port); 1.000W Max (dual ports)", "max"),
+    ("1.200W Max (dual ports); 800W Max (single port)", "min"),
+])
+def test_min_max_pick_refuses_a_lone_dot_group_that_could_be_thousands(text, pick):
+    assert ss.parse_field_value(_f(kind="quantity", unit="W"), text, pick=pick) is None
+
+
+@pytest.mark.parametrize("text,unit,pick,expected", [
+    ("12-60V⎓15A, 500W Max (single port); 1000W Max (dual ports)", "W", "max", 1000.0),
+    ("12-60V⎓15A, 1.200W Max", "W", "max", 1.2),    # alone: read as written, the range check decides
+    ("12-60V⎓15A, 1.200W Max", "V", "max", 60.0),   # other families do not matter
+    ("Capacity 2.048 kWh, expandable to 6.144 kWh", "Wh", "max", 6144.0),   # every value alike
+    ("2.048 kWh", "Wh", "min", 2048.0),
+])
+def test_min_max_pick_keeps_rows_the_thousands_reading_does_not_change(text, unit, pick, expected):
+    pv = ss.parse_field_value(_f(kind="quantity", unit=unit), text, pick=pick)
+    assert pv.value_num == pytest.approx(expected)
+
+
+def test_a_thousands_reading_outside_the_field_range_is_not_an_ambiguity():
+    text = "2.048 kWh, expandable to 3000 Wh"       # 2048 Wh, unless '2.048' meant 2 048 000 Wh
+    assert ss.parse_field_value(_f(kind="quantity", unit="Wh", max=60000), text, pick="max").value_num == 3000.0
+    assert ss.parse_field_value(_f(kind="quantity", unit="Wh"), text, pick="max") is None

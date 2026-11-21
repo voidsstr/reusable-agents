@@ -29,9 +29,13 @@ CLI
   python3 agent.py --config               resolved settings and per-kind field sets (no DB, no HTTP)
   python3 agent.py --print-sql            the contract SQL this engine runs (no DB, no HTTP)
   python3 agent.py --plan [--limit N]     read-only DB: which sources are due and why (no HTTP)
-  python3 agent.py --dry-run [--model-id ID ...] [--limit N]
+  python3 agent.py --dry-run --agent-id <instance id> [--model-id ID ...] [--limit N]
                                           LIVE polite fetch + extract + consolidate for a few
-                                          models; NO DB, queue or LLM writes, no run record
+                                          models; NO DB, queue or LLM writes, no run record.
+                                          Holds the instance's run lock like a cron run (one
+                                          fetching process per instance): exit 3 while a run
+                                          holds it, exit 2 without the instance id ($AGENT_ID
+                                          or database.lock_key also name the lock)
 Options: --site-yaml PATH[#key] (default $SPEC_EXTRACTOR_CONFIG), --agent-id ID,
          --spec-config-file / --compat-config-file (local JSON instead of the storage configs).
 """
@@ -345,7 +349,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     mode.add_argument("--plan", action="store_true",
                       help="read-only DB: due sources and why (no HTTP)")
     mode.add_argument("--dry-run", action="store_true",
-                      help="LIVE polite fetch + extract + consolidate; no DB / queue / LLM writes")
+                      help="LIVE polite fetch + extract + consolidate; no DB / queue / LLM writes; "
+                           "holds the instance's run lock (needs the instance id)")
     ap.add_argument("--site-yaml", default="", help="config PATH[#dotted.key] (default $SPEC_EXTRACTOR_CONFIG)")
     ap.add_argument("--agent-id", default="", help="instance id (default $AGENT_ID)")
     ap.add_argument("--spec-config-file", default="", help="spec-sources config JSON (instead of storage)")
@@ -363,6 +368,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         settings = settings_mod.load_settings(args.site_yaml or None, agent_id=agent_id, storage=None)
     except settings_mod.SettingsError as exc:
         print(f"config invalid: {exc}", file=sys.stderr)
+        return 2
+    if args.dry_run and agent_id == ENGINE_ID and not settings.database.get("lock_key"):
+        # the lock would be the engine's, not the instance's cron run's
+        print("--dry-run fetches live and must hold the instance's run lock: pass --agent-id "
+              "<instance id> (the cron unit's AGENT_ID) or set database.lock_key", file=sys.stderr)
         return 2
     collab = _collab_from_args(args)
     if args.print_sql:
@@ -390,6 +400,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     store = store_mod.SpecStore(conn, settings)
+    locked = False
     try:
         if args.plan:
             models = store.load_models(engines)
@@ -414,7 +425,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             _print({"models": len(models), "sources": len(sources), "due": len(rows),
                     "first": rows[:max(1, args.limit)]})
             return 0
-        # --dry-run
+        # --dry-run fetches live, so it holds the instance's run lock as a cron
+        # run does: PoliteFetcher keeps the per-host interval, Crawl-delay and
+        # 429/503 backoff in one process's memory (pg_try_advisory_lock writes
+        # nothing, so the read-only session can take it)
+        if not store.try_lock(settings.lock_key):
+            print(f"another {agent_id} run holds the lock ({settings.lock_key}); "
+                  "not dry-running alongside it", file=sys.stderr)
+            return 3
+        locked = True
         only = args.model_id or None
         if only is None:
             models = store.load_models(engines)[:max(1, args.limit)]
@@ -429,6 +448,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(rep.summary_md)
         return 0 if rep.status == "success" else 1
     finally:
+        if locked:
+            store.unlock(settings.lock_key)
         store.conn.close()
 
 

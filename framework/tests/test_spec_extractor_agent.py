@@ -1685,3 +1685,64 @@ def test_cli_plan_runs_on_a_read_only_session(h, monkeypatch, capsys, tmp_path):
     assert seen == [True]
     out = json.loads(capsys.readouterr().out)
     assert out["due"] == 7 and out["models"] == 8
+
+
+def test_cli_dry_run_holds_the_instance_run_lock(h, monkeypatch, capsys, tmp_path):
+    # --dry-run fetches live, and PoliteFetcher keeps its per-host slots in one
+    # process: a dry run must never fetch alongside a cron run of the instance
+    import psycopg2
+    import yaml
+    seen, unlocked = [], []
+    key = f"spec-extractor:{AGENT_ID}"          # the cron unit's lock (AGENT_ID=<instance id>)
+
+    def connect(settings, *, environ=None, readonly=False):
+        seen.append(readonly)
+        conn = psycopg2.connect(h.dsn)
+        conn.set_session(readonly=readonly)
+        return conn
+
+    real_unlock = ST.SpecStore.unlock
+
+    def unlock(store, lock_key):
+        unlocked.append(lock_key)
+        real_unlock(store, lock_key)
+
+    def site_yaml(name: str, **over) -> str:
+        p = tmp_path / name
+        p.write_text(yaml.safe_dump({"spec_extractor": site_block(**over)}))
+        return str(p)
+
+    monkeypatch.setattr(A, "default_connect", connect)
+    monkeypatch.setattr(A, "_collab_from_args", lambda _args: h.collab())
+    monkeypatch.setattr(ST.SpecStore, "unlock", unlock)
+    monkeypatch.delenv("AGENT_ID", raising=False)
+    plain = site_yaml("site.yaml")
+    keyed = site_yaml("keyed.yaml", database={"lock_key": key})
+    dry = ["--dry-run", "--model-id", "1", "--site-yaml"]
+
+    # no instance id: the lock would be the engine's, not the cron unit's
+    assert A.main(dry + [plain]) == 2
+    assert "--agent-id" in capsys.readouterr().err
+    assert seen == [] and h.http.calls == []
+
+    other = psycopg2.connect(h.dsn)
+    with other.cursor() as cur:
+        cur.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+    try:
+        assert A.main(dry + [plain, "--agent-id", AGENT_ID]) == 3
+        assert A.main(dry + [keyed]) == 3                 # database.lock_key names the same lock
+    finally:
+        other.close()
+    assert "holds the lock" in capsys.readouterr().err
+    assert seen == [True, True] and h.http.calls == [] and unlocked == []
+
+    assert A.main(dry + [plain, "--agent-id", AGENT_ID]) == 0
+    assert "[dry-run] model 1" in capsys.readouterr().out
+    assert h.http.urls() and unlocked == [key]               # released explicitly, not only by close()
+    free = psycopg2.connect(h.dsn)
+    try:
+        with free.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+            assert cur.fetchone()[0] is True
+    finally:
+        free.close()

@@ -36,5 +36,9 @@ A=agents/spec-extractor-agent/agent.py
 python3 $A --config    --site-yaml <site.yaml>
 python3 $A --print-sql --site-yaml <site.yaml>
 python3 $A --plan      --site-yaml <site.yaml>
-python3 $A --dry-run   --site-yaml <site.yaml> --model-id <id>
+python3 $A --dry-run   --site-yaml <site.yaml> --agent-id <instance id> --model-id <id>
 ```
+
+`--dry-run` fetches live, so it holds the instance's run lock: it needs the
+instance id (the cron unit's `AGENT_ID`) and exits 3 while a run holds the
+lock. See AGENT.md, "CLI".
