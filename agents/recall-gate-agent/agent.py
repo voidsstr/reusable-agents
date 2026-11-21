@@ -23,7 +23,12 @@ What one run does
            review request, to the fleet operator pair; more than
            ``email.max_per_run`` go out as one summary email. Sent state lives
            in the match row (notified_key), so a re-run sends nothing twice.
-           No recipient configured: the run FAILS (it never goes quiet).
+           No recipient configured: the run FAILS (it never goes quiet). Nor
+           does a broken mail path: a run that hands mail to the transport
+           and gets none delivered (msmtp missing, no credential, non-zero
+           exit) is a warning, and ``email.fail_after_runs`` (2) such runs in
+           a row FAIL the run (state ``email_failure_streak``; any delivered
+           email resets it, a run with nothing to send leaves it).
 5. verify  0 recalled SKUs with a live buy button: the site's
            ``buy_button.sql`` and/or an HTTP probe of the blocked products'
            live pages (a product that left catalog_sql is probed at the page
@@ -33,7 +38,8 @@ What one run does
            (``buy_button_unchecked_sites``); one that left catalog_sql with no
            page to check is reported apart (``recalled_blocked_unlisted``):
            by the catalog_sql contract it renders no page. A violation emails
-           an alert (once per distinct set).
+           an alert (once per distinct set; a failed send counts in
+           ``emails_failed`` and is retried next run).
 6. report  the cross-site manual queue to agents/<id>/manual-queue.json,
            metrics for the goals (recall_sync_age_h,
            recalled_live_buy_buttons, manual_queue_oldest_h, site_errors).
@@ -130,6 +136,9 @@ class RecallGateAgent(AgentBase):
     db_connect: Optional[Callable[[str, rg.SiteSettings], Any]] = None
     send_email: Optional[Callable[..., tuple[bool, str]]] = None
     cache_dir: Optional[str] = None
+    # This run's sends as the transport saw them (every _send: match emails,
+    # the overflow summary, the buy-button alert); run() starts it.
+    _mail: Optional[dict[str, Any]] = None
 
     # ---- never an LLM ---------------------------------------------------
     def ai_chat(self, *args: Any, **kwargs: Any) -> str:  # noqa: D401
@@ -165,11 +174,59 @@ class RecallGateAgent(AgentBase):
               email_cfg: Mapping[str, Any]) -> tuple[bool, str]:
         fn = self.send_email or default_send_email
         try:
-            return fn(subject=subject, body_html=body, to=to, sender=sender,
-                      msmtp_account=str(email_cfg.get("msmtp_account") or "automation"),
-                      bypass_digest=bool(email_cfg.get("bypass_digest", True)))
+            ok, detail = fn(subject=subject, body_html=body, to=to, sender=sender,
+                            msmtp_account=str(email_cfg.get("msmtp_account") or "automation"),
+                            bypass_digest=bool(email_cfg.get("bypass_digest", True)))
         except Exception as e:  # noqa: BLE001 - a mail failure must not fail the sync
-            return False, f"{type(e).__name__}: {e}"[:200]
+            ok, detail = False, f"{type(e).__name__}: {e}"[:200]
+        if self._mail is not None:
+            self._mail["attempts"] += 1
+            if ok:
+                self._mail["delivered"] += 1
+            else:
+                self._mail["detail"] = str(detail)[:200]
+        return ok, detail
+
+    def _email_streak(self, state: Mapping[str, Any], email_cfg: Mapping[str, Any],
+                      now: _dt.datetime) -> tuple[dict[str, Any], str, str]:
+        """(next state keys, run failure text, summary line) for the mail path.
+
+        The streak counts runs in a row that handed mail to the transport and
+        got none delivered. A run that delivered anything resets it. A run
+        that sent nothing (nothing pending, or no recipient, which fails the
+        run on its own) leaves it and does not fail on it, as no mail went
+        undelivered: the streak waits for the next run with mail to send,
+        which fails at once if none of it gets through."""
+        tally = self._mail or {}
+        attempts, delivered = int(tally.get("attempts") or 0), int(tally.get("delivered") or 0)
+        streak = int(state.get("email_failure_streak") or 0)
+        since = str(state.get("email_failing_since") or "")
+        detail = str(state.get("email_last_error") or "")
+        if delivered:
+            streak, since, detail = 0, "", ""
+        elif attempts:
+            since = since if streak > 0 and since else rg._iso(now)
+            streak += 1
+            detail = str(tally.get("detail") or "")
+        keys = {"email_failure_streak": streak, "email_failing_since": since,
+                "email_last_error": detail}
+        if not streak:
+            return keys, "", ""
+        runs = f"{streak} run{'' if streak == 1 else 's'}"
+        if not attempts:
+            return keys, "", (f"email delivery: nothing to send this run; the last {runs} that "
+                              f"sent mail delivered none (since {since}): {detail}")
+        try:
+            limit = max(1, int(email_cfg.get("fail_after_runs", 2)))
+        except (TypeError, ValueError):
+            limit = 2
+        self.decide("warning", f"email delivery: {attempts} send(s), none delivered, {runs} in "
+                    f"a row (the run fails at {limit}): {detail}")
+        if streak < limit:
+            return keys, "", (f"email delivery failed this run ({runs} in a row; the run "
+                              f"fails at {limit}): {detail}")
+        return (keys, f"email delivery failing since {since} for {runs}: {detail}",
+                f"EMAIL DELIVERY FAILING since {since} for {runs}: {detail}")
 
     @staticmethod
     def _sync_age(sources: Mapping[str, Any], enabled: list[str],
@@ -219,6 +276,7 @@ class RecallGateAgent(AgentBase):
         if dry_run:
             # A supervised dry run must not enqueue an agent-doctor run.
             self.auto_recovery_enabled = False
+        self._mail = {"attempts": 0, "delivered": 0, "detail": ""}
         state = dict(self.state or {})
         metrics: dict[str, Any] = {
             "sites_subscribed": 0, "sites_synced": 0, "site_errors": 0, "source_errors": 0,
@@ -367,14 +425,19 @@ class RecallGateAgent(AgentBase):
                 self.decide("warning", f"manual-queue mirror not written: {e}")
 
         # 6. report
+        # A dry run sends nothing, so it neither reads nor moves the streak.
+        mail_state, delivery_problem, mail_line = (
+            ({}, "", "") if dry_run else self._email_streak(state, cfg.get("email") or {}, now))
         all_sources_failed = bool(results) and all(not r.ok for r in results.values())
-        failed = all_sources_failed or metrics["site_errors"] > 0 or bool(email_problems)
+        failed = (all_sources_failed or metrics["site_errors"] > 0 or bool(email_problems)
+                  or bool(delivery_problem))
         src_line = ", ".join(f"{n} {'ok' if r.ok else 'FAILED'}" for n, r in results.items())
         if failed:
             summary = (f"recall sync problems: {metrics['source_errors']} source error(s), "
                        f"{metrics['site_errors']} site error(s)"
                        + (f", {len(email_problems)} email config problem(s)"
-                          if email_problems else ""))
+                          if email_problems else "")
+                       + (f"; {delivery_problem}" if delivery_problem else ""))
         elif metrics["matches_new"]:
             summary = (f"{metrics['matches_new']} new recall match(es) across "
                        f"{metrics['sites_synced']} site(s); {metrics['matches_blocking']} "
@@ -398,9 +461,11 @@ class RecallGateAgent(AgentBase):
             f"- emails: {metrics['emails_sent']} sent, {metrics['emails_failed']} failed, "
             f"{metrics['emails_pending']} pending",
             *[f"- EMAIL NOT CONFIGURED: {p}" for p in email_problems],
+            *([f"- {mail_line}"] if mail_line else []),
             "- LLM calls: 0 (deterministic matcher)",
         ])
-        errors = [r.error for r in results.values() if r.error] + email_problems
+        errors = ([r.error for r in results.values() if r.error] + email_problems
+                  + ([delivery_problem] if delivery_problem else []))
         if dry_run:
             # A dry run leaves no trace: same state, goal metrics renamed.
             return RunResult(status="failure" if failed else "success", summary=summary,
@@ -408,7 +473,7 @@ class RecallGateAgent(AgentBase):
                              next_state=state,
                              error_text="; ".join(errors) if failed else "")
         next_state = {**state, "sources": new_sources, "sites": site_states,
-                      "buy_button_alerts": alerts}
+                      "buy_button_alerts": alerts, **mail_state}
         return RunResult(status="failure" if failed else "success", summary=summary,
                          summary_md=summary_md, metrics=metrics, next_state=next_state,
                          error_text="; ".join(errors) if failed else "")
@@ -458,7 +523,7 @@ class RecallGateAgent(AgentBase):
         metrics["matches_blocking"] += res.blocking
         metrics["matches_stale"] += res.matches_stale
         metrics["emails_sent"] += sent
-        metrics["emails_failed"] += failed
+        metrics["emails_failed"] += failed + (bb["alert_failed"] if bb else 0)
         metrics["emails_pending"] += pending
         self.decide("result", f"{site}: {len(res.matches)} matches ({res.matches_new} new, "
                     f"{res.matches_updated} updated, {res.matches_stale} stale); "
@@ -545,8 +610,8 @@ class RecallGateAgent(AgentBase):
 
     def _check_buy_buttons(self, conn: Any, settings: rg.SiteSettings, cfg: Mapping[str, Any],
                            res: rg.SiteSyncResult, alerts: dict[str, Any]) -> dict[str, Any]:
-        """{"configured", "live", "unverified", "unlisted", "violations"} for
-        one site.
+        """{"configured", "live", "unverified", "unlisted", "violations",
+        "alert_failed"} for one site.
 
         ``live`` counts blocked SKUs that still show a buy button PLUS blocked
         SKUs nobody could verify: the site's ``buy_button.sql`` (when set)
@@ -557,7 +622,8 @@ class RecallGateAgent(AgentBase):
         catalog_sql and that no check can reach (no stored page, or no probe)
         is ``unlisted``: by the catalog_sql contract it renders no page, so it
         is reported (``recalled_blocked_unlisted``), never counted as live.
-        Alerts once per distinct set."""
+        Alerts once per distinct set; a failed alert send is ``alert_failed``
+        (1) and is retried next run."""
         sql_rows = rg.buy_button_sql_violations(conn, settings)
         hcfg = (settings.buy_button or {}).get("http") or {}
         template = str(hcfg.get("url_template") or "")
@@ -609,7 +675,7 @@ class RecallGateAgent(AgentBase):
         found = sorted(violations.values(), key=lambda v: v["key"])
         out = {"configured": configured, "violations": len(found),
                "unverified": len(unverified), "live": len(found) + len(unverified),
-               "unlisted": len(unreachable)}
+               "unlisted": len(unreachable), "alert_failed": 0}
         if not found and not unverified:
             alerts.pop(settings.site, None)
             return out
@@ -630,10 +696,14 @@ class RecallGateAgent(AgentBase):
                 subject, body = rg.render_buy_button_alert(
                     settings.site, found, unverified=unverified,
                     prefix=str(email_cfg.get("subject_prefix") or "[recall-gate]"))
-                ok, _ = self._send(subject=subject, body=body, to=to, sender=sender,
-                                   email_cfg=email_cfg)
+                ok, detail = self._send(subject=subject, body=body, to=to, sender=sender,
+                                        email_cfg=email_cfg)
                 if ok:
                     alerts[settings.site] = digest
+                else:
+                    out["alert_failed"] = 1
+                    self.decide("warning", f"{settings.site}: buy-button alert email failed "
+                                f"(retried next run): {detail}")
         return out
 
 

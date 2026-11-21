@@ -694,6 +694,44 @@ def test_a_model_the_recall_scopes_out_is_never_blocked(review_records):
     assert (2, "exact", "model-name") in _kinds(st, jackery, {other.id: other})
 
 
+def test_an_exclusion_inside_a_parenthetical_is_about_its_own_subject():
+    """'Explorer 1000 stations (chargers are not included in this recall)'
+    scopes out the chargers, not the Explorer 1000: the recalled model is
+    blocked instead of waiting in review with a live buy button. A
+    parenthetical the exclusion runs past still counts as before."""
+    st = settings_for("p", "home-backup-power")
+    jackery = _rows("Jackery", "station", "Explorer 1000", "Explorer 1000 Plus")
+
+    def kinds(description):
+        rec = _synthetic("Jackery Recalls Portable Power Stations Due to Fire Hazard",
+                         description)
+        return _kinds(st, jackery, {rec.id: rec})
+    for text in ("This recall involves Explorer 1000 stations (chargers are not included in "
+                 "this recall).",
+                 "This recall involves Explorer 1000 stations [chargers are not included in "
+                 "this recall].",
+                 "This recall involves Explorer 1000 stations (chargers are not included in "
+                 "this recall."):  # never closed
+        assert kinds(text) == {(1, "exact", "model-name"), (2, "sibling", "family")}, text
+    # The parenthetical names the excluded variant: only that one is scoped out.
+    assert kinds("This recall involves Explorer 1000 stations (the Explorer 1000 Plus is not "
+                 "included in this recall).") == {(1, "exact", "model-name"),
+                                                 (2, "ambiguous", "model-name-excluded")}
+    # The exclusion runs past a parenthetical about the mention: still excluded.
+    assert kinds("The Explorer 1000 Plus (model JE-1000C) is not included in this "
+                 "recall.") == {(1, "ambiguous", "model-name-excluded"),
+                                (2, "ambiguous", "model-name-excluded")}
+    # Pinned limits. A comma clause cannot be told apart from 25-395's "...,
+    # it is not included", so it stays in review ...
+    assert kinds("This recall involves Explorer 1000 stations, chargers are not included in "
+                 "this recall.") >= {(1, "ambiguous", "model-name-excluded")}
+    # ... and a parenthetical that scopes out the mention itself blocks it
+    # (the safe-side error: emailed, and a review can clear it).
+    assert (2, "exact", "model-name") in kinds(
+        "This recall involves Explorer 1000 Plus units (these are not included in this "
+        "recall).")
+
+
 def test_numbers_match_with_or_without_their_unit():
     st = settings_for("p", "home-backup-power")
     aeiusny = [{"product_id": 1, "brand": "Aeiusny", "model_name": "Portable Power Station 2000",

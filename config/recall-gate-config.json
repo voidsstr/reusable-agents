@@ -39,7 +39,8 @@
     "bypass_digest": true,
     "max_per_run": 25,
     "subject_prefix": "[recall-gate]",
-    "alert_on_live_buy_button": true
+    "alert_on_live_buy_button": true,
+    "fail_after_runs": 2
   },
   "goals": {"sync_age_max_h": 26, "manual_queue_max_age_h": 72},
   "profiles": {

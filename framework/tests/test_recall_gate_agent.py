@@ -233,6 +233,8 @@ def test_missing_recipients_fail_and_retry_next_run(env, site, monkeypatch):
     # A gate that cannot tell anyone is a failed run, never a quiet success.
     assert res.status == "failure" and "email config" in res.summary
     assert "OPERATOR_EMAIL" in res.error_text
+    # Nothing was handed to the transport: the delivery streak does not move.
+    assert res.next_state["email_failure_streak"] == 0
     monkeypatch.setenv("FRAMEWORK_OPERATOR_EMAIL", "first@example.com")
     res2 = h.run(res.next_state)
     assert res2.metrics["emails_sent"] == len(POWER_GOLDEN)
@@ -254,6 +256,64 @@ def test_failed_send_is_retried_and_never_duplicated(env, site):
         "emails_failed"]
     delivered = [s for i, s in enumerate(attempts, 1) if i % 2 == 0]
     assert len(delivered) == len(set(delivered))  # never the same match twice
+    # Some mail got through each time: a hiccup, not a broken mail path.
+    assert [(r.status, r.next_state["email_failure_streak"]) for r in (res, res2)] == [
+        ("success", 0), ("success", 0)]
+
+
+CREDENTIAL_MISSING = "msmtp credential unavailable for account 'automation'"
+
+
+def test_a_mail_path_that_keeps_failing_fails_the_run(env, site):
+    """shared.site_quality.send_via_msmtp answers (False, ...) for a missing
+    msmtp, a missing credential or a non-zero exit. One run that delivers
+    nothing is a warning; the next one in a row fails the run instead of
+    reporting success while every recall email is lost. The matches stay
+    unsent until a run delivers them, each exactly once."""
+    h = Harness(env)
+    attempts = []
+
+    def broken(**kw):
+        attempts.append(kw["subject"])
+        return False, CREDENTIAL_MISSING
+    h.send = broken
+    first = h.run()
+    assert first.status == "success", first.summary
+    # One email per match plus the 'could not be verified' alert (this site
+    # has no buy-button check), and none delivered.
+    assert (first.metrics["emails_sent"], first.metrics["emails_failed"]) == (
+        0, len(POWER_GOLDEN) + 1)
+    assert len(attempts) == len(POWER_GOLDEN) + 1
+    assert (first.next_state["email_failure_streak"], first.next_state["email_failing_since"],
+            first.next_state["email_last_error"]) == (1, NOW, CREDENTIAL_MISSING)
+    assert "email delivery failed" in first.summary_md
+    second = h.run(first.next_state)
+    assert second.status == "failure"
+    assert f"email delivery failing since {NOW} for 2 runs" in second.summary
+    assert CREDENTIAL_MISSING in second.error_text and "EMAIL DELIVERY" in second.summary_md
+    assert second.next_state["email_failure_streak"] == 2
+    assert query(site, "SELECT count(*) AS n FROM recall_matches WHERE notified_at IS NULL")[0][
+        "n"] == _matches_count(site) == len(POWER_GOLDEN)
+    # The mail path works again: every match goes out once and the streak resets.
+    h.sent, h.send = make_send_recorder()
+    third = h.run(second.next_state)
+    assert third.status == "success", third.summary
+    assert (third.next_state["email_failure_streak"], third.next_state["email_failing_since"],
+            third.next_state["email_last_error"]) == (0, "", "")
+    fourth = h.run(third.next_state)
+    assert fourth.status == "success" and fourth.metrics["emails_sent"] == 0
+    match_mails = [s for s in h.sent if "could not be verified" not in s["subject"]]
+    assert len(match_mails) == len(POWER_GOLDEN) == third.metrics["emails_sent"]
+    assert query(site, "SELECT count(*) AS n FROM recall_matches WHERE notified_at IS NULL")[0][
+        "n"] == 0
+
+
+def test_fail_after_runs_is_configurable(env, site):
+    write_config(env, _email={"fail_after_runs": 1})
+    h = Harness(env)
+    h.send = lambda **kw: (False, "msmtp not found on PATH")
+    res = h.run()
+    assert res.status == "failure" and "for 1 run: msmtp not found" in res.summary
 
 
 PAGE = "https://power.example/product/"
@@ -313,6 +373,55 @@ def _probed_harness(env):
     for slug in BLOCKED_SLUGS:
         h.http.pages[PAGE + slug] = (200, "<main><p>Recall notice</p></main>")
     return h
+
+
+def test_a_failed_live_buy_button_alert_is_counted_and_retried(env, site):
+    """The alert used to be dropped silently when its send failed: not in
+    emails_failed, no warning, and no part in the delivery streak."""
+    h = _probed_harness(env)
+    h.http.pages[PAGE + "halo-halo-1000"] = (
+        200, '<a data-cta-placement="pdp-hero" href="/r/B0RGTEST61">Check price</a>')
+    sent, record = make_send_recorder()
+
+    def alert_fails(**kw):
+        if "buy button" in kw["subject"]:
+            return False, "msmtp exited 75"
+        return record(**kw)
+    h.send = alert_fails
+    res = h.run()
+    m = res.metrics
+    assert m["recalled_live_buy_buttons"] == 1
+    assert (m["emails_sent"], m["emails_failed"]) == (len(POWER_GOLDEN), 1)
+    # The match emails got through, so this is no mail-path failure ...
+    assert res.status == "success" and res.next_state["email_failure_streak"] == 0
+    assert SITE not in res.next_state["buy_button_alerts"]  # ... and the alert is retried
+    runs = [res]
+    for _ in range(2):
+        runs.append(h.run(runs[-1].next_state))
+    # Only the alert has mail to send now, and it keeps failing.
+    assert [(r.metrics["emails_sent"], r.metrics["emails_failed"]) for r in runs[1:]] == [
+        (0, 1), (0, 1)]
+    assert [(r.status, r.next_state["email_failure_streak"]) for r in runs[1:]] == [
+        ("success", 1), ("failure", 2)]
+    assert "msmtp exited 75" in runs[-1].error_text
+    # Nothing to send (the page stopped selling): no mail went undelivered,
+    # so no failure, and the streak waits for the next send ...
+    selling = h.http.pages[PAGE + "halo-halo-1000"]
+    h.http.pages[PAGE + "halo-halo-1000"] = (200, "<p>Recalled</p>")
+    quiet = h.run(runs[-1].next_state)
+    assert (quiet.status, quiet.metrics["emails_failed"],
+            quiet.next_state["email_failure_streak"]) == ("success", 0, 2)
+    assert "nothing to send this run" in quiet.summary_md
+    # ... which fails at once while the mail path is still broken.
+    h.http.pages[PAGE + "halo-halo-1000"] = selling
+    again = h.run(quiet.next_state)
+    assert again.status == "failure" and again.next_state["email_failure_streak"] == 3
+    # A delivered alert counts as delivered mail: the streak resets.
+    h.send = record
+    last = h.run(again.next_state)
+    assert last.status == "success" and last.next_state["email_failure_streak"] == 0
+    assert len([s for s in sent if "buy button" in s["subject"]]) == 1
+    assert last.next_state["buy_button_alerts"][SITE]
 
 
 def test_a_retired_blocked_product_does_not_stick_the_goal(env, site):

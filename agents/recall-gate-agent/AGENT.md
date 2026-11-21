@@ -129,6 +129,17 @@ Remedy, hazard, contact and sold-at text are never searched for models.
   1000 and Solar Generator 1000 Plus" never names "Explorer 1000 Plus". A
   shorter catalog name is a variant only where every mention of it is part
   of a mention of a longer one ("HALO 1000" inside "HALO 1000 Bolt").
+- An exclusion ("… is not included in this recall") after a mention must
+  read as one both as written and with every parenthetical opened after the
+  mention left out: "Explorer 1000 stations (chargers are not included in
+  this recall)" blocks the Explorer 1000, while "Explorer 1000 Plus (model
+  JE-1000C) is not included" still excludes the Plus (matcher version 4).
+  Known limits: a comma clause ("Explorer 1000 stations, chargers are not
+  included") reads like 25-395's "EFMIS129-B or EFMIS129-C, it is not
+  included", so it stays in review; a parenthetical that scopes out the
+  mention itself ("Explorer 1000 Plus units (these are not included in this
+  recall)") blocks it, which is the safe-side error (emailed; a review
+  clears it).
 - All distinguishing words must fall within `matching.max_span` (8) tokens:
   in "RANGER 1000, 1000 Crew, XP 1000, XP 1000 Crew" the last item's shared
   "RANGER" stands 9 tokens back, so "RANGER XP 1000 Crew" is a sibling
@@ -241,7 +252,21 @@ recipient or sender configured: the emails count as failed, the run FAILS
 next run. With `email.enabled: false` (or `by_site.<site>.email.enabled:
 false`) unsent matches stay pending (`emails_pending`) and go out, capped,
 when email is turned back on. A live or unverified buy button on a blocked
-SKU sends one alert per distinct set of SKUs (`email.alert_on_live_buy_button`).
+SKU sends one alert per distinct set of SKUs (`email.alert_on_live_buy_button`);
+a failed alert send counts in `emails_failed` and is retried next run.
+
+A broken mail path fails the run too. `send_via_msmtp` answers "not
+delivered" for a missing msmtp, an unavailable credential or a non-zero
+exit. A run that hands mail to the transport (match emails, the summary,
+the alert) and gets none of it delivered is a warning and raises
+`email_failure_streak` in the agent state (with `email_failing_since` and
+`email_last_error`). `email.fail_after_runs` (2) such runs in a row FAIL the
+run: "email delivery failing since … for N runs: …". Any delivered email
+resets the streak. A run with nothing to send leaves the streak as it is and
+does not fail on it (no mail went undelivered; its summary still notes the
+streak), and the next run with mail to send fails at once if none of it gets
+through. Undelivered match emails keep `notified_at` NULL and are retried
+every run, so none is lost or sent twice.
 
 ## Goals
 
@@ -281,6 +306,10 @@ There is no free-text `label` column (one in `catalog_sql` is ignored).
   invalid JSON). Rehydrate or rewrite it; the agent will not guess.
 - `recall gate halted: config has no by_site entry for …` — see "Fails
   closed" above.
+- `email delivery failing since … for N runs: <detail>` — nothing reached
+  the operator in N runs that had mail to send; the detail is the
+  transport's answer (msmtp missing, credential, exit code). Fix the host's
+  mail path; the next run sends the pending emails and resets the streak.
 - `no DSN: none of [...] is set` — export the env var the site registry
   names (or set `by_site.<site>.dsn_env`).
 - `relation "recalls" does not exist` — the site migration has not applied

@@ -176,7 +176,10 @@ log = logging.getLogger("framework.recall_gate")
 
 SCHEMA_VERSION = "1"
 # 3: elided list naming ("Explorer 1000 and 1000 Plus"); supersede by covered words.
-MATCHER_VERSION = "3"
+# 4: an exclusion inside a parenthetical opened after a mention is about the
+#    parenthetical's own subject ("Explorer 1000 stations (chargers are not
+#    included ...)"), not the mention.
+MATCHER_VERSION = "4"
 CONFIG_KEY = "config/recall-gate-config.json"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 REPO_CONFIG_PATH = _REPO_ROOT / "config" / "recall-gate-config.json"
@@ -361,6 +364,10 @@ DEFAULTS: dict[str, Any] = {
         "max_per_run": 25,
         "subject_prefix": "[recall-gate]",
         "alert_on_live_buy_button": True,
+        # Runs in a row that tried to send and delivered nothing (msmtp
+        # missing, no credential, non-zero exit) before the run FAILS; one
+        # such run alone is a warning. At least 1.
+        "fail_after_runs": 2,
     },
     "goals": {"sync_age_max_h": 26, "manual_queue_max_age_h": 72},
     "site_defaults": {
@@ -624,17 +631,23 @@ _LIST_GAP_RE = re.compile(r"[,;/]")
 _STOP_GAP_RE = re.compile(r"[.!?;:]\s")  # "2.5" and "recall.The" are not stops
 # Words that join list items ("Q20 and Q20 Pro", "1000 or 1500").
 _LIST_WORDS = frozenset({"and", "or"})
+# Brackets between two tokens: "stations (chargers are ...)".
+_PAREN_GAP_RE = re.compile(r"[()\[\]]")
 
 
-def tokenize_with_gaps(value: Any) -> tuple[tuple[str, ...], frozenset[int], frozenset[int]]:
-    """(tokens, seps, stops) of ``norm_text(value)``: ``seps`` holds i when a
-    list separator (',', ';', '/') stands between token i and token i+1,
-    ``stops`` holds i when a sentence or clause ends after token i. The
-    tokens equal ``tokenize(value)``."""
+def tokenize_with_gaps(value: Any) -> tuple[tuple[str, ...], frozenset[int], frozenset[int],
+                                            tuple[tuple[int, str], ...]]:
+    """(tokens, seps, stops, parens) of ``norm_text(value)``: ``seps`` holds
+    i when a list separator (',', ';', '/') stands between token i and token
+    i+1, ``stops`` holds i when a sentence or clause ends after token i, and
+    ``parens`` holds (i, ch), in text order, for each bracket ch ('(', ')',
+    '[', ']') between token i and token i+1. The tokens equal
+    ``tokenize(value)``."""
     s = norm_text(value)
     toks: list[str] = []
     seps: set[int] = set()
     stops: set[int] = set()
+    parens: list[tuple[int, str]] = []
     prev_end: Optional[int] = None
     for m in _TOKEN_RE.finditer(s):
         if prev_end is not None:
@@ -645,9 +658,10 @@ def tokenize_with_gaps(value: Any) -> tuple[tuple[str, ...], frozenset[int], fro
                     seps.add(i)
                 if _STOP_GAP_RE.search(gap):
                     stops.add(i)
+                parens.extend((i, ch) for ch in _PAREN_GAP_RE.findall(gap))
         toks.append(m.group(0))
         prev_end = m.end()
-    return tuple(toks), frozenset(seps), frozenset(stops)
+    return tuple(toks), frozenset(seps), frozenset(stops), tuple(parens)
 
 
 def compact(value: Any) -> str:
@@ -1662,6 +1676,9 @@ class _Field:
     # token i+1. i in stops: a sentence or clause ends after token i.
     seps: frozenset[int] = frozenset()
     stops: frozenset[int] = frozenset()
+    # (i, ch): bracket ch ('(', ')', '[', ']') stands between token i and
+    # token i+1, in text order.
+    parens: tuple[tuple[int, str], ...] = ()
 
 
 # Fields that name what was recalled (as opposed to describing it at length).
@@ -1689,9 +1706,9 @@ class RecallView:
         fields: list[_Field] = []
 
         def add(name: str, value: str) -> None:
-            toks, seps, stops = tokenize_with_gaps(value)
+            toks, seps, stops, parens = tokenize_with_gaps(value)
             if toks:
-                fields.append(_Field(name, toks, seps=seps, stops=stops))
+                fields.append(_Field(name, toks, seps=seps, stops=stops, parens=parens))
         add("title", rec.title)
         for v in rec.product_names:
             add("product_name", v)
@@ -2205,19 +2222,36 @@ class Matcher:
 
     def _excluded(self, f: _Field, s: int, e: int) -> bool:
         """The recall scopes this mention OUT: "... is not included in this
-        recall" after it in the same sentence, or "excluding" right before."""
+        recall" after it in the same sentence, or "excluding" right before.
+
+        The words after the mention must match both as written and with
+        every parenthetical opened after the mention left out: in "Explorer
+        1000 stations (chargers are not included in this recall)" the
+        exclusion is about the chargers, while "Explorer 1000 Plus (model
+        JE-1000C) is not included" still excludes. This only ever removes an
+        exclusion."""
         if self.s.exclusion_cues and _preceded_by_cue(
                 f.tokens, s, self.s.exclusion_cues, max(1, self.s.compat_lookback)):
             return True
         rx = self.s.exclusion_after
         if rx is None:
             return False
-        after: list[str] = []
+        brackets: dict[int, list[str]] = {}
+        for i, ch in f.parens:
+            brackets.setdefault(i, []).append(ch)
+        flat: list[str] = []
+        outside: list[str] = []
+        depth = 0
         for j in range(e + 1, min(len(f.tokens), e + 13)):
             if (j - 1) in f.stops:
                 break
-            after.append(f.tokens[j])
-        return bool(after) and rx.match(" ".join(after)) is not None
+            for ch in brackets.get(j - 1, ()):
+                depth = depth + 1 if ch in "([" else max(0, depth - 1)
+            flat.append(f.tokens[j])
+            if depth == 0:
+                outside.append(f.tokens[j])
+        return all(bool(words) and rx.match(" ".join(words)) is not None
+                   for words in (flat, outside))
 
     def _find_number(self, view: RecallView, mn: str) -> list[dict[str, Any]]:
         hits = []
