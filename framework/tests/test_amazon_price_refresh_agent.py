@@ -460,6 +460,9 @@ def test_example_config_is_the_launch_plan(storage):
     assert s.cache.max_age_hours == HORIZON_4H
     assert s.quotable_hours(24) == QUOTABLE_H and s.max_html_cache_age_s == 660
     assert s.describe()["cache"]["worst_case_stored_age_hours"] == 24.0
+    # A row a run asked about and could not refresh is spared while still
+    # displayable: stored up to the quotable window plus a period and a run.
+    assert s.describe()["cache"]["worst_case_spared_age_hours"] == round(QUOTABLE_H + 4.5, 4)
 
 
 def test_human_clicks_source_is_the_verified_human_beacon_series(storage):
@@ -630,6 +633,107 @@ def test_example_schedule_never_stores_amazon_data_past_24h(storage):
 
     assert oldest(s.cache.max_age_hours) <= 24.0 + 1e-9
     assert oldest(24.0) > 27.0
+
+
+def _oldest_spared(answered: float, *, period: float, run_h: float, horizon: float,
+                   window: float, gate: float, max_fails: int, steps: int = 6) -> float:
+    """The oldest a value answered ``answered`` hours after a cron tick gets in
+    storage, over every outcome of the runs after it, by the engine's rules.
+    Each run ranks 10 s after its tick (due when older than ``gate``:
+    price_refresh_priority's ``fresh < NOW() - gate``), then answers, then
+    purges, all within ``run_h`` of the tick. A due row is answered (its
+    value is replaced), its batch fails (one of the run's unrefreshed keys)
+    or the budget never reaches it (a spill). The purge NULLs a row older
+    than ``horizon`` unless its batch failed in that run and it is at most
+    ``window`` old (THE SPARE); a spilled or not-due row is never spared. At
+    most ``max_fails`` failed batches."""
+    rank = 10 / 3600.0
+    offsets = [rank + (run_h - rank) * i / steps for i in range(steps + 1)]
+
+    def from_tick(k: int, fails: int) -> float:
+        age = k * period - answered                   # the value's age at tick k
+        if age > 72:
+            raise AssertionError("the replay never removed the value")
+        outcomes = ("answered", "failed", "spilled") if age + rank > gate else ("not due",)
+        oldest = 0.0
+        for outcome in outcomes:
+            if outcome == "answered":                 # replaced, at the latest at the purge
+                oldest = max(oldest, age + offsets[-1])
+                continue
+            n = fails + (outcome == "failed")
+            if n > max_fails:
+                continue
+            kept = False
+            for y in offsets:                         # this run's purge
+                spared = outcome == "failed" and age + y <= window
+                if age + y > horizon and not spared:
+                    oldest = max(oldest, age + y)     # NULLed by this purge
+                else:
+                    kept = True
+            if kept:
+                oldest = max(oldest, from_tick(k + 1, n))
+        return oldest
+
+    return from_tick(1, 0)
+
+
+def test_example_schedule_bounds_how_long_a_spared_row_is_stored(storage):
+    """The spare on the example's schedule (_oldest_spared). Budget spills
+    alone stay within the horizon's 24h, and a row answered on its cadence
+    and spared once is gone by ~24.5h (the docs used to call that the worst
+    case). A row answered off its cadence (a manual or catch-up run) reaches
+    ~28.0h: answered 3.4h before a tick, its batch failing at ~19.4h and
+    ~23.4h, it is stored until ~27.9h. Nothing passes
+    worst_case_spared_age_hours (the window plus a period and a run, ~28.3h),
+    which a row on its cadence whose batch fails twice in a row reaches."""
+    s = make_settings(storage)
+    cfg = A.priority_config(s, storage=storage)
+    period, run_h = s.cron_period_hours, s.max_run_minutes / 60.0
+    horizon = s.cache.max_age_hours
+    window = s.quotable_hours(cfg.get("display_hours"))   # the run's spare window
+    assert (horizon, window) == (HORIZON_4H, QUOTABLE_H)
+    bound = C.worst_case_spared_age_hours(window, period, s.max_run_minutes)
+    assert bound == s.describe()["cache"]["worst_case_spared_age_hours"] == 28.3167
+    no_spare = C.worst_case_stored_age_hours(horizon, period, s.max_run_minutes)
+    gates = sorted({g["gate_hours"] for g in cfg["groups"]} | {cfg["long_tail"]["gate_hours"]})
+    assert gates == [12.0, TAIL_GATE]
+
+    def oldest(answered: float, max_fails: int, gate: float = TAIL_GATE) -> float:
+        return _oldest_spared(answered, period=period, run_h=run_h, horizon=horizon,
+                              window=window, gate=gate, max_fails=max_fails)
+
+    # The review's case (answered 3.4h before a tick, first due at ~19.4h):
+    # failing at ~19.4h and ~23.4h, it is spared at ~23.4h and stored until
+    # ~27.9h. Failing only at ~23.4h does the same after a ~19.4h run that
+    # never asked it and purged within 6 minutes. Spills alone stay in 24h.
+    twice = oldest(period - 3.4, 2)
+    assert twice > 24.0 and round(twice, 4) == 27.9
+    assert round(oldest(period - 3.4, 1), 4) == 27.9
+    assert oldest(period - 3.4, 0) <= no_spare == 24.0
+
+    minutes = [m / 60.0 for m in range(1, int(period * 60))]   # answered at any minute
+    for gate in gates:
+        worst = {n: {a: oldest(a, n, gate) for a in minutes} for n in range(4)}
+        assert max(worst[0].values()) <= no_spare                             # spills alone
+        assert max(v for a, v in worst[1].items() if a <= run_h) <= 24.5      # on cadence, once
+        assert max(v for a, v in worst[3].items() if a > run_h) <= (          # off cadence
+            horizon + 2 * period + run_h) == 28.0
+        assert max(worst[3].values()) <= bound
+        assert max(worst[2].values()) > bound - 0.05                          # and it is reached
+
+
+def test_worst_case_spared_age_is_never_below_the_horizon_bound(storage):
+    assert C.worst_case_spared_age_hours(QUOTABLE_H, 4, 30) == round(QUOTABLE_H + 4.5, 4)
+    assert C.worst_case_spared_age_hours(QUOTABLE_H, 4, 30, horizon_hours=18) == 28.3167
+    # The spare only keeps rows past the horizon: a window at or under it
+    # spares nothing, and the bound is the horizon's own, never a smaller one.
+    assert C.worst_case_spared_age_hours(19.0, 4, 30) == C.worst_case_stored_age_hours(
+        HORIZON_4H, 4, 30) == 24.0
+    assert C.worst_case_spared_age_hours(17.0, 4, 30, horizon_hours=18) == 22.5
+    short = make_settings(storage, lambda b: b["demand_priority"].__setitem__(
+        "display_hours", 19.5))
+    assert short.quotable_hours(19.5) < short.cache.max_age_hours == HORIZON_4H
+    assert short.describe()["cache"]["worst_case_spared_age_hours"] == 24.0
 
 
 # ---------------------------------------------------------------------------

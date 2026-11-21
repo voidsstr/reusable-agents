@@ -220,7 +220,11 @@ class Settings:
                       "purge_horizon_hours": self.cache.max_age_hours,
                       "worst_case_stored_age_hours": cache_mod.worst_case_stored_age_hours(
                           self.cache.max_age_hours, self.cron_period_hours,
-                          self.max_run_minutes)},
+                          self.max_run_minutes),
+                      "worst_case_spared_age_hours": cache_mod.worst_case_spared_age_hours(
+                          self.quotable_hours(self.demand_priority.get("display_hours")),
+                          self.cron_period_hours, self.max_run_minutes,
+                          horizon_hours=self.cache.max_age_hours)},
             "not_found_guard": {"max_share": self.not_found_max_share,
                                 "min_answered": self.not_found_min_answered},
             "metrics": {"indexable_sql": self.indexable_sql or None,

@@ -4,7 +4,8 @@
 > buyers and AI assistants actually use, for any **cache-model** site, through
 > the official Creators API only. Writes each fresh answer into the site's
 > Amazon cache table, never blanks data on a failed run, and NULLs every
-> Amazon-sourced value before any of it has been stored for 24 hours.
+> Amazon-sourced value before any of it has been stored for 24 hours (except
+> a row a run asked about and could not refresh: rule 2).
 > North-star link: a page with a fresh, quotable price shows an Offer and
 > converts; a page without one does not.
 
@@ -94,7 +95,7 @@
 | `no_offer` (no New offer; MAP-hidden) | same, price NULL, availability text, availability type and buy-box flag NULL (a used listing's "Only 2 left" / `IN_STOCK_SCARCE` / buy box must not sit by a NULL price); condition kept (it says why). MAP-hidden (`map_hidden=true`: Amazon withholds a New buy-box price under MAP) keeps the type and the buy-box flag, because that item is buyable |
 | `non_usd` | same, price NULL, currency = the foreign currency; availability text, type and buy-box flag NULL |
 | `not_found` (per-ASIN error) | every API column NULL, `outcome='not_found'`, `fetched_at=NOW()`; written only after a clean sweep and only if the not_found guard holds |
-| asked but not refreshed: `missing` (silently omitted), `error` (failed batch), an answer whose values cannot be stored (`poison_rows`) | **nothing**: the row keeps its previous values. This run's purge **spares** it while it is still inside the quotable window (`spared_rows`); the next run re-asks it, and its purge removes it if it is still unrefreshed by then (it is past the window). One already past the window is purged now (`purged_unrefreshed_rows`; nobody sees it) |
+| asked but not refreshed: `missing` (silently omitted), `error` (failed batch), an answer whose values cannot be stored (`poison_rows`) | **nothing**: the row keeps its previous values. This run's purge **spares** it while it is still inside the quotable window (`spared_rows`); the next run re-asks it, and its purge removes it if it is still unrefreshed by then (normally past the window; rule 2). One already past the window is purged now (`purged_unrefreshed_rows`; nobody sees it) |
 | untried (the budget ran out, an abort, a throttle) | **nothing**: the row keeps its previous values until a successful run's purge finds it past the horizon. A due row the budget never reached and that is still displayable when purged is counted in `blanked_due_rows` (the gate check keeps one run between falling due and the horizon, so this means the budget is short) |
 
 A row's API columns always come from the single answer stamped in
@@ -124,11 +125,23 @@ window, never on `availability_type` or `is_buybox_winner` alone.
    rows past the horizon are purged. **The spare:** the rows the run asked
    about and could not refresh (failed batch, omitted ASIN, unstorable
    answer) are left alone while their answer is inside the quotable window;
-   the next run re-asks them and purges them if they are still unrefreshed.
-   Like amendment 10's failed run, a spared row can stay stored past 24h
-   until a run purges it: normally the next one (~24.5h at worst on the 4h
-   cron); a row the next run again cannot refresh while still inside the
-   window is spared once more.
+   the next run re-asks them and purges them if they are still unrefreshed,
+   unless they are still inside the window then (spared once more). Like
+   amendment 10's failed run, a spared row can stay stored past 24h (never
+   displayed past the quotable window) until a later purge removes it. On
+   the 4h cron: ~24.5h for a row answered by a cron run on time (within
+   `max_run_minutes` of its tick) and spared once; up to ~28.0h for one
+   answered off that cadence (a manual or catch-up run, a run longer than
+   `max_run_minutes`), e.g. answered 3.4h before a tick, failed at ~19.4h and
+   ~23.4h, stored until ~27.9h; at most the quotable window plus one period
+   and one run, **~28.3h** (`worst_case_spared_age_hours`), for a row
+   answered on time whose batch fails in two runs in a row: slightly (~19
+   min) above amendment 10's one failed run (horizon + 2 periods + run =
+   28.0h). Budget spills alone never pass 24h. Like rule 3's 24h, these
+   bounds assume every later tick's run purges within `max_run_minutes`:
+   after a spare, a run that skips its purge (failed or partial), or a tick
+   skipped because a manual run still holds the lock, adds one period
+   (~32.3h).
 3. **The horizon keeps storage under 24h, not the threshold.** The Amazon
    license caches non-image content for at most 24h, and the purge runs once
    per run: a row just under the horizon at one purge is removed only at the
@@ -311,8 +324,10 @@ otherwise. Every mode honours `--agent-id`.
    tag and that getItems accepts the resource set (an invalid resource name
    fails every batch with HTTP 400; the dry run then exits 1 with Amazon's
    message, and a live run would fail without writing anything).
-5. `--config`: `purge_horizon_hours` and `worst_case_stored_age_hours` (≤ 24)
-   match the instance's cron. `--plan`: the tiers fill, the gate check is
+5. `--config`: `purge_horizon_hours` matches the instance's cron;
+   `worst_case_stored_age_hours` (≤ 24) is the bound with no failed batch or
+   failed run, and `worst_case_spared_age_hours` (~28.3 on the 4h cron) is
+   what the spare allows (rule 2). `--plan`: the tiers fill, the gate check is
    clean (`gate_buffer` empty: in particular no gate whose first re-check
    lands past the purge horizon), the first candidates look right. Settle
    the long-tail gate decision in rule 7 first.

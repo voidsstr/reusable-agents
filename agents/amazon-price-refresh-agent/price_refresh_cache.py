@@ -54,14 +54,31 @@ a visitor can still see it. So the purge takes the run's unrefreshed keys and
 a spare window (the engine passes the quotable window, 24h minus the HTML
 cache age) and leaves alone every such row whose answer is still inside that
 window. The next run re-asks it: a fresh answer replaces it, and otherwise
-that run's purge removes it, because by then it is normally past the window.
-The price of the spare is the one amendment 10 accepts for a failed run: a
-spared row can stay stored past 24h until a successful run purges it,
-normally the next one (~24.5h at worst on a 4-hourly cron); only a row the
-next run again cannot refresh while it is still inside the window (that
-purge came earlier in its run) is spared once more. Rows the run never asked
-about (the budget ran out) are not spared: the purge removes them once past
-the horizon.
+that run's purge removes it, because by then it is normally past the window;
+a row that run again cannot refresh while it is still inside the window is
+spared once more. Rows the run never asked about (the budget ran out) are
+not spared: the purge removes them once past the horizon.
+
+The spare's price is the kind amendment 10 accepts for a failed run: a
+spared row can stay stored past 24h, though never displayed past the
+quotable window, until a later purge removes it. On a 4-hourly cron with
+30-minute runs (horizon 19.5h; window ~23.8h at the kit's defaults) it is
+stored up to:
+* ~24.5h when it was answered on its cadence (within a run of a tick) and
+  spared once;
+* ~28.0h when it was answered off its cadence (a manual run, a catch-up run
+  after downtime, a run longer than max_run_minutes). For example, a row
+  answered 3.4h before a tick, whose batch then fails at ~19.4h and ~23.4h,
+  is spared at ~23.4h and stored until ~27.9h; the failure at ~23.4h alone
+  does it when the ~19.4h run never asked it and purged within 6 minutes;
+* the spare window plus one period and one run at worst, ~28.3h
+  (``worst_case_spared_age_hours``), reached by a row on its cadence whose
+  batch fails in two runs in a row (spared twice). That is slightly (~19
+  min) above amendment 10's one failed run: horizon + 2 periods + run, 28.0h.
+Budget spills alone never pass 24h. Like the horizon's 24h, these bounds
+assume every later tick's run purges within max_run_minutes. After a spare,
+a run that skips its purge (failed or partial), or a tick skipped because a
+manual run still holds the lock, adds one period (~32.3h).
 
 COLUMN CONTRACT
 ---------------
@@ -222,8 +239,27 @@ def worst_case_stored_age_hours(horizon_hours: float, period_hours: float,
                                 max_run_minutes: float = DEFAULT_MAX_RUN_MINUTES) -> float:
     """How old a value can get in storage when every run purges at
     ``horizon_hours``: just under the horizon at one purge, purged at the next
-    (one period later, up to one run later within its run)."""
+    (one period later, up to one run later within its run). A row the spare
+    keeps can get older: ``worst_case_spared_age_hours``."""
     return round(float(horizon_hours) + float(period_hours) + float(max_run_minutes) / 60.0, 4)
+
+
+def worst_case_spared_age_hours(spare_window_hours: float, period_hours: float,
+                                max_run_minutes: float = DEFAULT_MAX_RUN_MINUTES, *,
+                                horizon_hours: Optional[float] = None) -> float:
+    """How old a value can get in storage with the spare (see THE SPARE): a
+    row spared at up to ``spare_window_hours`` old is purged by the next run,
+    one period later and up to one run later within its run. The spare only
+    keeps rows past the horizon, so a window at or under it spares nothing
+    and the bound is the horizon's own (``worst_case_stored_age_hours``).
+    ``horizon_hours`` defaults to the 'auto' horizon of the period and run,
+    the largest a config may set. Like the horizon's bound, it assumes every
+    later tick's run purges within ``max_run_minutes``; a run after a spare
+    that skips its purge adds one period."""
+    horizon = (purge_horizon_hours(period_hours, max_run_minutes) if horizon_hours is None
+               else float(horizon_hours))
+    return worst_case_stored_age_hours(max(float(spare_window_hours), horizon),
+                                       period_hours, max_run_minutes)
 
 
 def build_cache_spec(cfg: Mapping[str, Any], *, period_hours: Optional[float] = None,
