@@ -12,7 +12,7 @@ domain, the starvation boost favours it forever, and so on.
 This test scans ``framework/`` and ``agents/`` for code constructs that name
 two or more of the reference sites (listed in the allowlist file, so this
 module itself names no site) and asserts that every one it finds is recorded
-in ``framework/tests/data/two_site_enumerations_allowlist.json``. That file is
+in ``framework/tests/two_site_enumerations_allowlist.json``. That file is
 W1's work inventory: W1 replaces each entry with a site-registry lookup and
 deletes the entry, until the list is empty. A construct that is not in the
 allowlist fails the test, so no new enumeration can land.
@@ -34,10 +34,20 @@ A *hit* is the innermost construct whose mentions span two or more sites:
   ``def f(root="<a>.com"): return root + "?tag=<b>-20"`` is one hit.
 * Shell: one logical line (continuations joined), ``if``/``case`` blocks,
   multi-line arrays, a function or script body. Python programs embedded in
-  a script (heredocs fed to ``python``, ``<<-`` included, and
-  ``python3 -c '<program>'``) are scanned with the Python rules, after the
-  shell's own escape and expansion handling. One that still does not parse
-  is a scan error, so the gate never silently stops looking inside it.
+  a script are scanned with the Python rules, after the shell's own escape
+  and expansion handling: heredocs fed to python (``<<-`` included) and
+  ``-c '<program>'``. The interpreter may be ``python3``, a path to one
+  (``"$VENV/bin/python3"``) or a PY/PYTHON-style variable (``$PY``,
+  ``"$PYTHON"``, ``${PYTHON:-python3}``, ``$VENV_PY``, ``$PYTHON_BIN``; not
+  ``$PYTHONPATH`` or ``$PYTEST``), quoted or not, with options before ``-c``
+  (``-u``, ``-W ignore``). A program that still does not parse is a scan
+  error. So is one the scan cannot isolate, if it names a site: a
+  ``python -c`` inside a quoted string or backticks
+  (``X="$(python3 -c '...')"``, ``bash -c "python3 -c '...'"``) and a heredoc
+  piped into python (``cat <<'PY' | python3 -``). Still not seen: an
+  interpreter spelled any other way (``$INTERP -c``, ``$(which python3) -c``)
+  and a program that reaches python by another route (a file the script
+  writes, ``eval``, a heredoc fed to ``bash`` or ``ssh``).
 * JS/TS: the innermost ``{}``, ``[]`` or ``()`` region, or a top-level
   declaration.
 
@@ -92,6 +102,8 @@ import ast
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import warnings
 from collections import Counter
@@ -103,7 +115,7 @@ from typing import Iterable, Iterator, Optional, Sequence
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ALLOWLIST_PATH = Path(__file__).resolve().parent / "data" / "two_site_enumerations_allowlist.json"
+ALLOWLIST_PATH = Path(__file__).resolve().parent / "two_site_enumerations_allowlist.json"
 
 #: Top-level directories that hold framework and shipped-agent code.
 SCAN_ROOTS: tuple[str, ...] = ("framework", "agents")
@@ -509,9 +521,40 @@ def scan_python_source(path: str, source: str, matcher: SiteMatcher, *,
 # ---------------------------------------------------------------------------
 
 _HEREDOC_RE = re.compile(r"<<(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
-_PYTHON_CMD_RE = re.compile(r"(?:^|[\s;&|(`=])(?:\S*/)?python[0-9.]*(?=\s|$)")
+#: A variable that holds a Python interpreter: PY or PYTHON (digits allowed), with an
+#: optional prefix ending in ``_`` and an optional BIN/EXE/CMD suffix: ``PY``, ``PYTHON3``,
+#: ``VENV_PY``, ``PYTHON_BIN``. Not ``PYTHONPATH``, ``PYTEST``, ``PY_FILE`` or ``HAPPY``.
+_PY_VAR = r"(?i:(?:[a-z0-9_]*_)?py(?:thon)?[0-9]*(?:_?(?:bin|exe|cmd))?)"
+#: A Python interpreter word: ``python3``, a path to one (``/usr/bin/python3.12``,
+#: ``$VENV/bin/python3``), or an expansion of an interpreter variable (``$PYTHON``,
+#: ``${PYTHON}``, ``${PYTHON:-python3}``, ``${PY-${VENV}/bin/python3}``).
+_PY_INTERP = (r"(?:(?:\S*/)?python[0-9.]*"
+              r"|\$" + _PY_VAR + r"(?![A-Za-z0-9_])"
+              r"|\$\{" + _PY_VAR + r"(?::?[-=?+](?:[^{}]|\{[^{}]*\})*)?\})")
+#: Interpreter options before ``-c``: letter flags (``-u``, ``-IB``) and the options that
+#: take a separate argument (``-W ignore``, ``-X utf8``).
+_PY_FLAGS = r"(?:\s+(?:-[WX]\s*\S+|-[A-Za-z]+))*?"
+#: Options that leave python reading its program from stdin (no ``-c`` or ``-m``).
+_PY_STDIN_FLAGS = r"(?:\s+(?:-[WX]\s*[^\s;&|)]+|-(?![A-Za-z]*[cm])[A-Za-z]+))*"
+#: An interpreter word anywhere in a line's code so far, bare or quoted as a whole
+#: (``"$PYTHON"``, not ``"python3 not found"``): a heredoc the line opens is a program.
+_PYTHON_CMD_RE = re.compile(
+    r"(?:^|[\s;&|(`=])(?:([\"'])" + _PY_INTERP + r"\1|" + _PY_INTERP + r")(?=\s|$)")
 #: A skeleton that ends in ``python3 [-flags] -c``: the next quoted region is a program.
-_PYTHON_C_RE = re.compile(r"(?:^|[\s;&|(`=])(?:\S*/)?python[0-9.]*(?:\s+-[A-Za-z]+)*?\s+-[A-Za-z]*c\s*$")
+_PYTHON_C_RE = re.compile(r"(?:^|[\s;&|(`=])" + _PY_INTERP + _PY_FLAGS + r"\s+-[A-Za-z]*c\s*$")
+#: What sits between a quoted interpreter and its program: ``"$PYTHON" -u -c '<program>'``.
+_C_OPTIONS_RE = re.compile(_PY_FLAGS + r"\s+-[A-Za-z]*c\s*")
+_PY_INTERP_RE = re.compile(_PY_INTERP)
+#: A ``python -c`` with a quoted or ``$``-expanded program, inside a quoted region
+#: (group 1 is the interpreter): ``"$(python3 -c '...')"``, ``bash -c "python3 -c '...'"``,
+#: a backtick substitution. Prose such as ``"python3 -c failed"`` has no program.
+_NESTED_C_RE = re.compile(r"(?:^|[\s;&|(`=\"'])(" + _PY_INTERP + r")[\"']?" + _PY_FLAGS
+                          + r"\s+-[A-Za-z]*c(?=\s*(?:\\?[\"']|\$))")
+#: A pipe into python reading its program from stdin: ``| python3``, ``| python3 -u -``,
+#: ``| "$PYTHON" - arg``. Never ``-c``, ``-m`` or a script argument: those read stdin as data.
+_PIPE_TO_PYTHON_RE = re.compile(
+    r"(?<!\|)\|(?!\|)&?\s*[\"']?" + _PY_INTERP + r"[\"']?" + _PY_STDIN_FLAGS
+    + r"(?:\s+-(?=\s|$|[;&|)])|\s*(?=$|[;&|)]))")
 _SH_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SH_SPECIAL_PARAMS = frozenset("@*#?$!-0123456789")
 #: What a backslash escapes inside double quotes, and inside an unquoted heredoc.
@@ -531,6 +574,23 @@ def _matching_close(text: str, start: int, opener: str, closer: str) -> int:
             if depth == 0:
                 return j
     return len(text) - 1
+
+
+def _command_end(text: str, start: int) -> int:
+    """End of the command starting at ``text[start]`` inside a quoted region: the
+    ``)`` that closes its ``$(``, a backtick, or the end of ``text``."""
+    depth = 0
+    for j in range(start, len(text)):
+        ch = text[j]
+        if ch == "`":
+            return j
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return j
+            depth -= 1
+    return len(text)
 
 
 def shell_expanded(text: str, *, escapable: str, expand: bool) -> str:
@@ -601,6 +661,7 @@ class _Heredoc:
     start_line: int  # line number of the first body line
     body: str  # leading tabs already stripped for `<<-`
     expands: bool = False  # unquoted delimiter: the shell expands $... in the body
+    op: int = 0  # offset of the `<<` operator in its logical line's code
 
 
 @dataclass
@@ -670,7 +731,7 @@ def split_shell(text: str) -> list[_ShLine]:
     spans: list[tuple[int, int]] = []
     span_lines: list[int] = []
     heredocs: list[_Heredoc] = []
-    pending: list[tuple[str, bool, bool, bool]] = []  # (tag, strip_tabs, python, expands)
+    pending: list[tuple[str, bool, bool, bool, int]] = []  # (tag, strip_tabs, python, expands, op)
     # Context stack: "sq", "ansi", "dq", "bt", "cmdsub" (only inside quotes), "param".
     stack: list[str] = []
     depth: list[int] = []  # nesting counters for "cmdsub"/"param" entries
@@ -706,7 +767,7 @@ def split_shell(text: str) -> list[_ShLine]:
     def read_heredocs() -> None:
         """Consume pending heredoc bodies; ``text[i]`` starts the first body line."""
         nonlocal i, line
-        for tag, strip_tabs, python, expands in pending:
+        for tag, strip_tabs, python, expands, op in pending:
             body_start = line
             body: list[str] = []
             while i < n:
@@ -719,7 +780,7 @@ def split_shell(text: str) -> list[_ShLine]:
                 if raw == tag:
                     break
                 body.append(raw)
-            heredocs.append(_Heredoc(tag, python, body_start, "\n".join(body), expands))
+            heredocs.append(_Heredoc(tag, python, body_start, "\n".join(body), expands, op))
         pending.clear()
 
     while i < n:
@@ -828,7 +889,7 @@ def split_shell(text: str) -> list[_ShLine]:
                 is_python = bool(_PYTHON_CMD_RE.search("".join(code)))
                 # Any quoting of the delimiter (<<'X', <<"X", <<\X) turns expansion off.
                 expands = m.group(4) is not None and "\\" not in m.group(0)
-                pending.append((tag, m.group(1) == "-", is_python, expands))
+                pending.append((tag, m.group(1) == "-", is_python, expands, len(code)))
                 emit(m.group(0))
                 i = m.end()
                 continue
@@ -853,6 +914,19 @@ def split_shell(text: str) -> list[_ShLine]:
         read_heredocs()
     finish_line(line)
     return out
+
+
+def _follows_quoted_interpreter(skeleton: str, marks: Sequence[int], values: Sequence[str],
+                                k: int) -> bool:
+    """Quoted region ``k`` is the program of a quoted interpreter: region ``k - 1`` is
+    one (``"$PYTHON"``, ``"$VENV/bin/python3"``) and only options sit between them."""
+    if k == 0:
+        return False
+    prev = marks[k - 1]
+    if prev > 0 and skeleton[prev - 1] not in " \t\n;&|(`=":
+        return False
+    return bool(_C_OPTIONS_RE.fullmatch(skeleton, prev + 1, marks[k])
+                and _PY_INTERP_RE.fullmatch(values[k - 1]))
 
 
 @dataclass
@@ -946,6 +1020,7 @@ class ShellScanner:
         for ln in split_shell(self.text):
             scope = next((b.scope for b in reversed(stack) if b.kind == "function"), "<script>")
             programs = self._scan_python_c(ln, scope)
+            self._flag_unisolated_python(ln, scope, skip=programs)
             mentions = self._line_mentions(ln, scope, skip=programs)
             if len(_sites_of(mentions)) >= 2:
                 self._hit("line", mentions, scope=scope, size=0, line=ln.start, end_line=ln.end)
@@ -1050,9 +1125,11 @@ class ShellScanner:
         """Scan each ``python3 -c '<program>'`` on the line with the Python rules;
         return the indexes of the quoted regions that were programs."""
         skeleton, marks = ln.skeleton_and_marks()
+        values = ln.quoted_values()
         programs: set[int] = set()
         for k, mark in enumerate(marks):
-            if not _PYTHON_C_RE.search(skeleton, 0, mark):
+            if not (_PYTHON_C_RE.search(skeleton, 0, mark)
+                    or _follows_quoted_interpreter(skeleton, marks, values, k)):
                 continue
             s, e = ln.quoted_spans[k]
             raw = ln.code[s:e]
@@ -1069,6 +1146,35 @@ class ShellScanner:
                                       scope=f"{scope}/python-c", what="python -c program")
             programs.add(k)
         return frozenset(programs)
+
+    def _flag_unisolated_python(self, ln: _ShLine, scope: str, *, skip: frozenset[int]) -> None:
+        """A scan error for each embedded program this scan cannot isolate when it
+        names a site: a ``python -c`` inside a quoted region (``X="$(python3 -c ...)"``,
+        ``bash -c "python3 -c ..."``, backticks), and a heredoc piped into python
+        (``cat <<'PY' | python3 -``). ``skip``: quoted regions scanned as programs."""
+        for k, (s, e) in enumerate(ln.quoted_spans):
+            if k in skip:
+                continue
+            raw = ln.code[s:e]
+            for m in _NESTED_C_RE.finditer(raw):
+                if self.matcher.sites_in(raw[m.start(1):_command_end(raw, m.start(1))]):
+                    line = ln.quoted_lines[k] if k < len(ln.quoted_lines) else ln.start
+                    self.errors.append(
+                        f"{self.path}:{line}: a python -c program inside a quoted string or "
+                        f"backticks in {scope} names a site, and this scan cannot see inside "
+                        "it. Run python outside any string (X=$(python3 -c '...') needs no "
+                        "outer quotes) or move the program into a .py file.")
+                    break
+        for n, doc in enumerate(ln.heredocs):
+            if doc.python or not self.matcher.sites_in(doc.body):
+                continue
+            end = ln.heredocs[n + 1].op if n + 1 < len(ln.heredocs) else len(ln.code)
+            if _PIPE_TO_PYTHON_RE.search(ln.code, doc.op, end):
+                self.errors.append(
+                    f"{self.path}:{ln.start}: heredoc <<{doc.tag} in {scope} is piped into "
+                    "python and names a site, and this scan cannot see inside it. Feed it to "
+                    f"python directly (python3 - <<'{doc.tag}') or move the program into a "
+                    ".py file.")
 
     def _scan_python_program(self, variants: Sequence[str], *, first_line: int, scope: str,
                              what: str) -> None:
@@ -1461,9 +1567,7 @@ def entry_key(entry: dict) -> tuple[str, str, str, int, tuple[str, ...]]:
 
 
 _MISSING_ALLOWLIST_HINT = (
-    "{path} is missing. Note that the repo-wide `data/` rule in .gitignore (meant for per-agent "
-    "runtime data) also matches framework/tests/data/, so a plain `git add` skips this file: "
-    "commit it with `git add -f`.")
+    "{path} is missing: it is F0's checked-in allowlist (W1's inventory); restore it from git.")
 
 
 def read_allowlist_doc(path: Path = ALLOWLIST_PATH) -> dict:
@@ -1566,7 +1670,7 @@ def format_hit(hit: Hit) -> str:
 
 @pytest.fixture(scope="module")
 def allowlist() -> Allowlist:
-    return load_allowlist()  # a missing file raises with the .gitignore hint
+    return load_allowlist()  # a missing file raises, naming the path
 
 
 @pytest.fixture(scope="module")
@@ -1855,6 +1959,81 @@ def test_shell_expanded_renders_what_python_sees():
                           expand=False) == 'a = 1   + 2  # \\"q\\"'
 
 
+#: Programs that only the Python rules flag: one names the sites as identifiers
+#: alone, the other names one site and has a fallback branch.
+_PROGRAMS = (
+    "D = {1: ACME_DSN, 2: GLOBEX_DSN}; print(D)",
+    'if site == "acme":\n    q = 1\nelse:\n    q = 2\nprint(q)',
+)
+
+
+def _sh_scan(src: str) -> tuple[list[tuple], list[str]]:
+    errors: list[str] = []
+    hits = scan_shell_source("x.sh", src, _SYN, errors=errors)
+    return [(h.line, h.kind, h.scope, h.size, h.tokens) for h in hits], errors
+
+
+@pytest.mark.parametrize("prog", _PROGRAMS, ids=("ident-dict", "one-site-if"))
+@pytest.mark.parametrize("form", [
+    "$PYTHON -c '{prog}'",
+    "$PY -u -c '{prog}'",
+    "${PYTHON:-python3} -c '{prog}'",
+    "\"$PYTHON\" -c '{prog}'",
+    "\"$VENV/bin/python3\" -c '{prog}'",
+    "X=$(\"${VENV_PY}\" -I -c '{prog}')",
+    "$PYTHON_BIN -c '{prog}'",
+    "python3 -W ignore -X utf8 -c '{prog}'",
+    "$PYTHON - <<'PY'\n{prog}\nPY",
+    "\"$PYTHON\" - <<'PY'\n{prog}\nPY",
+    "\"$VENV/bin/python3\" - <<'PY'\n{prog}\nPY",
+    "${PYTHON:-python3} <<'PY'\n{prog}\nPY",
+])
+def test_shell_interpreter_spellings_scan_like_python3(form, prog):
+    baseline = "python3 - <<'PY'\n{prog}\nPY" if "<<" in form else "python3 -c '{prog}'"
+    expected = _sh_scan(baseline.replace("{prog}", prog) + "\n")
+    assert expected[0] and expected[1] == []
+    assert _sh_scan(form.replace("{prog}", prog) + "\n") == expected
+
+
+@pytest.mark.parametrize("word", [
+    "$PYTHONPATH", "${PYTHONPATH:-x}", "$PYTEST", "$PY_FILE", "$HAPPY", "\"$PY_VERSION\""])
+def test_shell_other_variables_are_not_interpreters(word):
+    src = f"{word} -c '{_PROGRAMS[0]}'\n{word} - <<'PY'\n{_PROGRAMS[1]}\nPY\n"
+    assert _sh_scan(src) == ([], [])
+
+
+@pytest.mark.parametrize("form", [
+    "X=\"$(python3 -c '{prog}')\"",
+    "X=\"$(\"$PYTHON\" -u -c '{prog}')\"",
+    "X=`python3 -c '{prog}'`",
+    "bash -c \"python3 -c '{prog}'\"",
+    "cat <<'PY' | python3 -\n{prog}\nPY",
+    "cat <<'PY' |\n{prog}\nPY\n  \"$PYTHON\" -u - --verbose",
+])
+def test_shell_python_the_scan_cannot_isolate_fails_loud(form):
+    hits, errors = _sh_scan(form.replace("{prog}", _PROGRAMS[0]) + "\n")
+    assert hits == [] and len(errors) == 1, errors
+    assert errors[0].startswith("x.sh:1: ") and "cannot see inside it" in errors[0]
+    # The same shape is fine when the program names no site.
+    assert _sh_scan(form.replace("{prog}", "print(1)") + "\n") == ([], [])
+
+
+@pytest.mark.parametrize("src", [
+    # A data heredoc piped into a program or a module: python reads it as data.
+    "cat <<EOF | python3 -c 'import json, sys; print(json.load(sys.stdin))'\n{\"site\": \"acme\"}\nEOF\n",
+    "cat <<EOF | python3 -m json.tool\n{\"site\": \"acme\"}\nEOF\n",
+    "cat <<EOF | \"$PYTHON\" reader.py --site\nacme\nEOF\n",
+    "cat <<EOF | $PYTEST -\nacme\nEOF\n",
+    # The site sits outside the nested command.
+    "echo \"acme: $(python3 -c 'print(1)')\"\n",
+    # Prose that names python is neither an interpreter nor a program.
+    "echo \"python3 not found\"; cat <<EOF\nsome text\nEOF\n",
+    "echo \"python3 -c failed for acme\"\n",
+])
+def test_shell_python_data_and_prose_are_not_errors(src):
+    assert _sh_scan(src) == ([], [])
+
+
 def _js(src: str) -> list[tuple[str, str, int, tuple[str, ...]]]:
     return [(h.kind, h.scope, h.size, h.tokens) for h in scan_js_source("x.tsx", src, _SYN)]
 
@@ -1966,9 +2145,26 @@ def test_cli_prints_ready_to_paste_entries(capsys):
     assert json.loads(capsys.readouterr().out) == []
 
 
-def test_missing_allowlist_explains_the_gitignore_trap(tmp_path: Path):
-    with pytest.raises(FileNotFoundError, match="git add -f"):
-        load_allowlist(tmp_path / "data" / "absent.json")
+def test_missing_allowlist_names_the_missing_path(tmp_path: Path):
+    missing = tmp_path / "absent.json"
+    with pytest.raises(FileNotFoundError, match=re.escape(str(missing))):
+        load_allowlist(missing)
+
+
+def test_allowlist_is_not_git_ignored():
+    """An ignored allowlist makes every explicit-path ``git add`` of an edit to it
+    fail ("paths are ignored"), and W1 edits it entry by entry."""
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+    inside = subprocess.run([git, "-C", str(REPO_ROOT), "rev-parse", "--is-inside-work-tree"],
+                            capture_output=True, text=True, timeout=60)
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        pytest.skip("not a git work tree")
+    rel = ALLOWLIST_PATH.relative_to(REPO_ROOT).as_posix()
+    probe = subprocess.run([git, "-C", str(REPO_ROOT), "check-ignore", "--no-index", "-v", "--", rel],
+                           capture_output=True, text=True, timeout=60)
+    assert probe.returncode == 1, f"{rel} is git-ignored: {probe.stdout.strip() or probe.stderr.strip()}"
 
 
 # ---------------------------------------------------------------------------
