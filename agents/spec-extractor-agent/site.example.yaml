@@ -125,6 +125,12 @@ spec_extractor:
     enabled: true
     kinds: [station]
     require_complete: true
+    # Every runtime field below must be a field of each runtime kind's profile,
+    # given a min/max (a field the kind lacks fails the run in its first second):
+    # operator rows of an undefined field would drive the estimates unchecked. The measured
+    # field (operator-entered) also needs the profile rule
+    #   {kind: lte, a: usable_wh_measured, b: capacity_wh, on_fail: reject}
+    # (a measured value replaces the rated estimate; a range alone passes a 10x slip).
     energy:
       rated_field: capacity_wh
       measured_field: usable_wh_measured

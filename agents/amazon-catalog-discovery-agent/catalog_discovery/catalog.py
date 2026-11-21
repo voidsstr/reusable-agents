@@ -18,6 +18,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Sequence
 
+from framework.core.dsn_redaction import connect_error_text, redact_dsn
+
 from .config import CatalogSettings, INSERT_PARAMS
 
 KNOWN_CHUNK = 1000
@@ -160,8 +162,22 @@ def resolve_dsn(*, dsn_env: Optional[str], site: Optional[str], storage: Any = N
     return DsnResolution(name, env.get(name) or None, source)
 
 
+class CatalogConnectError(RuntimeError):
+    """A connection could not be opened. The text is safe to store and show:
+    it never carries the DSN or any piece of its password."""
+
+
+def connect_failure_text(exc: BaseException, *, dsn_env: str, dsn: str, label: str) -> str:
+    """The text of any exception a connect callable raised, safe to store
+    (framework.core.dsn_redaction)."""
+    if isinstance(exc, CatalogConnectError):
+        return redact_dsn(str(exc), dsn)
+    return connect_error_text(exc, dsn_env=dsn_env, dsn=dsn, label=label)
+
+
 def connect(dsn: str, *, application_name: str, statement_timeout_ms: int,
-            connect_timeout_s: int = 15, readonly: bool = False) -> Any:
+            connect_timeout_s: int = 15, readonly: bool = False, dsn_env: str = "",
+            label: str = "") -> Any:
     """A psycopg2 connection with a statement timeout; READ ONLY on request.
 
     READ ONLY is set twice: ``default_transaction_read_only=on`` for the whole
@@ -169,16 +185,35 @@ def connect(dsn: str, *, application_name: str, statement_timeout_ms: int,
     psycopg2 session flag. The seed SQL is also one statement by validation
     and runs as a subquery, so it cannot carry a 'COMMIT; DELETE ...' tail.
     The DSN of a sister database should still be a SELECT-only role.
+
+    A failure raises :class:`CatalogConnectError` naming ``label`` (default
+    "seed DB" when ``readonly``, else "catalog DB") and ``$dsn_env`` (the
+    variable's NAME): libpq echoes a malformed DSN, its password included,
+    so the driver's text is withheld or redacted, and the error is raised
+    outside the ``except`` block so no ``__context__`` carries it along.
     """
     import psycopg2  # type: ignore  # framework host dependency
 
     options = f"-c statement_timeout={int(statement_timeout_ms)}"
     if readonly:
         options += " -c default_transaction_read_only=on"
-    conn = psycopg2.connect(dsn, connect_timeout=int(connect_timeout_s),
-                            application_name=application_name[:63], options=options)
-    conn.autocommit = False
-    if readonly:
-        conn.set_session(readonly=True)
+    conn = None
+    failure = ""
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=int(connect_timeout_s),
+                                application_name=application_name[:63], options=options)
+        conn.autocommit = False
+        if readonly:
+            conn.set_session(readonly=True)
+    except Exception as exc:  # noqa: BLE001 -- re-raised below without the driver's text
+        failure = connect_error_text(exc, dsn_env=dsn_env, dsn=dsn,
+                                     label=label or ("seed DB" if readonly else "catalog DB"))
+    if failure:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        raise CatalogConnectError(failure)
     return conn
 

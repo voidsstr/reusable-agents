@@ -1,5 +1,5 @@
 {
-  "_comment": "Test-only spec_sources profiles for framework/tests/test_spec_extractor_agent.py. The station profile is framework/tests/fixtures/spec_sources/profiles/home-power.json (the F9 fixture, read-only) plus `station_extra_fields` merged in by the test; `solar-panel`, `solar-adapter` and `expansion-battery` (the shipped site.example.yaml's battery kind) are new here (field definitions copied from framework/tests/fixtures/compat_graph/catalog.json). Panels and adapters in the fixture catalog carry operator-entered values, so these profiles have fields and no extractors. Niche values only; the engine knows none of them.",
+  "_comment": "Test-only spec_sources profiles for framework/tests/test_spec_extractor_agent.py. The station profile is framework/tests/fixtures/spec_sources/profiles/home-power.json (the F9 fixture, read-only) plus `station_extra_fields` and `station_extra_rules` merged in by the test (usable_wh_measured, the shipped site.example.yaml's runtime.energy.measured_field, with its range and the rule a site's profile must ship with it: measured usable energy never above the rated capacity); `solar-panel`, `solar-adapter` and `expansion-battery` (the shipped site.example.yaml's battery kind) are new here (field definitions copied from framework/tests/fixtures/compat_graph/catalog.json). Panels and adapters in the fixture catalog carry operator-entered values, so these profiles have fields and no extractors. Niche values only; the engine knows none of them.",
   "station_extra_fields": {
     "pv_input_connectors": {
       "kind": "text",
@@ -17,8 +17,25 @@
         ]
       },
       "llm": false
+    },
+    "usable_wh_measured": {
+      "kind": "quantity",
+      "unit": "Wh",
+      "min": 50,
+      "max": 60000,
+      "description": "Usable energy measured in a discharge test (operator-entered)",
+      "llm": false
     }
   },
+  "station_extra_rules": [
+    {
+      "name": "measured-at-most-rated",
+      "kind": "lte",
+      "a": "usable_wh_measured",
+      "b": "capacity_wh",
+      "on_fail": "reject"
+    }
+  ],
   "profiles": {
     "solar-panel": {
       "fields": {

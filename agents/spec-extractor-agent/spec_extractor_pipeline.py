@@ -41,22 +41,25 @@ PHASES
              ``revisit_after_runs`` runs). A model's spec_values, typed spec
              row and status are written in one transaction, and only when
              they differ. New conflicts go to the adjudication queue; settled
-             or vanished ones are retired.
+             or vanished ones are retired. Typed rows of models now of a kind
+             not mapped to their table (configured or not) are deleted.
 4. compat    (``compat.enabled``) Rebuild compat_edges from accepted values
              with framework.core.compat_graph: incremental for changed
-             models, a full rebuild on a config / rule-version change and
-             every ``full_rebuild_every_runs`` runs, skipped when nothing
-             changed. Batched by A-side models so memory stays bounded. A
-             withdrawn fit record or list entry loses its edge on the next
-             run; the manual rows the engine writes from operator fit
-             records are its own and are released once no longer derived
-             (CompatPhase).
+             models, a full rebuild on a config / rule-version change, a
+             model's kind change and every ``full_rebuild_every_runs`` runs,
+             skipped when nothing changed. Batched by A-side models so
+             memory stays bounded. A withdrawn fit record or list entry
+             loses its edge on the next run; the manual rows the engine
+             writes from operator fit records are its own and are released
+             once no longer derived (CompatPhase).
 5. runtime   (``runtime.enabled``) Per spec-complete model of the runtime
              kinds and per load preset: usable energy (measured, else rated
              x factor with an interval) over the preset's average draw, only
              for loads the model's continuous output covers; peak check
              against the preset's surge. Rows of models that left the scope
-             (retired, another kind) are deleted.
+             (retired, another kind) are deleted. Every runtime field must
+             be a field of each runtime kind (build_engines), so the values
+             it reads were range-checked when their model was consolidated.
 
 AGENT_FORCE_RUN=1 (framework.core.short_circuit.force_run_requested)
 bypasses the in-run short-circuits: every fetched source is re-extracted,
@@ -275,6 +278,18 @@ def build_engines(settings: Settings, *, storage, collab: Collaborators
         if ks.typed:
             missing = sorted(set(ks.typed.columns) - set(fields))
             kp += [f"kind {kind}: typed column for unknown field {f!r}" for f in missing]
+        rt = settings.runtime
+        if rt.get("enabled") and kind in set(rt.get("kinds") or []):
+            # Only operator rows could carry a field the kind lacks, and those are
+            # never consolidated (no range check, no rule), yet runtime reads them.
+            en = rt.get("energy") or {}
+            for key, fname in (("energy.rated_field", en.get("rated_field")),
+                               ("energy.measured_field", en.get("measured_field")),
+                               ("continuous_field", rt.get("continuous_field")),
+                               ("peak_field", rt.get("peak_field"))):
+                if fname and fname not in fields:
+                    kp.append(f"kind {kind}: runtime.{key} {fname!r} is not one of its fields: its "
+                              "values would never be range-checked (add it to the profile with min/max)")
         problems += kp
         engines[kind] = KindEngine(kind=kind, settings=ks, cfg=cfg, ss=eng)
     return engines, common, fetcher, problems
@@ -633,7 +648,8 @@ class SpecExtractorRun:
         did = (self.metrics.get("sources_attempted", 0) or self.metrics.get("models_written", 0)
                or self.metrics.get("compat_upserts", 0) or self.metrics.get("compat_deletes", 0)
                or self.metrics.get("runtime_rows_written", 0) or self.metrics.get("runtime_rows_deleted", 0)
-               or self.metrics.get("llm_calls", 0) or self.metrics.get("adjudication_decisions", 0))
+               or self.metrics.get("llm_calls", 0) or self.metrics.get("adjudication_decisions", 0)
+               or self.metrics.get("typed_deletes", 0))
         rep.short_circuited = not did and not self.forced
         if self.problems or not compat_ok:
             rep.status = "failure"
@@ -1113,6 +1129,27 @@ class SpecExtractorRun:
                     self.warnings.append(f"queue retire failed: {type(e).__name__}: {e}"[:200])
         self.state["model_hashes"] = new_hashes
         self.state["model_revisits"] = new_counts
+        if not self.dry_run and self.only_models is None:
+            self._sweep_typed()
+
+    def _sweep_typed(self) -> None:
+        """A typed table holds rows only for models of the kinds mapped to it.
+        write_model cleans up after a kind change only for the models it
+        consolidates (kinds still configured); this deletes the rest, e.g. a
+        model moved to a kind the site does not configure. A failure is
+        rolled back and reported; compat and runtime still run."""
+        tables: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
+        for kind, eng in sorted(self.engines.items()):
+            if eng.settings.typed is not None:
+                tables[(eng.settings.typed.name, eng.settings.typed_key)].append(kind)
+        deleted = 0
+        try:
+            deleted = self.store.sweep_typed(tables)
+        except Exception as e:  # noqa: BLE001 - e.g. no DELETE grant: reported, retried next run
+            self.store.end_read()
+            self.problems.append(f"typed rows of models now of another kind not deleted: "
+                                 f"{type(e).__name__}: {e}"[:300])
+        self.m("typed_deletes", float(deleted))
 
     def _open_queue_items(self) -> dict[str, set[str]]:
         assert self.queue is not None
@@ -1425,11 +1462,13 @@ def edge_owned_sig(edge: cg.Edge) -> str:
 class CompatPhase:
     """compat_edges from accepted spec values, incremental by changed nodes.
 
-    State: {graph_sig, node_sigs {model id: sig}, record_sigs {pair: sig},
-    runs_since_full, owned_manual {edge key: sig}}. A full rebuild (plus
-    deleting rows of A-models that left the catalog) runs on the first run, a
-    config change, stale rule versions in the table, and every
-    ``full_rebuild_every_runs`` runs. Otherwise only pairs touching changed
+    State: {graph_sig, node_sigs {model id: sig}, node_kinds {model id:
+    kind}, record_sigs {pair: sig}, runs_since_full, owned_manual {edge key:
+    sig}}. A full rebuild (plus deleting rows of A-models that left the
+    catalog) runs on the first run, a config change, a model whose kind
+    changed while it stayed in the graph (its rows on the side it left are
+    outside every incremental batch), stale rule versions in the table, and
+    every ``full_rebuild_every_runs`` runs. Otherwise only pairs touching changed
     models are rebuilt: a model whose node changed, and both ends of every
     fit record that appeared, changed or was withdrawn (a published list
     edited, a fit-records row deleted). Both builds are planned with
@@ -1697,6 +1736,10 @@ class CompatPhase:
         r.metrics["compat_fit_names_unresolved"] = float(unresolved)
         gsig = self.graph_sig()
         node_sigs = {str(n.model_id): stable_hash(n.to_dict(), float_precision=6) for n in nodes}
+        node_kinds = {str(n.model_id): n.kind for n in nodes}
+        prior_kinds = dict(prior.get("node_kinds") or {})
+        # a model still in the graph under another kind (one that left it is `removed` below)
+        moved = sorted(k for k, kind in node_kinds.items() if k in prior_kinds and prior_kinds[k] != kind)
         rec_sigs: dict[str, list[str]] = collections.defaultdict(list)
         for rec in records:
             key = "|".join(sorted([str(rec.a), str(rec.b)])) + "|" + rec.relation
@@ -1714,13 +1757,17 @@ class CompatPhase:
             full_reason = "forced run (AGENT_FORCE_RUN)"
         elif runs_since_full >= every:
             full_reason = f"periodic ({every} runs)"
+        elif moved:
+            # its rows on the side it no longer occupies are outside every
+            # incremental batch (batches load rows by their A model)
+            full_reason = f"model kind changed: {', '.join(moved[:5])}{' ...' if len(moved) > 5 else ''}"
         elif self._stale_versions():
             full_reason = "stale rule versions"
         a_kinds = {k for rs in self.g.rulesets.values() if rs.enabled for k in rs.a_kinds}
         b_kinds = {k for rs in self.g.rulesets.values() if rs.enabled for k in rs.b_kinds}
         a_ids = [n.model_id for n in nodes if n.kind in a_kinds]
-        new_state = {"graph_sig": gsig, "node_sigs": node_sigs, "record_sigs": rec_sig,
-                     "runs_since_full": 0 if full_reason else runs_since_full,
+        new_state = {"graph_sig": gsig, "node_sigs": node_sigs, "node_kinds": node_kinds,
+                     "record_sigs": rec_sig, "runs_since_full": 0 if full_reason else runs_since_full,
                      "owned_manual": self.owned}
         prior_nodes = dict(prior.get("node_sigs") or {})
         removed = sorted(set(prior_nodes) - set(node_sigs))

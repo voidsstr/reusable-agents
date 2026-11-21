@@ -56,7 +56,8 @@ from framework.core.agent_base import AgentBase, RunResult  # noqa: E402
 from framework.core.guardrails import declare  # noqa: E402
 
 from catalog_discovery import catalog as catalog_mod  # noqa: E402
-from catalog_discovery.catalog import Catalog, resolve_dsn  # noqa: E402
+from catalog_discovery.catalog import (Catalog, CatalogConnectError,  # noqa: E402
+                                       connect_failure_text, resolve_dsn)
 from catalog_discovery.config import (CONFIG_ENV, ConfigError,  # noqa: E402
                                       DiscoveryConfig, SeedQuerySource, load_config)
 from catalog_discovery.engine import (STOP_UNAVAILABLE, BudgetDecision,  # noqa: E402
@@ -185,11 +186,14 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
         try:
             conn = self._connect(dsn.value, application_name=self.agent_id,
                                  statement_timeout_ms=cfg.catalog.statement_timeout_ms,
-                                 connect_timeout_s=cfg.catalog.connect_timeout_s)
-        except Exception as exc:  # noqa: BLE001 -- message never carries the DSN value
-            msg = f"{type(exc).__name__}: {str(exc).splitlines()[0][:200] if str(exc) else ''}"
+                                 connect_timeout_s=cfg.catalog.connect_timeout_s,
+                                 dsn_env=dsn.env_name or "")
+        except Exception as exc:  # noqa: BLE001 -- only the redacted text is kept (no traceback)
+            # libpq echoes a malformed DSN, its password included: never its raw text
+            msg = connect_failure_text(exc, dsn_env=dsn.env_name or "", dsn=dsn.value or "",
+                                       label="catalog DB")
             return RunResult(status="failure", summary=f"Catalog DB unreachable via ${dsn.env_name}",
-                             error_text=msg, next_state=prior), None
+                             error_text=msg[:2000], next_state=prior), None
         catalog = Catalog(conn, cfg.catalog, run_ts=self.run_ts, dry_run=self.dry_run)
 
         seeds: Optional[SeedReport] = None
@@ -267,10 +271,18 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
             res = resolve_dsn(dsn_env=src.dsn_env, site=src.site, storage=self.storage)
             if not res.ok:
                 raise SeedSourceError(f"seed DSN env {res.env_name or '(unset)'} is empty")
-            return self._connect(res.value, application_name=f"{self.agent_id}:seed",
-                                 statement_timeout_ms=src.statement_timeout_ms,
-                                 connect_timeout_s=cfg.catalog.connect_timeout_s,
-                                 readonly=True)
+            failure = ""
+            try:
+                return self._connect(res.value, application_name=f"{self.agent_id}:seed",
+                                     statement_timeout_ms=src.statement_timeout_ms,
+                                     connect_timeout_s=cfg.catalog.connect_timeout_s,
+                                     readonly=True, dsn_env=res.env_name or "")
+            except Exception as exc:  # noqa: BLE001 -- re-raised below without the driver's text
+                failure = connect_failure_text(exc, dsn_env=res.env_name or "", dsn=res.value or "",
+                                               label="seed DB")
+            # The engine stores this text in the run report and decision log. Raised
+            # outside the except block: no __context__ carries the driver's echo along.
+            raise CatalogConnectError(failure)
         return open_seed_db
 
     # -- reporting ---------------------------------------------------------------------------

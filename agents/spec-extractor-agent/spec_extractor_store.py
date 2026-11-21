@@ -20,7 +20,8 @@ Ownership rules the SQL enforces:
   is stored as an engine row with extractor 'manual' and extractor_id
   'manual:<...>').
 * Typed spec tables, model status columns and runtime estimates are fully
-  engine-owned projections.
+  engine-owned projections. A typed table holds rows only for models of
+  the kinds mapped to it (:meth:`SpecStore.sweep_typed`).
 """
 from __future__ import annotations
 
@@ -399,6 +400,28 @@ class SpecStore:
                 if status is not None:
                     stats["status_updates"] = self._update_status(cur, model, *status)
         return stats
+
+    def sweep_typed(self, tables: Mapping[tuple[str, str], Sequence[str]]) -> int:
+        """Delete every typed row whose model is now of a kind NOT mapped to
+        that table: a kind change to any other kind, configured or not
+        (:meth:`write_model` only cleans up after models it consolidates).
+        ``tables``: {(typed table, key column): the kinds mapped to it}.
+        ``tables.models.where`` is not applied, so a retired model of a
+        mapped kind keeps its row; a row whose model the relation does not
+        show, or whose kind is NULL, is left alone. One transaction; returns
+        the number of rows deleted."""
+        if not tables:
+            return 0
+        mid, mkind = q(self.m.col("id")), q(self.m.col("kind"))
+        deleted = 0
+        with self.conn:
+            with self.conn.cursor() as cur:
+                for (table, key), kinds in sorted(tables.items()):
+                    cur.execute(f"DELETE FROM {q(table)} t USING {q(self.m.name)} m "
+                                f"WHERE m.{mid}::text = t.{q(key)}::text "
+                                f"AND NOT (m.{mkind} = ANY(%(kinds)s))", {"kinds": sorted(set(kinds))})
+                    deleted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        return deleted
 
     def _insert_values(self, cur, rows: Sequence[Mapping[str, Any]]) -> int:
         from psycopg2.extras import execute_values

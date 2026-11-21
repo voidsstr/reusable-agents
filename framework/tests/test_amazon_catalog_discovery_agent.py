@@ -3,7 +3,8 @@
 Covers the config contract, the lane classifier (both worked examples), the
 engine's own paging (the short-page / itemPage-10 / totalResultCount fixes the
 shared loop lacks), the run budget, ASIN-only persistence, seed import, the
-golden-label precision metrics and the AgentBase run. Offline: the Creators
+golden-label precision metrics and the AgentBase run, where a malformed catalog
+or seed DSN never reaches the run record, storage or a log. Offline: the Creators
 client and the catalog connection are fakes, framework storage is the tmp
 LocalFilesystemStorage from conftest, no LLM and no email.
 
@@ -1819,6 +1820,69 @@ def test_dsn_resolution_through_the_site_registry(storage, monkeypatch):
         assert "postgresql" not in repr(K.resolve_dsn(dsn_env=None, site="acme", storage=storage))
     finally:
         site_registry.clear_cache()
+
+
+# ---------------------------------------------------------------------------
+# The DSN never reaches a run record, framework storage or a log
+# ---------------------------------------------------------------------------
+
+#: (DSN template, password). Each password is built from tokens ordinary text
+#: never holds, so NO 4-character piece of it may appear anywhere the run
+#: writes or prints. libpq echoes each of them while it parses the DSN or its
+#: port, before any host lookup ('%' before the '@' that ends the password),
+#: except the at-sign case, whose host lookup is simulated.
+BAD_DSNS = {
+    "raw-percent": ("postgresql://site_rw:{pw}@127.0.0.1:1/catalog", "Zq9%xMv @Wk7Tj"),
+    "keyword-space": ("host=127.0.0.1 port=1 user=site_rw password={pw} dbname=catalog", "Zq9Mv @Wk7Tj"),
+    "slash": ("postgresql://site_rw:{pw}@127.0.0.1:1/catalog", "Zq9xMv/Wk7Tj"),     # its head is the "port"
+    "at-sign": ("postgresql://site_rw:{pw}@127.0.0.1:1/catalog", "Zq9xMv@Wk7Tj"),   # its tail is the host
+}
+
+
+def _assert_password_kept_out(password, result, storage, *printed):
+    pieces = {password[i:i + 4] for i in range(len(password) - 3)}
+    texts = {"summary": result.summary or "", "summary_md": getattr(result, "summary_md", "") or "",
+             "error_text": result.error_text or "", "metrics": json.dumps(result.metrics, default=str),
+             "next_state": json.dumps(result.next_state, default=str),
+             "storage": _storage_text(storage), "printed": "\n".join(printed)}
+    leaks = {name: sorted(p for p in pieces if p in text) for name, text in texts.items()}
+    assert {name: found for name, found in leaks.items() if found} == {}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_DSNS))
+@pytest.mark.parametrize("target", ["catalog", "seed"])
+def test_a_bad_dsn_never_reaches_the_run_record_storage_or_logs(make_agent, storage, monkeypatch, capsys,
+                                                                  target, case):
+    psycopg2 = pytest.importorskip("psycopg2")
+    template, password = BAD_DSNS[case]
+    dsn = template.format(pw=password)
+    if case == "at-sign":               # libpq would resolve "Wk7Tj@127.0.0.1": its message, offline
+        def resolve_fails(*_a, **_k):
+            raise psycopg2.OperationalError('could not translate host name "Wk7Tj@127.0.0.1" to address: '
+                                            'Name or service not known\n')
+
+        monkeypatch.setattr(psycopg2, "connect", resolve_fails)
+    if target == "catalog":             # the real connect, on the catalog DSN
+        monkeypatch.setenv("TEST_CATALOG_DSN", dsn)
+        agent = make_agent(base_doc(), client=FakeCreators({}), connect=lambda d, **kw: K.connect(d, **kw))
+    else:                               # a fake catalog; the real connect on the seed query's DSN
+        monkeypatch.setenv("SISTER_DSN", dsn)
+        doc = seed_doc(queries=[{"name": "sister", "dsn_env": "SISTER_DSN", "default_lane": "station",
+                                 "sql": "SELECT asin FROM products"}])
+        agent = make_agent(doc, client=FakeCreators({}),
+                           connect=lambda d, **kw: K.connect(d, **kw) if kw.get("readonly") else FakeConn())
+        agent.mode = "seeds-only"
+    result = agent.run_once()
+    out = capsys.readouterr()
+    _assert_password_kept_out(password, result, storage, out.out, out.err)
+    if target == "catalog":
+        assert result.status == "failure" and result.summary == "Catalog DB unreachable via $TEST_CATALOG_DSN"
+        assert result.error_text.startswith("cannot connect to the catalog DB ($TEST_CATALOG_DSN): ")
+    else:                               # a seed source never fails the run; its error is reported
+        assert result.status == "success" and result.metrics["seed_source_errors"] == 1
+        report = storage.read_json(f"agents/{agent.agent_id}/runs/{RUN_TS}/discovery-report.json")
+        assert report["seeds"]["errors"]["sister"].startswith(
+            "CatalogConnectError: cannot connect to the seed DB ($SISTER_DSN): ")
 
 
 # ---------------------------------------------------------------------------

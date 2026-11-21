@@ -26,7 +26,12 @@ AGENT_FORCE_RUN / ENGINE_VERSION bypassing them, never blanking on failed
 fetches, a config change re-extracting from the fetch cache, the batched
 cheap-model fallback, its pool-reserve deferral and LLM answers surviving a
 config change, disabled rulesets purged, a kind change removing the old
-typed row, a failing run keeping its state, a dropped connection replaced
+typed row (also to a kind the site does not configure; a retired model and
+a kind sharing the table keep theirs) and rebuilding compat on the same run
+(both sides; again after a failed rebuild), runtime fields that must be
+fields of every runtime kind (an
+operator's measured value range- and rule-checked before it drives an
+estimate), a failing run keeping its state, a dropped connection replaced
 between phases, operator rows never deleted, read-only CLI sessions, the
 advisory lock and the goals wiring. Compat withdrawals: a deleted fit record
 and an edited published list (the shipped template's fit_lists) lose their
@@ -329,6 +334,7 @@ def spec_file_cfg() -> dict:
     extra = json.loads((FX / "spec-sources-test-profiles.json").read_text())
     hp = copy.deepcopy(hp)
     hp["fields"] = {**hp["fields"], **extra["station_extra_fields"]}
+    hp["rules"] = [*(hp.get("rules") or []), *extra.get("station_extra_rules", [])]
     return {"defaults": {}, "profiles": {"home-power": hp, **extra["profiles"]}, "by_site": {}, "by_agent_id": {}}
 
 
@@ -1219,6 +1225,67 @@ def test_a_kind_change_removes_the_old_typed_row(h):
     assert h.q("SELECT 1 FROM panel_specs WHERE model_id = 5") and res.metrics["typed_deletes"] == 1
 
 
+def test_a_model_moved_to_an_unconfigured_kind_loses_its_typed_row(h):
+    h.run()
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 1")
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 3")
+    h.q("UPDATE models SET lifecycle = 'retired' WHERE id = 3")       # out of scope, still a station
+    h.q("UPDATE models SET kind = 'kit' WHERE id = 1")                 # a kind the site does not configure
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success", res.summary
+    # a LEFT JOIN on station_specs must not give the kit the station's specs
+    assert not h.q("SELECT 1 FROM station_specs WHERE model_id = 1")
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 3")       # retired, same kind: kept
+    assert res.metrics["typed_deletes"] == 1
+    h.clock.advance(1)
+    again = h.run()
+    assert again.metrics["typed_deletes"] == 0 and again.short_circuited is True
+
+
+def test_a_kind_change_that_only_leaves_a_typed_row_is_not_a_short_circuit(h):
+    h.run()
+    # model 5 (an Amazon-only source, refused) has a typed row and nothing else
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 5")
+    assert not h.q("SELECT 1 FROM runtime_estimates WHERE model_id = 5")
+    assert not h.q("SELECT 1 FROM compat_edges WHERE a_model_id = 5 OR b_model_id = 5")
+    h.q("UPDATE models SET kind = 'kit' WHERE id = 5")
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success", res.summary
+    assert res.short_circuited is False and res.metrics["typed_deletes"] == 1
+    assert not h.q("SELECT 1 FROM station_specs WHERE model_id = 5")
+
+
+def test_a_typed_table_shared_by_two_kinds_keeps_a_model_moving_between_them(h):
+    h.block["kinds"]["kit"] = copy.deepcopy(h.block["kinds"]["station"])       # kits share station_specs
+    h.run()
+    h.q("UPDATE models SET kind = 'kit' WHERE id = 1")
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success", res.summary
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 1") and res.metrics["typed_deletes"] == 0
+
+
+def test_a_failing_typed_sweep_is_reported_and_retried_while_compat_and_runtime_run(h, monkeypatch):
+    h.run()
+    h.q("UPDATE models SET kind = 'kit' WHERE id = 1")
+    real = ST.SpecStore.sweep_typed
+    monkeypatch.setattr(ST.SpecStore, "sweep_typed",        # e.g. a role without DELETE on a typed table
+                        lambda self, tables: real(self, {("no_such_typed_table", "model_id"): ["x"], **tables}))
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "failure" and "typed rows of models now of another kind not deleted" in res.error_text
+    assert h.q("SELECT 1 FROM station_specs WHERE model_id = 1")                         # rolled back
+    assert not h.q("SELECT 1 FROM runtime_estimates WHERE model_id = 1")                 # runtime still ran
+    assert not h.q("SELECT 1 FROM compat_edges WHERE a_model_id = 1 OR b_model_id = 1")  # and compat
+    monkeypatch.setattr(ST.SpecStore, "sweep_typed", real)
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success" and res.metrics["typed_deletes"] == 1
+    assert not h.q("SELECT 1 FROM station_specs WHERE model_id = 1")
+
+
 def test_disabling_a_ruleset_purges_its_computed_edges(h):
     h.run()
     h.q("INSERT INTO compat_edges (a_model_id, b_model_id, relation, verdict, rule_id, rule_version, confidence) "
@@ -1299,6 +1366,54 @@ def test_the_template_fit_list_adds_and_withdraws_expands_edges(h):
     h.clock.advance(1)
     h.run()
     assert edges(h, "expands") == {(1, 31, "expands"): ("fits", "manufacturer-listed")}
+
+
+@pytest.mark.parametrize("model_id,kind,stale", [
+    (1, "battery", {(1, 21, "adapter_for"), (1, 13, "charges_from")}),        # a station leaves the A side
+    (13, "station", {(1, 13, "charges_from"), (3, 13, "charges_from"),       # a panel leaves the B side
+                     (4, 13, "charges_from")}),
+])
+def test_a_kind_change_rebuilds_compat_on_the_same_run(h, model_id, kind, stale):
+    import yaml
+    template = yaml.safe_load((AGENT_DIR / "site.example.yaml").read_text())["spec_extractor"]
+    h.block["kinds"]["battery"] = copy.deepcopy(template["kinds"]["battery"])
+    h.block["compat"]["fit_lists"] = copy.deepcopy(template["compat"]["fit_lists"])
+    assert h.run().status == "success"
+    assert stale <= set(edges(h))
+    h.q("UPDATE models SET kind = %s WHERE id = %s", (kind, model_id))
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success", res.summary
+    # not an incremental pass that leaves those rows to the periodic rebuild days later
+    assert res.metrics["compat_mode_full"] == 1.0
+    stored = edges(h)
+    assert not stale & set(stored)
+    assert stored == {(int(e.a_model_id), int(e.b_model_id), e.relation): (e.verdict, e.confidence)
+                      for e in direct_graph_build(h).stored()}
+    if kind == "battery":
+        assert not [k for k in stored if model_id in k[:2]]
+    h.clock.advance(1)
+    assert h.run().metrics["compat_skipped"] == 1.0          # one rebuild, not one per run
+
+
+def test_a_kind_change_whose_compat_rebuild_fails_is_rebuilt_on_the_next_run(h, monkeypatch):
+    h.run()
+    stale = {(1, 13, "charges_from"), (3, 13, "charges_from"), (4, 13, "charges_from")}
+    assert stale <= set(edges(h))
+    h.q("UPDATE models SET kind = 'station' WHERE id = 13")
+    real = P.CompatPhase._build
+
+    def fail(*_a, **_k):
+        raise RuntimeError("injected compat failure")
+
+    monkeypatch.setattr(P.CompatPhase, "_build", fail)
+    h.clock.advance(1)
+    assert h.run().status == "failure"                       # the prior compat state (node kinds) is kept
+    monkeypatch.setattr(P.CompatPhase, "_build", real)
+    h.clock.advance(1)
+    res = h.run()
+    assert res.status == "success", res.summary
+    assert res.metrics["compat_mode_full"] == 1.0 and not stale & set(edges(h))
 
 
 def test_an_operator_fit_record_edge_is_withdrawn_with_its_record(h):
@@ -1499,6 +1614,60 @@ def test_runtime_niche_values_have_no_engine_default(drop, needle):
         S.build_settings(site_block(compat={"purge_orphaned": "sometimes"}), agent_id=AGENT_ID)
     assert S.DEFAULTS["runtime"]["energy"]["rated_factor"] is None
     assert S.DEFAULTS["runtime"]["output"]["columns"]["usable_energy"] == "usable_energy"
+
+
+@pytest.mark.parametrize("key", ["energy.rated_field", "energy.measured_field", "continuous_field", "peak_field"])
+def test_every_runtime_field_must_be_a_field_of_each_runtime_kind(tmp_path, storage, key):
+    h = Harness(tmp_path, storage)
+    node = h.block["runtime"]
+    *path, last = key.split(".")
+    for part in path:
+        node = node[part]
+    node[last] = "no_such_field"
+    _e, _c, _f, problems = P.build_engines(h.settings(), storage=storage, collab=h.collab())
+    assert any(p.startswith(f"kind station: runtime.{key} 'no_such_field' is not one of its fields")
+               for p in problems), problems
+    assert not any(p.startswith("kind panel") for p in problems)      # panels are not a runtime kind
+
+
+def test_the_templates_measured_field_without_a_profile_definition_fails_closed(h):
+    import yaml
+    template = yaml.safe_load((AGENT_DIR / "site.example.yaml").read_text())["spec_extractor"]
+    h.block["runtime"]["energy"]["measured_field"] = template["runtime"]["energy"]["measured_field"]
+    hp = h.spec_cfg["profiles"]["home-power"]
+    hp["fields"].pop("usable_wh_measured", None)
+    hp["rules"] = [r for r in hp["rules"] if "usable_wh_measured" not in (r.get("a"), r.get("b"))]
+    res = h.run()
+    # an operator value of an undefined field would never be range-checked, yet drive the card
+    assert res.status == "failure"
+    assert ("kind station: runtime.energy.measured_field 'usable_wh_measured' is not one of its fields"
+            in res.error_text)
+    assert h.http.urls() == [] and not h.q("SELECT 1 FROM runtime_estimates")
+
+
+def test_a_measured_runtime_value_is_checked_before_it_drives_an_estimate(h):
+    h.block["runtime"]["energy"]["measured_field"] = "usable_wh_measured"       # as the shipped template
+    h.q("INSERT INTO spec_values (model_id, field, value_num, unit, source_id, extractor, extractor_id, "
+        "confidence, status) VALUES (1, 'usable_wh_measured', 99999, 'Wh', 102, 'manual', 'manual-entry:meas', "
+        "1, 'accepted')")
+
+    def measured() -> tuple:
+        status = h.q("SELECT status FROM spec_values WHERE extractor_id = 'manual-entry:meas'")[0]["status"]
+        rt = h.q("SELECT basis, usable_wh FROM runtime_estimates WHERE model_id = 1")
+        return status, {(r["basis"], float(r["usable_wh"])) for r in rt}
+
+    res = h.run()
+    assert res.status == "success", res.summary
+    rated = {("rated-x-0.842", 900.9)}                       # Explorer 1000 v2: 1070 Wh rated
+    assert measured() == ("rejected", rated)                 # a typo: outside the field's range
+    h.q("UPDATE spec_values SET value_num = 9990 WHERE extractor_id = 'manual-entry:meas'")
+    h.clock.advance(1)
+    h.run()
+    assert measured() == ("rejected", rated)                 # in range, but above the rated capacity
+    h.q("UPDATE spec_values SET value_num = 1000 WHERE extractor_id = 'manual-entry:meas'")
+    h.clock.advance(1)
+    h.run()
+    assert measured() == ("accepted", {("measured", 1000.0)})
 
 
 def test_dsn_env_must_be_a_variable_name_and_is_never_echoed():

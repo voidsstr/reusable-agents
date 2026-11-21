@@ -62,14 +62,17 @@ Built on:
    row and status are written in one transaction and only when they differ.
    New conflicts are enqueued; conflicts that vanished are retired. A model
    whose write fails is rolled back, reported, and retried next run; the
-   others proceed.
+   others proceed. Last, typed rows of models that are now of a kind not
+   mapped to their table are deleted (see `kinds.<kind>.typed`).
 4. **compat** (`compat.enabled`). Nodes are the accepted values of every
    model of the rulesets' kinds; fit records come from `compat.fit_lists`
    (a published "compatible with ..." text field resolved through
    `compat_graph.ModelIndex`, never guessed) and the optional
    `compat.fit_records` table. Full rebuild on the first run, a config or
-   rule-version change, or every `full_rebuild_every_runs` runs; otherwise
-   only pairs touching changed models: a model whose values changed, and
+   rule-version change, a model's kind change (the rows on the side it no
+   longer occupies are outside every incremental batch; the state keeps
+   `compat.node_kinds` to see it), or every `full_rebuild_every_runs` runs;
+   otherwise only pairs touching changed models: a model whose values changed, and
    both ends of every fit record that appeared, changed or was WITHDRAWN (a
    fit-records row deleted, a model dropped from a published list). Inside
    that part every row that no longer yields a stored edge is deleted on
@@ -109,7 +112,11 @@ Built on:
    no surge or the model's peak is unknown. Rows are replaced per model only
    when they differ; rows of models that left the scope (retired, another
    kind, a kind no longer estimated) are deleted, so `runtime_models_live`
-   counts the current catalog only.
+   counts the current catalog only. Every runtime field (`energy.rated_field`,
+   `energy.measured_field`, `continuous_field`, `peak_field`) must be a field
+   of each runtime kind's profile, given a min/max range: a field the kind
+   lacks fails the run in its first second, because only operator rows could
+   carry it and they would drive the estimates without a range check.
 
 One run per instance at a time: a session advisory lock in the site DB
 (`database.lock_key`, default `spec-extractor:<agent id>`); a second run
@@ -231,8 +238,9 @@ consolidation), are never deleted or changed by the engine except their
 `status` (e.g. `rejected` when out of the field's range). An operator row
 for a field outside its kind's configured field set is not consolidated
 (not range-checked, status left as entered) but, if `accepted`, is still
-read by the compat and runtime phases: add the field to the kind's profile
-to have it validated. Every other row is
+read by the compat phase: add the field to the kind's profile to have it
+validated. The runtime phase never reads such a row: its fields must be
+fields of every runtime kind (a config problem otherwise). Every other row is
 engine output, replaced per model when the consolidated result changes. An
 operator's *adjudication decision* is stored as an engine row with
 `extractor = 'manual'` and `extractor_id = 'manual:<extractor>'`.
@@ -249,9 +257,19 @@ counts products (pages) instead of models.
 `columns: {field: column}` (values in the field's canonical unit; booleans
 as boolean, dimensions as numeric[]), optional `completeness` (numeric) and
 `updated_at` (timestamptz, set when the row changes). Fields that are not
-accepted (missing or in conflict) are written as NULL. When a model's kind
-changes, its row in another configured kind's typed table is deleted with
-the next write (`typed_deletes`).
+accepted (missing or in conflict) are written as NULL. Several kinds may
+share one table. A typed table holds rows only for models of the kinds
+mapped to it: when a model's kind changes to any other kind, configured or
+not, its row is deleted on the next run (`typed_deletes`), so a site view
+that LEFT JOINs the table never gives a model another kind's specs. The
+check reads `tables.models.relation` without its `where`: a retired model
+keeps its row while its kind is unchanged, and a row whose model the
+relation does not show (or whose kind is NULL) is left alone. Removing a
+kind from `kinds` leaves its typed table as it is when no configured kind
+maps to it any more (still that kind's models, no longer updated): drop
+it, or its rows, by hand. In a table other configured kinds still map to,
+its models' rows are deleted on the next run. The engine's DB role needs
+DELETE on every typed table.
 
 ### compat (optional)
 
@@ -280,6 +298,13 @@ the next write (`typed_deletes`).
   `hours_est`, `hours_low`, `hours_high`, `peak_ok` required, `computed_at`
   optional; unique per (model_id, preset_id). Column defaults are the
   logical names (e.g. map `usable_energy: usable_wh`, `peak_ok: surge_ok`).
+* The runtime fields (`energy.rated_field`, `energy.measured_field`,
+  `continuous_field`, `peak_field`) must be fields of every runtime kind's
+  profile (a config problem otherwise); give each its min/max. A measured field also
+  needs the rule `{kind: lte, a: <measured field>, b: <rated field>,
+  on_fail: reject}` in that profile: a measured value replaces the rated
+  estimate, and the range alone lets a 10× slip through (9990 Wh entered for
+  a 999 Wh unit).
 
 ## Configuration
 
@@ -436,7 +461,8 @@ again after the run).
 
 | Symptom | Look at |
 |---|---|
-| run fails in its first second | `config problems` / `config invalid` in the summary: schema, unknown profile, a typed column for a field the kind lacks, a UA without the robots token |
+| run fails in its first second | `config problems` / `config invalid` in the summary: schema, unknown profile, a typed column for a field the kind lacks, a runtime field the kind lacks (`runtime.energy.measured_field ... is not one of its fields`: define it in the profile with min/max), a UA without the robots token |
+| a model that changed kind still has its old typed row | the next run deletes it (`typed_deletes`). `typed rows of models now of another kind not deleted` in the problems: grant the engine's role DELETE on that typed table. A kind removed from `kinds` keeps a typed table no configured kind maps to as it was, for the operator to drop |
 | `sources_unhealthy_pct` rising | `spec_sources.<state>->>'status'` and `reason`; gone pages need new URLs |
 | a model stays `partial` | the missing required field: add a label / brand extractor to the profile, or an operator value |
 | `open_spec_conflicts` stuck | `conflicts_needs_human`: operator decisions (see above) |

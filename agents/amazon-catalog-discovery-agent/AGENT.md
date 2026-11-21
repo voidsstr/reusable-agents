@@ -302,7 +302,8 @@ COMMIT is read-only.
 |---|---|
 | `Config invalid: <path>: ...` | the config failed validation; run `--validate` for every problem. Nothing else ran |
 | `Catalog DSN not set: X` | env var `X` (from `catalog.dsn_env` or the registry) is empty in the unit's environment |
-| `Catalog DB unreachable via $X` | connect failed; the message never includes the DSN |
+| `Catalog DB unreachable via $X` | connect failed. The error reads `cannot connect to the catalog DB ($X): <class>: <detail>` and never carries the DSN (`framework.core.dsn_redaction`): libpq echoes a malformed DSN, password included, so a DSN parse error (`not a valid connection string or URI`) keeps no driver text, and other messages lose quoted segments and every piece of the password. Usually an unencoded special character in a URI password (`%` → `%25`, `@` → `%40`, `/` → `%2F`) |
+| seed source `<name>` skipped: `CatalogConnectError: cannot connect to the seed DB ($X): ...` | the seed query's DSN failed the same way (same redaction); the other sources and the search still run |
 | `Amazon Creators API not configured` | `AMAZON_CREATORS_*` missing; the seed phase still ran |
 | `Creators unavailable: ...` (failure) | auth / network; pages fetched before it are inserted and recorded, the rest retry next run |
 | `stopped: budget-exhausted` | the consumer's daily share is spent; the slot is retried next run |
