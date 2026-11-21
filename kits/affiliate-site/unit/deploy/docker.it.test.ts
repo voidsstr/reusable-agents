@@ -67,6 +67,20 @@ describeIt('Dockerfile.azure builds and serves (opt-in)', () => {
 
   it('builds, runs as the node user, passes its HEALTHCHECK and the smoke check', async () => {
     const site = path.join(sb.fx, 'site');
+    // A checkout no one else may read (a restrictive umask or default ACL, as on
+    // the fleet host's deploy worktrees): the image must work anyway.
+    const restrict = (p: string): void => {
+      const st = fs.lstatSync(p);
+      if (st.isSymbolicLink()) return;
+      if (st.isDirectory()) {
+        for (const e of fs.readdirSync(p)) restrict(path.join(p, e));
+        fs.chmodSync(p, 0o750);
+      } else {
+        fs.chmodSync(p, 0o640);
+      }
+    };
+    restrict(site);
+    expect(fs.statSync(path.join(site, 'site.json')).mode & 0o777).toBe(0o640);
     const b = docker(['build', '--platform', 'linux/amd64', '-f', path.join(site, 'Dockerfile.azure'), '-t', tag, site]);
     expect(b.stderr + b.stdout).not.toMatch(/ERROR/);
     expect(b.status).toBe(0);
@@ -85,6 +99,17 @@ describeIt('Dockerfile.azure builds and serves (opt-in)', () => {
     expect(uid).toBe('node');
     const write = docker(['exec', name, 'sh', '-c', 'touch /app/dist/x 2>&1; echo $?']).stdout.trim();
     expect(write.split('\n').pop()).not.toBe('0');
+    // Readable as node although the checkout was 0640/0750 (nested files: COPY
+    // creates the top-level destination directories 0755 whatever the source).
+    for (const cmd of ['cat /app/site.json', 'cat /app/package.json', 'cat /app/db/.keep', 'cat /app/content/.keep',
+      'cat /app/vendor/affiliate-kit/VERSION', 'ls /app/vendor/affiliate-kit/migrations', 'cat /app/dist/src/index.js']) {
+      const r = docker(['exec', name, 'sh', '-c', `${cmd} >/dev/null`]);
+      expect([cmd, r.status, r.stderr]).toEqual([cmd, 0, '']);
+    }
+    for (const p of ['/app/site.json', '/app/vendor/affiliate-kit/VERSION', '/app/db']) {
+      const w = docker(['exec', name, 'sh', '-c', `test -w ${p} && echo writable || echo read-only`]).stdout.trim();
+      expect([p, w]).toEqual([p, 'read-only']);
+    }
   });
 });
 

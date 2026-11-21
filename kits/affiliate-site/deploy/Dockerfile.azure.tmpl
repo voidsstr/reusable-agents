@@ -37,6 +37,12 @@ COPY vendor/affiliate-kit ./vendor/affiliate-kit
 RUN npm run {{BUILD_SCRIPT}} \
  && test -f {{SERVER_ENTRY}} \
  || { echo "npm run {{BUILD_SCRIPT}} did not produce {{SERVER_ENTRY}}" >&2; exit 1; }
+# COPY keeps the checkout's file modes (a 0640 or 0660 checkout: a restrictive
+# umask or default ACL, as on the fleet host's deploy worktrees), and the
+# server runs as node: make everything the runtime stage copies readable, and
+# its directories searchable, by everyone, and writable only by its owner
+# (root), whatever the checkout's modes. (COPY --chmod needs BuildKit.)
+RUN chmod -R a+rX,go-w package.json site.json dist vendor/affiliate-kit{{EXTRA_CHMOD_PATHS}}
 
 # ---- runtime ----
 FROM ${NODE_IMAGE} AS production

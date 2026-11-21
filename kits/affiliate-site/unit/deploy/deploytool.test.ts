@@ -279,6 +279,20 @@ describe('render-dockerfile', () => {
     expect(r.stdout.split('\n')[0]).toBe('# rendered-from: affiliate-kit/deploy/Dockerfile.azure.tmpl (kit 9.9.9)');
     expect(r.stdout).toContain('COPY db ./db\nCOPY content ./content');
     expect(r.stdout).toContain('COPY --from=build /app/db ./db\nCOPY --from=build /app/content ./content');
+    // The build stage makes every path the runtime stage copies readable by the
+    // server's user, whatever the checkout's file modes: after the build, before
+    // the runtime stage.
+    const chmod = 'RUN chmod -R a+rX,go-w package.json site.json dist vendor/affiliate-kit db content\n';
+    expect(r.stdout).toContain(chmod);
+    expect(r.stdout.indexOf(chmod)).toBeGreaterThan(r.stdout.indexOf('RUN npm run build'));
+    expect(r.stdout.indexOf(chmod)).toBeLessThan(r.stdout.indexOf('FROM ${NODE_IMAGE} AS production'));
+  });
+
+  it('with no extra paths the chmod names the four base paths only (and adds no write bit)', () => {
+    const r = runTool([...base, '--extra-paths', '', '--out', '-']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('RUN chmod -R a+rX,go-w package.json site.json dist vendor/affiliate-kit\n');
+    expect(r.stdout).not.toMatch(/\{\{|\}\}/);
   });
 
   it.each([

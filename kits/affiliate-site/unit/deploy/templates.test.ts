@@ -41,6 +41,24 @@ describe('Dockerfile.azure.tmpl', () => {
     expect(df).toContain('COPY --from=build /app/vendor/affiliate-kit ./vendor/affiliate-kit');
   });
 
+  it('makes everything the runtime stage copies from the build stage readable by the server, never writable', () => {
+    // The build context keeps the checkout's modes; a 0640 checkout would leave
+    // these unreadable to USER node (reproduced 2026-11-17).
+    const chmods = [...df.matchAll(/^RUN chmod -R (\S+) (.+)$/gm)];
+    expect(chmods).toHaveLength(1);
+    const [, mode, list] = chmods[0] as RegExpMatchArray;
+    expect(mode).toBe('a+rX,go-w');
+    expect(mode).not.toMatch(/[+=][rwxXst]*w/); // it adds no write bit to anyone
+    const covered = new Set((list as string).split(' '));
+    const copied = [...df.matchAll(/^COPY --from=build \/app\/(\S+) /gm)].map((m) => m[1] as string);
+    expect(copied).toEqual(['package.json', 'dist', 'site.json', 'vendor/affiliate-kit', 'db', 'content']);
+    expect(copied.filter((p) => !covered.has(p))).toEqual([]);
+    // In the build stage, after the build, so it also covers what the build wrote into dist.
+    const at = df.indexOf(chmods[0]![0]);
+    expect(at).toBeGreaterThan(df.indexOf('RUN npm run build'));
+    expect(at).toBeLessThan(df.indexOf('FROM ${NODE_IMAGE} AS production'));
+  });
+
   it('runs as the unprivileged node user on TARGET_PORT with a /health check and dumb-init', () => {
     expect(df).toMatch(/^USER node$/m);
     expect(df).toMatch(/^EXPOSE 8080$/m);

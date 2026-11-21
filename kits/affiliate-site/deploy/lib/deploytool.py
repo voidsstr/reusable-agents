@@ -570,12 +570,14 @@ def dockerfile_values(args: argparse.Namespace) -> Dict[str, str]:
         raise ToolError(f"BUILD_SCRIPT {args.build_script!r} must be an npm script name")
     build_copy: List[str] = []
     runtime_copy: List[str] = []
+    chmod_paths: List[str] = []
     for p in (args.extra_paths or "").split():
         p = p.rstrip("/")
         if not _SAFE_PATH.fullmatch(p) or ".." in p.split("/") or p.startswith("/"):
             raise ToolError(f"DOCKER_EXTRA_PATHS entry {p!r} must be a plain relative path")
         build_copy.append(f"COPY {p} ./{p}")
         runtime_copy.append(f"COPY --from=build /app/{p} ./{p}")
+        chmod_paths.append(p)
     none = "# (none: DOCKER_EXTRA_PATHS is empty)"
     return {
         "APP_NAME": args.app_name,
@@ -587,6 +589,8 @@ def dockerfile_values(args: argparse.Namespace) -> Dict[str, str]:
         "HEALTH_PATH": args.health_path,
         "EXTRA_BUILD_COPY": "\n".join(build_copy) or none,
         "EXTRA_RUNTIME_COPY": "\n".join(runtime_copy) or none,
+        # The runtime stage's copies, made readable by the server's user (after the base four).
+        "EXTRA_CHMOD_PATHS": "".join(f" {p}" for p in chmod_paths),
         "RENDER_MARKER": RENDER_MARKER,
     }
 

@@ -151,6 +151,14 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
   Azure `--with-images` stops when another Container App or job runs an image
   from the repository, and `--with-certificates` deletes only the
   certificates the site's app binds, plus failed attempts.
+- `Dockerfile.azure.tmpl` normalises file modes: the build stage runs
+  `chmod -R a+rX,go-w` on everything the runtime stage copies (`package.json`,
+  `site.json`, `dist`, `vendor/affiliate-kit` and the `DOCKER_EXTRA_PATHS`), so
+  a checkout whose files others cannot read (0640 or 0660: a restrictive umask
+  or default ACL, as on the fleet host's deploy worktrees) no longer builds an
+  image the `node` user cannot read (reproduced 2026-11-17), and nothing there
+  is writable by the server. Scaffolded sites' `BUILD_SCRIPT=build:image`
+  (the same `chmod` inside the build script) stays as a second layer.
 
 #### Scaffold and sync (K7)
 
@@ -223,16 +231,6 @@ at `b5415b08` (`PORTED_FROM.json` holds a sha256 per ported declaration).
 
 ### Known issues
 
-- `deploy/Dockerfile.azure.tmpl` copies the build context with the checkout's
-  file modes and runs the server as `node`, so a checkout whose files are not
-  readable by others (0640 or 0660: a restrictive umask or default ACL, as on
-  the fleet host's deploy worktrees under `~/.reusable-agents`) builds an
-  image that cannot read `site.json`, `package.json`, `vendor/affiliate-kit`
-  or the `DOCKER_EXTRA_PATHS` (reproduced 2026-11-17). Sites from
-  `create-affiliate-site.sh` work around it with `BUILD_SCRIPT=build:image`
-  (`chmod -R a+rX` on those paths inside the build stage). The template should
-  normalise the modes itself (`COPY --chmod`, or a `chmod` in the build stage
-  as `fixture-site/Dockerfile` does).
 - A scaffolded content-policy site has no publish guard until its own
   migrations install one (`migrations/README.md`, "The publish guard"); the
   generated `CLAUDE.md`, README and the create script's closing notes say so.
