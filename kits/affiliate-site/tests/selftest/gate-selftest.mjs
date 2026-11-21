@@ -21,8 +21,10 @@
  *
  * Both runs build the fixture's production image (fixture-site/Dockerfile),
  * start it on the fixture's own ports (fixture-site/tests/suite.env: app
- * :10032, Postgres :5434) take the host's gate locks (SUITE_HOST_LOCKS='*')
- * and run niced with a CPU cap, exactly as a site's deploy gate does. The
+ * :10032, Postgres :5434), hold the host's gate locks (SUITE_HOST_LOCKS: the
+ * registry sites' gate projects, their lock files created when missing, plus
+ * '*' for any other lock present) and run niced with a CPU cap, exactly as a
+ * site's deploy gate does. The
  * project, container and compose names come from the runner's --print-config.
  * Needs docker, flock, node 22, python3 and the kit's node_modules (npm ci).
  * Exit: 0 the gate proved itself, 1 it did not, 2 bad arguments or a missing

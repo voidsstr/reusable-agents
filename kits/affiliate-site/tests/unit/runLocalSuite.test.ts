@@ -177,6 +177,50 @@ describe('settings', () => {
     expect(r.stdout).toContain('host_locks=*\n');
   });
 
+  // The kit's own fixture names no site, yet must hold the registry sites' gate
+  // locks by name: with '*' alone it waits only on lock files that already
+  // exist, and after a reboot (/tmp is tmpfs) a site's lock file does not
+  // exist until that site's gate first runs, so the two gates could overlap.
+  const FIXTURE_ENV = path.join(KIT, 'fixture-site', 'tests', 'suite.env');
+  const REPO = path.resolve(KIT, '..', '..');
+  const FLEET = path.join(REPO, '_template', 'affiliate-site', 'scaffold', 'fleet_sites.py');
+
+  it("the fixture's suite.env holds the registry sites' gate locks by name, plus '*', and both scenarios agree", () => {
+    const names = execFileSync('python3', ['-I', FLEET, 'gate-projects', '--repo', REPO, '--except', 'kitfixture'], { encoding: 'utf8' }).trim();
+    expect(names).not.toBe('');
+    const sb = sandbox();
+    for (const env of [FIXTURE_ENV, path.join(KIT, 'fixture-site', 'tests', 'suite.violations.env')]) {
+      const r = spawnSync('bash', [RUNNER, '--suite-env', env, '--print-config'], { env: runnerEnv(sb), encoding: 'utf8', cwd: KIT });
+      expect([env, r.status, r.stderr]).toEqual([env, 0, '']);
+      expect(r.stdout).toContain(`host_locks=${names} *\n`);
+    }
+    // --print-config stops before any lock: none was created.
+    expect(fs.readdirSync(sb.locks)).toEqual([]);
+  });
+
+  it("the fixture's suite.env falls back to '*' alone where the site registry cannot be read", () => {
+    const sb = sandbox();
+    // Four directories above the sandbox's tests/ there is no reusable-agents checkout.
+    const above = path.resolve(path.dirname(sb.suiteEnv), '..', '..', '..', '..');
+    expect(fs.existsSync(path.join(above, '_template', 'affiliate-site', 'scaffold', 'fleet_sites.py'))).toBe(false);
+    fs.writeFileSync(sb.suiteEnv, fs.readFileSync(FIXTURE_ENV, 'utf8'));
+    const r = spawnSync('bash', [RUNNER, '--suite-env', sb.suiteEnv, '--print-config'], { env: runnerEnv(sb), encoding: 'utf8' });
+    expect([r.status, r.stderr]).toEqual([0, '']);
+    expect(r.stdout).toContain('host_locks=*\n');
+    // So does a host without python3 (only the fakes and bash on PATH).
+    const bin = path.join(sb.root, 'bin');
+    fs.mkdirSync(bin);
+    for (const tool of ['bash', 'dirname', 'nice', 'basename', 'cat', 'sed', 'tr', 'mkdir', 'flock', 'git']) {
+      const at = spawnSync('bash', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+      if (at) fs.symlinkSync(at, path.join(bin, tool));
+    }
+    const noPython = spawnSync('bash', [RUNNER, '--suite-env', FIXTURE_ENV, '--print-config'], {
+      env: { ...runnerEnv(sb), PATH: `${FAKES}:${bin}` }, encoding: 'utf8', cwd: KIT,
+    });
+    expect([noPython.status, noPython.stderr]).toEqual([0, '']);
+    expect(noPython.stdout).toContain('host_locks=*\n');
+  });
+
   it('maps the site into GATE_SOURCE_REPO by its path inside the repository', () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'kit-suite-repo-'));
     sandboxes.push(repo);
