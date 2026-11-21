@@ -23,12 +23,16 @@
 -- else `category`; a site that adds a `bucket` column lists it too).
 --
 -- RULES, for every write by a role other than {{publisher_role}}:
---   INSERT                       status := '{{draft_status}}', whatever was asked
---                                (an author's INSERT ... ON CONFLICT DO UPDATE
---                                takes the UPDATE rules on its conflict path).
+--   INSERT                       status := '{{draft_status}}' and published_at :=
+--                                NULL, whatever was asked (an author's INSERT
+--                                ... ON CONFLICT DO UPDATE takes the UPDATE
+--                                rules on its conflict path).
 --   UPDATE asking for '{{published_status}}'
---     row was not published      status := '{{draft_status}}' (only the publisher
---                                publishes, or un-archives).
+--     row was not published      status kept: a row in the gate's queue
+--                                ('{{draft_status}}') stays queued, and a held
+--                                row (archived, ...) stays held. Only the
+--                                publisher publishes; only a write asking for
+--                                '{{draft_status}}' resubmits a held row.
 --     row was published and a    status := '{{draft_status}}' (the new content has
 --     content column changed     not been checked; the gate re-checks it).
 --     row was published, no      kept published. Housekeeping writes such as
@@ -39,6 +43,18 @@
 --   UPDATE asking for any other status (draft, archived, ...)
 --                                kept as asked: leaving the published state is
 --                                always allowed.
+--   UPDATE setting published_at to NULL
+--                                the old value is kept once there is one.
+-- PUBLISHED_AT is the first go-live time. The INSERT rule clears whatever the
+-- author wrote, the gate's promote stamps it (COALESCE(published_at, now())),
+-- and no later write by another role clears it: a draft held for days goes
+-- live dated the day it went live, and an edited or resubmitted article keeps
+-- its first date. Setting another time is allowed (published_at is not
+-- content), so a fixture can re-date its articles.
+-- AN AUTHOR'S UPSERT leaves status out of its DO UPDATE list, or asks for
+-- '{{published_status}}' there. status = EXCLUDED.status asks for
+-- '{{draft_status}}' (EXCLUDED carries what the INSERT rule forced), and that
+-- resubmits a held row.
 -- Writes by {{publisher_role}} pass the guard unchanged. The gate's promote is
 --   UPDATE editorial_articles SET status = '{{published_status}}' ... RETURNING status
 -- and a RETURNING value of '{{draft_status}}' tells it the connection was not the
@@ -70,8 +86,8 @@
 -- column is dropped or renamed, guarded writes to a published row fail with
 -- an error (the page-view counter's fire-and-forget UPDATE included) rather
 -- than pass or unpublish the article: re-render the guard in the migration
--- that changes the column. A missing or uncomparable column at install time
--- is an error.
+-- that changes the column. A missing or uncomparable content column, or a
+-- missing status or published_at, at install time is an error.
 --
 -- THE ROLES must keep it meaningful (the site's roles migration or the kit's
 -- deploy/ provisioning; the install warns about the first three it can see):
@@ -97,7 +113,9 @@
 --       ALTER TABLE editorial_articles
 --         ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_guard_trg,
 --         ENABLE ALWAYS TRIGGER editorial_articles_zzz_publish_recheck_trg;
---     Seed fixtures promote through SET ROLE {{publisher_role}}, never replica mode.
+--     Seed fixtures promote through SET ROLE {{publisher_role}}, never replica
+--     mode, and set published_at in that same UPDATE (their INSERT left it
+--     NULL; a promote that sets only status leaves a live row undated).
 --   * the author role (agents) and the app role are not {{publisher_role}}, are
 --     not members of it (SET ROLE would pass) and are not superusers;
 --   * migrations run as a dedicated owner role. Neither the author role nor the
@@ -132,8 +150,10 @@ BEGIN
   IF to_regclass('editorial_articles') IS NULL THEN
     RAISE EXCEPTION 'publish guard: table editorial_articles does not exist (apply kit_0003 first)';
   END IF;
+  -- status and published_at are the guard's own: without published_at every
+  -- guarded INSERT would fail ('record "new" has no field').
   SELECT array_agg(c ORDER BY c) INTO missing
-    FROM unnest(ARRAY['status', {{content_columns}}]::text[]) AS c
+    FROM unnest(ARRAY['status', 'published_at', {{content_columns}}]::text[]) AS c
    WHERE NOT EXISTS (
      SELECT 1 FROM pg_attribute a
       WHERE a.attrelid = to_regclass('editorial_articles')
@@ -207,16 +227,27 @@ BEGIN
   IF current_user = publisher THEN
     RETURN NEW;
   END IF;
+  -- A new row is a draft whatever it asked for, and undated: published_at is
+  -- the first go-live time, which the publish gate stamps when it promotes it.
   IF TG_OP = 'INSERT' THEN
     NEW.status := draft_status;
+    NEW.published_at := NULL;
     RETURN NEW;
   END IF;
-  -- UPDATE by any other role. Leaving the published state is always allowed.
+  -- UPDATE by any other role. It never clears a go-live time (an upsert's
+  -- published_at = EXCLUDED.published_at carries the NULL given above).
+  IF NEW.published_at IS NULL AND OLD.published_at IS NOT NULL THEN
+    NEW.published_at := OLD.published_at;
+  END IF;
+  -- Leaving the published state is always allowed.
   IF NEW.status IS DISTINCT FROM public_status THEN
     RETURN NEW;
   END IF;
+  -- Only the publisher publishes. A row that was not published keeps its
+  -- status: a queued row (draft_status) stays queued and a held one
+  -- (archived, ...) stays held, until a write asks for draft_status itself.
   IF OLD.status IS DISTINCT FROM public_status THEN
-    NEW.status := draft_status;
+    NEW.status := OLD.status;
     RETURN NEW;
   END IF;
   -- A published row stays published only while its content is unchanged. The
@@ -234,7 +265,7 @@ END
 $fn$;
 
 COMMENT ON FUNCTION editorial_articles_publish_guard() IS
-  'Publish guard (kit template publish_trigger.sql.tmpl): writes by any role but {{publisher_role}} cannot make a row published, and an edit to a published row''s content ({{content_columns_plain}}) returns it to {{draft_status}}. INSERTs by those roles are always {{draft_status}}.';
+  'Publish guard (kit template publish_trigger.sql.tmpl): writes by any role but {{publisher_role}} cannot make a row published. Their INSERTs are always {{draft_status}} with published_at NULL (the publish gate stamps the first go-live time); an UPDATE asking for {{published_status}} leaves a row that was not published in its status (a held row stays held); an edit to a published row''s content ({{content_columns_plain}}) returns it to {{draft_status}}; and no such UPDATE clears a published_at once set.';
 
 CREATE OR REPLACE FUNCTION editorial_articles_publish_recheck()
 RETURNS trigger

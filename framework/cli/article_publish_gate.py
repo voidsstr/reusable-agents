@@ -16,7 +16,8 @@ the trigger writes every author INSERT, and every author edit of a live
 article's text, as 'pending' (render the K4 template with that draftStatus).
 'draft', 'archived' and any other status are HOLDS the gate never selects or
 promotes: an operator or agent takes an article down by setting status to
-'draft' (or 'archived'), and resubmits it to the gate by setting 'pending'.
+'draft' (or 'archived'), and resubmits it to the gate by setting 'pending'
+(the trigger keeps a hold held when an author write asks for 'published').
 
   1. Select the site's pending rows (all of them, newest first, up to
      `limit`; --drafts-since-hours narrows that to a window). The status is
@@ -29,9 +30,14 @@ promotes: an operator or agent takes an article down by setting status to
      guards are called through their public functions; none is modified.
   3. --commit: promote passing rows through a SEPARATE publisher-role
      connection (compare-and-set on the checked content, so a body edited
-     after the check is never published unchecked). Re-queue failing rows
-     through framework.core.implementation_queue as Opus article-refresh
-     recs whose addendum names every violation.
+     after the check is never published unchecked). published_at is the
+     FIRST GO-LIVE TIME: the K4 trigger clears whatever date an author INSERT
+     wrote and never lets another role clear it later, and the promote sets
+     COALESCE(published_at, now()), so a draft held for days goes live dated
+     the day it went live while an edited or resubmitted live article keeps
+     its first date. Re-queue failing rows through
+     framework.core.implementation_queue as Opus article-refresh recs whose
+     addendum names every violation.
   4. --enforce: also check published rows written in the --since-hours window
      (0 = every published row) and (with --commit) return the ones that break
      an enforced check (default: claims guard and content policy; link minima
@@ -524,7 +530,9 @@ class ArticleStore:
 
     def promote(self, row: Mapping[str, Any]) -> str:
         """draft_status (the queue) -> published, only if the row still holds
-        what was checked.
+        what was checked. published_at is the first go-live time: stamped on
+        the first promotion (the trigger leaves an author INSERT's NULL) and
+        kept on every later one.
         Returns published | already-published | changed | gone |
         trigger-kept-draft (this connection is not the publisher role)."""
         st, cols = self.st, self.columns()

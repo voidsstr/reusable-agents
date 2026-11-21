@@ -8,8 +8,10 @@
 --
 -- Once the site installs the kit's publish guard (content-policy sites; see
 -- vendor/affiliate-kit/migrations/README.md), an INSERT by this fixture role
--- is forced to the draft status. Seed published articles then through
--- SET ROLE <publisher role>, never replica mode.
+-- is forced to the draft status with published_at NULL. Seed published
+-- articles then through SET ROLE <publisher role>, never replica mode, and
+-- set published_at in that same UPDATE: a promote that sets only status
+-- leaves a live article with no publication date.
 DO $seed$
 BEGIN
   IF to_regclass('public.editorial_articles') IS NULL THEN

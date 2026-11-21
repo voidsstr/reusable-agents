@@ -614,9 +614,11 @@ def test_pg_acceptance_a_self_published_banned_row_never_goes_live(pg, store, mo
     faqs = json.dumps([{"question": "Can it run my router?", "answer": "Yes, for about 11 hours."}])
     _sql(pg["author"], ins, ("wifi-picks", "Best Power Station for Starlink", CLEAN, faqs))
     _sql(pg["author"], ins, ("whole-house", "Whole-House Power", BANNED, None))
-    # the trigger: the author's own 'published' INSERTs land in the gate's queue
+    # the trigger: the author's own 'published' INSERTs land in the gate's queue, with
+    # published_at NULL whatever the author wrote (the gate stamps the go-live time)
     assert _live(pg) == set()
     assert {r[0] for r in _sql(pg["su"], "SELECT status FROM editorial_articles")} == {"pending"}
+    assert {r[0] for r in _sql(pg["su"], "SELECT published_at FROM editorial_articles")} == {None}
 
     code, rep = _run("--commit")
     assert code == apg.EXIT_OK, rep
@@ -753,36 +755,75 @@ def _status(db, slug):
     return _sql(db["su"], "SELECT status FROM editorial_articles WHERE slug = %s", (slug,))[0][0]
 
 
+def _published_at(db, slug):
+    return _sql(db["su"], "SELECT published_at FROM editorial_articles WHERE slug = %s", (slug,))[0][0]
+
+
+# agents/implementer/ARTICLE_AUTHOR.md's upsert: it asks for 'published', dates
+# the row itself (suggested_published_at or now()) and, on a conflict, asks for
+# 'published' again.
+AUTHOR_UPSERT = ("INSERT INTO editorial_articles (slug, title, body_md, category, status, written_by, published_at, "
+                 "written_at, created_at, updated_at) VALUES (%s, %s, %s, 'guide', 'published', 'claude-cli', "
+                 "now() - interval '1 day', now(), now(), now()) ON CONFLICT (slug) DO UPDATE SET "
+                 "title = EXCLUDED.title, body_md = EXCLUDED.body_md, excerpt = EXCLUDED.excerpt, updated_at = now(), "
+                 "written_at = now(), status = 'published'")
+
+
 def test_pg_composition_with_the_kit_table_and_publish_trigger(kitdb, store, monkeypatch):
     monkeypatch.setattr(apg, "_storage", lambda: store)
     monkeypatch.setenv(f"DATABASE_URL_{SITE.upper()}", kitdb["author"])
     monkeypatch.setenv(f"DATABASE_URL_{SITE.upper()}_PUBLISHER", kitdb["publisher"])
-    ins = ("INSERT INTO editorial_articles (slug, title, body_md, category, status) "
-           "VALUES (%s, %s, %s, 'guide', 'published')")
+    # the author dates its own row, five days back (a draft held that long)
+    ins = ("INSERT INTO editorial_articles (slug, title, body_md, category, status, published_at) "
+           "VALUES (%s, %s, %s, 'guide', 'published', now() - interval '5 days')")
     _sql(kitdb["author"], ins, ("wifi", "Best Power Station for Starlink", CLEAN))
-    assert _status(kitdb, "wifi") == "pending"
+    assert _status(kitdb, "wifi") == "pending" and _published_at(kitdb, "wifi") is None
     code, rep = _run("--commit")
     assert code == apg.EXIT_OK and rep["promoted"] == ["wifi"], rep
     assert rep["guard"] == {"installed": True, "enabled": True, "statuses": True,
                             "function": "editorial_articles_publish_guard"}
+    # datePublished is the go-live time, not the date the author wrote
+    [(fresh,)] = _sql(kitdb["su"], "SELECT published_at BETWEEN now() - interval '1 minute' AND now() "
+                                   "FROM editorial_articles WHERE slug = 'wifi'")
+    assert fresh is True
+    # a dating UPDATE by another role (the scaffold's freshen.sql) still works on a live row
+    _sql(kitdb["su"], "UPDATE editorial_articles SET published_at = now() - interval '10 days' "
+                      "WHERE slug = 'wifi' AND status = 'published'")
+    first = _published_at(kitdb, "wifi")
+    assert _status(kitdb, "wifi") == "published" and (_sql(kitdb["su"], "SELECT now()")[0][0] - first).days >= 9
 
     # an agent takes the live article down: no later run publishes it again
     _sql(kitdb["author"], "UPDATE editorial_articles SET status = 'draft' WHERE slug = 'wifi'")
     for argv in (("--commit",), ("--enforce", "--since-hours", "0", "--commit")):
         code, rep = _run(*argv)
         assert code == apg.EXIT_OK and rep["promoted"] == [] and _status(kitdb, "wifi") == "draft"
+    # not even when the author regenerates it: ARTICLE_AUTHOR's upsert asks for
+    # 'published' on its conflict path, and a hold stays a hold (the new text lands)
+    _sql(kitdb["author"], AUTHOR_UPSERT, ("wifi", "Best Power Station for Starlink", CLEAN + "\nRegenerated.\n"))
+    assert _status(kitdb, "wifi") == "draft"
+    code, rep = _run("--commit")
+    assert code == apg.EXIT_OK and rep["promoted"] == [] and _status(kitdb, "wifi") == "draft"
     # an old held draft is never promoted by the sweep either
     _sql(kitdb["author"], ins, ("held", "Held", CLEAN.replace("Starlink", "Camping")))
     _sql(kitdb["author"], "UPDATE editorial_articles SET status = 'draft' WHERE slug = 'held'")
     _sql(kitdb["su"], "UPDATE editorial_articles SET updated_at = now() - interval '30 days' WHERE slug = 'held'")
     code, rep = _run("--enforce", "--since-hours", "0", "--commit")
     assert rep["promoted"] == [] and _status(kitdb, "held") == "draft"
+    # an archived article an agent asks back to 'published' stays archived
+    _sql(kitdb["author"], "UPDATE editorial_articles SET status = 'archived' WHERE slug = 'held'")
+    _sql(kitdb["author"], "UPDATE editorial_articles SET status = 'published' WHERE slug = 'held'")
+    assert _status(kitdb, "held") == "archived"
+    code, rep = _run("--enforce", "--since-hours", "0", "--commit")
+    assert rep["promoted"] == [] and _status(kitdb, "held") == "archived"
 
-    # resubmitted to the queue, it is checked and published again
+    # resubmitted to the queue explicitly, it is checked and published again,
+    # keeping its first go-live date
     _sql(kitdb["author"], "UPDATE editorial_articles SET status = 'pending' WHERE slug = 'wifi'")
     assert _run("--commit")[1]["promoted"] == ["wifi"]
+    assert _published_at(kitdb, "wifi") == first
     # an agent edits the live text WITHOUT bumping updated_at (kit_0003 keeps
-    # the old value): back in the queue, and re-published despite its age
+    # the old value): back in the queue, and re-published despite its age,
+    # with its first go-live date
     _sql(kitdb["su"], "UPDATE editorial_articles SET updated_at = now() - interval '30 days' WHERE slug = 'wifi'")
     _sql(kitdb["author"], "UPDATE editorial_articles SET body_md = %s WHERE slug = 'wifi'", (CLEAN + "\nUpdated.\n",))
     assert _status(kitdb, "wifi") == "pending"
@@ -791,6 +832,7 @@ def test_pg_composition_with_the_kit_table_and_publish_trigger(kitdb, store, mon
     assert age is True
     code, rep = _run("--commit")
     assert rep["promoted"] == ["wifi"] and _status(kitdb, "wifi") == "published"
+    assert _published_at(kitdb, "wifi") == first
 
     # a gate that queues 'draft' (the kit template's own default) refuses to
     # write against a guard rendered for 'pending', and says so
@@ -798,7 +840,7 @@ def test_pg_composition_with_the_kit_table_and_publish_trigger(kitdb, store, mon
                                                       "publish_gate": {"draft_status": "draft"}}}})
     code, rep = _run("--commit")
     assert code == apg.EXIT_CONFIG and "draftStatus 'draft'" in rep["errors"][0]
-    assert _status(kitdb, "held") == "draft"
+    assert _status(kitdb, "held") == "archived"
 
 
 def test_pg_kit_a_device_title_or_a_concession_is_never_promoted(kitdb, store, monkeypatch):

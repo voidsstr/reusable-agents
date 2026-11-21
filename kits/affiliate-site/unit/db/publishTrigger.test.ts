@@ -46,6 +46,7 @@ describe('validatePublishTriggerParams', () => {
     [{ publisherRole: 'p', contentColumns: [] }, /at least one column/],
     [{ publisherRole: 'p', contentColumns: ['body_md', 'body_md'] }, /listed twice/],
     [{ publisherRole: 'p', contentColumns: ['status'] }, /gated column itself/],
+    [{ publisherRole: 'p', contentColumns: ['body_md', 'published_at'] }, /go-live time the publish gate stamps/],
     [{ publisherRole: 'p', contentColumns: ['body md'] }, /lower-case SQL identifier/],
   ])('rejects %j', (params, issue) => {
     const issues = validatePublishTriggerParams(params as never);
@@ -133,6 +134,12 @@ describe('renderPublishTrigger', () => {
       `ALTER TABLE editorial_articles ENABLE ALWAYS TRIGGER ${PUBLISH_GUARD_TRIGGER}, ENABLE ALWAYS TRIGGER ${PUBLISH_RECHECK_TRIGGER}`,
     ]);
     expect(sql).toContain("SET LOCAL lock_timeout = '5s';\nSET LOCAL statement_timeout = '15min';\n");
+  });
+
+  it('requires status and published_at besides the content columns, and clears published_at on a guarded INSERT', () => {
+    expect(sql).toContain("unnest(ARRAY['status', 'published_at', 'title', 'subtitle', 'excerpt', 'body_md', 'faqs', 'outbound_citations', 'category']::text[])");
+    const guard = sql.slice(sql.indexOf(`CREATE OR REPLACE FUNCTION ${PUBLISH_GUARD_FUNCTION}`), sql.indexOf(`COMMENT ON FUNCTION ${PUBLISH_GUARD_FUNCTION}`));
+    expect(guard).toMatch(/IF TG_OP = 'INSERT' THEN\s+NEW\.status := draft_status;\s+NEW\.published_at := NULL;\s+RETURN NEW;/);
   });
 
   it('compares current_user with the role and lists the content columns as a text[]', () => {

@@ -589,6 +589,9 @@ def test_concession_settings_are_config_and_validated(repo_cfg):
     opted_out = cp.merge_config(base, {"rule_sets": {"electrical": {**repo_cfg["rule_sets"]["electrical"],
                                                                     "rules": rules}}})
     assert cp.check_markdown(cp.resolve_policy("s", config=opted_out), text).passes
+    bare = "Gas generators belong outdoors. The garage works if you leave the door open."
+    assert not cp.check_markdown(cp.resolve_policy("s", config=base), bare).passes
+    assert cp.check_markdown(cp.resolve_policy("s", config=opted_out), bare).passes      # bare claims opt out too
     shove = "Never backfeed. If push comes to shove, turn off the main breaker first."
     assert cp.check_markdown(cp.resolve_policy("s", config=base), shove).passes
     ext = cp.merge_config(base, {"negation": {"extra_concession_openers": [r"if\s+push\s+comes\s+to\s+shove\b"]}})
@@ -599,11 +602,48 @@ def test_concession_settings_are_config_and_validated(repo_cfg):
             cp.resolve_policy("s", config=cp.merge_config(base, bad))
     rule = {"id": "r", "patterns": ["x"], "why": "w", "fix": "f"}
     for extra, msg in (({"concession_subjects": ["gen"]}, "needs concession_claims"),
-                       ({"concession": "yes"}, "concession"), ({"concession_claims": ["(bad"]}, "invalid regex")):
+                       ({"concession": "yes"}, "concession"), ({"concession_claims": ["(bad"]}, "invalid regex"),
+                       ({"concession_bare_claims": ["(bad"]}, "invalid regex"),
+                       ({"concession_bare_claims": "x"}, None),
+                       ({"concession": False, "concession_bare_claims": ["x"]}, None),     # an explicit opt-out
+                       ({"negation_target": "claim", "require_any": ["y"], "concession_bare_claims": ["x"]},
+                        "concession_bare_claims needs concession: true")):
         cfg = cp.merge_config(base, {"sites": {"s": {"rule_sets": ["x"]}},
                                      "rule_sets": {"x": {"rules": [{**rule, **extra}]}}})
+        if msg is None:
+            assert [r.concession_bare_claims for r in cp.resolve_policy("s", config=cfg).rules][0][0].pattern == "x"
+            continue
         with pytest.raises(cp.ContentPolicyConfigError, match=msg):
             cp.resolve_policy("s", config=cfg)
+    # bare claims alone are enough for a bare subject's window
+    cfg = cp.merge_config(base, {"sites": {"s": {"rule_sets": ["x"]}}, "rule_sets": {"x": {"rules": [
+        {**rule, "concession_subjects": [r"\bgen\b"], "concession_bare_claims": [r"\bthe shed works\b"]}]}}})
+    pol_x = cp.resolve_policy("s", config=cfg)
+    assert [v.rule_id for v in cp.check_markdown(pol_x, "Keep the gen outside. The shed works.").rejects] == ["x.r"]
+
+
+def test_bare_concession_claims_need_no_opener_but_need_the_window(pol):
+    """electrical.indoor-generator's concession_bare_claims: inside the window
+    a fuel-generator sentence opens, a place called workable or a door kept
+    open is a concession with no opener ("The garage works if you leave the
+    door open."); outside it the same words are no concession."""
+    bare = "The garage works if you leave the door open."
+    a = cp.check_markdown(pol, "Gas generators belong outdoors. " + bare)
+    [v] = [v for v in a.rejects if v.rule_id == "electrical.indoor-generator"]
+    assert v.excerpt == "Gas generators belong outdoors. " + bare
+    assert v.matched == "The garage works"
+    assert cp.check_markdown(pol, bare).passes                                         # no window
+    assert cp.check_markdown(pol, "Gas generators belong outdoors.\n\n## Storage\n\n" + bare).passes   # a heading ends it
+    late = "Gas generators belong outdoors. Storms are loud. Rain is wet. " + bare
+    assert cp.check_markdown(pol, late).passes                                         # 3 sentences on: out of range
+    assert not cp.check_markdown(pol, late.replace("Rain is wet. ", "")).passes          # 2 sentences on
+    # after an exempted match too, and in the opener-gated claims' place: a door kept open
+    door = cp.check_markdown(pol, "Never run a gas generator indoors. Keep the garage door wide open if you run it there.")
+    assert [v.matched for v in door.rejects if v.rule_id == "electrical.indoor-generator"] == [
+        "Keep the garage door wide open"]
+    # a room or the house needs a ventilation workaround in the same sentence to count
+    assert not cp.check_markdown(pol, "Gas generators belong outdoors. The kitchen is fine if you crack a window.").passes
+    assert cp.check_markdown(pol, "Gas generators belong outdoors. The kitchen is fine for a power station.").passes
 
 
 def test_claim_rules_carry_instead_of_using_concessions(pol):

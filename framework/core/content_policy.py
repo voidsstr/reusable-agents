@@ -35,7 +35,12 @@ build items F6a and F5a):
     generic English (`negation.concession_openers`); a rule can name a bare
     subject that opens the same window ("Gas generators belong outdoors. In
     a pinch, the garage works.") with `concession_subjects` and
-    `concession_claims`.
+    `concession_claims`, and name claims that count inside the window with
+    no opener at all ("Gas generators belong outdoors. The garage works if
+    you leave the door open.") with `concession_bare_claims`. Not caught: a
+    concession in the warning's own sentence ("Gas generators belong
+    outdoors, but the garage works if you leave the door open.") or more
+    than `concession_window` sentences after it, or across a heading.
   * A list exempts its items only under an explicit prohibition lead-in
     ("What not to do", "Never do any of these:"), never an ordered list.
   * A safety-callout block (a blockquote that opens with "**Safety:**",
@@ -1288,6 +1293,11 @@ class Rule:
     # GARAGE WORKS"). Concession claims also count after an exempted match.
     concession_subjects: tuple[re.Pattern, ...] = ()
     concession_claims: tuple[re.Pattern, ...] = ()
+    # Claims that count inside either window even when the sentence does not
+    # open with a concession opener ("THE GARAGE WORKS if you leave the door
+    # open.", "KEEP THE GARAGE DOOR WIDE OPEN if you run it there."). Keep
+    # them narrow: unlike concession_claims nothing else gates them.
+    concession_bare_claims: tuple[re.Pattern, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1407,8 +1417,9 @@ class ContentPolicyAudit:
             "\"**Safety:**\". A callout may name a banned practice; it may never give steps or say a practice "
             "is safe. A warning sentence must not also give an instruction: put the safe alternative in its "
             "own sentence. Never follow a warning with a concession (\"If you must, ...\", \"In a pinch, "
-            "...\", \"That said / Still / Even so, ...\", \"Here's how to do it safely:\"): the sentences "
-            "after a warning give only the safe alternative, with no such opener.")
+            "...\", \"That said / Still / Even so, ...\", \"Here's how to do it safely:\") or with a workaround "
+            "that needs no opener (\"The garage works if you leave the door open.\"): the sentences after a "
+            "warning give only the safe alternative, with no such opener.")
         return "\n".join(lines)
 
     def summary(self) -> str:
@@ -1612,10 +1623,11 @@ def _followers(blocks: Sequence[Block], i: int, *, heading: bool) -> list[str]:
     return out
 
 
-def _concession_claim(rule: Rule, sentence: str, lx: _Lexicon) -> re.Match | None:
-    """A concession claim of `rule` the sentence makes (and does not itself
-    negate or warn about: "never run it in the garage" is no claim)."""
-    for p in rule.concession_claims:
+def _concession_claim(rule: Rule, sentence: str, lx: _Lexicon, *, bare: bool = False) -> re.Match | None:
+    """A concession claim of `rule` (its concession_bare_claims when `bare`)
+    the sentence makes, and does not itself negate or warn about: "never run
+    it in the garage" is no claim."""
+    for p in (rule.concession_bare_claims if bare else rule.concession_claims):
         for cm in p.finditer(sentence):
             if not negation_reason(sentence, cm.start(), cm.end(), lx):
                 return cm
@@ -1632,7 +1644,9 @@ def _concession_hits(rule: Rule, blocks: Sequence[Block], sents: list[list[str]]
     backfeed through a dryer outlet."), an instruction or "it works" is
     enough ("If you absolutely must, turn off the main first."); after a
     bare subject ("Gas generators belong outdoors.") only a configured
-    concession claim counts ("In a pinch, the garage works")."""
+    concession claim counts ("In a pinch, the garage works"). Either way a
+    concession_bare_claims match counts with no opener ("The garage works
+    if you leave the door open.")."""
     if lx.concession_window <= 0:
         return []
     units = [(i, j) for i, blk in enumerate(blocks) if blk.field in rule.fields for j in range(len(sents[i]))]
@@ -1650,6 +1664,14 @@ def _concession_hits(rule: Rule, blocks: Sequence[Block], sents: list[list[str]]
             if fb.field != field or fb.kind in _WINDOW_STOP_KINDS:
                 break
             s = sents[fi][fj]
+            bm = (_concession_claim(rule, s, lx, bare=True)
+                  if rule.concession_bare_claims and (fi, fj) not in flagged and (fi, fj) not in violated else None)
+            if bm:
+                flagged.add((fi, fj))
+                out.append(Violation(rule.id, rule.rule_set, "pattern", rule.action, fb.field,
+                                     f"{opening} {s}"[:240], bm.group(0).strip(" \t,;:—–")[:80], fb.line,
+                                     rule.label, rule.why, rule.fix))
+                break
             m = lx.concession.match(s)
             if m and (fi, fj) not in flagged and (fi, fj) not in violated:
                 if fb.kind == "heading":
@@ -1982,14 +2004,25 @@ def compile_rule_set(name: str, spec: Mapping[str, Any],
                                     for p in _as_list(r.get("concession_subjects"), f"{where}.concession_subjects"))
         concession_claims = tuple(_compile(p, f"{where}.concession_claims")
                                   for p in _as_list(r.get("concession_claims"), f"{where}.concession_claims"))
-        if concession_subjects and not concession_claims:
-            raise ContentPolicyConfigError(f"{where}: concession_subjects needs concession_claims (what a "
-                                           f"concession after a bare subject must say to count)")
+        concession_bare_claims = tuple(
+            _compile(p, f"{where}.concession_bare_claims")
+            for p in _as_list(r.get("concession_bare_claims"), f"{where}.concession_bare_claims"))
+        if concession_subjects and not (concession_claims or concession_bare_claims):
+            raise ContentPolicyConfigError(f"{where}: concession_subjects needs concession_claims or "
+                                           f"concession_bare_claims (what a concession after a bare subject must "
+                                           f"say to count)")
         # Claim rules carry their subject through the block and the section
         # instead, so a concession is checked for anchor rules by default.
         concession = r.get("concession", target == "anchor")
         if not isinstance(concession, bool):
             raise ContentPolicyConfigError(f"{where}.concession: expected true or false, got {concession!r}")
+        # Bare claims count only inside a concession window. A claim rule has
+        # none unless it says so; an explicit "concession": false is an
+        # operator's opt-out and turns them off with the rest.
+        if concession_bare_claims and "concession" not in r and not concession:
+            raise ContentPolicyConfigError(f"{where}: concession_bare_claims needs concession: true (they count "
+                                           f"only inside a concession window, which a claim rule has none of by "
+                                           f"default)")
         if action == "off":
             continue
         rules.append(Rule(
@@ -2004,7 +2037,7 @@ def compile_rule_set(name: str, spec: Mapping[str, Any],
             why=str(r.get("why") or ""), fix=str(r.get("fix") or ""), negation_target=target,
             carry_block=bool(r.get("carry_block_subject", bool(carry_pats) and target == "claim")),
             concession=concession, concession_subjects=concession_subjects,
-            concession_claims=concession_claims))
+            concession_claims=concession_claims, concession_bare_claims=concession_bare_claims))
     notices: list[Notice] = []
     for i, n in enumerate(_as_list(spec.get("required_notices"), f"rule_sets.{name}.required_notices")):
         where = f"rule_sets.{name}.required_notices[{i}]"

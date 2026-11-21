@@ -138,9 +138,19 @@ or `renderPublishTrigger({ publisherRole, draftStatus })` from
 `publish_gate.draft_status` (the gate's default is `pending`; the template's is
 `draft`), or the gate refuses to write. For every role except the publisher:
 
-- an INSERT is always the draft status;
-- an UPDATE asking for `published` on a row that was not published gets the
-  draft status;
+- an INSERT is always the draft status, with `published_at` NULL whatever the
+  author wrote: the publish gate stamps `published_at` when it first promotes
+  the row (`COALESCE(published_at, now())`), so a draft held for days goes
+  live dated the day it went live;
+- an UPDATE asking for `published` on a row that was not published keeps the
+  status the row had: a row in the gate's queue (the draft status) stays
+  queued, and a held row (`archived`, or `draft` when the queue is `pending`)
+  stays held. Only a write that asks for the draft status itself resubmits a
+  held row;
+- no UPDATE clears a `published_at` once set, so an edited or resubmitted
+  article keeps its first go-live date. Setting another time is allowed
+  (`published_at` is not content), which is how a fixture re-dates its
+  articles;
 - an edit to a published row's content sends it back to the draft status for
   the publish gate to re-check. The content columns are what the gate's
   checks read: title, subtitle, excerpt, body_md, faqs, outbound_citations and
@@ -149,6 +159,13 @@ or `renderPublishTrigger({ publisherRole, draftStatus })` from
 - other updates of a published row (a `view_count` bump on every page view,
   hero swaps, featured rotation, trend scores, link arrays) keep it published;
 - leaving the published state (`archived`, `draft`) is always allowed.
+
+An author's upsert (`INSERT ... ON CONFLICT (slug) DO UPDATE`) takes the
+UPDATE rules on its conflict path. Leave `status` out of its `DO UPDATE` list,
+or ask for `published` there: `status = EXCLUDED.status` asks for the draft
+status, because `EXCLUDED` carries what the INSERT rule forced, and that
+resubmits a held row. For the same reason `published_at = EXCLUDED.published_at`
+sets NULL, and the guard keeps the row's own date instead.
 
 It installs two triggers, both `ENABLE ALWAYS`, so
 `session_replication_role = replica` does not skip them:
@@ -201,7 +218,10 @@ to mean anything (installing it warns about the first three it can see):
   `ALTER TABLE editorial_articles ENABLE ALWAYS TRIGGER
   editorial_articles_zzz_publish_guard_trg, ENABLE ALWAYS TRIGGER
   editorial_articles_zzz_publish_recheck_trg`. Seed fixtures promote through
-  `SET ROLE <publisher>`, never replica mode;
+  `SET ROLE <publisher>`, never replica mode, and set `published_at` in that
+  same UPDATE (`SET status = 'published', published_at = ...`): the fixture's
+  own INSERT left it NULL, and a promote that sets only `status` leaves a live
+  article with no publication date;
 - the author and app roles are not the publisher role, not members of it, and
   not superusers;
 - migrations run as a dedicated owner role, and neither the author role nor
@@ -220,10 +240,13 @@ published until it does. A content column is compared by name on every write
 to a published row, so after one is dropped or renamed those writes fail with
 an error, the page-view counter's included, instead of passing or unpublishing
 the article; re-render the guard in the migration that changes the column. To
-change a parameter, render again into a new migration. A full `pg_restore`
-creates the triggers after loading the rows; a data-only restore fires them
-on every row (restore those with `--disable-triggers`, then re-enable as
-above).
+change a parameter, render again into a new migration. The table needs
+`status` and `published_at` as well as the content columns, or the
+installation fails. A full `pg_restore` creates the triggers after loading the
+rows; a data-only restore fires them on every row, which turns every article
+into a draft with `published_at` NULL, and the gate would then re-date every
+article as it re-publishes it. Restore those with `--disable-triggers`, then
+re-enable as above.
 
 ## Tests
 

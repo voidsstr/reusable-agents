@@ -81,17 +81,48 @@ async function insertAs(c: PoolClient, slug: string, status = 'published'): Prom
 }
 
 /** The publish gate's promote, exactly as framework/cli/article_publish_gate.py issues it. */
-async function promote(c: PoolClient, slug: string): Promise<string | null> {
+async function promote(c: PoolClient, slug: string, draftStatus = 'draft'): Promise<string | null> {
   const r = await c.query(
     `UPDATE editorial_articles SET status = $2, published_at = COALESCE(published_at, now())
       WHERE slug = $1 AND status = $3 RETURNING status`,
-    [slug, 'published', 'draft'],
+    [slug, 'published', draftStatus],
   );
   return r.rows[0]?.status ?? null;
 }
 
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000);
+
+/**
+ * The implementer's ARTICLE_AUTHOR upsert (reusable-agents agents/implementer/ARTICLE_AUTHOR.md),
+ * with its own conflict clause: it asks for 'published', dates the row itself
+ * (suggested_published_at, else now()), and asks for 'published' again on a conflict.
+ */
+async function authorUpsert(c: PoolClient, slug: string, body: string, publishedAt: Date = daysAgo(5)) {
+  const r = await c.query(
+    `INSERT INTO editorial_articles (slug, title, subtitle, excerpt, body_md, category, author, status, written_by,
+                                     published_at, written_at, created_at, updated_at)
+     VALUES ($1, 'Title', 'Sub', 'Excerpt', $2, 'guide', 'Editorial', 'published', 'claude-cli', $3, now(), now(), now())
+     ON CONFLICT (slug) DO UPDATE SET title = EXCLUDED.title, body_md = EXCLUDED.body_md, excerpt = EXCLUDED.excerpt,
+       updated_at = now(), written_at = now(), status = 'published'
+     RETURNING status, published_at`,
+    [slug, body, publishedAt],
+  );
+  return r.rows[0] as { status: string; published_at: Date | null };
+}
+
 async function statusOf(pool: Pool, slug: string): Promise<string> {
   return (await pool.query('SELECT status FROM editorial_articles WHERE slug = $1', [slug])).rows[0]?.status;
+}
+
+async function publishedAtOf(pool: Pool, slug: string): Promise<Date | null> {
+  return (await pool.query('SELECT published_at FROM editorial_articles WHERE slug = $1', [slug])).rows[0]?.published_at ?? null;
+}
+
+/** Was the row's published_at stamped within the last minute (by the database clock)? */
+async function stampedJustNow(pool: Pool, slug: string): Promise<boolean> {
+  return (await pool.query(
+    `SELECT published_at BETWEEN now() - interval '1 minute' AND now() AS fresh FROM editorial_articles WHERE slug = $1`, [slug],
+  )).rows[0]?.fresh === true;
 }
 
 /** A session logged in as `role` itself (not SET ROLE), as a role an operator granted something to would connect. */
@@ -223,9 +254,59 @@ describePg('publish guard: the rules (real Postgres)', () => {
   it('leaving the published state is always allowed; coming back needs the publisher', async () => {
     const sl = await published();
     expect((await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'archived' WHERE slug = $1 RETURNING status`, [sl]))).rows[0].status).toBe('archived');
-    expect((await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'published' WHERE slug = $1 RETURNING status`, [sl]))).rows[0].status).toBe('draft');
+    // A hold stays a hold: asking for 'published' keeps 'archived'; only an explicit draft status resubmits it.
+    expect((await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'published' WHERE slug = $1 RETURNING status`, [sl]))).rows[0].status).toBe('archived');
+    expect(await asRole(s.pool, s.publisher, (c) => promote(c, sl))).toBeNull();
+    expect((await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'draft' WHERE slug = $1 RETURNING status`, [sl]))).rows[0].status).toBe('draft');
+    expect(await asRole(s.pool, s.publisher, (c) => promote(c, sl))).toBe('published');
     const sl2 = await published();
     expect((await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'draft' WHERE slug = $1 RETURNING status`, [sl2]))).rows[0].status).toBe('draft');
+  });
+
+  it("an author's INSERT lands with published_at NULL, whatever date it wrote; the publisher's promote stamps the go-live time", async () => {
+    const sl = slug();
+    const r = await asRole(s.pool, s.author, (c) => c.query(
+      `INSERT INTO editorial_articles (slug, title, body_md, category, status, published_at)
+       VALUES ($1, 'Title', 'Body', 'guide', 'published', $2) RETURNING status, published_at`, [sl, daysAgo(5)]));
+    expect(r.rows[0]).toEqual({ status: 'draft', published_at: null });
+    // ARTICLE_AUTHOR's upsert on its insert path, dated by the author (suggested_published_at)
+    const sl2 = slug();
+    expect(await asRole(s.pool, s.author, (c) => authorUpsert(c, sl2, 'Body', daysAgo(5)))).toEqual({ status: 'draft', published_at: null });
+    for (const x of [sl, sl2]) {
+      expect(await asRole(s.pool, s.publisher, (c) => promote(c, x))).toBe('published');
+      expect(await stampedJustNow(s.pool, x)).toBe(true);   // the go-live time, not the 5-day-old date
+    }
+  });
+
+  it('published_at stays the first go-live time: an edit, an upsert, a takedown and an EXCLUDED.published_at copy all keep it', async () => {
+    const sl = await published();
+    // A dating UPDATE by another role (the scaffold's fixture freshen.sql): published_at is not content.
+    expect((await s.pool.query(`UPDATE editorial_articles SET published_at = now() - interval '10 days'
+      WHERE slug = $1 AND status = 'published' RETURNING status`, [sl])).rows[0].status).toBe('published');
+    const first = await publishedAtOf(s.pool, sl);
+    expect(Date.now() - first!.getTime()).toBeGreaterThan(9 * 86_400_000);
+    // an edit sends it back to the gate; the re-promote keeps the first date
+    await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET body_md = 'Body, edited' WHERE slug = $1`, [sl]));
+    expect(await asRole(s.pool, s.publisher, (c) => promote(c, sl))).toBe('published');
+    expect(await publishedAtOf(s.pool, sl)).toEqual(first);
+    // ARTICLE_AUTHOR's upsert re-drafts it on its conflict path (which never writes published_at)
+    expect((await asRole(s.pool, s.author, (c) => authorUpsert(c, sl, 'Body, regenerated', daysAgo(1)))).status).toBe('draft');
+    expect(await asRole(s.pool, s.publisher, (c) => promote(c, sl))).toBe('published');
+    expect(await publishedAtOf(s.pool, sl)).toEqual(first);
+    // a takedown, then an explicit resubmit
+    await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'archived' WHERE slug = $1`, [sl]));
+    await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'draft' WHERE slug = $1`, [sl]));
+    expect(await asRole(s.pool, s.publisher, (c) => promote(c, sl))).toBe('published');
+    expect(await publishedAtOf(s.pool, sl)).toEqual(first);
+    // An improvised upsert that copies EXCLUDED.published_at (the NULL the INSERT trigger gave it) cannot clear it.
+    const r = await asRole(s.pool, s.author, (c) => c.query(
+      `INSERT INTO editorial_articles (slug, title, body_md, category, status, published_at)
+       VALUES ($1, 'Title', 'Body, regenerated', 'guide', 'published', now())
+       ON CONFLICT (slug) DO UPDATE SET body_md = EXCLUDED.body_md, published_at = EXCLUDED.published_at, status = 'published'
+       RETURNING status, published_at`, [sl]));
+    expect(r.rows[0]).toEqual({ status: 'published', published_at: first });
+    await asRole(s.pool, s.author, (c) => c.query(`UPDATE editorial_articles SET status = 'draft', published_at = NULL WHERE slug = $1`, [sl]));
+    expect(await publishedAtOf(s.pool, sl)).toEqual(first);
   });
 
   it('every other role is guarded too, including the table owner and a superuser', async () => {
@@ -307,6 +388,38 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
     expect(await statusOf(st.pool, 'a')).toBe('live');
     await asRole(st.pool, st.author, (c) => c.query(`UPDATE editorial_articles SET body_md = 'changed' WHERE slug = 'a'`));
     expect(await statusOf(st.pool, 'a')).toBe('pending');
+  }, 60_000);
+
+  it("rendered for the gate's 'pending' queue: a queued row stays queued, and a hold (draft, archived) stays a hold until it is resubmitted", async () => {
+    const st = await setUpSite('kit_guard_holds', { draftStatus: 'pending' });
+    sites.push(st);
+    const ask = (slug: string, status: string) => asRole(st.pool, st.author, (c) =>
+      c.query(`UPDATE editorial_articles SET status = $2 WHERE slug = $1 RETURNING status`, [slug, status])).then((r) => r.rows[0].status);
+    expect(await asRole(st.pool, st.author, (c) => insertAs(c, 'a'))).toBe('pending');
+    expect(await ask('a', 'published')).toBe('pending');
+    expect(await asRole(st.pool, st.publisher, (c) => promote(c, 'a', 'pending'))).toBe('published');
+    // A takedown to 'draft' is a hold. Asking for 'published', directly or through ARTICLE_AUTHOR's
+    // upsert, keeps it a hold (the upsert's new text still lands), and the gate never selects it.
+    expect(await ask('a', 'draft')).toBe('draft');
+    expect(await ask('a', 'published')).toBe('draft');
+    expect((await asRole(st.pool, st.author, (c) => authorUpsert(c, 'a', 'Body, regenerated'))).status).toBe('draft');
+    expect(await asRole(st.pool, st.publisher, (c) => promote(c, 'a', 'pending'))).toBeNull();
+    expect((await st.pool.query(`SELECT status, body_md FROM editorial_articles WHERE slug = 'a'`)).rows[0])
+      .toEqual({ status: 'draft', body_md: 'Body, regenerated' });
+    // 'archived' too
+    expect(await ask('a', 'archived')).toBe('archived');
+    expect(await ask('a', 'published')).toBe('archived');
+    // Only an explicit 'pending' resubmits it to the gate.
+    expect(await ask('a', 'pending')).toBe('pending');
+    expect(await asRole(st.pool, st.publisher, (c) => promote(c, 'a', 'pending'))).toBe('published');
+    // An upsert that writes status = EXCLUDED.status resubmits a hold: EXCLUDED carries the 'pending' the
+    // INSERT trigger forced, which the guard cannot tell from a deliberate resubmit. That is why an
+    // author's upsert leaves status out of its DO UPDATE (migrations/README.md, "The publish guard").
+    expect(await ask('a', 'draft')).toBe('draft');
+    expect((await asRole(st.pool, st.author, (c) => c.query(
+      `INSERT INTO editorial_articles (slug, title, body_md, category, status) VALUES ('a', 'Title', 'Body, again', 'guide', 'published')
+       ON CONFLICT (slug) DO UPDATE SET body_md = EXCLUDED.body_md, status = EXCLUDED.status RETURNING status`))).rows[0].status)
+      .toBe('pending');
   }, 60_000);
 
   it('a content column dropped after installation makes guarded writes fail, never unpublish, until the guard is re-rendered', async () => {
@@ -550,7 +663,7 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
     }
   }, 60_000);
 
-  it('refuses to install without the table or with a content column the table lacks', async () => {
+  it('refuses to install without the table, or with a content column or published_at the table lacks', async () => {
     const db = await createScratchDb('kit_guard_bad');
     try {
       const pool = db.pool({ max: 1 });
@@ -562,6 +675,10 @@ describePg('publish guard: installation and configuration (real Postgres)', () =
       await pool.query('ALTER TABLE editorial_articles ADD COLUMN extra_json json');
       await expect(pool.query(renderPublishTrigger({ publisherRole: 'nobody_x', contentColumns: ['body_md', 'extra_json'] })))
         .rejects.toThrow(/content column editorial_articles\.extra_json cannot be compared: operator does not exist: json = json/);
+      // The guard clears published_at on every INSERT it guards: without the column every such INSERT would fail.
+      await pool.query('ALTER TABLE editorial_articles DROP COLUMN published_at');
+      await expect(pool.query(renderPublishTrigger({ publisherRole: 'nobody_x' })))
+        .rejects.toThrow(/editorial_articles has no column\(s\) \{published_at\}/);
       expect((await pool.query(`SELECT count(*)::int AS n FROM pg_trigger WHERE tgname = 'editorial_articles_zzz_publish_guard_trg'`)).rows[0].n).toBe(0);
     } finally {
       await db.drop();
@@ -625,14 +742,22 @@ for step in os.environ['KIT_GATE_STEPS'].split(','):
     status = 'published' if action == 'unpublish' else 'draft'
     rows = store.select(status, since_hours=0, slugs=[os.environ['KIT_GATE_SLUG']])
     result = (store.promote(rows[0]) if action == 'promote' else store.unpublish(rows[0])) if rows else 'not-selected'
-    out.append({'step': step, 'user': store.current_user(), 'result': result, 'guard': store.guard_status()})
+    with conn.cursor() as cur:
+        cur.execute('SELECT published_at FROM editorial_articles WHERE slug = %s', (os.environ['KIT_GATE_SLUG'],))
+        at = cur.fetchone()[0]
+    out.append({'step': step, 'user': store.current_user(), 'result': result, 'guard': store.guard_status(),
+                'published_at': at.isoformat() if at else None})
     store.close()
 print(json.dumps(out))
 `;
 
   it("promote() is 'trigger-kept-draft' as the author and 'published' as the publisher; unpublish() works for the author", async () => {
-    await asRole(st.pool, st.author, (c) => insertAs(c, 'gate-article'));
-    const out = runPythonJson<Array<{ step: string; user: string; result: string; guard: Record<string, unknown> }>>(GATE, {
+    // The author dates its row itself, five days back: the gate's promote stamps the go-live time instead.
+    await asRole(st.pool, st.author, (c) => c.query(
+      `INSERT INTO editorial_articles (slug, title, subtitle, excerpt, body_md, category, faqs, outbound_citations, status, published_at)
+       VALUES ('gate-article', 'Title', 'Sub', 'Excerpt', 'Body', 'guide', $1::jsonb, ARRAY['https://example.org/a'], 'published', $2)`,
+      [JSON.stringify(FAQS), daysAgo(5)]));
+    const out = runPythonJson<Array<{ step: string; user: string; result: string; guard: Record<string, unknown>; published_at: string | null }>>(GATE, {
       KIT_GATE_DSN: st.db.url,
       KIT_GATE_PUBLISHER: st.publisher,
       KIT_GATE_AUTHOR: st.author,
@@ -646,6 +771,12 @@ print(json.dumps(out))
       [st.publisher, 'published'],
     ]);
     expect(await statusOf(st.pool, 'gate-article')).toBe('published');
+    // published_at: still NULL after the author's promote (rolled back), the go-live time after the
+    // publisher's, and that same first time through the unpublish and the re-publish.
+    const at = out.map((o) => o.published_at);
+    expect(at[0]).toBeNull();
+    expect(Math.abs(Date.now() - Date.parse(at[1]!))).toBeLessThan(60_000);
+    expect(at.slice(2)).toEqual([at[1], at[1]]);
     // The gate's own check accepts the guard: ENABLE ALWAYS counts as enabled, and the guard
     // function names the gate's statuses.
     for (const o of out) {

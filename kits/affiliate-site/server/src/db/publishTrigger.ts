@@ -4,11 +4,14 @@
  * (affiliate-site kit design, binding amendment 1; build item K4).
  *
  * A write by any role other than the publisher can never make a row published:
- * its INSERTs become drafts, an UPDATE that asks for 'published' on a row that
- * was not published becomes a draft, and an edit to a published row's content
- * columns sends it back to draft so the publish gate re-checks it. Housekeeping
- * writes to a published row (view_count on every page view, hero swaps,
- * featured rotation, trend scores) leave it published.
+ * its INSERTs become drafts with published_at NULL (the gate stamps the first
+ * go-live time), an UPDATE that asks for 'published' on a row that was not
+ * published keeps the status it had (a queued draft stays queued, a held row
+ * such as 'archived' stays held until a write asks for the draft status), and
+ * an edit to a published row's content columns sends it back to draft so the
+ * publish gate re-checks it. No such UPDATE clears a published_at once set.
+ * Housekeeping writes to a published row (view_count on every page view, hero
+ * swaps, featured rotation, trend scores) leave it published.
  *
  * Two triggers, both ENABLE ALWAYS so replica mode cannot skip them: the BEFORE
  * guard applies those rules, and an AFTER recheck raises when the row as
@@ -141,6 +144,8 @@ export function validatePublishTriggerParams(params: PublishTriggerParams): stri
         continue;
       }
       if (c === 'status') issues.push("content column 'status' is the gated column itself");
+      // The gate's promote sets published_at, and the recheck refuses a publisher write that changes content.
+      if (c === 'published_at') issues.push("content column 'published_at' is the go-live time the publish gate stamps; as content it would make every promote fail");
       if (seen.has(c)) issues.push(`content column ${c} is listed twice`);
       seen.add(c);
     }

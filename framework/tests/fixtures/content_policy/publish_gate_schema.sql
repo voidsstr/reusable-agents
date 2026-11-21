@@ -5,15 +5,19 @@
 -- item K4); this copy follows the same rules, so the gate is exercised against
 -- the contract K4 ships (and the composition test renders K4's own template):
 --   * any INSERT by a role other than the publisher lands in the gate's
---     queue, 'pending' (a self-INSERTed 'published' row never goes live);
+--     queue, 'pending', with published_at NULL (a self-INSERTed 'published'
+--     row never goes live, and the gate stamps the first go-live time);
 --   * an UPDATE by another role that asks for 'published' on a row that was
---     not published lands as 'pending';
+--     not published keeps the status it had: a 'pending' row stays queued
+--     and a hold ('draft', 'archived') stays a hold until a write asks for
+--     'pending' itself;
 --   * an UPDATE by another role that changes the checked text of a published
 --     row lands as 'pending' (the gate re-checks it);
 --   * any other UPDATE keeps the status it asks for: leaving 'published'
 --     (a takedown to 'draft' or 'archived') is always allowed, and
 --     housekeeping writes to a published row (a hero image, a view count)
---     keep it published.
+--     keep it published;
+--   * no UPDATE by another role clears a published_at once set.
 -- {author} and {publisher} are replaced with the test's role names.
 CREATE TABLE editorial_articles (
   id            SERIAL PRIMARY KEY,
@@ -47,13 +51,17 @@ BEGIN
   END IF;
   IF TG_OP = 'INSERT' THEN
     NEW.status := draft_status;
+    NEW.published_at := NULL;
     RETURN NEW;
+  END IF;
+  IF NEW.published_at IS NULL AND OLD.published_at IS NOT NULL THEN
+    NEW.published_at := OLD.published_at;
   END IF;
   IF NEW.status IS DISTINCT FROM public_status THEN
     RETURN NEW;
   END IF;
   IF OLD.status IS DISTINCT FROM public_status THEN
-    NEW.status := draft_status;
+    NEW.status := OLD.status;
     RETURN NEW;
   END IF;
   IF (NEW.body_md, NEW.title, NEW.subtitle, NEW.excerpt, NEW.faqs)
