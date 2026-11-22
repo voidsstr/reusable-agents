@@ -12,6 +12,20 @@ mechanics (price rule, CTA, Offer, click classification) has to be applied in
 both places. Record each one under "Parity" in the release that carries it;
 `unit/drift.test.ts` lists upstream changes since the port commit.
 
+## 0.2.1 (2026-11-22)
+
+### Fixed
+
+- **Deploy, database phase: schema public on Azure.** Azure Database for
+  PostgreSQL creates a new database's `public` schema owned by
+  `azure_pg_admin`, not by `pg_database_owner` as stock PostgreSQL 15+ does,
+  so the owner role could neither create the site's tables ("permission denied
+  for schema public" on the first migration) nor converge the schema's
+  privileges ("no privileges could be revoked"). The phase now hands `public`
+  to `DB_OWNER_ROLE` first, as the admin, when another role owns it; it leaves
+  `pg_database_owner` alone. Found on RuntimePicks' first provisioning.
+  Integration tests cover both layouts.
+
 ## 0.2.0 (2026-11-21)
 
 Staging and launch controls for a site that serves real pages before it may

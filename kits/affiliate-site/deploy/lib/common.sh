@@ -1222,6 +1222,21 @@ kd_sql_database() {
 -- affiliate-kit: privileges inside database "${DB_NAME}"; converges to DB_*_GRANTS
 SET client_min_messages = warning;
 BEGIN;
+-- The owner role must own schema public to create the site's tables and to
+-- converge its privileges. Stock PostgreSQL 15+ gives public to
+-- pg_database_owner (which the database owner already is); Azure Database
+-- for PostgreSQL gives it to azure_pg_admin, whose members (the server admin)
+-- may hand it over. Any other owner is handed to the owner role here.
+DO ${dq}
+DECLARE cur oid;
+BEGIN
+  SELECT nspowner INTO cur FROM pg_catalog.pg_namespace WHERE nspname = 'public';
+  IF cur IS NOT NULL AND cur <> '"${DB_OWNER_ROLE}"'::regrole
+     AND (to_regrole('pg_database_owner') IS NULL OR cur <> to_regrole('pg_database_owner')) THEN
+    ALTER SCHEMA public OWNER TO "${DB_OWNER_ROLE}";
+  END IF;
+END
+${dq};
 SET LOCAL ROLE "${DB_OWNER_ROLE}";
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO ${others};

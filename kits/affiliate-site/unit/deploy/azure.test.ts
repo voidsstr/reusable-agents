@@ -86,7 +86,14 @@ describe('azure/provision.sh --dry-run all (fresh: nothing exists)', () => {
     expect(r.stdout).toContain('connection limits: roles owner 3, app 20, agents 10, publisher 2 (sum 35); database left as the server has it (DB_CONNECTION_LIMIT unset)');
 
     expect(db).toMatch(/^-- affiliate-kit: privileges inside database "kitexample"/);
-    expect(db).toContain('BEGIN;\nSET LOCAL ROLE "kitexample_owner";\nREVOKE ALL ON SCHEMA public FROM PUBLIC;');
+    // Schema public goes to the owner role first when another role owns it (Azure: azure_pg_admin),
+    // never when the owner or pg_database_owner (stock PostgreSQL 15+) already does; then the owner converges it.
+    expect(db).toContain(`IF cur IS NOT NULL AND cur <> '"kitexample_owner"'::regrole`);
+    expect(db).toContain("AND (to_regrole('pg_database_owner') IS NULL OR cur <> to_regrole('pg_database_owner')) THEN");
+    expect(db).toContain('    ALTER SCHEMA public OWNER TO "kitexample_owner";');
+    expect(db.indexOf('ALTER SCHEMA public OWNER TO')).toBeGreaterThan(db.indexOf('BEGIN;'));
+    expect(db.indexOf('ALTER SCHEMA public OWNER TO')).toBeLessThan(db.indexOf('SET LOCAL ROLE "kitexample_owner";'));
+    expect(db).toContain('$kit$;\nSET LOCAL ROLE "kitexample_owner";\nREVOKE ALL ON SCHEMA public FROM PUBLIC;');
     expect(db).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA public TO "kitexample_app";');
     expect(db).toContain("EXECUTE format('GRANT INSERT ON public.%I TO %I', 'outbound_clicks', 'kitexample_app');");
     expect(db).toContain("EXECUTE format('GRANT INSERT ON public.%I TO %I', 'ai_traffic_log', 'kitexample_app');");

@@ -1,6 +1,6 @@
 {
   "name": "@reusable-agents/affiliate-site-kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Versioned affiliate-site kit: SiteContext, Amazon offer/price/link compliance helpers, click and AI-crawler verification, HTTP middleware, render helpers, migrations, gate engine and deploy templates. Vendored read-only into each site as vendor/affiliate-kit.",
   "license": "MIT",

@@ -38,7 +38,7 @@ const PW: Record<Kind, string> = {
 const dsn = (k: Kind) => `postgresql://${ROLES[k]}:${PW[k]}@${HOST}:${PORT}/${DB}?sslmode=disable`;
 /** Objects that stand in for another site's on the shared server. */
 const VICTIM = { role: 'kitit_victim', password: 'Victim-Password-0123456789', db: 'kitit_victimdb' };
-const EXTRA_ROLES = [VICTIM.role, 'kitit2_owner', 'kitit2_app', 'kitit2_agents', 'kitit2_publisher',
+const EXTRA_ROLES = ['kitit_azure_admin', VICTIM.role, 'kitit2_owner', 'kitit2_app', 'kitit2_agents', 'kitit2_publisher',
   'kitit3_owner', 'kitit3_app', 'kitit3_agents', 'kitit3_publisher'];
 const EXTRA_DBS = [VICTIM.db, 'kitit3'];
 
@@ -159,6 +159,40 @@ describeIt('database phase against a real Postgres (opt-in)', () => {
     expect(owner.rows[0]).toEqual({ owner: 'kitit_owner', datconnlimit: 40 });
     const stranger = await su((c) => c.query(`SELECT has_database_privilege('kitit_stranger', $1, 'CONNECT') AS ok`, [DB]));
     expect(stranger.rows[0].ok).toBe(false);
+  });
+
+  it('on stock PostgreSQL schema public stays with pg_database_owner, and the owner role creates tables', async () => {
+    const own = await su((c) => c.query(`SELECT nspowner::regrole::text AS owner FROM pg_namespace WHERE nspname = 'public'`), DB);
+    expect(own.rows[0].owner).toBe('pg_database_owner');
+    expect(await allowed('owner', 'CREATE TABLE kit_it_owner_probe (x int); DROP TABLE kit_it_owner_probe;')).toBe(true);
+  });
+
+  it('a schema public that another role owns (Azure: azure_pg_admin) is handed to the owner role on a re-run', async () => {
+    // Azure Database for PostgreSQL creates public owned by azure_pg_admin, of which the server admin is a member.
+    await su(async (c) => {
+      await c.query('DROP ROLE IF EXISTS kitit_azure_admin');
+      await c.query('CREATE ROLE kitit_azure_admin NOLOGIN');
+      await c.query(`GRANT kitit_azure_admin TO ${ADMIN.user}`);
+    });
+    await su(async (c) => {
+      await c.query('ALTER SCHEMA public OWNER TO kitit_azure_admin');
+      await c.query('GRANT USAGE ON SCHEMA public TO PUBLIC');
+    }, DB);
+    expect(await allowed('owner', 'CREATE TABLE kit_it_owner_probe (x int)')).toBe(false);
+
+    const r = provision();
+    expect(r.stderr).not.toMatch(/ERROR/);
+    expect(r.status).toBe(0);
+    const own = await su((c) => c.query(
+      `SELECT nspowner::regrole::text AS owner, has_schema_privilege('kitit_stranger', 'public', 'USAGE') AS public_usage
+         FROM pg_namespace WHERE nspname = 'public'`), DB);
+    expect(own.rows[0]).toEqual({ owner: ROLES.owner, public_usage: false });
+    expect(await allowed('owner', 'CREATE TABLE kit_it_owner_probe (x int); DROP TABLE kit_it_owner_probe;')).toBe(true);
+    // A second run changes nothing (the owner already owns public).
+    const again = provision();
+    expect(again.status).toBe(0);
+    const own2 = await su((c) => c.query(`SELECT nspowner::regrole::text AS owner FROM pg_namespace WHERE nspname = 'public'`), DB);
+    expect(own2.rows[0].owner).toBe(ROLES.owner);
   });
 
   it('every role logs in with the password from its DSN (the SCRAM verifiers are right) and gets its timeout', async () => {
