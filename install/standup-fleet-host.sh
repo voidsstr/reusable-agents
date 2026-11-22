@@ -329,6 +329,11 @@ Type=simple
 WorkingDirectory=$REPO_DIR
 Environment=PYTHONPATH=$REPO_DIR
 Environment=STORAGE_BACKEND=azure
+# The cloud copy of the API (the agents Container App, next to the storage
+# account) runs the snapshot updater, reapers and cache warmers. Here every
+# storage read is billed internet egress (~130 GB/day, ~\$340/month on
+# 2026-11-21 with both copies looping), so this copy only answers requests.
+Environment=FRAMEWORK_API_BACKGROUND_JOBS=0
 EnvironmentFile=-$SECRETS_FILE
 # $LOG_DIR is under /tmp, wiped on reboot; systemd will not create the
 # parent of an append: target and fails the unit at 209/STDOUT.

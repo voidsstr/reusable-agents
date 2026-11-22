@@ -343,8 +343,11 @@ def list_dispatches(limit: int = Query(20, le=100)):
 
 
 _BATCHES_CACHE: dict = {"data": None, "ts": 0.0}
-_BATCHES_TTL_S = 30.0
-_BATCHES_WARM_INTERVAL_S = 25.0   # refresh just before TTL expires
+# Each refresh lists every dispatching agent's runs/ (up to 10k keys each),
+# so the warmer is the API's biggest storage reader. 120s is plenty for a
+# dashboard panel; BATCHES_WARM_INTERVAL_S overrides it.
+_BATCHES_WARM_INTERVAL_S = float(os.getenv("BATCHES_WARM_INTERVAL_S", "120") or 120)
+_BATCHES_TTL_S = _BATCHES_WARM_INTERVAL_S + 30.0   # warmer refreshes before expiry
 _BATCHES_WARMER_STARTED = False
 _BATCHES_LIMIT_HEAD = 50  # keep a head wide enough to satisfy any limit ≤ 50
 
@@ -361,6 +364,7 @@ _BATCHES_FIRST_PASS_DONE = _threading.Event()
 # sweeps 9000+ unrelated keys (status.json, run-index, recommendations,
 # verifications, etc).
 _DISPATCH_AGENTS: set[str] = set()
+_DISPATCH_BOOTSTRAP: dict = {"done": False}   # set once the registry scan ran
 
 
 def _list_dispatch_keys(s) -> list[tuple[str, str]]:
@@ -391,19 +395,34 @@ def _list_dispatch_keys(s) -> list[tuple[str, str]]:
                     parts = blob_key.split("/")
                     run_ts_sort = parts[3] if len(parts) > 3 else ""
                     candidate_keys.append((run_ts_sort, blob_key))
-    else:
-        # Bootstrap: global walk + record which agents we found.
+    elif not _DISPATCH_BOOTSTRAP["done"]:
+        # Bootstrap once: list each registered agent's runs/ and keep the
+        # agents that have a dispatch-batches.json. The old global walk of
+        # "agents/" stopped at list_prefix's 10k-key cap before reaching any
+        # runs/, found nothing, and so repeated on every warmer pass (about
+        # 3,500 full listings a day per API copy) while the panel stayed empty.
+        _DISPATCH_BOOTSTRAP["done"] = True
         try:
-            for blob_key in s.list_prefix("agents/"):
-                if not blob_key.endswith("/dispatch-batches.json"):
-                    continue
-                parts = blob_key.split("/")
-                if len(parts) > 1:
-                    _DISPATCH_AGENTS.add(parts[1])
-                run_ts_sort = parts[3] if len(parts) > 3 else ""
-                candidate_keys.append((run_ts_sort, blob_key))
+            registry = s.read_json("registry/agents.json") or {}
+            agents = registry.get("agents") if isinstance(registry, dict) else registry
+            ids = sorted({(a.get("id") if isinstance(a, dict) else str(a)) for a in (agents or [])} - {None, ""})
         except Exception:
-            pass
+            ids = []
+
+        def _scan(agent_id: str) -> list[str]:
+            try:
+                return [k for k in (s.list_prefix(f"agents/{agent_id}/runs/") or [])
+                        if k.endswith("/dispatch-batches.json")]
+            except Exception:
+                return []
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for agent_id, agent_keys in zip(ids, ex.map(_scan, ids)):
+                if agent_keys:
+                    _DISPATCH_AGENTS.add(agent_id)
+                for blob_key in agent_keys:
+                    parts = blob_key.split("/")
+                    run_ts_sort = parts[3] if len(parts) > 3 else ""
+                    candidate_keys.append((run_ts_sort, blob_key))
     candidate_keys.sort(key=lambda x: x[0], reverse=True)
     return candidate_keys
 
@@ -415,7 +434,8 @@ def _start_batches_warmer():
 
     Idempotent: only starts once per process."""
     global _BATCHES_WARMER_STARTED
-    if _BATCHES_WARMER_STARTED:
+    from ..background import enabled as _bg_enabled
+    if _BATCHES_WARMER_STARTED or not _bg_enabled():
         return
     _BATCHES_WARMER_STARTED = True
     import threading, time as _time
@@ -451,7 +471,8 @@ def _start_lifetime_warmer():
     once a minute. With warming, every request is a cache hit (~50ms).
     """
     global _LIFETIME_WARMER_STARTED
-    if _LIFETIME_WARMER_STARTED:
+    from ..background import enabled as _bg_enabled
+    if _LIFETIME_WARMER_STARTED or not _bg_enabled():
         return
     _LIFETIME_WARMER_STARTED = True
     import time as _time

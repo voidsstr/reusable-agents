@@ -103,14 +103,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"storage backend init failed: {e}")
         raise
+    # Background jobs can be switched off for a copy of the API that only
+    # answers requests (FRAMEWORK_API_BACKGROUND_JOBS=0, see background.py).
+    from . import background as _bg
+    _bg_on = _bg.enabled()
+    if not _bg_on:
+        logger.info("background jobs disabled (FRAMEWORK_API_BACKGROUND_JOBS=0): "
+                    "no snapshot updater, reapers or cache warmers in this process")
     # Start the snapshot updater background thread — it writes a single
-    # registry/agent-snapshot.json blob every 5s so GET /api/agents can
-    # serve from one read instead of N status.json reads.
+    # registry/agent-snapshot.json blob so GET /api/agents can serve from
+    # one read instead of N status.json reads. Every 30s by default: each
+    # pass reads every agent's status.json (88 reads), and 5s cost ~1.5M
+    # reads a day per API copy.
     try:
-        from framework.core import snapshot_updater
-        interval = float(os.getenv("SNAPSHOT_UPDATER_INTERVAL_S", "5.0"))
-        snapshot_updater.start(interval_s=interval)
-        logger.info(f"snapshot_updater started (interval={interval}s)")
+        if _bg_on:
+            from framework.core import snapshot_updater
+            interval = _bg.interval("SNAPSHOT_UPDATER_INTERVAL_S", 30.0)
+            snapshot_updater.start(interval_s=interval)
+            logger.info(f"snapshot_updater started (interval={interval}s)")
     except Exception as e:
         logger.warning(f"snapshot_updater start failed: {e}")
     # Startup ghost-run reap: any agent that was mid-run when the API last
@@ -127,6 +137,8 @@ async def lifespan(app: FastAPI):
     # Periodic ghost-run sweep — every 60s, catch agents whose host-worker
     # died mid-run between API list calls.
     try:
+        if not _bg_on:
+            raise RuntimeError("background jobs disabled")
         from framework.core import ghost_reaper as _gr
         import threading
         def _sweep_loop():
@@ -147,6 +159,8 @@ async def lifespan(app: FastAPI):
     # the load balancer would 502 callers if FastAPI hadn't started
     # accepting requests yet.
     try:
+        if not _bg_on:
+            raise RuntimeError("background jobs disabled")
         from framework.core import batch_reaper as _br
         import threading
         def _batch_sweep_loop():
@@ -172,6 +186,8 @@ async def lifespan(app: FastAPI):
     # API restart isn't a multi-second cold hit. Then warmer threads
     # keep them fresh on TTL cycles.
     try:
+        if not _bg_on:
+            raise RuntimeError("background jobs disabled")
         from .routes import dispatch as _dispatch
         from framework.core.status import read_recent_events
         import threading
