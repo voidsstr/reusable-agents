@@ -1,0 +1,536 @@
+# keep-the-lights-on: system config for RuntimePicks (runtimepicks.com).
+#
+# The runbook is reusable-agents .claude/skills/keep-the-lights-on/SKILL.md;
+# every value for this site lives here (template: the skill's
+# systems/_example.yaml). The skill resolves this file by convention
+# (/home/voidsstr/development/runtimepicks/keep-the-lights-on.yaml); the
+# explicit `runtimepicks` line in the skill's systems/registry.yaml is an edit
+# of a frozen file and waits for 12-02 (launch plan §6). Its byte-identical
+# copy is the skill's systems/runtimepicks.yaml (the dev fallback): edit THIS
+# file, then copy it over (`cp keep-the-lights-on.yaml
+# /home/voidsstr/development/reusable-agents/.claude/skills/keep-the-lights-on/systems/runtimepicks.yaml`);
+# agents/check_configs.py fails while the two differ.
+#
+# NOT ACTIVE until the agents are registered (launch step A1) and the operator
+# starts a loop ("keep the lights on for runtimepicks").
+#
+# What the host sweep (~/.reusable-agents/ktlo-work/sweep.py) runs every tick:
+# the agents roster, the first `db` entry's catalog_health checks, the
+# agent_metric_checks, the urls, the deploy-gate state
+# (~/.reusable-agents/deployer/gate-state/runtimepicks.json) and the
+# conversion block. Its bound checks only compare int / float results, so every
+# check below casts to ::int or ::float8 (a numeric column would never be
+# checked). `scheduled_checks` and `spillover_watch` are Layer-B procedures the
+# session runs on their cadence: the sweep does not run them yet (their keys
+# go into _example.yaml and the sweep after 12-02).
+
+system: runtimepicks
+type: site
+display_name: "RuntimePicks (runtimepicks.com): portable power stations, solar kits and their runtimes"
+
+# ── North star ──
+# Success is people who reach Amazon from this site and buy, measured as
+# verified-human Amazon clicks, not code shipped, pages generated or articles
+# published (launch plan §8). Leading indicators: indexable pages, verified
+# answer-time fetches by AI assistants, organic clicks.
+growth:
+  north_star: "Grow verified-human Amazon clicks per week (beacon clicks that pass the human_clicks verdict), on top of indexable pages and IP-verified answer-time fetches by AI assistants."
+  proxies:
+    # The sweep's "volume" pulse is the FIRST proxy: the north star itself.
+    - name: verified_human_amazon_clicks_7d
+      sql: "select count(*)::int from outbound_clicks_verified_human where target = 'amazon' and clicked_at > now() - interval '7 days'"
+      db: runtimepicks
+      note: "The north star (kit view outbound_clicks_verified_human: via='beacon' rows that pass every human_clicks rule). 0 is normal before L2 (search and assistants not yet sent); a site that publishes no articles is not DOWN for a 0 here."
+    - name: indexable_pages
+      sql: "select count(*)::int from v_indexable_pages where indexable"
+      db: runtimepicks
+      note: "KPI: indexable URLs (D30 >= 600, D60 >= 900, D90 >= 1,400). runtimepicks-site-goals-tracker records the same count."
+    - name: articles_published_total
+      sql: "select count(*)::int from editorial_articles where status = 'published'"
+      db: runtimepicks
+      note: "Guides through the publish gate (D30 >= 8, from 12-04). Volume is not the goal."
+
+# ── Agents in scope (registered at launch step A1; Creators consumers marked) ──
+agents:
+  critical:
+    - runtimepicks-price-refresh            # Creators consumer runtimepicks-price-refresh; the 24 h licence purge
+    - recall-gate-agent                     # shared F8 instance: the recall gate is never cut
+  supporting:
+    - runtimepicks-amazon-catalog-discovery # Creators consumer runtimepicks-discovery
+    - runtimepicks-spec-extractor
+    - runtimepicks-pick-builder
+    - runtimepicks-site-goals-tracker       # not AgentBase: no run-index; check its goal values
+  # After 12-02 (launch plan §6): runtimepicks-article-engine, runtimepicks-shelf-audit-agent,
+  # runtimepicks-indexnow-submitter / -bulk, runtimepicks-gsc-coverage-auditor. Add them here when registered.
+
+# ── Databases (env-var NAMES in ~/.reusable-agents/secrets.env). The sweep runs
+# every catalog_health check on the FIRST entry; specpicks is read only by the
+# spillover watch below (Layer B). ──
+db:
+  runtimepicks: DATABASE_URL_RUNTIMEPICKS
+  specpicks: DATABASE_URL_SPECPICKS
+
+# ── Live URLs to HTTP-probe (homepage and sitemap must answer 200) ──
+# The serving host is site.json `canonicalOrigin`: the Azure address until the
+# bind (noindexed staging, launch plan §3.1), https://runtimepicks.com after it
+# (§3.3 step 1). Switch every URL in this file in the same commit as site.json;
+# agents/check_configs.py fails while they differ. After the bind the Azure
+# address answers 301, so probing it would read as down.
+urls:
+  homepage: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/
+  sitemap: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/sitemap.xml
+  health: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/health
+  llms: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/llms.txt
+
+# ── Escalation recipient ──
+# The fleet operator address of the recipient policy (SKILL §6; reusable-agents
+# CLAUDE.md "Outbound-email recipient policy"), never a personal inbox. It is
+# read from the environment, first set name wins: the same names the recall
+# gate and framework.core.resilience read. Escalation mail goes to that address
+# only, from the fixed automation sender.
+owner_email_env: [FRAMEWORK_OPERATOR_EMAIL, OPERATOR_EMAIL]
+
+# ── Known non-issues (do not re-flag) ──
+known_excluded:
+  - agent: runtimepicks-site-goals-tracker
+    reason: "Until the GSC Domain property is verified (about L2-7) and a GA4 property exists (design I5), every run logs a GSC and a GA4 error and records only the DB metrics. Expected."
+  - pattern: "seed source sizing-launch skipped"
+    reason: "content/seed-asins.json is written at D1; until then discovery reports the seed source error and carries on."
+  - pattern: "seed source specpicks-power-stations skipped"
+    reason: "Needs SISTER_CATALOG_DATABASE_URL (a SELECT-only SpecPicks role) in secrets.env; until the operator adds it, discovery reports it and carries on."
+  - pattern: "storage key agents/runtimepicks-pick-builder/state/pick-asins.json holds no list"
+    reason: "The price refresh's picks group is empty until runtimepicks-pick-builder publishes its first list."
+
+# ── Cadence (seconds) ──
+cadence:
+  healthy: 1800
+  degraded: 240
+  down: 180
+  blocked_backoff: 3600
+
+improvement_every_hours: 24
+
+# ── Catalog, licence and safety health: bounded probes every tick (SKILL §5c) ──
+catalog_health:
+  checks:
+    # Licence (Amazon IP licence; launch plan §8.1 compliance row)
+    - name: amazon_values_past_24h
+      db: runtimepicks
+      sql: "select count(*)::int from v_amazon_cache_overdue"
+      expect_max: 0
+      owner_class: licence-purge
+      note: "Cache rows holding any Amazon-sourced value older than 24 h (view 0002). 0 after every clean purge; a row a failed batch could not refresh can briefly pass 24 h (data contract §7 C5): read runtimepicks-price-refresh's purge_skipped / spared_rows. Never NULL rows by hand while a run holds the lock."
+    - name: article_heroes_not_null
+      db: runtimepicks
+      sql: "select count(*)::int from editorial_articles where hero_image_url is not null and hero_image_url <> ''"
+      expect_max: 0
+      owner_class: amazon-content
+      note: "Year 1: hero_image_url stays NULL (site CHECK editorial_articles_hero_image_null, 0008). A hit means the constraint was dropped."
+    - name: amazon_hosted_article_heroes
+      db: runtimepicks
+      sql: "select count(*)::int from editorial_articles where hero_image_url ~* '(media-amazon|ssl-images-amazon|images-amazon|amazon-adsystem)[.]com'"
+      expect_max: 0
+      owner_class: amazon-content
+      note: "IP Licence 2(h): never an Amazon image. The kit's CHECKs refuse new ones."
+    - name: price_history_objects
+      db: runtimepicks
+      sql: "select count(*)::int from information_schema.tables where table_schema = 'public' and table_name ~* 'price_?(history|alert|watch|drop|change|log)|lowest_?price'"
+      expect_max: 0
+      owner_class: amazon-content
+      note: "Participation 6(y): no price history, price alerts or 'lowest ever' anywhere (tables and views). A hit is a migration that must be reverted."
+    # Safety (the recall gate is never cut)
+    - name: recalled_live_buy_buttons
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from v_buy_button bb
+         where bb.shows_buy_button
+           and exists (select 1 from v_recall_buy_blocks r
+                        where r.product_id = bb.product_id or r.model_id = bb.model_id)
+      expect_max: 0
+      owner_class: recall-buy-button
+      note: "S11: 0 recalled SKUs with a live buy button. The same query as the recall gate's buy_button.sql: every CTA and /r/ read v_buy_button, so a hit means a migration broke the view. Escalate at once; the gate's alert email fires too."
+    - name: year1_titles_with_buy_button
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from v_buy_button bb join v_offer_display o on o.asin = bb.asin
+         where bb.shows_buy_button
+           and o.title ~* '(c-?pap|bi-?pap|oxygen concentrator|sleep apnea|resmed|inogen|\me[- ]?bikes?\M|e-?scooter|electric bicycle|l14-?30|l5-?30|l6-?30|nema 14-?50|ss2-?50|dog ?bone|120 ?/ ?240|split[- ]phase|transfer switch|generator inlet|interlock kit|grid[- ]tie)'
+      expect_max: 0
+      owner_class: year1-boundary
+      note: "Buy-buttoned listings whose fresh Amazon title names a year-1 exclusion (medical, e-bike, 240 V / locking cords, split phase, generator hookups, grid-tie): a seed or an older rule let one in. For each: is_active = false plus the quality flag year1-reject-<rule> (or models.policy_hold for its model); v_buy_button then hides every CTA and /r/. Never edit the view to clear it."
+    - name: recall_sync_age_h
+      db: runtimepicks
+      sql: "select coalesce(extract(epoch from now() - max(synced_at)) / 3600.0, 9999)::float8 from recall_sync_log where not dry_run"
+      expect_max: 26
+      owner_class: recall-sync
+      note: "S11: recall sync within 26 h (recall-gate-agent, cron 15 11). 9999 = never synced (expected only before D6). Product pages stay noindex ('recall-unchecked') until a sync after their model mapping."
+    # Prices (launch plan §8.1: >= 90% of the priced catalog fresh)
+    - name: priced_catalog_fresh_pct
+      db: runtimepicks
+      sql: >-
+        select coalesce(100.0 * count(*) filter (where s.offer_state = 'quotable')
+                        / nullif(count(*) filter (where s.offer_state in ('quotable', 'priced-unquotable')), 0), 100)::float8
+          from v_offer_state s join products p on p.id = s.product_id
+         where p.is_active
+      expect_min: 90
+      owner_class: price-stale
+      note: "S11: fresh-priced share >= 90%: of active products whose last Amazon answer was a price, the share still quotable (USD, >= $1, inside 24 h minus 660 s). 100 when nothing is priced yet. Out-of-stock listings are not in the denominator here (they are in the engine's fresh_priced_pct)."
+    # Content (S11: at most 1 article a day)
+    - name: published_articles_24h
+      db: runtimepicks
+      sql: "select count(*)::int from editorial_articles where status = 'published' and published_at > now() - interval '24 hours'"
+      expect_max: 1
+      owner_class: content-volume
+      note: "S11 / article_output_gate: at most one guide a day, and only through the publish gate (status pending -> published by the publisher role). More = the gate or the output gate was bypassed: escalate."
+    # Shared database (launch plan §10 risk 8: nscappsdb is shared with SpecPicks)
+    - name: nscappsdb_connections
+      db: runtimepicks
+      sql: "select count(*)::int from pg_stat_activity"
+      expect_max: 160
+      owner_class: shared-db
+      note: "Server-wide sessions on nscappsdb (every database). Launch plan B.9 acceptance: peak <= 160. Above it: stop the RuntimePicks timers first (they are the newcomers), then escalate."
+    - name: runtimepicks_connections
+      db: runtimepicks
+      sql: "select count(*)::int from pg_stat_activity where datname = current_database()"
+      expect_max: 25
+      owner_class: shared-db
+      note: "The four runtimepicks roles' connection limits sum to 25 (owner 3, app 12, agents 8, publisher 2)."
+    # Gauges (no bound): the §8 KPIs the goals tracker cannot measure (definitions:
+    # launch plan §8.2). Fleet-host and smoke-probe fetches are excluded at the
+    # source: the kit marks an IP listed in deploy.env AI_TRAFFIC_EXCLUDE_IPS as
+    # ip_verified = false (ip_check 'excluded-ip'), so `ip_verified is true` drops
+    # them once the operator lists the fleet host's addresses there.
+    - name: verified_human_amazon_clicks_24h
+      db: runtimepicks
+      sql: "select count(*)::int from outbound_clicks_verified_human where target = 'amazon' and clicked_at > now() - interval '24 hours'"
+      note: "S11 gauge: verified clicks a day (the north star's daily pulse)."
+    - name: verified_answer_fetches_24h
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from ai_traffic_log
+         where kind = 'crawler' and ts > now() - interval '24 hours'
+           and source in ('claude-user', 'chatgpt-user', 'perplexity-user', 'mistralai-user', 'duckassistbot')
+           and status_code = 200 and ip_verified is true
+           and coalesce(path, '') !~ '[?&]probe='
+      note: "S11 gauge: IP-verified answer-time fetches a day (§8.2; Claude-User from Anthropic's published ranges is verified by the kit's static ranges). Excludes ?probe= rows. KPI: >= 1 organic fetch logged by D30, 7-day mean >= 3 by D90."
+    - name: verified_answer_fetches_7d_mean
+      db: runtimepicks
+      sql: >-
+        select (count(*) / 7.0)::float8 from ai_traffic_log
+         where kind = 'crawler' and ts > now() - interval '7 days'
+           and source in ('claude-user', 'chatgpt-user', 'perplexity-user', 'mistralai-user', 'duckassistbot')
+           and status_code = 200 and ip_verified is true
+           and coalesce(path, '') !~ '[?&]probe='
+      note: "KPI: verified answer-time fetches a day, 7-day mean (D90 >= 3, D180 >= 10)."
+    - name: fetch_intensity_30d
+      db: runtimepicks
+      sql: >-
+        select coalesce((select count(*) from ai_traffic_log
+                          where kind = 'crawler' and ts > now() - interval '30 days'
+                            and source in ('claude-user', 'chatgpt-user', 'perplexity-user', 'mistralai-user', 'duckassistbot')
+                            and status_code = 200 and ip_verified is true
+                            and coalesce(path, '') !~ '[?&]probe=')::numeric
+                        / nullif((select count(*) from v_indexable_pages where indexable), 0), 0)::float8
+      note: "KPI: verified fetches per indexable page per 30 days (D60 >= 0.02, the 03-01 bar 0.046)."
+    - name: verified_clicks_per_1k_indexable_30d
+      db: runtimepicks
+      sql: >-
+        select coalesce(1000.0 * (select count(*) from outbound_clicks_verified_human
+                                   where target = 'amazon' and clicked_at > now() - interval '30 days')
+                        / nullif((select count(*) from v_indexable_pages where indexable), 0), 0)::float8
+      note: "KPI: clicks per 1k indexable pages per 30 days (the 03-01 bar: >= 1)."
+    - name: claude_share_of_verified_fetches_7d_pct
+      db: runtimepicks
+      sql: >-
+        select coalesce(100.0 * count(*) filter (where source = 'claude-user') / nullif(count(*), 0), 0)::float8
+          from ai_traffic_log
+         where kind = 'crawler' and ts > now() - interval '7 days'
+           and source in ('claude-user', 'chatgpt-user', 'perplexity-user', 'mistralai-user', 'duckassistbot')
+           and status_code = 200 and ip_verified is true
+           and coalesce(path, '') !~ '[?&]probe='
+      note: "KPI: assistant mix. Above 90% at D90 = spend the next fortnight on Bing and Perplexity entry (§8.3 rule 6)."
+    - name: search_crawler_verified_visits_7d
+      db: runtimepicks
+      sql: "select count(*)::int from ai_traffic_log where kind = 'crawler' and source in ('bingbot', 'oai-searchbot', 'perplexitybot') and ip_verified is true and ts > now() - interval '7 days'"
+      note: "KPI: crawl coverage since L2. 0 at L2+14 = check robots, headers and status codes from outside, push IndexNow again (§8.3 rule 1)."
+    - name: ai_referrals_30d
+      db: runtimepicks
+      sql: "select count(*)::int from ai_traffic_log where kind = 'referral' and ts > now() - interval '30 days'"
+      note: "KPI: AI referrals per 30 days (D60 >= 1, D90 >= 3), first-party (no GA4 property yet)."
+    - name: indexable_runtime_card_pdps
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from v_indexable_pages ip
+          join products p on p.asin = ip.key
+          join models m on m.id = p.model_id
+         where ip.family = 'product' and ip.indexable and m.kind in ('station', 'kit')
+      note: "KPI: model-matched product pages with sourced specs and a runtime card (an indexable station or kit page meets exactly that bar). D30 >= 300."
+    - name: unmatched_active_products
+      db: runtimepicks
+      sql: "select count(*)::int from products where is_active and model_id is null"
+      note: "Gauge: discovered ASINs not yet mapped to one of our models (noindex pages without a buy button: not recall-checkable, so v_buy_button fails closed). A flat backlog means the model resolver (D3) is behind discovery."
+    - name: offer_states_unavailable
+      db: runtimepicks
+      sql: "select count(*)::int from v_offer_state s join products p on p.id = s.product_id where p.is_active and s.offer_state = 'unavailable'"
+      note: "Gauge: active products Amazon cannot sell right now (substitutes lead those pages)."
+  # Bounds on the owners' own RunResult.metrics (agents/<id>/run-index.json).
+  agent_metric_checks:
+    - name: price_refresh_fresh_priced_pct
+      agent: runtimepicks-price-refresh
+      metric: fresh_priced_pct
+      expect_min: 90
+      sustain_runs: 2
+      max_age_hours: 6
+      owner_class: price-stale
+      note: "Indexable product pages with a fresh price (cron every 4 h; 6 h without a run = the refresh stopped)."
+    - name: price_refresh_api_rows_past_24h
+      agent: runtimepicks-price-refresh
+      metric: api_rows_past_24h
+      expect_max: 0
+      max_age_hours: 6
+      owner_class: licence-purge
+    - name: price_refresh_blanked_on_failed_run
+      agent: runtimepicks-price-refresh
+      metric: blanked_on_failed_run
+      expect_max: 0
+      owner_class: engine-regression
+      note: "Any value above 0 is an engine regression: disable the instance and escalate."
+    - name: creators_throttles_today
+      agent: runtimepicks-price-refresh
+      metric: creators_throttled_today
+      expect_max: 50
+      owner_class: creators-budget
+      note: "S11: Creators throttles at most 50 a day (this consumer's ledger)."
+    - name: creators_day_total
+      agent: runtimepicks-price-refresh
+      metric: creators_calls_all_consumers_today
+      expect_max: 7600
+      owner_class: creators-budget
+      note: "Launch plan §5: alert when the shared credential's day total (every consumer) passes 7,600 of 8,000. RuntimePicks takes no more than its default shares during Black Friday."
+    - name: discovery_budget_overrun
+      agent: runtimepicks-amazon-catalog-discovery
+      metric: budget_overrun_calls
+      expect_max: 0
+      max_age_hours: 8
+      owner_class: engine-regression
+    - name: discovery_known_now_rejected
+      agent: runtimepicks-amazon-catalog-discovery
+      metric: known_now_rejected
+      expect_max: 0
+      owner_class: year1-boundary
+      note: "Catalog ASINs whose fresh title hits a year-1 reject (240 V / locking cords, generators, medical, e-bike, fuel). For each: is_active = false plus the quality flag year1-reject-<rule id> (v_buy_button and /r/ then fail closed), and models.policy_hold if it has a model. Relabel only a false positive."
+    - name: recall_sync_age
+      agent: recall-gate-agent
+      metric: recall_sync_age_h
+      expect_max: 26
+      max_age_hours: 26
+      owner_class: recall-sync
+    - name: recall_live_buy_buttons
+      agent: recall-gate-agent
+      metric: recalled_live_buy_buttons
+      expect_max: 0
+      owner_class: recall-buy-button
+    - name: picks_ineligible
+      agent: runtimepicks-pick-builder
+      metric: ineligible_in_picks
+      expect_max: 0
+      sustain_runs: 2
+      max_age_hours: 6
+      owner_class: pick-dead
+      note: "One run above 0 can be a price aging out between build and check; two in a row is real."
+    - name: picks_pool_integrity
+      agent: runtimepicks-pick-builder
+      metric: pool_integrity_rejects
+      expect_max: 0
+      owner_class: pricing-integrity
+      note: "v_pick_eligible let an invalid price through: a migration fix, never a looser engine floor."
+    - name: picks_ladders_without_plan
+      agent: runtimepicks-pick-builder
+      metric: ladders_without_plan
+      expect_max: 0
+      owner_class: pick-coverage
+      note: "Launch plan §6 'every slot filled or deliberately empty': an active ladder whose kind has no plan in agents/pick-builder/site.yaml is only swept. The engine emits the key only when above 0, so an absent value is the healthy state."
+    - name: picks_lists_without_selector
+      agent: runtimepicks-pick-builder
+      metric: lists_without_selector
+      expect_max: 0
+      owner_class: pick-coverage
+      note: "The same for an active best list whose kind has no selector."
+    - name: specs_amazon_sourced
+      agent: runtimepicks-spec-extractor
+      metric: amazon_sourced_values
+      expect_max: 0
+      max_age_hours: 14
+      owner_class: amazon-content
+    - name: runtime_cards_live
+      agent: runtimepicks-spec-extractor
+      metric: runtime_models_live
+      max_age_hours: 14
+      note: "Gauge (KPI >= 300 by 12-08). Flat across 3 runs while specs land = presets exceed the stations' continuous output, or capacity is missing."
+
+# ── Money path (SKILL §5f): verified-human Amazon clicks, by template ──
+conversion:
+  clicks:
+    db: runtimepicks
+    table: outbound_clicks
+    spec: {time_col: clicked_at, ua_col: user_agent, ip_col: ip_address, referer_col: source_page, country_col: country, bot_flag_col: is_bot}
+    profile: runtimepicks-site-goals-tracker   # same spec + profile as the goals tracker
+    match: {target: amazon, via: beacon}
+    page_col: source_page
+    product_col: asin
+    placement_col: placement                   # data-cta-placement via the kit beacon
+  templates:
+    - {name: product, path_regex: '^/product/'}
+    - {name: compat,  path_regex: '^/compat/'}
+    - {name: runtime, path_regex: '^/runtime/'}
+    - {name: kits,    path_regex: '^/kits/'}
+    - {name: best,    path_regex: '^/best/'}
+    - {name: guide,   path_regex: '^/guides/'}
+    - {name: hub,     path_regex: '^/(category|brands)/'}
+    - {name: home,    path_regex: '^/$'}
+  # Money placements: add `values:` per placement once the PDP renderer (S4)
+  # fixes the data-cta-placement names; until then the templates carry them.
+  money_placements:
+    product: {template: product}
+    kits:    {template: kits}
+    best:    {template: best}
+  money_set: {window_days: 30, min_clicks: 2, max_pages: 25, max_products: 150, slug_path_regex: '^/guides/([^/?#]+)$'}
+  watch:
+    full_every_minutes: 60
+    cache: ~/.reusable-agents/ktlo-work/conversion-runtimepicks.json
+    drop_pct: 30
+    min_prev7: 15
+    sustain_passes: 2
+    post_deploy_hours: 24
+    placements: []
+    max_suspect_share_pct: 15
+  floors:
+    total_d7: 0          # raise once the site has a baseline (launch plan §8.1: D60 floor 1 click / 30 days)
+  goals:
+    - {agent: runtimepicks-site-goals-tracker, goal: goal-amazon-clicks-30d, live: d30}
+  forwarded:
+    note: "/r/<ASIN> forwards with the site's tag; non-human redirects are a gauge, never a KTLO auto-fix."
+  # Storage docs the money path reads (§11.I: an archived doc silently falls back to defaults).
+  # Add the F15c docs (config/amazon-creators-budget.json, config/recall-gate-config.json,
+  # config/spec-sources-config.json, config/site-goals-tracker-config.json,
+  # config/content-policy-config.json) here once F15c has written them: listing a doc
+  # that does not exist yet routes a "missing" measurement breach every tick.
+  config_reads:
+    - {key: config/human-click-filter-config.json, require: true}
+  # ONE OWNER PER OUTCOME (SKILL §5f). Before 12-02 there are no growth or
+  # content agents for this site, so most classes escalate.
+  owners:
+    measurement:        {agent: runtimepicks-site-goals-tracker, action: trigger, goals: [goal-amazon-clicks-30d]}
+    price-stale:        {agent: runtimepicks-price-refresh, action: escalate}
+    licence-purge:      {agent: runtimepicks-price-refresh, action: escalate}
+    amazon-content:     {action: escalate}
+    engine-regression:  {action: escalate}
+    creators-budget:    {action: escalate}
+    recall-buy-button:  {agent: recall-gate-agent, action: escalate}
+    recall-sync:        {agent: recall-gate-agent, action: trigger}
+    pick-dead:          {agent: runtimepicks-pick-builder, action: trigger}
+    pick-coverage:      {agent: runtimepicks-pick-builder, action: escalate}
+    pricing-integrity:  {action: escalate}
+    year1-boundary:     {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
+    content-volume:     {action: escalate}
+    shared-db:          {action: escalate}
+    template-drop:      {action: escalate}
+    placement-drop:     {action: escalate}
+    money-page-gone:    {action: escalate}
+    traffic-drop:       {action: escalate}
+
+# ── Layer-B checks on their own cadence (the session runs them; S11 list) ──
+scheduled_checks:
+  - name: content_policy_crawl
+    every_hours: 24
+    cmd: >-
+      cd /home/voidsstr/development/reusable-agents &&
+      python3 -m framework.cli.content_policy_scan --rule-set electrical --rule-set electrical-year1 --rule-set medical
+      --base https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io --sitemap --max-pages 300 --pause 1 --quiet
+      --report-json ~/.reusable-agents/ktlo-work/runtimepicks-content-policy.json
+    expect: "exit 0"
+    note: "S11: a daily content_policy crawl of the live pages (GET only, same host, never /r/ or /api/). Exit 1 = a reject-level violation reached a live page: escalate with the report (the deploy gate and the publish gate should have caught it). Exit 3 = pages unreadable: check the site first. --base follows site.json canonicalOrigin (switch at the bind)."
+  - name: archived_config_docs
+    every_hours: 24
+    keys:
+      - config/human-click-filter-config.json
+      - config/amazon-creators-budget.json
+      - config/recall-gate-config.json
+      - config/spec-sources-config.json
+      - config/compat-graph-config.json
+      - config/content-policy-config.json
+      - config/site-goals-tracker-config.json
+      - config/price-refresh-priority-config.json
+    rule: "For each key: storage exists() but read_json() returns None = ARCHIVED or unreadable: rewrite it from its last known content or rehydrate it (SKILL §11.I), then re-read. Absent is fine until F15c writes it (each reader then uses its repo default), except recall-gate-config.json once the gate has synced runtimepicks: then a missing or unreadable copy halts every recall run."
+    note: "S11: no archived config."
+  - name: deploy_gate_state
+    every_hours: 1
+    file: ~/.reusable-agents/deployer/gate-state/runtimepicks.json
+    note: "S11: deploy-gate state (the sweep reads it every tick: status, signature, red_since). Red: SKILL §11.D. Never deploy around the gate."
+
+# ── SpecPicks impact watch (launch plan B.8 / §10 risk 8; design §4, S11) ──
+# Seven days from the day the RuntimePicks agents are registered (A1), once a
+# day: RuntimePicks shares nscappsdb, the Creators credential and the gate host
+# with SpecPicks' money path. A breach: stop the RuntimePicks timers first,
+# then escalate with the numbers.
+spillover_watch:
+  starts: "the day the runtimepicks agents are registered (launch step A1)"
+  days: 7
+  every_hours: 24
+  baseline: "the 7 days before A1 (launch plan B.9: re-measure SpecPicks on 11-24); keep it in agents/keep-the-lights-on/runtimepicks/spillover-baseline.json"
+  checks:
+    - name: specpicks_pdp_p95_ms
+      db: specpicks
+      sql: "select coalesce(percentile_cont(0.95) within group (order by duration_ms), 0)::float8 from ai_traffic_log where path like '/product/%' and status_code = 200 and duration_ms is not null and ts > now() - interval '24 hours'"
+      max_ratio_to_baseline: 1.25
+      note: "SpecPicks PDP p95 (server time of the logged AI fetches of /product/ pages) within its 7-day baseline. If the column is absent there, use the outside probe: curl -w '%{time_total}' over 25 product URLs from https://specpicks.com/sitemap.xml and take the p95."
+    - name: specpicks_empty_noindex_rate_pct
+      probe: "fetch 25 /product/ URLs listed in SpecPicks' sitemap (a browser UA, GET only, never /r/ or /go/): count pages whose X-Robots-Tag or meta robots says noindex. A sitemap-listed PDP that answers noindex is the empty-module fallback (design §4, 'shipped empty noindex pages')."
+      max_ratio_to_baseline: 1.5
+    - name: nscappsdb_cpu_max_pct
+      cmd: "az monitor metrics list --resource <nscappsdb resource id> --metric cpu_percent --interval PT1H --aggregation Maximum --offset 24h -o table"
+      note: "Hourly CPU maximum of the shared server (166 of 182 hours were >= 90% before RuntimePicks). Read-only; compare with the baseline. The scale trigger is a D4ds resize (+$147 a month), an operator decision."
+    - name: nscappsdb_peak_connections
+      note: "catalog_health.nscappsdb_connections every tick; the watch keeps the day's maximum (<= 160)."
+    - name: creators_day_total
+      note: "catalog_health agent metric creators_day_total (<= 7,600); SpecPicks' price-refresh consumer still at its 3,600 share."
+
+# ── Functional verification against PRODUCTION (read-only @prod-safe specs) ──
+functional_tests:
+  runner: playwright
+  cwd: /home/voidsstr/development/runtimepicks/tests
+  target: production
+  base_url: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io
+  full_cmd: "TEST_URL=https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io npx playwright test --grep @prod-safe --reporter=line --workers=2"
+  smoke_cmd: "TEST_URL=https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io npx playwright test --grep @prod-safe --reporter=line --workers=2"
+  total_tests: 0
+  run_every_hours: 24
+  run_smoke_after_prod_change: true
+  coverage_areas:
+    - health, robots.txt, llms.txt and sitemaps
+    - AI answer-time fetchers get what a browser gets
+    - every page family renders (the deploy gate covers the rest on the fixture)
+
+# ── Standing incidents (operator-gated) ──
+standing_incidents:
+  - id: runtimepicks-scheduler-ignores-timezone
+    severity: medium
+    summary: >-
+      reusable-agents framework/core/scheduler.py writes OnCalendar without a time zone, so the
+      manifests' UTC crons fire in host local time (America/Detroit). The 4-hourly refresh /
+      pick-builder pairing and the 04:00-06:00Z Creators blackout still hold in winter; discovery's
+      week-1 01:55 slot would start at 05:55Z under EDT.
+    flagged: 2026-11-21
+    next_step: "After 12-02: a framework change appends the manifest timezone to OnCalendar (systemd accepts a zone suffix), with a test. Until then switch discovery to 55 7,19 after week 1, as planned."
+  - id: runtimepicks-recall-probe-disabled
+    severity: low
+    summary: "The recall gate's live-page buy-button probe is off for runtimepicks: its generic markers would match the substitutes' CTAs on a recalled page. buy_button.sql (v_buy_button) is the authoritative check."
+    flagged: 2026-11-21
+    next_step: "Once S4 fixes the PDP's own CTA placement names, enable buy_button.http with markers naming only those (agents/recall-gate/README.md)."
+  - id: runtimepicks-fleet-host-fetch-exclusion
+    severity: low
+    summary: "deploy.env AI_TRAFFIC_EXCLUDE_IPS is empty, so the fleet host's own fetches (the launch plan §8.2 exclusion list) still count as verified answer-time fetches when they carry an assistant UA."
+    flagged: 2026-11-21
+    next_step: "The operator lists the fleet host's addresses in deploy.env AI_TRAFFIC_EXCLUDE_IPS (an operator-owned file) before L2."
+
+history: []
