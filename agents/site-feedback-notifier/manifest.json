@@ -1,0 +1,27 @@
+{
+  "id": "site-feedback-notifier",
+  "name": "Site Feedback Notifier",
+  "description": "Hourly: emails the fleet operator every new reader feedback submission each subscribed site stored (the FeedbackWidget's /api/feedback rows). One instance serves all sites; sites subscribe in config/site-feedback-notifier-config.json by_site. Read-only on site databases. Never calls an LLM.",
+  "category": "ops",
+  "task_type": "scheduled-cron",
+  "cron_expr": "7 * * * *",
+  "timezone": "UTC",
+  "enabled": true,
+  "owner": "",
+  "runbook": "AGENT.md",
+  "skill": "SKILL.md",
+  "entry_command": "bash /home/voidsstr/development/reusable-agents/agents/site-feedback-notifier/run.sh",
+  "runnable_modes": ["cron", "manual"],
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "scheduled-task",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/site-feedback-notifier",
+    "source_repo": "reusable-agents",
+    "source_path": "agents/site-feedback-notifier",
+    "config_key": "config/site-feedback-notifier-config.json",
+    "llm": "none",
+    "created_at": "2026-11-22T16:42:10Z",
+    "owner_note": "owner is empty on purpose: AgentBase then sends a failed run's email to AGENT_DEFAULT_OWNER_EMAIL (the fleet operator). Feedback emails go to OPERATOR_EMAIL / OPERATOR_FROM_EMAIL."
+  }
+}

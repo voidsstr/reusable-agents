@@ -1,0 +1,32 @@
+{
+  "schema_version": "1",
+  "_note": "Repo default for agents/site-feedback-notifier. The storage copy at config/site-feedback-notifier-config.json REPLACES this file wholesale and is where sites subscribe (by_site). An unreadable storage copy fails the run instead of falling back here. Recipients come from OPERATOR_EMAIL / OPERATOR_FROM_EMAIL (fleet operator pair) unless email.to / email.from are set.",
+  "email": {
+    "enabled": true,
+    "to": [],
+    "from": "",
+    "to_env": ["FRAMEWORK_OPERATOR_EMAIL", "OPERATOR_EMAIL"],
+    "from_env": ["IMPLEMENTER_FROM", "OPERATOR_FROM_EMAIL"],
+    "msmtp_account": "automation",
+    "bypass_digest": true,
+    "max_items_per_email": 25,
+    "max_message_chars": 1500,
+    "subject_prefix": ""
+  },
+  "site_defaults": {
+    "enabled": false,
+    "table": "Feedback",
+    "max_rows_per_run": 200
+  },
+  "fail_after_read_errors": 2,
+  "by_site": {
+    "_example": {
+      "enabled": true,
+      "label": "Example Site",
+      "dsn_env": "DATABASE_URL_EXAMPLE",
+      "app_key": "example",
+      "admin_url": "https://example.com/admin/hub?tab=feedback",
+      "start_from": "2026-01-01T00:00:00Z"
+    }
+  }
+}

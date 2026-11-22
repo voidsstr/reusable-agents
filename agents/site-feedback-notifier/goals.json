@@ -1,0 +1,61 @@
+{
+  "schema_version": "1",
+  "agent_id": "site-feedback-notifier",
+  "goals": [
+    {
+      "id": "goal-every-feedback-reaches-operator",
+      "title": "Every reader feedback submission reaches the operator",
+      "description": "Rows found this run whose email was not delivered (transport failure, no recipient configured, email disabled in config). The cursor only advances after delivery, so an undelivered row is retried next run; a non-zero value here means a reader's message is waiting in the database and nobody has seen it. Emitted key: feedback_undelivered.",
+      "target_metric": "feedback_undelivered",
+      "metric": {
+        "name": "feedback_undelivered",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "submissions",
+        "reopen": true
+      },
+      "directives": [
+        "A failed send names the transport detail in the run summary: check the Graph token (~/.reusable-agents/responder/.oauth.json) before anything else",
+        "Never advance a cursor by hand to make this number drop; deliver the rows (re-run) instead",
+        "No recipient means OPERATOR_EMAIL / OPERATOR_FROM_EMAIL are missing from the unit's EnvironmentFile; never add a personal address to the config"
+      ]
+    },
+    {
+      "id": "goal-feedback-notified-within-90-min",
+      "title": "New feedback is emailed within 90 minutes of submission",
+      "description": "Minutes between the oldest submission emailed this run and the email going out (0 when nothing was new). The agent runs hourly at :07, so a healthy value is under ~70; a larger one means runs were missed or failed. Emitted key: feedback_notify_lag_min.",
+      "target_metric": "feedback_notify_lag_min",
+      "metric": {
+        "name": "feedback_notify_lag_min",
+        "current": 0,
+        "target": 90,
+        "direction": "decrease",
+        "unit": "minutes",
+        "reopen": true
+      },
+      "directives": [
+        "If this rises, check the timer first: systemctl --user list-timers | grep agent-site-feedback-notifier (NEXT must be within the hour)",
+        "Do not shorten the cron below hourly to chase this; fix missed runs"
+      ]
+    },
+    {
+      "id": "goal-feedback-reads-healthy",
+      "title": "Every subscribed site's feedback table is readable every run",
+      "description": "Subscribed sites whose read failed this run (missing DSN env, bad config, connection or query error). One failed read is a warning; two runs in a row fail the run. Emitted key: site_errors.",
+      "target_metric": "site_errors",
+      "metric": {
+        "name": "site_errors",
+        "current": 0,
+        "target": 0,
+        "direction": "decrease",
+        "unit": "sites",
+        "reopen": true
+      },
+      "directives": [
+        "Name the site and the error class in the run summary; a transient Azure Postgres timeout clears on the next run",
+        "A site that removed its feedback table must be unsubscribed in the storage config (enabled: false), not silently skipped"
+      ]
+    }
+  ]
+}

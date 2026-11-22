@@ -1,0 +1,4 @@
+# Agent-specific Python deps. The framework itself + storage SDK + FastAPI
+# are installed once at the framework level — agents only need to list
+# extras they import directly.
+psycopg2-binary>=2.9
