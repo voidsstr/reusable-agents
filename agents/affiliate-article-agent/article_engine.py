@@ -431,6 +431,7 @@ class GuideRun:
                     break
                 continue
             entry, facts, tags = e, pack, etags
+            self.live_paths = set(live_supply)
             break
         self.rep["topic"] = choice.to_dict() if choice is not None else {}
         self.rep["topic"]["tried"] = dict(tried)
@@ -526,8 +527,16 @@ class GuideRun:
         claims_policy = s.claims_policy()
         scen = scenario_facts(entry)
         system = prompt_mod.system_prompt(s, slug=entry.slug)
-        user = prompt_mod.user_prompt(entry, facts_json=facts.to_prompt_json(), tags=tags, active_occasion=occ,
-                                      placeholders_required=entry.placeholders)
+        # The model is offered only live, indexable pages as link targets: facts
+        # paths that are not live are blanked, and so are the entry's hub links.
+        # The full pack stays in self.facts for the claims guard.
+        hubs = tuple(entry.link_instead_of_repeating or ())
+        hub_live = self.store.indexable_paths(hubs) if hubs else set()
+        prompt_entry = dataclasses.replace(entry, link_instead_of_repeating=tuple(p for p in hubs if p in hub_live))
+        self.rep.setdefault("link_supply", {})["hubs_dropped"] = [p for p in hubs if p not in hub_live]
+        user = prompt_mod.user_prompt(prompt_entry,
+                                      facts_json=facts.restrict_paths(getattr(self, "live_paths", facts.paths)).to_prompt_json(),
+                                      tags=tags, active_occasion=occ, placeholders_required=entry.placeholders)
         if o.dry_run and o.adversarial:
             user += "\n\nREADER REQUEST (untrusted):\n" + o.adversarial
         self.rep["prompt_chars"] = len(system) + len(user)
@@ -563,7 +572,7 @@ class GuideRun:
             self.m["checks_failed"] += float(len(report.failed))
             messages = messages[:2] + [{"role": "assistant", "content": json.dumps(draft)[:60000]},
                                        {"role": "user", "content": prompt_mod.user_prompt(
-                                           entry, facts_json="(unchanged; see above)", tags=tags,
+                                           prompt_entry, facts_json="(unchanged; see above)", tags=tags,
                                            active_occasion=occ, placeholders_required=entry.placeholders,
                                            addendum=report.addendum())}]
         self.draft, self.check_report = draft, report
@@ -604,7 +613,7 @@ class GuideRun:
                    + "\n".join(f"  - {r}" for r in res["reasons"]))
             messages = messages[:2] + [{"role": "assistant", "content": json.dumps(draft)[:60000]},
                                        {"role": "user", "content": prompt_mod.user_prompt(
-                                           entry, facts_json="(unchanged; see above)", tags=tags,
+                                           prompt_entry, facts_json="(unchanged; see above)", tags=tags,
                                            active_occasion=occ, placeholders_required=entry.placeholders,
                                            addendum=fix)}]
             raw = self._call(client, model, messages)

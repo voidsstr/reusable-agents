@@ -17,9 +17,10 @@ if [ -z "$real" ]; then
     pool="${CLAUDE_POOL_ROOT:-$HOME/.reusable-agents/claude-pool}/bin/claude"
     if [ -x "$pool" ]; then real="$pool"; else real="claude"; fi
 fi
-# stdin is closed: the prompt arrives as an argument, and claude otherwise
-# waits 3 s for piped input. MultiEdit is not a tool in claude >= 2.1, and an
-# unknown name in a deny rule only prints a warning, so it is not listed.
+# stdin is passed through: ai_providers sends long prompts on stdin (a short
+# one arrives as an argument, and claude then waits 3 s for stdin and warns).
+# MultiEdit is not a tool in claude >= 2.1, and an unknown name in a deny rule
+# only prints a warning, so it is not listed.
 exec "$real" --tools "" --strict-mcp-config \
     --disallowedTools "Bash Edit Write NotebookEdit Read Glob Grep WebFetch WebSearch Task TodoWrite" \
-    "$@" < /dev/null
+    "$@"

@@ -67,8 +67,14 @@ DEFAULT_BANNED: tuple[dict, ...] = (
                                        r"dropped|cuts?|watch|changes?|increases?|hikes?)\b|\b(?:price|prices) (?:has|have) "
                                        r"(?:dropped|fallen|risen|gone (?:up|down))",
      "why": "Price history, price changes and price alerts are banned (Associates Participation 6(y))."},
-    {"id": "lowest-ever", "pattern": r"\b(?:lowest|all[- ]time[- ]low|record[- ]low|cheapest[- ]ever|best[- ]price|"
-                                     r"never been cheaper|rock[- ]bottom)\b",
+    # 'lowest' is a price claim only next to price words: "the lowest charging
+    # temperature" and "the lowest capacity ceiling" are specs (first live
+    # drafts, 2026-11-22); "record-low temperatures" are weather.
+    {"id": "lowest-ever", "pattern": r"\blowest(?:[- ]ever\b|[- ]priced?\b|\s+(?:\w+\s+){0,2}(?:price|prices|pricing|cost|costs)\b)"
+                                     r"|\blowest\s+(?:it|they|this|that)\s+(?:has|have|had|is|was|'s|\u2019s)\b|\bat\s+(?:its|their)\s+lowest\b"
+                                     r"|\blowest\s+(?:yet|so\s+far|this\s+(?:year|month|week|season))\b"
+                                     r"|\b(?:all[- ]time[- ]low|cheapest[- ]ever|best[- ]price|never been cheaper|"
+                                     r"rock[- ]bottom)\b|\brecord[- ]low\s+(?:price|prices|cost)\b",
      "why": "'Lowest' / 'all-time low' claims are price-history claims (6(y))."},
     {"id": "deal-talk", "pattern": r"\b(?:deals?|doorbusters?|on sale|sale prices?|discount(?:s|ed)?|markdowns?|"
                                    r"clearance|price cuts?|limited[- ]time)\b|\d\s?% off\b|\bsav(?:e|ings?)\s+(?:up to\s+)?\$|"

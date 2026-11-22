@@ -278,6 +278,19 @@ class FactsPack:
     def ready(self) -> bool:
         return not self.empty_required
 
+    def restrict_paths(self, live: Iterable[str]) -> "FactsPack":
+        """A copy for the prompt whose site paths that are not in `live` are
+        None (so ``to_prompt_json`` drops them): the model is only offered live,
+        indexable pages as link targets. Names and figures are unchanged, and
+        the original pack (what the claims guard checks against) is untouched."""
+        keep = set(live)
+
+        def fix(r: dict) -> dict:
+            return {k: (None if isinstance(v, str) and v in self.paths and v not in keep else v) for k, v in r.items()}
+
+        return dataclasses.replace(self, rows={n: [fix(r) for r in rs] for n, rs in self.rows.items()},
+                                   paths={p for p in self.paths if p in keep})
+
     def to_prompt_json(self) -> str:
         """Compact JSON for the prompt: None values dropped."""
         slim = {n: [{k: v for k, v in r.items() if v is not None} for r in rows] for n, rows in self.rows.items()}
