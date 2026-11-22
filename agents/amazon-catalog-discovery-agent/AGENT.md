@@ -11,11 +11,11 @@
 |---|---|
 | Engine id | `amazon-catalog-discovery-agent` (this directory; `enabled: false`, no cron: engines never run on their own) |
 | Instances | config-only directories in the site repos, e.g. `<site repo>/agents/amazon-catalog-discovery/` with `manifest.json` + `site.yaml`; their `AGENT_ID` is `<site>-amazon-catalog-discovery` |
-| Kind | AgentBase python, a thin wrapper on `framework.core.amazon_discovery.discover()` (+ `amazon_creators`, `site_registry`) |
+| Kind | AgentBase python, a thin wrapper on `framework.core.amazon_discovery.discover()` (+ `amazon_creators`, `site_registry`, and `model_matcher` for the match phase) |
 | Config | `CATALOG_DISCOVERY_CONFIG` = path of a YAML/JSON file, or the `catalog_discovery:` block of a larger site.yaml. Schema: [`catalog-discovery-config.schema.json`](catalog-discovery-config.schema.json) |
 | Worked examples | [`examples/home-power.site.yaml`](examples/home-power.site.yaml) (launch niche), [`examples/cleaning-robots.site.yaml`](examples/cleaning-robots.site.yaml) (fallback niche) |
-| Writes | the site's catalog table via its `insert_sql` (ASIN + lane label only); framework storage: run report, decisions, state, the Creators usage ledger |
-| Reads | Creators `searchItems`; the catalog via `known_sql`; seed files; optional read-only seed SELECTs on other databases |
+| Writes | the site's catalog table via its `insert_sql` (ASIN + lane label only) and, with `model_matching`, its `link_sql` (model id + our confidence on rows without a model); framework storage: run report, decisions, state, the Creators usage ledger |
+| Reads | Creators `searchItems` (and `getItems` for title + byline when matching); the catalog via `known_sql`; the site's models via `models_sql`; seed files; optional read-only seed SELECTs on other databases |
 | LLM | none |
 | Build item | F12 (build design, section 5) |
 
@@ -68,14 +68,19 @@
    title: one that now hits a global reject pattern is reported
    (`known_now_rejected`, ASIN + rule id, and a warning decision). Discovery
    never changes an existing row; the operator removes or relabels it.
-5. **REPORT.** Metrics (see *Goals*), decisions, the run report
+5. **MATCH** (only with `model_matching.enabled`). Links catalog products
+   to the site's own models, "search and confirm" (see *Model matching*):
+   getItems for products without a model, then one searchItems per model
+   that has no product. Same consumer, budget and run lock as the search.
+6. **REPORT.** Metrics (see *Goals*), decisions, the run report
    `agents/<id>/runs/<run_ts>/discovery-report.json`, and `next_state`.
 
 ## What is persisted, and what never is
 
 Persisted: the ASIN (Amazon allows storing it indefinitely) and our own
 values: lane, lane kind, lane category, our confidence, provenance (`via`,
-`seed`), the run timestamp, the configured `site_id`. These are the only
+`seed`), the run timestamp, the configured `site_id`, and from the match
+phase our model id, the matcher's rule id and our confidence (`LINK_PARAMS`). These are the only
 names `insert_sql` may use (`config.INSERT_PARAMS`); validation rejects any
 other placeholder, and the engine never binds an Amazon value.
 
@@ -208,6 +213,95 @@ price refresh needs later in the UTC day. `discover()` also checks
 `config/amazon-creators-usage/<day>/<consumer>.json`; its share belongs in
 `config/amazon-creators-budget.json` (F15c).
 
+## Model matching (operator decision 2026-11-22)
+
+The only allowed use of Amazon titles for matching is **search and confirm**:
+for each model, one Creators search on maker + model name, and for products
+already carried a getItems. An ASIN is linked to a model ONLY when Amazon's
+brand field (`itemInfo.byLineInfo.brand`) matches the maker, alias-aware, AND
+the exact model designation appears in the listing title as a whole token
+sequence. Anything ambiguous stays unlinked. Titles and every other Amazon
+field are used in memory at match time and never stored, logged, written to
+reports, run records, decision logs, exceptions or test snapshots; only our
+derived outcome persists (ASIN, model id, rule id, confidence, time). ASINs
+may be stored indefinitely (licence 2(h)).
+
+The rule lives in `framework/core/model_matcher.py` (generic, pure,
+`framework/tests/test_model_matcher.py`): whole-token designations with case,
+punctuation, unicode and spacing folded ('DELTA3' = 'DELTA 3'; 'AC180' never
+inside 'AC180P'); nested designations resolve to the longest; a known
+designation followed by an unknown variant word ('v3', 'Max', a bare
+number) is not the base model; designations after 'for' / 'compatible' /
+'fits' are an accessory's target and ignored; two different models, or one
+designation shared by two of our models, is ambiguous; a bundle (station +
+solar-panel wording or wattage, or 'with extra battery') maps only to a kit
+whose station, panels and batteries agree, never to the bare station; a
+stated Wh or W that contradicts the model's rated value is no match; never on
+brand alone. After the adversarial review (2026-11-22) also: the item noun of
+the designation's own phrase decides what is sold, so an accessory or part
+('DELTA 2 Max Waterproof Bag', 'AC180 Replacement Cable', 'Yeti 1500X Roll
+Cart') or another kind ('DELTA 3 Max Smart Extra Battery') never links to the
+station (`accessory`, `item-kind-mismatch`); a designation that only follows
+'with' / '+' is a bundled part (`bundle-component`); renewed / refurbished /
+used / open-box wording is `condition`; a unit count above one ('2 Pack', 'x2',
+'Set of 2') is `multi-pack`, and in a bundle every count must be one the kit
+check read; suffixes our own catalog uses to tell models apart ('C300' vs
+'C300 DC') plus 'Wireless' / 'UPS' / 'DC' are variant words; a '+' glued to a
+name reads 'plus' ('Max+', 'Nomad 100+'); a name ending in 'Max' no longer
+hides a contradicting wattage. The regressions are the `ADVERSARIAL` table in
+`test_model_matcher.py`.
+
+The phase (`catalog_discovery/matching.py`), after seeds and search:
+
+1. **ASIN-first.** `candidates_sql` (e.g. active products with no model) in
+   keyset pages of `asin_first.batch` (<= 10), one getItems per page with
+   resources `itemInfo.title` + `itemInfo.byLineInfo` only. A title that hits
+   a global reject is never linked (an untitled seed label is screened here
+   first), nor is one that no active lane accepts by its title rules
+   (`lane:<reason>`; getItems carries no price or browse nodes here). A match
+   at or above `confidence` whose model kind fits the product's kind and the
+   title's lane kind (`compatible_kinds`) is written by `link_sql`, which must
+   keep `model_id IS NULL` as a top-level AND term of its WHERE (validation
+   refuses an OR, a comment or a literal standing in for it): an existing link is
+   never overwritten and confidence is never raised without a match. The
+   cursor persists; after a full pass it starts over after `recheck_hours`.
+2. **Model-first.** Models from `models_sql` with no linked active product and
+   `searchable`, in `priority` order (NULL last), one searchItems
+   '<maker> <model name>' each (`queries_per_run`). Each listing: pricing gate
+   (new ASINs), global rejects and lane rules, then the matcher. A known
+   product is linked; a new one is inserted with its lane (`insert_sql`,
+   `via = match:<lane>/model-first`) and linked. At most one product per model
+   per run unless `variants` > 0; a model searched without a link waits
+   `retry_hours` (recorded only once its listings are committed, so a failed
+   model is searched again next run).
+
+Allowance: `min(model_matching.max_calls_per_run, the consumer's share left
+after search, the protected reserve)` (`budget_allowance(..., cap=)`);
+`asin_first.max_calls` keeps room for model-first. A spent budget, a 429 or
+three 5xx in a row stop the phase cleanly; the next run resumes. An
+unexpected error is reported by class name only (`model matching stopped by
+<Class>`), never its text. `--dry-run --match-only` makes the real calls,
+computes every match and writes nothing.
+
+`models_sql` columns (by name): `id`, `brand`, `model_name`, `kind`;
+optional `aliases`, `model_number`, `brand_aliases`, `capacity_wh`,
+`power_w`, `components` + `component_qty` (kits), `priority`, `linked`,
+`searchable`, `variants`. `stats_sql` (optional): one row
+`active_products, matched_products`. `brand_aliases` in the config: maker
+name as `models_sql` returns it -> other spellings of the brand field.
+
+Report: `discovery-report.json` gains `match` with `counts` (checked,
+matched, linked, inserted, ambiguous, unmatched, rejected, calls), reason
+counts, and `rows` of `{asin, model_id, rule, confidence}` only (`rule` is
+the reason code when unlinked). Metrics: `models_with_product`,
+`products_model_matched_pct`, `match_ambiguous`, `match_calls_per_link`,
+`match_calls`, `match_checked`, `match_matched`, `match_linked`,
+`match_inserted`, `match_unmatched`, `match_rejected`, `match_errors`,
+`match_allowed_calls`; `budget_overrun_calls` covers both phases. A test runs
+the phase with fixture titles carrying a sentinel and asserts it appears in
+no DB row or statement, report, storage file, log or output
+(`framework/tests/test_amazon_catalog_discovery_matching.py`).
+
 ## Goals & metrics
 
 Declared in [`goals.json`](goals.json) (seed it under each instance's id):
@@ -241,7 +335,8 @@ Other metrics: `seed_asins_imported`, `seed_asins_skipped`,
 ## State carried between runs
 
 `agents/<id>/state/latest.json` -> `state`:
-`rotation` (cycle, per-query `next_page` / `ended` / `end_reason` / `total` /
+`match` (`asin_cursor`, `asin_cycle_done_at`, `models_queried`: model id ->
+last search time), `rotation` (cycle, per-query `next_page` / `ended` / `end_reason` / `total` /
 `saturated` / `retries`), `seed_sources` (per source: signature, config
 fingerprint, complete, counts, and for a query source the keyset `cursor`
 of an unfinished read), `golden` (latest verdict per labelled ASIN),
@@ -263,6 +358,9 @@ set -a; . ~/.reusable-agents/secrets.env; set +a
 python3 agents/amazon-catalog-discovery-agent/agent.py --config <site.yaml> --dry-run --max-calls 3 [--show-titles]
 # Seed import only (a recorded run; the D1 path):
 AGENT_ID=<site>-amazon-catalog-discovery python3 agents/amazon-catalog-discovery-agent/agent.py --config <site.yaml> --seeds-only
+# Model matching only: dry run (REAL getItems/searchItems, matches computed, nothing written), then a recorded run:
+python3 agents/amazon-catalog-discovery-agent/agent.py --config <site.yaml> --dry-run --match-only --max-calls 5
+AGENT_ID=<site>-amazon-catalog-discovery python3 agents/amazon-catalog-discovery-agent/agent.py --config <site.yaml> --match-only
 ```
 
 Per-site instance manifest (S12; registered at A1, never before):
@@ -319,6 +417,10 @@ COMMIT is read-only.
 | `insert_errors > 0` | the site's `insert_sql` failed for some rows (CHECK, FK); samples in the decisions; other rows landed |
 | seed source "labelled record(s) without a title were not imported" | list the lanes you trust under the source's `lanes` (or set `trust_labels: true`) after checking where the labels came from |
 | precision metrics missing | fewer than `qa.min_observations` labelled listings seen yet |
+| `match.reasons` mostly `brand-unknown` | the brand field's spelling is not an alias: add it to `model_matching.brand_aliases` |
+| `match.reasons` mostly `no-designation` / `unknown-variant` | the listings are models (or variants) the site does not carry, or a name / alias differs: add the model or alias; never loosen the matcher |
+| `match_ambiguous` high | two of the site's records share a designation, or a bundle fits several kits: fix the records (aliases, kit components) |
+| `model matching stopped by <Class>` (failure) | an unexpected error; the class name is all that is kept. Work linked before it is committed; rerun with `--dry-run --match-only` to reproduce |
 
 ## Provenance and differences
 

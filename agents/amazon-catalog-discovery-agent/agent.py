@@ -10,12 +10,18 @@ run, for the site named by its config (``CATALOG_DISCOVERY_CONFIG``):
               itemPage at a time, breadth first and resumed across runs,
               within the run's call allowance; classifies each new listing
               into the site's own lanes and inserts the in-lane ASINs.
-3. REPORT  -- metrics for the declared goals, a per-run report of ASINs and
+3. MATCH   -- (``model_matching.enabled``) links products to the site's own
+              models, "search and confirm": getItems for unlinked catalog
+              ASINs, then one searchItems per model that has no product;
+              Amazon's brand field must resolve to the maker and the exact
+              model designation must appear in the title (model_matcher).
+4. REPORT  -- metrics for the declared goals, a per-run report of ASINs and
               our labels, and the rotation state for the next run.
 
 It persists ONLY the ASIN and our own labels (lane, kind/category, confidence,
-provenance). Titles, prices, images and every other Amazon field are read in
-memory to decide, then dropped: not stored, not logged, not in the report.
+provenance, and from MATCH our model id). Titles, prices, images, brands and
+every other Amazon field are read in memory to decide, then dropped: not
+stored, not logged, not in the report.
 
 Per-site instances are config-only directories in the site repos whose
 manifest runs this file with ``AGENT_ID`` and ``CATALOG_DISCOVERY_CONFIG`` set.
@@ -27,9 +33,11 @@ CLI
     python3 agent.py --config site.yaml --dry-run      # REAL searchItems calls (budget-charged),
                                                        # no DB writes, no state or run record
     python3 agent.py --config site.yaml --seeds-only   # a recorded run of the seed import only
+    python3 agent.py --config site.yaml --match-only   # a recorded run of the MATCH phase only
     python3 agent.py --config site.yaml                # a full recorded run
-Dry-run extras: --max-calls N (can only lower the cap), --no-seeds,
---show-titles (prints titles to the terminal only; never stored).
+Extras: --max-calls N (can only lower each phase's cap), --no-seeds, --no-match,
+--show-titles (dry run only: prints SEARCH titles to the terminal; never stored;
+the match phase never prints a title).
 """
 from __future__ import annotations
 
@@ -60,14 +68,15 @@ from catalog_discovery.catalog import (Catalog, CatalogConnectError,  # noqa: E4
                                        connect_failure_text, resolve_dsn)
 from catalog_discovery.config import (CONFIG_ENV, ConfigError,  # noqa: E402
                                       DiscoveryConfig, SeedQuerySource, load_config)
-from catalog_discovery.engine import (STOP_UNAVAILABLE, BudgetDecision,  # noqa: E402
-                                      DiscoveryEngine, SearchReport, SeedReport,
-                                      budget_allowance, golden_metrics,
+from catalog_discovery.engine import (STOP_THROTTLED, STOP_UNAVAILABLE,  # noqa: E402
+                                      BudgetDecision, DiscoveryEngine, SearchReport,
+                                      SeedReport, budget_allowance, golden_metrics,
                                       update_golden_window)
+from catalog_discovery.matching import MatchPhase, MatchReport  # noqa: E402
 from catalog_discovery.seeds import SeedSourceError  # noqa: E402
 
 REPORT_NAME = "discovery-report.json"
-MODES = ("full", "seeds-only", "no-seeds")
+MODES = ("full", "seeds-only", "no-seeds", "match-only", "no-match")
 
 
 def _utcnow() -> dt.datetime:
@@ -88,6 +97,10 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
                 risk_level="medium", affects=["production-db"]),
         declare("read_seed_sources", "Read seed ASIN files and run read-only seed SELECTs",
                 risk_level="low"),
+        declare("link_catalog_models",
+                "Set model_id (and our confidence) on products whose Amazon brand and title name "
+                "exactly one of the site's models; never overwrites an existing link",
+                risk_level="medium", affects=["production-db"]),
     ]
 
     #: Set by the CLI before run_once()/execute().
@@ -148,7 +161,7 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         prior = copy.deepcopy(self.state) if isinstance(self.state, dict) else {}
-        for key in ("rotation", "seed_sources", "golden"):
+        for key in ("rotation", "seed_sources", "golden", "match"):
             if key in prior and not isinstance(prior[key], dict):
                 prior.pop(key)  # malformed state piece: start it afresh, keep the rest
         self._progress("loading config", 0.02)
@@ -199,10 +212,12 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
         seeds: Optional[SeedReport] = None
         search: Optional[SearchReport] = None
         budget: Optional[BudgetDecision] = None
+        match: Optional[MatchReport] = None
+        match_budget: Optional[BudgetDecision] = None
         failure: list[str] = []
         error_text = ""
         try:
-            if self.mode != "no-seeds" and (cfg.seed_files or cfg.seed_queries):
+            if self.mode not in ("no-seeds", "match-only") and (cfg.seed_files or cfg.seed_queries):
                 self._progress("importing seed ASINs", 0.1)
                 seeds = engine.import_seeds(catalog, state=state,
                                             connect_seed=self._seed_connector(cfg))
@@ -210,7 +225,7 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
                 client = self._make_client(cfg)
                 if client is None:
                     failure.append("Amazon Creators API not configured (AMAZON_CREATORS_*)")
-                else:
+                elif self.mode != "match-only":
                     budget = budget_allowance(cfg, client, storage=self.storage,
                                               max_calls=self.max_calls_override)
                     self._note("observation",
@@ -223,6 +238,21 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
                                                allowed_calls=budget.allowed_calls)
                     if search.stopped_reason == STOP_UNAVAILABLE:
                         failure.append(f"Creators unavailable: {search.creators_error}")
+                if (client is not None and cfg.matching.enabled and self.mode != "no-match"
+                        and not (search and search.stopped_reason in (STOP_UNAVAILABLE, STOP_THROTTLED))):
+                    # Same consumer, asked again: the share left already counts search's calls.
+                    match_budget = budget_allowance(cfg, client, storage=self.storage,
+                                                    max_calls=self.max_calls_override,
+                                                    cap=cfg.matching.max_calls_per_run)
+                    self._progress(f"matching products to models (allowance "
+                                   f"{match_budget.allowed_calls} calls)", 0.7)
+                    new_left = cfg.limits.max_new_per_run - (len(search.inserted) if search else 0)
+                    match = MatchPhase(cfg, now=now, run_ts=self.run_ts,
+                                       classifier=engine.classifier).run(
+                        client, catalog, state=state, allowed_calls=match_budget.allowed_calls,
+                        max_new=new_left)
+                    if match.failure:
+                        failure.append(match.failure)
         except Exception as exc:  # noqa: BLE001 -- keep the progress made so far
             failure.append(f"{type(exc).__name__}: {str(exc)[:300]}")
             error_text = traceback.format_exc()[-4000:]
@@ -239,20 +269,25 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
             state["golden"] = update_golden_window(state.get("golden"), search.golden,
                                                    run_ts=self.run_ts, size=cfg.qa.window)
         golden = golden_metrics(state.get("golden") or {}, min_observations=cfg.qa.min_observations)
-        metrics = self._metrics(cfg, seeds, search, budget, rotation, golden)
+        metrics = self._metrics(cfg, seeds, search, budget, rotation, golden,
+                                match=match, match_budget=match_budget, dry_run=self.dry_run)
         state["last_run"] = {"run_ts": self.run_ts,
                              "new_in_lane_asins": metrics.get("new_in_lane_asins", 0),
                              "seed_asins_imported": metrics.get("seed_asins_imported", 0),
                              "api_calls": metrics.get("api_calls", 0),
-                             "stopped_reason": search.stopped_reason if search else ""}
-        self._log_outcome(cfg, seeds, search, rotation)
-        summary = self._summary(cfg, seeds, search, budget, rotation, failure)
+                             "stopped_reason": search.stopped_reason if search else "",
+                             "match_linked": match.linked if match else 0,
+                             "match_calls": match.calls if match else 0}
+        self._log_outcome(cfg, seeds, search, rotation, match)
+        summary = self._summary(cfg, seeds, search, budget, rotation, failure, match, match_budget)
         report = {
             "schema_version": "1", "agent_id": self.agent_id, "run_ts": self.run_ts,
             "dry_run": self.dry_run, "mode": self.mode, "config": describe,
             "budget": budget.to_dict() if budget else None,
             "seeds": seeds.to_dict() if seeds else None,
             "search": search.to_dict() if search else None,
+            "match_budget": match_budget.to_dict() if match_budget else None,
+            "match": match.to_dict(dry_run=self.dry_run) if match else None,
             "rotation": {"cycle": rotation.cycle, "cycle_progress": rotation.cycle_progress(),
                          "cycle_restarted": bool(rotation.cycles_started_this_run),
                          "cooldown_until": rotation.cooldown_until(),
@@ -290,7 +325,9 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
     @staticmethod
     def _metrics(cfg: DiscoveryConfig, seeds: Optional[SeedReport], search: Optional[SearchReport],
                  budget: Optional[BudgetDecision], rotation: Any,
-                 golden: dict[str, float]) -> dict[str, Any]:
+                 golden: dict[str, float], *, match: Optional[MatchReport] = None,
+                 match_budget: Optional[BudgetDecision] = None,
+                 dry_run: bool = False) -> dict[str, Any]:
         m: dict[str, Any] = {"discovery_enabled": 1}
         if seeds is not None:
             m["seed_asins_imported"] = len(seeds.imported)
@@ -329,6 +366,30 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
         if budget is not None:
             m["budget_allowed_calls"] = budget.allowed_calls
             m["budget_overrun_calls"] = max(0, (search.api_calls if search else 0) - budget.allowed_calls)
+        if match is not None:
+            # Model matching (goals: models_with_product, products_model_matched_pct,
+            # match_ambiguous, match_calls_per_link).
+            m.update({
+                "match_calls": match.calls,
+                "match_checked": match.checked,
+                "match_matched": match.matched,
+                "match_linked": match.linked,
+                "match_inserted": match.inserted,
+                "match_ambiguous": match.ambiguous,
+                "match_unmatched": match.unmatched,
+                "match_rejected": match.rejected,
+                "match_errors": match.errors,
+                "models_with_product": match.models_with_product,
+            })
+            if match.calls:
+                m["match_calls_per_link"] = round(match.calls / max(1, match.linked), 3)
+            pct = match.products_model_matched_pct(dry_run=dry_run)
+            if pct is not None:
+                m["products_model_matched_pct"] = pct
+            if match_budget is not None:
+                m["match_allowed_calls"] = match_budget.allowed_calls
+                m["budget_overrun_calls"] = (m.get("budget_overrun_calls", 0)
+                                             + max(0, match.calls - match_budget.allowed_calls))
         m["cycle"] = rotation.cycle
         m["cycle_progress"] = rotation.cycle_progress()
         m["saturated_queries"] = len(rotation.saturated_keys())
@@ -338,7 +399,23 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
         return m
 
     def _log_outcome(self, cfg: DiscoveryConfig, seeds: Optional[SeedReport],
-                     search: Optional[SearchReport], rotation: Any) -> None:
+                     search: Optional[SearchReport], rotation: Any,
+                     match: Optional[MatchReport] = None) -> None:
+        if match is not None:
+            # Counts, ids and reason codes only: never listing text.
+            self._note("result" if match.linked else "observation",
+                       f"model matching: {match.linked} product(s) linked "
+                       f"({match.linked_asin_first} via getItems, {match.linked_model_first} via search, "
+                       f"{match.inserted} new), {match.ambiguous} ambiguous, {match.unmatched} unmatched, "
+                       f"{match.rejected} rejected; {match.calls}/{match.allowance} calls"
+                       + (f" (stopped: {match.stopped_reason})" if match.stopped_reason else ""),
+                       evidence={"reasons": dict(match.reasons.most_common(12)),
+                                 "models_with_product": match.models_with_product})
+            for problem in match.index_problems[:5]:
+                self._note("warning", f"model matching: {problem}")
+            if match.errors:
+                self._note("warning", f"model matching: {match.errors} error(s): "
+                                      f"{'; '.join(match.error_samples[:3])}")
         if seeds is not None:
             for name, err in seeds.errors.items():
                 self._note("warning", f"seed source {name} skipped: {err}")
@@ -393,7 +470,9 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
 
     @staticmethod
     def _summary(cfg: DiscoveryConfig, seeds: Optional[SeedReport], search: Optional[SearchReport],
-                 budget: Optional[BudgetDecision], rotation: Any, failure: list[str]) -> str:
+                 budget: Optional[BudgetDecision], rotation: Any, failure: list[str],
+                 match: Optional[MatchReport] = None,
+                 match_budget: Optional[BudgetDecision] = None) -> str:
         parts: list[str] = []
         if failure:
             parts.append("FAILED: " + "; ".join(failure)[:300] + ".")
@@ -418,6 +497,13 @@ class AmazonCatalogDiscoveryAgent(AgentBase):
             if search.deferred_max_new:
                 parts.append(f"{search.deferred_max_new} in-lane listing(s) over the per-run cap "
                              f"wait for the next run.")
+        if match is not None:
+            parts.append(
+                f"Model matching: {match.linked} linked ({match.inserted} new product(s)), "
+                f"{match.ambiguous} ambiguous, {match.unmatched} unmatched, {match.rejected} rejected; "
+                f"{match.models_with_product}/{match.models_total} models have a product; "
+                f"{match.calls}/{match_budget.allowed_calls if match_budget else match.allowance} calls"
+                + (f" (stopped: {match.stopped_reason})" if match.stopped_reason else "") + ".")
         if seeds is not None:
             bits = f"Seeds: {len(seeds.imported)} imported"
             if seeds.unchanged:
@@ -446,6 +532,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--seeds-only", action="store_true", help="only the seed import")
     mode.add_argument("--no-seeds", action="store_true", help="skip the seed import")
+    mode.add_argument("--match-only", action="store_true",
+                      help="only the model-matching phase (no seeds, no search)")
+    mode.add_argument("--no-match", action="store_true", help="skip the model-matching phase")
     ap.add_argument("--max-calls", type=int, help="lower the run's call cap")
     ap.add_argument("--show-titles", action="store_true",
                     help="dry run only: print listing titles to this terminal (never stored)")
@@ -464,7 +553,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     agent = AmazonCatalogDiscoveryAgent()
     agent.config_path = args.config
-    agent.mode = "seeds-only" if args.seeds_only else ("no-seeds" if args.no_seeds else "full")
+    agent.mode = ("seeds-only" if args.seeds_only else "no-seeds" if args.no_seeds
+                  else "match-only" if args.match_only else "no-match" if args.no_match else "full")
     agent.max_calls_override = args.max_calls
     if args.dry_run:
         # Outside run_once: no run record, no state write, no DB writes. The

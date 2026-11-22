@@ -1,0 +1,8266 @@
+{
+"_comment": "Our model records (maker, model name, aliases, model number, kind, rated Wh / W, kit components) in the shape of a site's model_matching.models_sql, converted from the home-power research dataset (specs-v1.json, maker pages only; no Amazon data). Used by test_model_matcher.py.",
+"generated_from": "specs-v1.json 2026-11-22T03:37:17+00:00",
+"models": [
+{
+"id": "pecron-e300lfp",
+"brand": "PECRON",
+"model_name": "E300LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E300LFP",
+"capacity_wh": 288,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e500lfp",
+"brand": "PECRON",
+"model_name": "E500LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E500LFP",
+"capacity_wh": 576,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e1000lfp",
+"brand": "PECRON",
+"model_name": "E1000LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E1000LFP",
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-f1000lfp",
+"brand": "PECRON",
+"model_name": "F1000LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "F1000LFP",
+"capacity_wh": 960,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e1500lfp-v3",
+"brand": "PECRON",
+"model_name": "E1500LFP (V3)",
+"kind": "station",
+"aliases": [],
+"model_number": "E1500LFP",
+"capacity_wh": 1536,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e2400lfp",
+"brand": "PECRON",
+"model_name": "E2400LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E2400LFP",
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e3600lfp",
+"brand": "PECRON",
+"model_name": "E3600LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E3600LFP",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e3800lfp",
+"brand": "PECRON",
+"model_name": "E3800LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "E3800LFP",
+"capacity_wh": 3840,
+"power_w": 4200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-f3000lfp",
+"brand": "PECRON",
+"model_name": "F3000LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "F3000LFP",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-f5000lfp",
+"brand": "PECRON",
+"model_name": "F5000LFP",
+"kind": "station",
+"aliases": [],
+"model_number": "F5000LFP",
+"capacity_wh": 5120,
+"power_w": 7200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-ep3800-48v",
+"brand": "PECRON",
+"model_name": "EP3800-48V",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3840,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-fp5000-48v",
+"brand": "PECRON",
+"model_name": "FP5000-48V",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-pv100",
+"brand": "PECRON",
+"model_name": "PV100",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-pv200",
+"brand": "PECRON",
+"model_name": "PV200",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-pv300",
+"brand": "PECRON",
+"model_name": "PV300",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-pv500",
+"brand": "PECRON",
+"model_name": "PV500",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-e1000lfp-solar-generator-kit",
+"brand": "PECRON",
+"model_name": "E1000LFP Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-e1000lfp"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "pecron-e1500lfp-solar-generator-kit",
+"brand": "PECRON",
+"model_name": "E1500LFP Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-e1500lfp-v3"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "pecron-e2400lfp-solar-generator-kit",
+"brand": "PECRON",
+"model_name": "E2400LFP Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": "E2400LFP+300W",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-e2400lfp"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "pecron-e3600lfp-solar-generator-kit",
+"brand": "PECRON",
+"model_name": "E3600LFP Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-e3600lfp",
+"pecron-pv300"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "pecron-e3800lfp-solar-generator",
+"brand": "PECRON",
+"model_name": "E3800LFP Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": "E3800LFP-PV300",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-e3800lfp",
+"pecron-240v-connect-box"
+],
+"component_qty": [
+2,
+1
+]
+},
+{
+"id": "pecron-f1000lfp-solar-generator",
+"brand": "PECRON",
+"model_name": "F1000LFP Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": "F1000LFP+PV200",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-f1000lfp",
+"pecron-pv200"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "pecron-f3000lfp-solar-generator",
+"brand": "PECRON",
+"model_name": "F3000LFP Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-f3000lfp",
+"pecron-pv300"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "pecron-f5000lfp-solar-generator",
+"brand": "PECRON",
+"model_name": "F5000LFP Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"pecron-f5000lfp",
+"pecron-pv500"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "pecron-240v-connect-box",
+"brand": "PECRON",
+"model_name": "240V Connect Box",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-30a-ac-charging-cable",
+"brand": "PECRON",
+"model_name": "30A AC Charging Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-mj32-cascade-cable-for-ep3800-48v",
+"brand": "PECRON",
+"model_name": "MJ32 Cascade Cable for EP3800-48V",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-xt60-to-gx16mf-5-cable",
+"brand": "PECRON",
+"model_name": "XT60 to GX16MF-5 Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-mc4-cable-to-5-pin-aviation-male-solar-adapter",
+"brand": "PECRON",
+"model_name": "MC4 Cable To 5-Pin Aviation Male Solar Adapter",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-mc4-to-xt60-cable",
+"brand": "PECRON",
+"model_name": "MC4 to XT60 cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "pecron-f3000lfp-cascade-cable",
+"brand": "PECRON",
+"model_name": "F3000LFP Cascade Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-jump-600x-v-beyond",
+"brand": "VTOMAN",
+"model_name": "Jump 600X (V-BEYOND)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 268.8,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-flashspeed-1100",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1100",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 460.8,
+"power_w": 1100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-jump-1800-1408wh-new-version",
+"brand": "VTOMAN",
+"model_name": "Jump 1800 (1408Wh new version)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1408,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-flashspeed-2400",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 2400",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1408,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-flashspeed-1548wh-extra-battery-pb-81",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1548Wh Extra Battery (PB-81)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1548,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-vs110-110w",
+"brand": "VTOMAN",
+"model_name": "VS110 110W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 110,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-vs400-400w",
+"brand": "VTOMAN",
+"model_name": "VS400 400W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-vs200-200w",
+"brand": "VTOMAN",
+"model_name": "VS200 200W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-jump-600x-200w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "Jump 600X + 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-jump-600x-v-beyond"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-jump-600x-110w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "Jump 600X + 110W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-jump-600x-v-beyond"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-jump-1800-110w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "Jump 1800 + 110W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-jump-1800-1408wh-new-version"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-jump-1800-200w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "Jump 1800 + 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-jump-1800-1408wh-new-version"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-flashspeed-1100-110w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1100 + 110W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-flashspeed-1100"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-flashspeed-1100-200w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1100 + 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-flashspeed-1100"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-flashspeed-1100-1868-8wh-110w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1100 1868.8Wh + 110W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-flashspeed-1100"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-flashspeed-1100-1868-8wh-200w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 1100 1868.8Wh + 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-flashspeed-1100"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-flashspeed-2400-400w-solar-panel",
+"brand": "VTOMAN",
+"model_name": "FlashSpeed 2400 + 400W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"vtoman-flashspeed-2400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "vtoman-cp3500-cable-for-vtoman-extra-battery",
+"brand": "VTOMAN",
+"model_name": "CP3500 Cable for VTOMAN Extra Battery",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-3-meter-solar-cable",
+"brand": "VTOMAN",
+"model_name": "3 Meter Solar Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "vtoman-ac-charging-cable-for-flashspeed-2400-1500-1000",
+"brand": "VTOMAN",
+"model_name": "AC Charging Cable for FlashSpeed 2400/1500/1000",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-f1800",
+"brand": "FOSSiBOT",
+"model_name": "F1800",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-f2400",
+"brand": "FOSSiBOT",
+"model_name": "F2400",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-f3600-pro",
+"brand": "FOSSiBOT",
+"model_name": "F3600 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3840,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-f7200",
+"brand": "FOSSiBOT",
+"model_name": "F7200",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5222.4,
+"power_w": 7200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-fb3840",
+"brand": "FOSSiBOT",
+"model_name": "FB3840",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3840,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-sp200",
+"brand": "FOSSiBOT",
+"model_name": "SP200",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-sp420",
+"brand": "FOSSiBOT",
+"model_name": "SP420",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 420,
+"components": [],
+"component_qty": []
+},
+{
+"id": "fossibot-f2400-solar-generator-kit",
+"brand": "FOSSiBOT",
+"model_name": "F2400 Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"fossibot-f2400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "fossibot-f3600-pro-solar-generator-kit",
+"brand": "FOSSiBOT",
+"model_name": "F3600 Pro Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"fossibot-f3600-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p800",
+"brand": "OUKITEL",
+"model_name": "P800",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 512,
+"power_w": 800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p1000-plus",
+"brand": "OUKITEL",
+"model_name": "P1000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p1201",
+"brand": "OUKITEL",
+"model_name": "P1201",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 960,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p1500-plus",
+"brand": "OUKITEL",
+"model_name": "P1500 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1536,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p2001",
+"brand": "OUKITEL",
+"model_name": "P2001",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2000,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p2001-plus",
+"brand": "OUKITEL",
+"model_name": "P2001 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p2001-pro",
+"brand": "OUKITEL",
+"model_name": "P2001 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 3200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-bp2000",
+"brand": "OUKITEL",
+"model_name": "BP2000",
+"kind": "station",
+"aliases": [],
+"model_number": "BP2000",
+"capacity_wh": 2048,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-bp2000-pro",
+"brand": "OUKITEL",
+"model_name": "BP2000 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 3300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-bp3000-bp3000-plus",
+"brand": "OUKITEL",
+"model_name": "BP3000 / BP3000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "BP3000",
+"capacity_wh": 2048,
+"power_w": 3200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p5000",
+"brand": "OUKITEL",
+"model_name": "P5000",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p5000-plus",
+"brand": "OUKITEL",
+"model_name": "P5000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p5000-pro",
+"brand": "OUKITEL",
+"model_name": "P5000 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-bp5000-pro-max",
+"brand": "OUKITEL",
+"model_name": "BP5000 Pro Max",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": 5000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-b2000",
+"brand": "OUKITEL",
+"model_name": "B2000",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-b2000l-b2000l-plus",
+"brand": "OUKITEL",
+"model_name": "B2000L / B2000L Plus",
+"kind": "battery",
+"aliases": [],
+"model_number": "B2000L",
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-100w-portable-solar-panel",
+"brand": "OUKITEL",
+"model_name": "100W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-200w-portable-solar-panel",
+"brand": "OUKITEL",
+"model_name": "200W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-400w-portable-solar-panel",
+"brand": "OUKITEL",
+"model_name": "400W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-solar-extension-cable-mc4-to-xt60-5m",
+"brand": "OUKITEL",
+"model_name": "Solar Extension Cable (MC4 to XT60, 5m)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oukitel-p1000-plus-100w-solar-panel",
+"brand": "OUKITEL",
+"model_name": "P1000 Plus + 100W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p1000-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p2001-plus-200w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P2001 Plus + 200W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p2001-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p2001-plus-2-200w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P2001 Plus + 2*200W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p2001-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p2001-plus-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P2001 Plus + 400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p2001-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p5000-pro-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P5000 Pro + 400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p5000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p5000-pro-2-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P5000 Pro + 2*400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p5000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p5000-2-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P5000 + 2*400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p5000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p5000-solar-generator-with-400w-solar-panel",
+"brand": "OUKITEL",
+"model_name": "P5000 Solar Generator with 400W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p5000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-bp2000-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "BP2000 + 400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-bp2000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-bp2000-2-400w-solar-generator",
+"brand": "OUKITEL",
+"model_name": "BP2000 + 2*400W Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-bp2000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p1201-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P1201 Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": "P1201+1*200W",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p1201"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "oukitel-p2001-solar-generator",
+"brand": "OUKITEL",
+"model_name": "P2001 Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oukitel-p2001"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r600",
+"brand": "ALLPOWERS",
+"model_name": "R600",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 299,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-volix-p300",
+"brand": "ALLPOWERS",
+"model_name": "VOLIX P300",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 256,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-s700",
+"brand": "ALLPOWERS",
+"model_name": "S700",
+"kind": "station",
+"aliases": [],
+"model_number": "S700",
+"capacity_wh": 606,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-p1800",
+"brand": "ALLPOWERS",
+"model_name": "P1800",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r1500-lite",
+"brand": "ALLPOWERS",
+"model_name": "R1500 LITE",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1056,
+"power_w": 1600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r1500",
+"brand": "ALLPOWERS",
+"model_name": "R1500",
+"kind": "station",
+"aliases": [],
+"model_number": "R1500",
+"capacity_wh": 1152,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-s2000-pro",
+"brand": "ALLPOWERS",
+"model_name": "S2000 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1451,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-s2000",
+"brand": "ALLPOWERS",
+"model_name": "S2000",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1500,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r2500-plus",
+"brand": "ALLPOWERS",
+"model_name": "R2500 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "R2500",
+"capacity_wh": 2016,
+"power_w": 2500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r2500-v2",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1920,
+"power_w": 2500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r3500",
+"brand": "ALLPOWERS",
+"model_name": "R3500",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3168,
+"power_w": 3200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-r4000",
+"brand": "ALLPOWERS",
+"model_name": "R4000",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3456,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sp033-200w",
+"brand": "ALLPOWERS",
+"model_name": "SP033 200W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sp037-400w",
+"brand": "ALLPOWERS",
+"model_name": "SP037 400W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sp039-600w",
+"brand": "ALLPOWERS",
+"model_name": "SP039 600W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sf100-100w-flexible",
+"brand": "ALLPOWERS",
+"model_name": "SF100 100W Flexible",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sf200-200w-flexible",
+"brand": "ALLPOWERS",
+"model_name": "SF200 200W Flexible",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-sf400-400w-flexible",
+"brand": "ALLPOWERS",
+"model_name": "SF400 400W Flexible",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-se100-100w",
+"brand": "ALLPOWERS",
+"model_name": "SE100 100W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-se200-200w",
+"brand": "ALLPOWERS",
+"model_name": "SE200 200W",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-xt60-1-5m-solar-charging-cable-mc4-to-xt60",
+"brand": "ALLPOWERS",
+"model_name": "XT60 1.5M Solar Charging Cable (MC4 to XT60)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-car-charger-to-xt60-1-5m-cable",
+"brand": "ALLPOWERS",
+"model_name": "Car Charger to XT60 1.5M Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-solar-extension-cable-1-5m-mc4",
+"brand": "ALLPOWERS",
+"model_name": "Solar Extension Cable 1.5M (MC4)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-solar-y-branch-connectors-mmf-ffm",
+"brand": "ALLPOWERS",
+"model_name": "Solar Y-branch connectors (MMF+FFM)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-solar-t-branch-connectors-1-to-3",
+"brand": "ALLPOWERS",
+"model_name": "Solar T-branch connectors 1-to-3",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-solar-generator-kit-3200w-r3500-sp039-600w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3200W (R3500 + SP039 600W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3200W (R3500 + SP039 600W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r3500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2000w-s2000-sf100-100w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2000W (S2000 + SF100 100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2000W (S2000 + SF100 100W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-v2-sp037-400w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2 + SP037 400W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 V2 + SP037 400W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-1800w-solar-generator-p1800-1024wh-with-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "1800W Solar Generator P1800 1024Wh with 400W Solar Panel",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS 1800W Solar Generator P1800 1024Wh with 400W Solar Panel"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-p1800"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-600w-r600-sf100-100w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 600W (R600 + SF100 100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 600W (R600 + SF100 100W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r600"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2400w-s2000-pro-sp037-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2400W (S2000 Pro + SP037 400W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2400W (S2000 Pro + SP037 400W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1800w-r1500-sp037-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1800W (R1500 + SP037 400W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1800W (R1500 + SP037 400W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3200w-r3500-sp037-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3200W (R3500 + SP037 400W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3200W (R3500 + SP037 400W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r3500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2000w-s2000-sp037-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2000W (S2000 + SP037 400W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2000W (S2000 + SP037 400W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-plus-400w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 Plus + 400W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 Plus + 400W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-sp037-400w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + SP037 400W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + SP037 400W  Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r600-200w-solar-panel-600w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R600 + 200W Solar Panel | 600W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R600 + 200W Solar Panel | 600W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r600"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r600-100w-solar-panel-600w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R600 + 100W Solar Panel | 600W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R600 + 100W Solar Panel | 600W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r600"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-v2-600w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2 + 600W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 V2 + 600W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-v2-200w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2 + 200W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 V2 + 200W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-v2-100w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2 + 100W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 V2 + 100W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-allpower-r1500-lite-140w-solar-panel-1600w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "ALLPOWER R1500 LITE + 140W Solar Panel | 1600W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWER R1500 LITE + 140W  Solar Panel | 1600W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500-lite"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-allpower-solar-generator-kit-1800w-r1500-sp029-140w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "ALLPOWER Solar Generator Kit 1800W (R1500 + SP029 140W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-sp029-140w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + SP029 140W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + SP029 140W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2500w-r2500-v2-sp029-140w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2500W (R2500 V2 + SP029 140W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2500W (R2500 V2 + SP029 140W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1500w-s1500-sp029-140w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1500W (S1500 + SP029 140W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1500W (S1500 + SP029 140W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "allpowers-solar-generator-kit-700w-s700-sp029-140w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 700W (S700 + SP029 140W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 700W (S700 + SP029 140W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s700"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-volix-p300-100w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "VOLIX P300 + 100W Solar Panel",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS VOLIX P300 + 100W Solar Panel"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-volix-p300"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2000w-s2000-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2000W (S2000 + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2000W (S2000 + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-1800w-solar-generator-p1800-1024wh-with-600w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "1800W Solar Generator P1800 1024Wh with 600W Solar Panel",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS 1800W Solar Generator P1800 1024Wh with 600W Solar Panel"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-p1800"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-1800w-solar-generator-p1800-1024wh-with-200w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "1800W Solar Generator P1800 1024Wh with 200W Solar Panel",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS 1800W Solar Generator P1800 1024Wh with 200W Solar Panel"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-p1800"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-v2-se160-160w-solar-panel-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 V2 + SE160 160W Solar Panel Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 V2 + SE160 160W Solar Panel Solar Generator Kit"
+],
+"model_number": "SE160",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1600w-r1500-lite-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1600W (R1500 LITE + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1600W (R1500 LITE + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500-lite"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1800w-r1500-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1800W (R1500 + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1800W (R1500 + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-2400w-s2000-pro-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 2400W (S2000 Pro + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 2400W (S2000 Pro + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1800w-r1500-sf100-100w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1800W (R1500 + SF100 100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1800W (R1500 + SF100 100W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-2pcs-sp039-600w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + 2PCS SP039 600W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + 2PCS SP039 600W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-1800w-r1500-sp039-600w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 1800W (R1500 + SP039 600W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 1800W (R1500 + SP039 600W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r1500-lite-600w-solar-panel-1600w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R1500 LITE + 600W Solar Panel | 1600W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R1500 LITE + 600W  Solar Panel | 1600W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r1500-lite"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3200w-r3500-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3200W (R3500 + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3200W (R3500 + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r3500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3200w-r3500-sf100-100w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3200W (R3500 + SF100 100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3200W (R3500 + SF100 100W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r3500"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-sf200-200w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + SF200 200W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + SF200 200W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-sf100-100w-flexible-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + SF100 100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + SF100 100W Flexible Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-plus-600w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 Plus + 600W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 Plus + 600W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-r2500-plus-200w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "R2500 Plus + 200W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS R2500 Plus + 200W Solar Panel | 2500W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-allpower-r2500-plus-100w-solar-panel-2500w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "ALLPOWER R2500 Plus + 100W Solar Panel | 2500W Solar Generator Kit",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r2500-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-s2000-pro-200w-solar-panel-2400w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "S2000 Pro + 200W Solar Panel | 2400W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS S2000 Pro + 200W Solar Panel | 2400W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-s2000-pro-100w-solar-panel-2400w-solar-generator-kit",
+"brand": "ALLPOWERS",
+"model_name": "S2000 Pro + 100W Solar Panel | 2400W Solar Generator Kit",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS S2000 Pro + 100W Solar Panel | 2400W Solar Generator Kit"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-s2000-pro"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "allpowers-solar-generator-kit-3600w-r4000-sp039-600w-solar-panel",
+"brand": "ALLPOWERS",
+"model_name": "Solar Generator Kit 3600W (R4000 + SP039 600W Solar Panel)",
+"kind": "kit",
+"aliases": [
+"ALLPOWERS Solar Generator Kit 3600W (R4000 + SP039 600W Solar Panel)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"allpowers-r4000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "grecell-300w-portable-power-station-288wh",
+"brand": "GRECELL",
+"model_name": "300W Portable Power Station 288Wh",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": 330,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-t-500-500w-519wh",
+"brand": "GRECELL",
+"model_name": "T-500 (500W, 519Wh)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 519.48,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-t1000-1000w-999wh",
+"brand": "GRECELL",
+"model_name": "T1000 (1000W, 999Wh)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 999,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-h2400",
+"brand": "GRECELL",
+"model_name": "H2400",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1843.2,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-s5-4000w",
+"brand": "GRECELL",
+"model_name": "S5 4000W",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": 4000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-s5-bat-5040wh-expansion-battery",
+"brand": "GRECELL",
+"model_name": "S5-BAT 5040Wh Expansion Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "grecell-200w-portable-solar-panel",
+"brand": "GRECELL",
+"model_name": "200W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-mercury-m2200-us",
+"brand": "MARSTEK",
+"model_name": "MERCURY M2200 (US)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2240,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-p2200-extra-battery",
+"brand": "MARSTEK",
+"model_name": "P2200 Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2240,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-mercury-m1200-us",
+"brand": "MARSTEK",
+"model_name": "MERCURY M1200 (US)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1030,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-m5000-n-us",
+"brand": "MARSTEK",
+"model_name": "M5000-N (US)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": 5000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-p5000-n-extra-battery",
+"brand": "MARSTEK",
+"model_name": "P5000-N Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "marstek-p1200-m-extra-battery",
+"brand": "MARSTEK",
+"model_name": "P1200-M Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1030,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c1000-gen-2",
+"brand": "Anker SOLIX",
+"model_name": "C1000 Gen 2",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C1000 Gen 2"
+],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c2000-gen-2",
+"brand": "Anker SOLIX",
+"model_name": "C2000 Gen 2",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C2000 Gen 2"
+],
+"model_number": "A17831A1",
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-f3000",
+"brand": "Anker SOLIX",
+"model_name": "F3000",
+"kind": "station",
+"aliases": [
+"Anker SOLIX F3000"
+],
+"model_number": "A1782112",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-f3800-plus",
+"brand": "Anker SOLIX",
+"model_name": "F3800 Plus",
+"kind": "station",
+"aliases": [
+"Anker SOLIX F3800 Plus"
+],
+"model_number": "A1790112",
+"capacity_wh": 3840,
+"power_w": 6000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-f2600",
+"brand": "Anker SOLIX",
+"model_name": "F2600",
+"kind": "station",
+"aliases": [
+"Anker SOLIX F2600"
+],
+"model_number": "A1781111",
+"capacity_wh": 2560,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-f1500",
+"brand": "Anker SOLIX",
+"model_name": "F1500",
+"kind": "station",
+"aliases": [
+"Anker SOLIX F1500"
+],
+"model_number": "A1772111",
+"capacity_wh": 1536,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c1000x",
+"brand": "Anker SOLIX",
+"model_name": "C1000X",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C1000X"
+],
+"model_number": "A1761111",
+"capacity_wh": 1056,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-s2000",
+"brand": "Anker SOLIX",
+"model_name": "S2000",
+"kind": "station",
+"aliases": [
+"Anker SOLIX S2000"
+],
+"model_number": "AS220111",
+"capacity_wh": 2010,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-s5000",
+"brand": "Anker SOLIX",
+"model_name": "S5000",
+"kind": "station",
+"aliases": [
+"Anker SOLIX S5000"
+],
+"model_number": "AS5101A1",
+"capacity_wh": 5024,
+"power_w": 4500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c300",
+"brand": "Anker SOLIX",
+"model_name": "C300",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C300"
+],
+"model_number": "A17221Z1",
+"capacity_wh": 288,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c300-dc",
+"brand": "Anker SOLIX",
+"model_name": "C300 DC",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C300 DC"
+],
+"model_number": "A17260Z1",
+"capacity_wh": 288,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c300x",
+"brand": "Anker SOLIX",
+"model_name": "C300X",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C300X"
+],
+"model_number": "A1723111",
+"capacity_wh": 288,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-521-powerhouse-256wh",
+"brand": "Anker SOLIX",
+"model_name": "521 PowerHouse (256Wh)",
+"kind": "station",
+"aliases": [
+"Anker 521 PowerHouse (256Wh)"
+],
+"model_number": "A1720113",
+"capacity_wh": 256,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-powerhouse-522-299wh",
+"brand": "Anker SOLIX",
+"model_name": "PowerHouse 522 (299Wh)",
+"kind": "station",
+"aliases": [
+"Anker PowerHouse 522 (299Wh)"
+],
+"model_number": "A1721111",
+"capacity_wh": 299,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-535-powerhouse-512wh",
+"brand": "Anker SOLIX",
+"model_name": "535 PowerHouse (512Wh)",
+"kind": "station",
+"aliases": [
+"Anker 535 PowerHouse (512Wh)"
+],
+"model_number": "A1751113",
+"capacity_wh": 512,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-536-powerhouse-508wh",
+"brand": "Anker SOLIX",
+"model_name": "536 PowerHouse (508Wh)",
+"kind": "station",
+"aliases": [
+"Anker 536 PowerHouse (508Wh)"
+],
+"model_number": "A1756111",
+"capacity_wh": 508,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-555-powerhouse-1024wh",
+"brand": "Anker SOLIX",
+"model_name": "555 PowerHouse (1024Wh)",
+"kind": "station",
+"aliases": [
+"Anker 555 PowerHouse (1024Wh)"
+],
+"model_number": "A1760111",
+"capacity_wh": 1024,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c800x",
+"brand": "Anker SOLIX",
+"model_name": "C800X",
+"kind": "station",
+"aliases": [
+"Anker SOLIX C800X"
+],
+"model_number": null,
+"capacity_wh": 768,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp1000x-expansion-battery",
+"brand": "Anker SOLIX",
+"model_name": "BP1000X Expansion Battery",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP1000X Expansion Battery"
+],
+"model_number": "A1761111-85",
+"capacity_wh": 1056,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp2000-expansion-battery-gen-1-760",
+"brand": "Anker SOLIX",
+"model_name": "BP2000 Expansion Battery (Gen 1, 760)",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP2000 Expansion Battery (Gen 1, 760)"
+],
+"model_number": "A1780111-85",
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp2600-expansion-battery",
+"brand": "Anker SOLIX",
+"model_name": "BP2600 Expansion Battery",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP2600 Expansion Battery"
+],
+"model_number": "A1781111-85",
+"capacity_wh": 2560,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp3000-expansion-battery",
+"brand": "Anker SOLIX",
+"model_name": "BP3000 Expansion Battery",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP3000 Expansion Battery"
+],
+"model_number": "A1782111-85",
+"capacity_wh": 3072,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp3800-expansion-battery",
+"brand": "Anker SOLIX",
+"model_name": "BP3800 Expansion Battery",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP3800 Expansion Battery"
+],
+"model_number": "A1790111-85",
+"capacity_wh": 3840,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp5000-expansion-battery",
+"brand": "Anker SOLIX",
+"model_name": "BP5000 Expansion Battery",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP5000 Expansion Battery"
+],
+"model_number": "AS5101A1-85",
+"capacity_wh": 5024,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-bp2000-expansion-battery-gen-2",
+"brand": "Anker SOLIX",
+"model_name": "BP2000 Expansion Battery (Gen 2)",
+"kind": "battery",
+"aliases": [
+"Anker SOLIX BP2000 Expansion Battery (Gen 2)"
+],
+"model_number": "A17831A1-85",
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-ps100-bifacial-portable-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "PS100 Bifacial Portable Solar Panel",
+"kind": "panel",
+"aliases": [
+"Anker SOLIX PS100 Bifacial Portable Solar Panel"
+],
+"model_number": "AS310111",
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-ps200-bifacial-portable-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "PS200 Bifacial Portable Solar Panel",
+"kind": "panel",
+"aliases": [
+"Anker SOLIX PS200 Bifacial Portable Solar Panel"
+],
+"model_number": "AS320111",
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-ps400-bifacial-portable-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "PS400 Bifacial Portable Solar Panel",
+"kind": "panel",
+"aliases": [
+"Anker SOLIX PS400 Bifacial Portable Solar Panel"
+],
+"model_number": "AS340111",
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-ps400-portable-solar-panel-400w-a2437",
+"brand": "Anker SOLIX",
+"model_name": "PS400 Portable Solar Panel (400W, A2437)",
+"kind": "panel",
+"aliases": [
+"Anker SOLIX PS400 Portable Solar Panel (400W, A2437)"
+],
+"model_number": "A24371A1",
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-c1000-gen-2-ps100-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C1000 Gen 2 + PS100 Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C1000 Gen 2 + PS100 Solar Panel"
+],
+"model_number": "B17631A9",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c1000-gen-2",
+"anker-solix-ps100-bifacial-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "anker-solix-c1000-gen-2-ps200-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C1000 Gen 2 + PS200 Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C1000 Gen 2 + PS200 Solar Panel"
+],
+"model_number": "B17631AY",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c1000-gen-2",
+"anker-solix-ps200-bifacial-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "anker-solix-s2000-ps400-bifacial-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "S2000 + PS400 Bifacial Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX S2000 + PS400 Bifacial Solar Panel"
+],
+"model_number": "BS220112",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-s2000",
+"anker-solix-ps400-bifacial-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "anker-solix-c300-solar-generator-60w-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C300 Solar Generator + 60W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C300 Solar Generator + 60W Solar Panel"
+],
+"model_number": "B17221Z1",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c300"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-c300-dc-solar-generator-60w-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C300 DC Solar Generator + 60W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C300 DC Solar Generator + 60W Solar Panel"
+],
+"model_number": "B17260Z1",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c300-dc"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-c800x-100w-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C800X + 100W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C800X + 100W Solar Panel"
+],
+"model_number": "B1755116",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c800x"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-f3800-plus-400w-bifacial-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "F3800 Plus + 400W Bifacial Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX F3800 Plus + 400W Bifacial Solar Panel"
+],
+"model_number": "B1790116M",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-f3800-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-f3000-400w-bifacial-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "F3000 + 400W Bifacial Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX F3000 + 400W Bifacial Solar Panel"
+],
+"model_number": "B1782111M",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-f3000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-c2000-gen-2-200w-bifacial-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "C2000 Gen 2 + 200W Bifacial Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX C2000 Gen 2 + 200W Bifacial Solar Panel"
+],
+"model_number": "B17831AZ",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-c2000-gen-2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-s5000-400w-bifacial-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "S5000 + 400W Bifacial Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX S5000 + 400W Bifacial Solar Panel"
+],
+"model_number": "BS5101A1",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-s5000"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-f2600-solar-generator-400w-solar-panel",
+"brand": "Anker SOLIX",
+"model_name": "F2600 Solar Generator + 400W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Anker SOLIX F2600 Solar Generator + 400W Solar Panel"
+],
+"model_number": "B1781112",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"anker-solix-f2600"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "anker-solix-high-voltage-solar-charging-cable",
+"brand": "Anker SOLIX",
+"model_name": "High-Voltage Solar Charging Cable",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX High-Voltage Solar Charging Cable"
+],
+"model_number": "AS210011",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-120v-generator-input-adapter-for-f3000",
+"brand": "Anker SOLIX",
+"model_name": "120V Generator Input Adapter (For F3000)",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX 120V Generator Input Adapter (For F3000)"
+],
+"model_number": "A17D1111",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-240v-bypass-charging-cable-for-f3800-plus",
+"brand": "Anker SOLIX",
+"model_name": "240V Bypass Charging Cable for F3800 Plus",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX 240V Bypass Charging Cable for F3800 Plus"
+],
+"model_number": "A17D0111",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-240v-fast-charging-cable-for-s5000",
+"brand": "Anker SOLIX",
+"model_name": "240V Fast Charging Cable (For S5000)",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX 240V Fast Charging Cable (For S5000)"
+],
+"model_number": "AS5101A1-80",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-double-voltage-hub-for-f3000",
+"brand": "Anker SOLIX",
+"model_name": "Double Voltage Hub (For F3000)",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX Double Voltage Hub (For F3000)"
+],
+"model_number": "A17D4111-5",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "anker-solix-mc4-to-xt-60-charging-cable-0-5m",
+"brand": "Anker SOLIX",
+"model_name": "MC4-to-XT-60 Charging Cable (0.5m)",
+"kind": "cable",
+"aliases": [
+"Anker SOLIX MC4-to-XT-60 Charging Cable (0.5m)"
+],
+"model_number": "A24V7011",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-500",
+"brand": "DJI",
+"model_name": "Power 500",
+"kind": "station",
+"aliases": [
+"DJI Power 500"
+],
+"model_number": null,
+"capacity_wh": 512,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-1000",
+"brand": "DJI",
+"model_name": "Power 1000",
+"kind": "station",
+"aliases": [
+"DJI Power 1000"
+],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-1000-mini",
+"brand": "DJI",
+"model_name": "Power 1000 Mini",
+"kind": "station",
+"aliases": [
+"DJI Power 1000 Mini"
+],
+"model_number": "DYM1000M",
+"capacity_wh": 1008,
+"power_w": 800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-2000",
+"brand": "DJI",
+"model_name": "Power 2000",
+"kind": "station",
+"aliases": [
+"DJI Power 2000"
+],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-expansion-battery-2000",
+"brand": "DJI",
+"model_name": "Power Expansion Battery 2000",
+"kind": "battery",
+"aliases": [
+"DJI Power Expansion Battery 2000"
+],
+"model_number": "DYS_2000EB",
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dji-power-solar-panel-adapter-module-mppt",
+"brand": "DJI",
+"model_name": "Power Solar Panel Adapter Module (MPPT)",
+"kind": "cable",
+"aliases": [
+"DJI Power Solar Panel Adapter Module (MPPT)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ugreen-powerroam-2200",
+"brand": "UGREEN",
+"model_name": "PowerRoam 2200",
+"kind": "station",
+"aliases": [
+"UGREEN PowerRoam 2200"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-v4600",
+"brand": "Zendure",
+"model_name": "SuperBase V4600",
+"kind": "station",
+"aliases": [
+"Zendure SuperBase V4600"
+],
+"model_number": "ZDSBV4600-GY-US",
+"capacity_wh": 4608,
+"power_w": 3800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-satellite-battery-b4600",
+"brand": "Zendure",
+"model_name": "SuperBase Satellite Battery B4600",
+"kind": "battery",
+"aliases": [
+"Zendure SuperBase Satellite Battery B4600"
+],
+"model_number": "ZDSATB4600-gy",
+"capacity_wh": 4608,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-pro-2000",
+"brand": "Zendure",
+"model_name": "SuperBase Pro 2000",
+"kind": "station",
+"aliases": [
+"Zendure SuperBase Pro 2000"
+],
+"model_number": "ZDSBP2000-BK-US",
+"capacity_wh": 2096,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-pro-1500",
+"brand": "Zendure",
+"model_name": "SuperBase Pro 1500",
+"kind": "station",
+"aliases": [
+"Zendure SuperBase Pro 1500"
+],
+"model_number": "ZDSBP1500-BK-US",
+"capacity_wh": null,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-m-1000-1000m",
+"brand": "Zendure",
+"model_name": "SuperBase M 1000 (1000M)",
+"kind": "station",
+"aliases": [
+"Zendure SuperBase M 1000 (1000M)"
+],
+"model_number": "ZDSB1000M-GY-US",
+"capacity_wh": 1016.16,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-m-600-600m",
+"brand": "Zendure",
+"model_name": "SuperBase M 600 (600M)",
+"kind": "station",
+"aliases": [
+"Zendure SuperBase M 600 (600M)"
+],
+"model_number": "ZDSB600M",
+"capacity_wh": 607.36,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-200w-portable-solar-panel",
+"brand": "Zendure",
+"model_name": "200W Portable Solar Panel",
+"kind": "panel",
+"aliases": [
+"Zendure 200W Portable Solar Panel"
+],
+"model_number": "ZD200SP-bk-jh",
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-400w-portable-solar-panel",
+"brand": "Zendure",
+"model_name": "400W Portable Solar Panel",
+"kind": "panel",
+"aliases": [
+"Zendure 400W Portable Solar Panel"
+],
+"model_number": "ZD400SP-MD-GY",
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-zeny-pro-cable-tt-30",
+"brand": "Zendure",
+"model_name": "ZenY Pro Cable (TT-30)",
+"kind": "cable",
+"aliases": [
+"Zendure ZenY Pro Cable (TT-30)"
+],
+"model_number": "ZDSZY30-bk",
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "zendure-superbase-v4600-400w-solar-panel",
+"brand": "Zendure",
+"model_name": "SuperBase V4600 + 400W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Zendure SuperBase V4600 + 400W Solar Panel"
+],
+"model_number": "ZDSBV4600-GY-US-1&ZD400SP-MD-GY",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"zendure-superbase-v4600",
+"zendure-400w-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "zendure-superbase-pro-1500-400w-solar-panel",
+"brand": "Zendure",
+"model_name": "SuperBase Pro 1500 + 400W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Zendure SuperBase Pro 1500 + 400W Solar Panel"
+],
+"model_number": "ZDSBP1500-BK-US-1&ZD400SP-MD-GY",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"zendure-superbase-pro-1500",
+"zendure-400w-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "zendure-superbase-m-1000-200w-solar-panel",
+"brand": "Zendure",
+"model_name": "SuperBase M 1000 + 200W Solar Panel",
+"kind": "kit",
+"aliases": [
+"Zendure SuperBase M 1000 + 200W Solar Panel"
+],
+"model_number": "ZDSB1000M-GY-US-ZD200SP-BK-JH",
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"zendure-superbase-m-1000-1000m",
+"zendure-200w-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "bluetti-elite-30-v2",
+"brand": "BLUETTI",
+"model_name": "Elite 30 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-30-mini",
+"brand": "BLUETTI",
+"model_name": "Elite 30 mini",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-100-mini",
+"brand": "BLUETTI",
+"model_name": "Elite 100 mini",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1004.8,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-100-v2",
+"brand": "BLUETTI",
+"model_name": "Elite 100 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-200-v2",
+"brand": "BLUETTI",
+"model_name": "Elite 200 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 2600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-300",
+"brand": "BLUETTI",
+"model_name": "Elite 300",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3014.4,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-elite-400",
+"brand": "BLUETTI",
+"model_name": "Elite 400",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3840,
+"power_w": 2600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-apex-200",
+"brand": "BLUETTI",
+"model_name": "Apex 200",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2560,
+"power_w": 3200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-apex-300",
+"brand": "BLUETTI",
+"model_name": "Apex 300",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2764.8,
+"power_w": 3840,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-pioneer-na",
+"brand": "BLUETTI",
+"model_name": "Pioneer Na",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 900,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-fridgepower",
+"brand": "BLUETTI",
+"model_name": "FridgePower",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2016,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac200l",
+"brand": "BLUETTI",
+"model_name": "AC200L",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac180",
+"brand": "BLUETTI",
+"model_name": "AC180",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1152,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac180p",
+"brand": "BLUETTI",
+"model_name": "AC180P",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1440,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac70",
+"brand": "BLUETTI",
+"model_name": "AC70",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 768,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac70p",
+"brand": "BLUETTI",
+"model_name": "AC70P",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 864,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac50b",
+"brand": "BLUETTI",
+"model_name": "AC50B",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 448,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac50p",
+"brand": "BLUETTI",
+"model_name": "AC50P",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 504,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac200p-l",
+"brand": "BLUETTI",
+"model_name": "AC200P L",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2304,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-premium-100-v2",
+"brand": "BLUETTI",
+"model_name": "Premium 100 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-premium-200-v2",
+"brand": "BLUETTI",
+"model_name": "Premium 200 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2073.6,
+"power_w": 2700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ps72",
+"brand": "BLUETTI",
+"model_name": "PS72",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 716,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b300k",
+"brand": "BLUETTI",
+"model_name": "B300K",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2764.8,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b500k",
+"brand": "BLUETTI",
+"model_name": "B500K",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5120,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b300",
+"brand": "BLUETTI",
+"model_name": "B300",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3072,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b300s",
+"brand": "BLUETTI",
+"model_name": "B300S",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3072,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b230",
+"brand": "BLUETTI",
+"model_name": "B230",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b210",
+"brand": "BLUETTI",
+"model_name": "B210",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2150,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-b80",
+"brand": "BLUETTI",
+"model_name": "B80",
+"kind": "battery",
+"aliases": [],
+"model_number": "B80P",
+"capacity_wh": 806,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-bc200-bluecell-200",
+"brand": "BLUETTI",
+"model_name": "BC200 (BlueCell 200)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2016,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-pv350-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "PV350 (350W Solar Panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 350,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-sora-500-500w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "SORA 500 (500W Solar Panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-sp200l-200w-portable-solar-panel",
+"brand": "BLUETTI",
+"model_name": "SP200L (200W Portable Solar Panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-sp100l",
+"brand": "BLUETTI",
+"model_name": "SP100L",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-pv100fx-flexible",
+"brand": "BLUETTI",
+"model_name": "PV100FX (flexible)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-sora-60",
+"brand": "BLUETTI",
+"model_name": "SORA 60",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 60,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-pv120s-120w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "PV120S (120W Solar Panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 120,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-eb3a",
+"brand": "BLUETTI",
+"model_name": "EB3A",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 268.8,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac60-pioneer-50",
+"brand": "BLUETTI",
+"model_name": "AC60 (Pioneer 50)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 403,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac240-pioneer-150",
+"brand": "BLUETTI",
+"model_name": "AC240 (Pioneer 150)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1536,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac180t-pioneer-md",
+"brand": "BLUETTI",
+"model_name": "AC180T (Pioneer MD)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac200max",
+"brand": "BLUETTI",
+"model_name": "AC200MAX",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ac200p",
+"brand": "BLUETTI",
+"model_name": "AC200P",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2000,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ep500",
+"brand": "BLUETTI",
+"model_name": "EP500",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-ep500pro",
+"brand": "BLUETTI",
+"model_name": "EP500Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-500w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: 500W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-b500k-2-500w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: B500K + 2×500W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200",
+"bluetti-b500k"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "bluetti-apex-200-solar-generator-kit-b300k-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Apex 200 solar generator kit: B300K + 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-apex-200",
+"bluetti-b300k"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "bluetti-elite-100-mini-solar-generator-kit-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 100 mini solar generator kit: 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-mini"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-100-mini-solar-generator-kit-100w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 100 mini solar generator kit: 100W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-mini"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-100-mini-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 100 mini solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-mini"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-100-v2-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 100 V2 solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-100-v2-solar-generator-kit-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 100 V2 solar generator kit: 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-100-v2-solar-generator-kit-100w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 100 V2 solar generator kit: 100W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-100-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-200-v2-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 200 V2 solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-200-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-200-v2-solar-generator-kit-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 200 V2 solar generator kit: 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-200-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-200-v2-solar-generator-kit-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 200 V2 solar generator kit: 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-200-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-200-v2-solar-generator-kit-2-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 200 V2 solar generator kit: 2×350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-200-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-300-solar-generator-kit-500w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 300 solar generator kit: 500W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-300"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-300-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 300 solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-300"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-300-solar-generator-kit-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 300 solar generator kit: 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-300"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-30-mini-solar-generator-kit-60w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 30 mini solar generator kit: 60W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-30-mini"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-30-mini-solar-generator-kit-100w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 30 mini solar generator kit: 100W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-30-mini"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-30-v2-solar-generator-kit-60w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 30 V2 solar generator kit: 60W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-30-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-30-v2-solar-generator-kit-100w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Elite 30 V2 solar generator kit: 100W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-30-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-400-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 400 solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-400-solar-generator-kit-500w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 400 solar generator kit: 500W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-400-solar-generator-kit-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 400 solar generator kit: 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-elite-400-solar-generator-kit-2-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Elite 400 solar generator kit: 2×350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-elite-400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-pioneer-na-solar-generator-kit-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Pioneer Na solar generator kit: 200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-pioneer-na"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-pioneer-na-solar-generator-kit-350w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Pioneer Na solar generator kit: 350W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-pioneer-na"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-pioneer-na-solar-generator-kit-2-200w-solar-panel",
+"brand": "BLUETTI",
+"model_name": "Pioneer Na solar generator kit: 2×200W Solar Panel",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-pioneer-na"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "bluetti-pioneer-na-solar-generator-kit-100w-solar-panel-model-not-named",
+"brand": "BLUETTI",
+"model_name": "Pioneer Na solar generator kit: 100W Solar Panel (model not named)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"bluetti-pioneer-na"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "goal-zero-yeti-300",
+"brand": "Goal Zero",
+"model_name": "Yeti 300",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 296.96,
+"power_w": 350,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-500",
+"brand": "Goal Zero",
+"model_name": "Yeti 500",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 499.2,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-700",
+"brand": "Goal Zero",
+"model_name": "Yeti 700",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 677.37,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-1000-6th-gen-2026",
+"brand": "Goal Zero",
+"model_name": "Yeti 1000 (6th gen, 2026)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 998.4,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-1500-6th-gen-2026",
+"brand": "Goal Zero",
+"model_name": "Yeti 1500 (6th gen, 2026)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1505.28,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-pro-4000",
+"brand": "Goal Zero",
+"model_name": "Yeti PRO 4000",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3993.6,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-tank-pro-4000",
+"brand": "Goal Zero",
+"model_name": "Tank PRO 4000",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3993.6,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-nomad-50",
+"brand": "Goal Zero",
+"model_name": "Nomad 50+",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 50,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-nomad-100",
+"brand": "Goal Zero",
+"model_name": "Nomad 100+",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-nomad-200",
+"brand": "Goal Zero",
+"model_name": "Nomad 200+",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-nomad-400",
+"brand": "Goal Zero",
+"model_name": "Nomad 400+",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-boulder-50",
+"brand": "Goal Zero",
+"model_name": "Boulder 50",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 50,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-boulder-100-briefcase",
+"brand": "Goal Zero",
+"model_name": "Boulder 100 Briefcase",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-boulder-200-briefcase",
+"brand": "Goal Zero",
+"model_name": "Boulder 200 Briefcase",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-ranger-300-briefcase",
+"brand": "Goal Zero",
+"model_name": "Ranger 300 Briefcase",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-pro-4000-nomad-400-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti PRO 4000 & Nomad 400+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-pro-4000",
+"goal-zero-nomad-400"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-1500-nomad-400-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 1500 & Nomad 400+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-nomad-400"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "goal-zero-yeti-1500-nomad-200-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 1500 & Nomad 200+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-nomad-200"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "goal-zero-yeti-500-nomad-50-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 500 & Nomad 50+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-500",
+"goal-zero-nomad-50"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-700-nomad-100-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 700 & Nomad 100+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-700",
+"goal-zero-nomad-100"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-1500-boulder-100-bc-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 1500 + Boulder 100 BC Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-boulder-100-briefcase"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "goal-zero-yeti-700-boulder-100-bc-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 700 + Boulder 100 BC Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-700",
+"goal-zero-boulder-100-briefcase"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-500-boulder-100-bc-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 500 + Boulder 100 BC Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-500",
+"goal-zero-boulder-100-briefcase"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-300-nomad-50-solar-generator",
+"brand": "Goal Zero",
+"model_name": "Yeti 300 & Nomad 50+ Solar Generator",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"goal-zero-yeti-300",
+"goal-zero-nomad-50"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "goal-zero-yeti-1500x",
+"brand": "Goal Zero",
+"model_name": "Yeti 1500X",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1516,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-3000x",
+"brand": "Goal Zero",
+"model_name": "Yeti 3000X",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3032,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "goal-zero-yeti-1000-core",
+"brand": "Goal Zero",
+"model_name": "Yeti 1000 Core",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 983,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-powerstation-2000",
+"brand": "Renogy",
+"model_name": "PowerStation 2000",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-e-flex-200se-rpp200ef-se-g2",
+"brand": "Renogy",
+"model_name": "E.Flex 200SE (RPP200EF-SE-G2)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-e-flex-100se-rpp100ef-se-g2",
+"brand": "Renogy",
+"model_name": "E.Flex 100SE (RPP100EF-SE-G2)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-solar-panel-blanket-200w-rpp200sb-se-g1",
+"brand": "Renogy",
+"model_name": "Solar Panel Blanket 200W (RPP200SB-SE-G1)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-solar-panel-blanket-400w-rsp400sb-g3",
+"brand": "Renogy",
+"model_name": "Solar Panel Blanket 400W (RSP400SB-G3)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-220w-lightweight-portable-solar-suitcase",
+"brand": "Renogy",
+"model_name": "220W Lightweight Portable Solar Suitcase",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 220,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-400w-lightweight-portable-solar-suitcase-rsp400lsc-g2-us-n-type",
+"brand": "Renogy",
+"model_name": "400W Lightweight Portable Solar Suitcase (RSP400LSC-G2-US, N-type)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-400w-lightweight-portable-solar-suitcase-rsp400lsc-g1-us-perc",
+"brand": "Renogy",
+"model_name": "400W Lightweight Portable Solar Suitcase (RSP400LSC-G1-US, PERC)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-300w-n-type-compact-suitcase-rsp300lsc",
+"brand": "Renogy",
+"model_name": "300W N-type Compact Suitcase (RSP300LSC)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-100w-n-type-compact-suitcase-rsp100lsc",
+"brand": "Renogy",
+"model_name": "100W N-type Compact Suitcase (RSP100LSC)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "renogy-200w-12v-n-type-portable-solar-panel-suitcase-kit-with-20a-pwm-controller",
+"brand": "Renogy",
+"model_name": "200W 12V N-Type Portable Solar Panel Suitcase Kit with 20A PWM Controller",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-3",
+"brand": "EcoFlow",
+"model_name": "RIVER 3",
+"kind": "station",
+"aliases": [],
+"model_number": "EFR705",
+"capacity_wh": 245,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-3-plus",
+"brand": "EcoFlow",
+"model_name": "RIVER 3 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-RV-H02-1",
+"capacity_wh": 286,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-3-max",
+"brand": "EcoFlow",
+"model_name": "RIVER 3 Max",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-river-3-plus",
+"ecoflow-river-3-plus-smart-extra-battery-eb300-286wh"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "ecoflow-river-3-max-plus",
+"brand": "EcoFlow",
+"model_name": "RIVER 3 Max Plus",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-river-3-plus",
+"ecoflow-river-3-plus-smart-extra-battery-eb600-572wh"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "ecoflow-river-2",
+"brand": "EcoFlow",
+"model_name": "RIVER 2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 256,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-2-max",
+"brand": "EcoFlow",
+"model_name": "RIVER 2 Max",
+"kind": "station",
+"aliases": [],
+"model_number": "EFR610",
+"capacity_wh": 512,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-2-max-500",
+"brand": "EcoFlow",
+"model_name": "RIVER 2 Max 500",
+"kind": "station",
+"aliases": [],
+"model_number": "EFR607",
+"capacity_wh": 499,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-2-pro",
+"brand": "EcoFlow",
+"model_name": "RIVER 2 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": "EFR620",
+"capacity_wh": 768,
+"power_w": 800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-2",
+"brand": "EcoFlow",
+"model_name": "DELTA 2",
+"kind": "station",
+"aliases": [],
+"model_number": "EFD330",
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-2-max",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max",
+"kind": "station",
+"aliases": [],
+"model_number": "EFD350",
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3",
+"brand": "EcoFlow",
+"model_name": "DELTA 3",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H10-3",
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-plus",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H10-4",
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-1500",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 1500",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H15-3",
+"capacity_wh": 1536,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-classic",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Classic",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-1000-air",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 1000 Air",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 960,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-max",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H02-3M",
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-max-plus",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-ultra",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Ultra",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H01-3U",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-ultra-plus",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Ultra Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "EF-DL-H02-3UP",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3000-gen4",
+"brand": "EcoFlow",
+"model_name": "DELTA 3000 Gen4",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3800-gen4",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3763,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-pro",
+"brand": "EcoFlow",
+"model_name": "DELTA Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3600,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-pro-3",
+"brand": "EcoFlow",
+"model_name": "DELTA Pro 3",
+"kind": "station",
+"aliases": [],
+"model_number": "EFD521",
+"capacity_wh": 4096,
+"power_w": 4000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-trail-300-dc",
+"brand": "EcoFlow",
+"model_name": "TRAIL 300 DC",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-trail-plus-300-dc",
+"brand": "EcoFlow",
+"model_name": "TRAIL Plus 300 DC",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-3-plus-smart-extra-battery-eb300-286wh",
+"brand": "EcoFlow",
+"model_name": "RIVER 3 Plus Smart Extra Battery EB300 (286Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": "EF-RV-E01-1",
+"capacity_wh": 286,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-river-3-plus-smart-extra-battery-eb600-572wh",
+"brand": "EcoFlow",
+"model_name": "RIVER 3 Plus Smart Extra Battery EB600 (572Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": "EF-RV-E02-1",
+"capacity_wh": 572,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-smart-extra-battery",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Smart Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": "EF-DL-E10-4",
+"capacity_wh": 1024,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-max-plus-smart-extra-battery",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Smart Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-pro-3-smart-extra-battery",
+"brand": "EcoFlow",
+"model_name": "DELTA Pro 3 Smart Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": "EFD521-EB",
+"capacity_wh": 4096,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-2-max-smart-extra-battery",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Smart Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-45w-portable-solar-panel",
+"brand": "EcoFlow",
+"model_name": "45W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": "EF-Fold-P045-CG",
+"capacity_wh": null,
+"power_w": 45,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-nextgen-160w-portable-solar-panel",
+"brand": "EcoFlow",
+"model_name": "NextGen 160W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 160,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-nextgen-220w-bifacial-portable-solar-panel",
+"brand": "EcoFlow",
+"model_name": "NextGen 220W Bifacial Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 220,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-400w-lightweight-portable-solar-panel",
+"brand": "EcoFlow",
+"model_name": "400W Lightweight Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": "EF-FOLD-400-LW",
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-400w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "400W Rigid Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-175w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "175W Rigid Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": "EF-SG-M175-01",
+"capacity_wh": null,
+"power_w": 175,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-110w-portable-solar-panel",
+"brand": "EcoFlow",
+"model_name": "110W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 110,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-100w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "100W Rigid Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-100w-flexible-solar-panel",
+"brand": "EcoFlow",
+"model_name": "100W Flexible Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-delta-3-solar-generator-110w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Solar Generator (110W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-solar-generator-220w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Solar Generator (220W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-solar-generator-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Solar Generator (160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-2-x-100w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (2 x 100W Rigid Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus",
+"ecoflow-100w-rigid-solar-panel"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-4-125w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (4 × 125W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-2-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (2 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-400w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (400W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-plus-solar-generator-100w-flexible-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Plus Solar Generator (100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max-plus",
+"ecoflow-100w-flexible-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-500w-solar-kit",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (500W Solar Kit)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-2-220w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (2 × 220W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-400w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (400W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-2-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (2 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-2-x-100w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (2 x 100W Rigid Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max",
+"ecoflow-100w-rigid-solar-panel"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "ecoflow-delta-3-max-solar-generator-100w-flexible-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Max Solar Generator (100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-max",
+"ecoflow-100w-flexible-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-2-220w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (2 × 220W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-500w-solar-kit",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (500W Solar Kit)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-2-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (2 × 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-2-x-100w-rigid-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (2 x 100W Rigid Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max",
+"ecoflow-100w-rigid-solar-panel"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "ecoflow-delta-2-max-solar-generator-100w-flexible-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 2 Max Solar Generator (100W Flexible Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-2-max",
+"ecoflow-100w-flexible-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "ecoflow-delta-3-classic-solar-generator-220w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Classic Solar Generator (220W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-classic"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-classic-solar-generator-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Classic Solar Generator (160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-classic"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3-classic-solar-generator-110w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3 Classic Solar Generator (110W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3-classic"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3000-gen4-solar-generator-2-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3000 Gen4 Solar Generator (2 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3000-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3000-gen4-solar-generator-400w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3000 Gen4 Solar Generator (400W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3000-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3800-gen4-solar-generator-400w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4 Solar Generator (400W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3800-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3800-gen4-solar-generator-2-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4 Solar Generator (2 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3800-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3800-gen4-solar-generator-delta-3-max-plus-extra-battery-2-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4 Solar Generator (DELTA 3 Max Plus Extra Battery + 2 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3800-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3800-gen4-solar-generator-delta-3-max-plus-extra-battery-400w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4 Solar Generator (DELTA 3 Max Plus Extra Battery + 400W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3800-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-delta-3800-gen4-solar-generator-4-x-160w-solar-panel",
+"brand": "EcoFlow",
+"model_name": "DELTA 3800 Gen4 Solar Generator (4 x 160W Solar Panel)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"ecoflow-delta-3800-gen4"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "ecoflow-solar-charging-cable-xt60i-to-lp60",
+"brand": "EcoFlow",
+"model_name": "Solar Charging Cable (XT60i to LP60)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-solar-to-xt60-charging-cable-3-5m",
+"brand": "EcoFlow",
+"model_name": "Solar to XT60 Charging Cable (3.5m)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-solar-to-xt60i-charging-cable-2-5m",
+"brand": "EcoFlow",
+"model_name": "Solar to XT60i Charging Cable (2.5m)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "ecoflow-extra-battery-expansion-adapter",
+"brand": "EcoFlow",
+"model_name": "Extra Battery Expansion Adapter",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-5000-plus",
+"brand": "Jackery",
+"model_name": "Explorer 5000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": 7200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-3600-plus",
+"brand": "Jackery",
+"model_name": "HomePower 3600 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "JHP-3600A",
+"capacity_wh": 3584,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-3600-pro-max",
+"brand": "Jackery",
+"model_name": "HomePower 3600 Pro Max",
+"kind": "station",
+"aliases": [],
+"model_number": "JHP-3600C",
+"capacity_wh": 3584,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-2000-plus-v2",
+"brand": "Jackery",
+"model_name": "HomePower 2000 Plus v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-1000-plus-v2",
+"brand": "Jackery",
+"model_name": "HomePower 1000 Plus v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-1000-plus",
+"brand": "Jackery",
+"model_name": "Explorer 1000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": "JE-1000C",
+"capacity_wh": 1264.64,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-3000",
+"brand": "Jackery",
+"model_name": "HomePower 3000",
+"kind": "station",
+"aliases": [],
+"model_number": "JHP-3000C",
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-2000-v2",
+"brand": "Jackery",
+"model_name": "Explorer 2000 v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2042,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-1500-ultra",
+"brand": "Jackery",
+"model_name": "Explorer 1500 Ultra",
+"kind": "station",
+"aliases": [],
+"model_number": "JE-1500C",
+"capacity_wh": 1536,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-1500-v2",
+"brand": "Jackery",
+"model_name": "Explorer 1500 v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1536,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-1000-v2",
+"brand": "Jackery",
+"model_name": "Explorer 1000 v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1070,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-homepower-1000-v2",
+"brand": "Jackery",
+"model_name": "HomePower 1000 v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-300-v2",
+"brand": "Jackery",
+"model_name": "Explorer 300 v2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-300d",
+"brand": "Jackery",
+"model_name": "Explorer 300D",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-300-lifepo4-current-listing",
+"brand": "Jackery",
+"model_name": "Explorer 300 (LiFePO4, current listing)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 291.84,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-2000-plus",
+"brand": "Jackery",
+"model_name": "Explorer 2000 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2042.8,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-1000-pro",
+"brand": "Jackery",
+"model_name": "Explorer 1000 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1002,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-290-plus",
+"brand": "Jackery",
+"model_name": "Explorer 290 Plus",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 293.76,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-explorer-300-original-li-ion",
+"brand": "Jackery",
+"model_name": "Explorer 300 (original, Li-ion)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 293,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-battery-pack-5000-plus",
+"brand": "Jackery",
+"model_name": "Battery Pack 5000 Plus",
+"kind": "battery",
+"aliases": [],
+"model_number": "JBP-5000A",
+"capacity_wh": 5040,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-battery-pack-3600-plus-battery-pack-homepower-3600",
+"brand": "Jackery",
+"model_name": "Battery Pack 3600 Plus (Battery Pack HomePower 3600)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3584,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-battery-pack-2000-plus-v2",
+"brand": "Jackery",
+"model_name": "Battery Pack 2000 Plus v2",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-battery-pack-2000-plus",
+"brand": "Jackery",
+"model_name": "Battery Pack 2000 Plus",
+"kind": "battery",
+"aliases": [],
+"model_number": "JBP-2000A",
+"capacity_wh": 2042.8,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-500-x",
+"brand": "Jackery",
+"model_name": "SolarSaga 500 X",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "SolarSaga 200W",
+"kind": "panel",
+"aliases": [],
+"model_number": "JS-200E",
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-100-prime",
+"brand": "Jackery",
+"model_name": "SolarSaga 100 Prime",
+"kind": "panel",
+"aliases": [],
+"model_number": "JS-100E",
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-100-light",
+"brand": "Jackery",
+"model_name": "SolarSaga 100 Light",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-100-air",
+"brand": "Jackery",
+"model_name": "SolarSaga 100 Air",
+"kind": "panel",
+"aliases": [],
+"model_number": "JS-100H",
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-40-air",
+"brand": "Jackery",
+"model_name": "SolarSaga 40 Air",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solarsaga-100w-original",
+"brand": "Jackery",
+"model_name": "SolarSaga 100W (original)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-5000-plus-10kwh-solarsaga-500-x-x-2-smart-transfer-switch",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 5000 Plus (10kWh) + SolarSaga 500 X x 2 + Smart Transfer Switch",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-5000-plus",
+"jackery-battery-pack-5000-plus",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-5000-plus-10kwh-solarsaga-500-x-x-2-automatic-transfer-switch",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 5000 Plus (10kWh) + SolarSaga 500 X x 2 + Automatic Transfer Switch",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-5000-plus-solarsaga-500-x-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 5000 Plus + SolarSaga 500 X x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-5000-plus",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-5000-plus-solarsaga-500-x-x-2-smart-transfer-switch",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 5000 Plus + SolarSaga 500 X x 2 + Smart Transfer Switch",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-5000-plus",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-plus-7-2kwh-solarsaga-500-x",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Plus (7.2kWh) + SolarSaga 500 X",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-plus",
+"jackery-battery-pack-3600-plus-battery-pack-homepower-3600",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-plus-7-2kwh-solarsaga-500-x-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Plus (7.2kWh) + SolarSaga 500 X x 2",
+"kind": "kit",
+"aliases": [
+"Solar Generator bundle: HomePower 3600 Plus (7.2kWh) + SolarSaga 500 X  x 2"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-plus",
+"jackery-battery-pack-3600-plus-battery-pack-homepower-3600",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-plus-solarsaga-200w-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Plus + SolarSaga 200W x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-plus",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-plus-solarsaga-500-x",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Plus + SolarSaga 500 X",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-plus",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-pro-max-500w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Pro Max + 500W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-pro-max",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-pro-max-500w-mts-40a-charging-cable",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Pro Max + 500W + MTS + 40A Charging Cable",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-pro-max",
+"jackery-solarsaga-500-x",
+"jackery-40a-charging-cable"
+],
+"component_qty": [
+1,
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3600-pro-max-extra-battery-500w-mts-40a-charging-cable",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3600 Pro Max + Extra Battery + 500W + MTS + 40A Charging Cable",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3600-pro-max",
+"jackery-battery-pack-3600-plus-battery-pack-homepower-3600",
+"jackery-solarsaga-500-x",
+"jackery-40a-charging-cable"
+],
+"component_qty": [
+1,
+1,
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-battery-pack-2000-plus-v2-200w-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + Battery Pack 2000 Plus v2+ 200W × 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-battery-pack-2000-plus-v2-x2-200w-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + Battery Pack 2000 Plus v2 x2 + 200W × 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-battery-pack-2000-plus-v2-200w-dune-white-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus + Battery Pack 2000 Plus v2 + 200W(Dune White) x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-battery-pack-2000-plus-v2-x-2-200w-dune-white-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus + Battery Pack 2000 Plus v2 x 2+200W(Dune White) x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-red-cross-edition-battery-pack2000-plus-v2-200w-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 Red Cross Edition + Battery Pack2000 Plus v2 + 200W × 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-red-cross-edition-battery-pack2000-plus-v2-2-200w-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 Red Cross Edition + Battery Pack2000 Plus v2 × 2 + 200W × 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+2,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-battery-pack-2000-plus-v2-500w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + Battery Pack 2000 Plus v2+ 500W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-battery-pack-2000-plus-v2-x2-500w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + Battery Pack 2000 Plus v2 x2 + 500W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+2,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-200w-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + 200W × 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-2000-plus-v2-500w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 2000 Plus v2 + 500W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-2000-plus-v2",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-white-homepower-1000-plus-v2-solarsaga-100-air-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: White / HomePower 1000 Plus v2 +SolarSaga 100 Air x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-white-homepower-1000-plus-v2-solarsaga-100-air",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: White / HomePower 1000 Plus v2 +SolarSaga 100 Air",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000-plus-v2-battery-pack-2000-plus-v2-solarsaga-200w-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000 Plus v2 +Battery Pack 2000 Plus v2+SolarSaga 200W x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000-plus-v2-battery-pack-2000-plus-v2-solarsaga-100-air-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000 Plus v2 +Battery Pack 2000 Plus v2+SolarSaga 100 Air x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-battery-pack-2000-plus-v2",
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000-plus-v2-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000 Plus v2 +SolarSaga 200W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000-plus-v2-solarsaga-100-air-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000 Plus v2 +SolarSaga 100 Air x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-1000-plus-solarsaga-100-air-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 1000 Plus + SolarSaga 100 Air x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-1000-plus",
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3000-solarsaga-200w-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3000 + SolarSaga 200W x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3000",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-homepower-3000-solarsaga-500-x",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: HomePower 3000 + SolarSaga 500 X",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-homepower-3000",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-100w-air-x2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + 100W air x2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-2000-v2",
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-200w-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + SolarSaga 200W x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-2000-v2",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-200w-dune-white-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + SolarSaga 200W(Dune White) x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-2000-v2"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-100w-light-x4",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + SolarSaga 100W light x4",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-2000-v2",
+"jackery-solarsaga-100-light"
+],
+"component_qty": [
+1,
+4
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-500w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + SolarSaga 500W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-2000-v2",
+"jackery-solarsaga-500-x"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-1500-ultra-solarsaga-200w-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 1500 Ultra + SolarSaga 200W x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-1500-ultra",
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-1500-ultra-solarsaga-100-prime-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 1500 Ultra + SolarSaga 100 Prime x 2",
+"kind": "kit",
+"aliases": [
+"Solar Generator bundle: Explorer 1500 Ultra + SolarSaga 100 Prime  x 2"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-1500-ultra",
+"jackery-solarsaga-100-prime"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-1500-v2-solarsaga-100w-air-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 1500 v2 + SolarSaga 100W Air x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-1500-v2",
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+1,
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-explorer-1000-v2-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / Explorer 1000 v2 + SolarSaga 200W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-dune-white-explorer-1000-v2-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Dune White / Explorer 1000 v2 + SolarSaga 200W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-white-homepower-1000-v2-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: White / HomePower 1000 v2 +SolarSaga 200W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000-v2-solarsaga-200w",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000 v2 +SolarSaga 200W",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-200w"
+],
+"component_qty": [
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-black-homepower-1000v2-solarsaga-100w-air-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Black / HomePower 1000v2 + SolarSaga 100W Air x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-solarsaga-100-air"
+],
+"component_qty": [
+2
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-300-v2-solarsaga-40-air",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 300 v2 + SolarSaga 40 Air",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"jackery-explorer-300-v2",
+"jackery-solarsaga-40-air"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-1000-plus-solarsaga-100-mini",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 1000 Plus + SolarSaga 100 Mini",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-100-mini-x-2",
+"brand": "Jackery",
+"model_name": "Solar Generator bundle: Explorer 2000 v2 + SolarSaga 100 Mini x 2",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-solar-panel-connector",
+"brand": "Jackery",
+"model_name": "Solar Panel Connector",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-10m-dc-extension-cable-plus",
+"brand": "Jackery",
+"model_name": "10m DC Extension Cable Plus",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-dc-extension-cable-for-solar-panel-16-4-ft",
+"brand": "Jackery",
+"model_name": "DC Extension Cable for Solar Panel (16.4 ft)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-adapter-dc7909-to-dc8020",
+"brand": "Jackery",
+"model_name": "Adapter DC7909 to DC8020",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-adapter-dc8020-to-dc7909",
+"brand": "Jackery",
+"model_name": "Adapter DC8020 to DC7909",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-adapter-dc8020-to-usb-c",
+"brand": "Jackery",
+"model_name": "Adapter DC8020 to USB-C",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-dc7909-to-usb-c-adapter",
+"brand": "Jackery",
+"model_name": "DC7909 to USB-C Adapter",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-anderson-connector-cable-extension-cable-y-parallel-y-series",
+"brand": "Jackery",
+"model_name": "Anderson Connector & Cable (Extension cable / Y-parallel / Y-series)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-car-charging-cable",
+"brand": "Jackery",
+"model_name": "Car Charging Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-40a-charging-cable",
+"brand": "Jackery",
+"model_name": "40A Charging Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-connector-parallel-kit",
+"brand": "Jackery",
+"model_name": "Connector (parallel kit)",
+"kind": "cable",
+"aliases": [
+"Jackery Connector (parallel kit)"
+],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-parallel-communication-cable",
+"brand": "Jackery",
+"model_name": "Parallel Communication Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-power-input-output-cable-smart-transfer-switch",
+"brand": "Jackery",
+"model_name": "Power Input/Output Cable (Smart Transfer Switch)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-expansion-cable-e1000-plus-e2000-plus-variants",
+"brand": "Jackery",
+"model_name": "Expansion Cable (E1000 Plus / E2000 Plus variants)",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "jackery-12v-automobile-battery-charging-cable",
+"brand": "Jackery",
+"model_name": "12V Automobile Battery Charging Cable",
+"kind": "cable",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bigblue-solarpowa-150-topcon-series",
+"brand": "BigBlue",
+"model_name": "SolarPowa 150 - TOPCon Series",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 150,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bigblue-solarpowa-100-topcon-series",
+"brand": "BigBlue",
+"model_name": "SolarPowa 100 - TOPCon Series",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bigblue-solarpowa-200-topcon-series",
+"brand": "BigBlue",
+"model_name": "SolarPowa 200 - TOPCon Series",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-rover2000-rover-2000-semi-solid-state",
+"brand": "BougeRV",
+"model_name": "ROVER2000 (Rover 2000) Semi-Solid State",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2008,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-rover2000-semi-solid-extra-battery",
+"brand": "BougeRV",
+"model_name": "ROVER2000 Semi-Solid Extra Battery",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2008,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-flash300-286wh-fast-charging-power-station",
+"brand": "BougeRV",
+"model_name": "Flash300 286Wh Fast Charging Power Station",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 286,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-new-200w-portable-solar-panel-us-s02002",
+"brand": "BougeRV",
+"model_name": "New 200W Portable Solar Panel (US-S02002)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-new-100w-portable-solar-panel-us-s02001-fs100w",
+"brand": "BougeRV",
+"model_name": "New 100W Portable Solar Panel (US-S02001 / FS100W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "bougerv-100w-n-type-fiberglass-foldable-portable-solar-panel-sp001",
+"brand": "BougeRV",
+"model_name": "100W N-Type Fiberglass Foldable Portable Solar Panel (SP001)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-fsp-100m-100w-glass-folding-suitcase-panel",
+"brand": "DOKIO",
+"model_name": "FSP-100M (100W glass folding suitcase panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-fsp-160m-160w-glass-folding-suitcase-panel",
+"brand": "DOKIO",
+"model_name": "FSP-160M (160W glass folding suitcase panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 160,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-fsp-200m-200w-glass-folding-suitcase-panel",
+"brand": "DOKIO",
+"model_name": "FSP-200M (200W glass folding suitcase panel)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-ffsp-110m-flexible-foldable-100-110w",
+"brand": "DOKIO",
+"model_name": "FFSP-110M (flexible foldable 100/110W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 110,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-ffsp-160m-flexible-foldable-160w",
+"brand": "DOKIO",
+"model_name": "FFSP-160M (flexible foldable 160W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 160,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-ffsp-220m-flexible-foldable-220w",
+"brand": "DOKIO",
+"model_name": "FFSP-220M (flexible foldable 220W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "dokio-ffsp-320m-flexible-foldable-300w-per-spec-table",
+"brand": "DOKIO",
+"model_name": "FFSP-320M (flexible foldable, 300W per spec table)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 300,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-f240-240w-foldable",
+"brand": "FlexSolar",
+"model_name": "F240 (240W foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 240,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-f360-360w-foldable",
+"brand": "FlexSolar",
+"model_name": "F360 (360W foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 360,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-c120-120w-foldable-anderson",
+"brand": "FlexSolar",
+"model_name": "C120 (120W foldable, Anderson)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 120,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-c100-100w-foldable-dc5521",
+"brand": "FlexSolar",
+"model_name": "C100 (100W foldable, DC5521)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-f120-120w-foldable-mc4",
+"brand": "FlexSolar",
+"model_name": "F120 (120W foldable, MC4)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 120,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-f220s-220w-foldable",
+"brand": "FlexSolar",
+"model_name": "F220S (220W foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 220,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-s100-100w-etfe-foldable",
+"brand": "FlexSolar",
+"model_name": "S100 (100W ETFE foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-f120s-120w-etfe-foldable",
+"brand": "FlexSolar",
+"model_name": "F120S (120W ETFE foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 120,
+"components": [],
+"component_qty": []
+},
+{
+"id": "flexsolar-c100pro-100w-foldable",
+"brand": "FlexSolar",
+"model_name": "C100PRO (100W foldable)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-homepower-one",
+"brand": "Geneverse",
+"model_name": "HomePower ONE",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1002,
+"power_w": 1000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-homepower-one-pro",
+"brand": "Geneverse",
+"model_name": "HomePower ONE PRO",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1209.6,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-homepower-2",
+"brand": "Geneverse",
+"model_name": "HomePower 2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2060.64,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-homepower-two-pro",
+"brand": "Geneverse",
+"model_name": "HomePower TWO PRO",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2419.2,
+"power_w": 2200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-solarpower-one-100w",
+"brand": "Geneverse",
+"model_name": "SolarPower ONE (100W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "geneverse-solarpower-2-200w",
+"brand": "Geneverse",
+"model_name": "SolarPower 2 (200W)",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-safari-me",
+"brand": "Lion Energy",
+"model_name": "Safari ME",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 922,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-safari-me-xp-expansion-pack",
+"brand": "Lion Energy",
+"model_name": "Safari ME-XP Expansion Pack",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2688,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-lion-safari-3-000w-1-612wh-30a",
+"brand": "Lion Energy",
+"model_name": "Lion Safari (3,000W / 1,612Wh, 30A)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1612,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-lion-safari-xp-expansion-pack-2-688wh",
+"brand": "Lion Energy",
+"model_name": "Lion Safari XP Expansion Pack (2,688Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2688,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-lion-summit-530w-665wh",
+"brand": "Lion Energy",
+"model_name": "Lion Summit (530W / 665Wh)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 665,
+"power_w": 530,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-lion-100w-lw-solar-panel-12v",
+"brand": "Lion Energy",
+"model_name": "Lion 100W LW Solar Panel 12V",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "lion-energy-lion-50w-foldable-solar-panel",
+"brand": "Lion Energy",
+"model_name": "Lion 50W Foldable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 50,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-1",
+"brand": "OUPES",
+"model_name": "Mega 1",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-2",
+"brand": "OUPES",
+"model_name": "Mega 2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-3",
+"brand": "OUPES",
+"model_name": "Mega 3",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-5",
+"brand": "OUPES",
+"model_name": "Mega 5",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": 4000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-exodus-1200",
+"brand": "OUPES",
+"model_name": "Exodus 1200",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 992,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-exodus-1500",
+"brand": "OUPES",
+"model_name": "Exodus 1500",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1488,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-exodus-2400",
+"brand": "OUPES",
+"model_name": "Exodus 2400",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2232,
+"power_w": 2400,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-exodus-700",
+"brand": "OUPES",
+"model_name": "Exodus 700",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 576,
+"power_w": 700,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-exodus-350",
+"brand": "OUPES",
+"model_name": "Exodus 350",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 288,
+"power_w": 350,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-2-v2",
+"brand": "OUPES",
+"model_name": "Mega 2 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-2-pro",
+"brand": "OUPES",
+"model_name": "Mega 2 Pro",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": 2500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-1-lite",
+"brand": "OUPES",
+"model_name": "Mega 1 Lite",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1024,
+"power_w": 2000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-guardian-6000-v2",
+"brand": "OUPES",
+"model_name": "Guardian 6000 V2",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 4608,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-b2-extra-battery-2048wh",
+"brand": "OUPES",
+"model_name": "B2 Extra Battery (2048Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-b2-v2-extra-battery-2048wh",
+"brand": "OUPES",
+"model_name": "B2 V2 Extra Battery (2048Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2048,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-b5-extra-battery-5040wh",
+"brand": "OUPES",
+"model_name": "B5 Extra Battery (5040Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-g5-extra-battery-4608wh",
+"brand": "OUPES",
+"model_name": "G5 Extra Battery (4608Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 4608,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-100w-portable-solar-panel",
+"brand": "OUPES",
+"model_name": "100W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 100,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-240w-portable-solar-panel",
+"brand": "OUPES",
+"model_name": "240W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 240,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-360w-portable-solar-panel",
+"brand": "OUPES",
+"model_name": "360W Portable Solar Panel",
+"kind": "panel",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": 360,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-ups-1200-online-ups",
+"brand": "OUPES",
+"model_name": "UPS 1200 (online UPS)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 368.64,
+"power_w": 1200,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-ups-1800-online-ups",
+"brand": "OUPES",
+"model_name": "UPS 1800 (online UPS)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 552.96,
+"power_w": 1800,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-mega-1-240w-solar-panel-kit",
+"brand": "OUPES",
+"model_name": "Mega 1 + 240W Solar Panel (kit)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oupes-mega-1",
+"oupes-240w-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "oupes-exodus-350-100w-solar-panel-kit",
+"brand": "OUPES",
+"model_name": "Exodus 350 + 100W Solar Panel (kit)",
+"kind": "kit",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [
+"oupes-exodus-350",
+"oupes-100w-portable-solar-panel"
+],
+"component_qty": [
+1,
+1
+]
+},
+{
+"id": "oupes-titan-3",
+"brand": "OUPES",
+"model_name": "Titan 3",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 3072,
+"power_w": 3600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "oupes-titan-5",
+"brand": "OUPES",
+"model_name": "Titan 5",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 5040,
+"power_w": 4000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "point-zero-energy-titan-original-145v-solar-input",
+"brand": "Point Zero Energy",
+"model_name": "Titan (original, 145V solar input)",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2000,
+"power_w": 3000,
+"components": [],
+"component_qty": []
+},
+{
+"id": "point-zero-energy-titan-battery-pack-2000wh",
+"brand": "Point Zero Energy",
+"model_name": "Titan Battery Pack (2000Wh)",
+"kind": "battery",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 2000,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "point-zero-energy-titan-240sp",
+"brand": "Point Zero Energy",
+"model_name": "Titan 240SP",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": null,
+"power_w": null,
+"components": [],
+"component_qty": []
+},
+{
+"id": "westinghouse-igen1000s",
+"brand": "Westinghouse",
+"model_name": "iGen1000s",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 1008,
+"power_w": 1500,
+"components": [],
+"component_qty": []
+},
+{
+"id": "westinghouse-igen600s",
+"brand": "Westinghouse",
+"model_name": "iGen600s",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 592,
+"power_w": 600,
+"components": [],
+"component_qty": []
+},
+{
+"id": "westinghouse-igen300s",
+"brand": "Westinghouse",
+"model_name": "iGen300s",
+"kind": "station",
+"aliases": [],
+"model_number": null,
+"capacity_wh": 296,
+"power_w": 300,
+"components": [],
+"component_qty": []
+}
+]
+}

@@ -105,10 +105,13 @@ class BudgetDecision:
 
 
 def budget_allowance(cfg: DiscoveryConfig, client: Any, *, storage: Any = None,
-                     max_calls: Optional[int] = None) -> BudgetDecision:
-    """How many searchItems calls this run may make (see module docstring).
-    ``max_calls`` (CLI override) can only lower the configured cap."""
-    cap = cfg.limits.max_calls_per_run
+                     max_calls: Optional[int] = None, cap: Optional[int] = None) -> BudgetDecision:
+    """How many Creators calls this phase may make (see module docstring).
+    ``cap`` is the phase's own ceiling (default ``limits.max_calls_per_run``;
+    the match phase passes ``model_matching.max_calls_per_run``). ``max_calls``
+    (CLI override) can only lower it. Asked after an earlier phase, the
+    consumer's remaining share already counts that phase's calls."""
+    cap = cfg.limits.max_calls_per_run if cap is None else max(0, int(cap))
     if max_calls is not None:
         cap = max(0, min(cap, int(max_calls)))
     own: Optional[int] = None

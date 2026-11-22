@@ -148,6 +148,48 @@
         "seed": {"type": "number", "minimum": 0, "maximum": 1}
       },
       "description": "Value bound to %(confidence)s by the evidence behind a lane label. Defaults 0.9 / 0.7 / 0.6, and 0.8 for seed imports."
+    },
+    "model_matching": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {"^_": {}},
+      "properties": {
+        "enabled": {"type": "boolean", "description": "Run the match phase after seeds and search, in the same run (same consumer, budget and run lock). Default false."},
+        "max_calls_per_run": {"type": "integer", "minimum": 0, "description": "Creators calls (getItems + searchItems) the match phase may make per run, on top of limits.max_calls_per_run, and never more than the consumer's remaining daily share (with budget.protect_consumers reserved). Default 20."},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "A link needs a matcher confidence at least this high, and this value is what link_sql binds as %(confidence)s (the product's category_confidence). Default 0.9."},
+        "brand_aliases": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "minLength": 1}}, "description": "Maker name as models_sql returns it -> other spellings of Amazon's brand field (byLineInfo.brand), e.g. {\"Maker\": [\"MAKER INC\"]}. Case, spacing and punctuation already fold together."},
+        "kind_roles": {"type": "object", "additionalProperties": {"enum": ["station", "kit", "panel", "battery", "other"]}, "description": "Model kind -> matcher role (station, kit, panel, battery, other). Default: station, kit, panel and battery (also expansion / expansion_battery) by name; anything else 'other'."},
+        "compatible_kinds": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}, "description": "Product kind (the lane's kind) -> model kinds it may be linked to. A product kind not listed may only take a model of the same kind. Omit to skip the check."},
+        "capacity_tolerance": {"type": "number", "minimum": 0, "maximum": 0.2, "description": "Relative tolerance when a capacity (Wh) or wattage (W) stated in the title is compared with the model's rated value. Default 0.03."},
+        "models_sql": {"type": "string", "minLength": 1, "description": "ONE read-only SELECT of every model (no parameters). Columns by name: id, brand, model_name, kind (required); aliases, model_number, brand_aliases, capacity_wh, power_w, components, component_qty (kit component model ids and quantities), priority (lower first; NULL last), linked (has an active product), searchable (model-first may search it; default true), variants (documented variants: links per run = max(1, variants))."},
+        "candidates_sql": {"type": "string", "minLength": 1, "description": "ONE read-only SELECT (no parameters) of the products ASIN-first checks: `asin` and optionally `kind`, e.g. active products with no model. It runs as a subquery in keyset pages (`asin > <cursor> ORDER BY asin`)."},
+        "link_sql": {"type": "string", "minLength": 1, "description": "The UPDATE that links a product to a model. Named parameters from asin, model_id, confidence, rule, run_ts only, and it must keep `model_id IS NULL` in its WHERE so an existing link is never overwritten."},
+        "stats_sql": {"type": "string", "minLength": 1, "description": "Optional ONE read-only SELECT returning one row with `active_products` and `matched_products` (feeds products_model_matched_pct)."},
+        "asin_first": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Default true."},
+            "batch": {"type": "integer", "minimum": 1, "maximum": 10, "description": "ASINs per getItems call (Creators allows 10). Default 10."},
+            "max_calls": {"type": "integer", "minimum": 0, "description": "getItems calls per run (the rest of the allowance goes to model-first). Default: the whole allowance."},
+            "recheck_hours": {"type": "number", "minimum": 0, "description": "Once every candidate was checked, start over after this long. Default 168."}
+          }
+        },
+        "model_first": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Default true."},
+            "item_count": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Items per searchItems call. Default 10."},
+            "queries_per_run": {"type": "integer", "minimum": 0, "description": "searchItems calls (one per model) per run. Default 20."},
+            "retry_hours": {"type": "number", "minimum": 0, "description": "A model searched without a link is searched again after this long. Default 168."},
+            "search_index": {"type": "string", "minLength": 1, "description": "Default creators.search_index."}
+          }
+        }
+      },
+      "description": "ASIN-to-model matching ('search and confirm'): links products to the site's own models with framework.core.model_matcher. Amazon's title and brand are read in memory at match time and never stored; only the ASIN, model id, rule id, confidence and time persist."
     }
   },
   "definitions": {

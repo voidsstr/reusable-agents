@@ -68,6 +68,77 @@ PRICE_UNITS = ("cents", "dollars")
 INSERT_PARAMS = ("asin", "lane", "lane_kind", "lane_category", "confidence",
                  "via", "seed", "run_ts", "site_id")
 KNOWN_PARAMS = ("asins",)
+#: The only names model_matching.link_sql may use: the ASIN and our derived
+#: outcome (model id, our confidence, the matcher's rule id, the run). The
+#: matcher reads Amazon's title and brand in memory; neither can reach the DB.
+LINK_PARAMS = ("asin", "model_id", "confidence", "rule", "run_ts")
+_GUARD_TERM_RE = re.compile(r"^\(*\s*(?:\w+\.)?model_id\s+is\s+null\s*\)*$", re.IGNORECASE)
+
+
+def _sql_code(sql: str) -> str:
+    """``sql`` with comments and quoted literals blanked (positions kept)."""
+    out, i, n = [], 0, len(sql)
+    while i < n:
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(" " * (j - i))
+            i = j
+        elif sql[i] in "'\"":
+            q = sql[i]
+            j = i + 1
+            while j < n and not (sql[j] == q and not sql.startswith(q * 2, j)):
+                j += 2 if sql.startswith(q * 2, j) else 1
+            j = min(n, j + 1)
+            out.append(" " * (j - i))
+            i = j
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
+def link_guard_ok(sql: str) -> bool:
+    """True when ``model_id IS NULL`` is a top-level AND term of the UPDATE's
+    WHERE (no top-level OR, not in a comment or a literal), so the statement
+    can never overwrite an existing link."""
+    code = _sql_code(sql).rstrip().rstrip(";")
+    depth, where_at, end_at = 0, None, len(code)
+    for m in re.finditer(r"[()]|\b(?:where|returning)\b", code, re.IGNORECASE):
+        tok = m.group(0).lower()
+        if tok == "(":
+            depth += 1
+        elif tok == ")":
+            depth -= 1
+        elif depth == 0 and tok == "where" and where_at is None:
+            where_at = m.end()
+        elif depth == 0 and tok == "returning" and where_at is not None:
+            end_at = m.start()
+            break
+    if where_at is None:
+        return False
+    clause = code[where_at:end_at]
+    terms, depth, start = [], 0, 0
+    for m in re.finditer(r"[()]|\b(?:and|or)\b", clause, re.IGNORECASE):
+        tok = m.group(0).lower()
+        if tok == "(":
+            depth += 1
+        elif tok == ")":
+            depth -= 1
+        elif depth == 0 and tok == "or":
+            return False
+        elif depth == 0 and tok == "and":
+            terms.append(clause[start:m.start()])
+            start = m.end()
+    terms.append(clause[start:])
+    return any(_GUARD_TERM_RE.match(" ".join(t.split())) for t in terms)
+_UPDATE_RE = re.compile(r"^\s*(?:--[^\n]*\n\s*)*update\b", re.IGNORECASE)
+MATCHER_ROLES = ("station", "kit", "panel", "battery", "other")
 
 _PARAM_RE = re.compile(r"%\((\w+)\)s")
 # A '%' that is not '%%' and does not start a named parameter.
@@ -385,6 +456,66 @@ class RotationSettings:
 
 
 @dataclass(frozen=True)
+class AsinFirstSettings:
+    enabled: bool = True
+    batch: int = 10
+    max_calls: Optional[int] = None
+    recheck_hours: float = 168.0
+
+
+@dataclass(frozen=True)
+class ModelFirstSettings:
+    enabled: bool = True
+    item_count: int = 10
+    queries_per_run: int = 20
+    retry_hours: float = 168.0
+    search_index: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class MatchingSettings:
+    """``model_matching``: link products to the site's own models (see matching.py)."""
+
+    enabled: bool = False
+    max_calls_per_run: int = 20
+    confidence: float = 0.9
+    brand_aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    kind_roles: Optional[Mapping[str, str]] = None
+    compatible_kinds: Optional[Mapping[str, frozenset]] = None
+    capacity_tolerance: float = 0.03
+    models_sql: str = ""
+    candidates_sql: str = ""
+    link_sql: str = ""
+    stats_sql: str = ""
+    asin_first: AsinFirstSettings = AsinFirstSettings()
+    model_first: ModelFirstSettings = ModelFirstSettings()
+
+    @staticmethod
+    def paged(sql: str) -> str:
+        """A read-only SELECT as a keyset page (as seed queries are)."""
+        inner = sql.replace("%", "%%")
+        return ("SELECT * FROM (\n" + inner + "\n) AS match_candidates"
+                " WHERE asin > %(after)s ORDER BY asin LIMIT %(limit)s")
+
+    @staticmethod
+    def plain(sql: str) -> str:
+        """A parameterless SELECT, with any literal '%' escaped for the driver."""
+        return sql.replace("%", "%%")
+
+    def describe(self) -> dict[str, Any]:
+        return {"enabled": self.enabled, "max_calls_per_run": self.max_calls_per_run,
+                "confidence": self.confidence, "brands_with_aliases": len(self.brand_aliases),
+                "asin_first": {"enabled": self.asin_first.enabled, "batch": self.asin_first.batch,
+                               "max_calls": self.asin_first.max_calls,
+                               "recheck_hours": self.asin_first.recheck_hours},
+                "model_first": {"enabled": self.model_first.enabled,
+                                "item_count": self.model_first.item_count,
+                                "queries_per_run": self.model_first.queries_per_run,
+                                "retry_hours": self.model_first.retry_hours},
+                "stats": bool(self.stats_sql)}
+
+
+@dataclass(frozen=True)
 class DiscoveryConfig:
     consumer: str
     catalog: CatalogSettings
@@ -403,6 +534,7 @@ class DiscoveryConfig:
     seed_queries: tuple[SeedQuerySource, ...] = ()
     qa: QASettings = QASettings()
     confidence: ConfidenceSettings = ConfidenceSettings()
+    matching: MatchingSettings = MatchingSettings()
     source: str = ""
     fingerprint: str = ""
 
@@ -478,6 +610,7 @@ class DiscoveryConfig:
             "seed_sources": ([s.name for s in self.seed_files]
                              + [s.name for s in self.seed_queries]),
             "golden_labels": len(self.qa.golden),
+            "model_matching": self.matching.describe(),
         }
 
 
@@ -964,6 +1097,94 @@ class _Builder:
         return QASettings(golden=golden, window=int(raw.get("window") or 500),
                           min_observations=int(raw.get("min_observations") or 10))
 
+    def select_sql(self, sql: str, where: str, *, params: bool = False) -> None:
+        if not _SELECT_RE.match(sql):
+            self.fail(where, "must be a read-only SELECT (or WITH ... SELECT)")
+        if ";" in sql:
+            self.fail(where, "must be a single statement (no ';' except one at the end)")
+        if not params and _PARAM_RE.search(sql):
+            self.fail(where, "takes no parameters")
+
+    def matching(self, raw: Mapping[str, Any]) -> MatchingSettings:
+        w = "model_matching"
+        raw = _strip_comments(raw or {})
+        if not raw:
+            return MatchingSettings()
+
+        def sql_of(key: str) -> str:
+            text = str(raw.get(key) or "").strip()
+            return text[:-1].rstrip() if text.endswith(";") else text
+
+        af = _strip_comments(raw.get("asin_first") or {})
+        mf = _strip_comments(raw.get("model_first") or {})
+        asin_first = AsinFirstSettings(
+            enabled=bool(af.get("enabled", True)), batch=int(af.get("batch", 10)),
+            max_calls=int(af["max_calls"]) if af.get("max_calls") is not None else None,
+            recheck_hours=float(af.get("recheck_hours", 168.0)))
+        model_first = ModelFirstSettings(
+            enabled=bool(mf.get("enabled", True)), item_count=int(mf.get("item_count", 10)),
+            queries_per_run=int(mf.get("queries_per_run", 20)),
+            retry_hours=float(mf.get("retry_hours", 168.0)),
+            search_index=str(mf["search_index"]) if mf.get("search_index") else None)
+        aliases: dict[str, tuple[str, ...]] = {}
+        for maker, names in (raw.get("brand_aliases") or {}).items():
+            aliases[str(maker)] = tuple(" ".join(str(n).split()) for n in (names or []) if str(n).strip())
+        roles = raw.get("kind_roles")
+        compat = raw.get("compatible_kinds")
+        cfg = MatchingSettings(
+            enabled=bool(raw.get("enabled", False)),
+            max_calls_per_run=int(raw.get("max_calls_per_run", 20)),
+            confidence=float(raw.get("confidence", 0.9)),
+            brand_aliases=aliases,
+            kind_roles={str(k): str(v) for k, v in roles.items()} if roles else None,
+            compatible_kinds=({str(k): frozenset(str(x) for x in (v or [])) for k, v in compat.items()}
+                              if compat else None),
+            capacity_tolerance=float(raw.get("capacity_tolerance", 0.03)),
+            models_sql=sql_of("models_sql"), candidates_sql=sql_of("candidates_sql"),
+            link_sql=sql_of("link_sql"), stats_sql=sql_of("stats_sql"),
+            asin_first=asin_first, model_first=model_first)
+        for key, sql in (("models_sql", cfg.models_sql), ("candidates_sql", cfg.candidates_sql),
+                         ("stats_sql", cfg.stats_sql)):
+            if sql:
+                self.select_sql(sql, f"{w}.{key}")
+        if cfg.link_sql:
+            link = cfg.link_sql
+            if not _UPDATE_RE.match(link):
+                self.fail(f"{w}.link_sql", "must be one UPDATE statement")
+            if ";" in link:
+                self.fail(f"{w}.link_sql", "must be a single statement (no ';' except one at the end)")
+            used = set(_PARAM_RE.findall(link))
+            for need in ("asin", "model_id"):
+                if need not in used:
+                    self.fail(f"{w}.link_sql", f"must use %({need})s")
+            for extra in sorted(used - set(LINK_PARAMS)):
+                self.fail(f"{w}.link_sql", f"unknown parameter %({extra})s: only "
+                          + ", ".join(LINK_PARAMS) + " are bound (Amazon content never is)")
+            if not link_guard_ok(link):
+                self.fail(f"{w}.link_sql", "must keep `model_id IS NULL` in its WHERE: an existing "
+                                           "link is never overwritten")
+            if _BAD_PERCENT_RE.search(link.replace("%%", "")):
+                self.fail(f"{w}.link_sql", "positional %s or a bare % (write %% for a literal percent)")
+        if cfg.enabled:
+            if not cfg.models_sql:
+                self.fail(f"{w}.models_sql", "required when model_matching is enabled")
+            if not cfg.link_sql:
+                self.fail(f"{w}.link_sql", "required when model_matching is enabled")
+            if cfg.asin_first.enabled and not cfg.candidates_sql:
+                self.fail(f"{w}.candidates_sql", "required when asin_first is enabled")
+            if not (cfg.asin_first.enabled or cfg.model_first.enabled):
+                self.fail(w, "enabled, but neither asin_first nor model_first is")
+        if not 0 <= cfg.confidence <= 1:
+            self.fail(f"{w}.confidence", "must be in [0, 1]")
+        if not 1 <= cfg.asin_first.batch <= 10:
+            self.fail(f"{w}.asin_first.batch", "must be 1-10 (getItems takes at most 10 ASINs)")
+        if not 1 <= cfg.model_first.item_count <= ITEMS_PER_PAGE:
+            self.fail(f"{w}.model_first.item_count", f"must be 1-{ITEMS_PER_PAGE}")
+        for kind, role in (cfg.kind_roles or {}).items():
+            if role not in MATCHER_ROLES:
+                self.fail(f"{w}.kind_roles.{kind}", f"must be one of {', '.join(MATCHER_ROLES)}")
+        return cfg
+
     # -- whole document ------------------------------------------------------------
 
     def build(self, doc: Mapping[str, Any], source: str) -> DiscoveryConfig:
@@ -1044,13 +1265,14 @@ class _Builder:
             seed=float(cf.get("seed", 0.8)))
         rot = doc.get("rotation") or {}
         rotation = RotationSettings(cycle_cooldown_hours=float(rot.get("cycle_cooldown_hours", 0.0)))
+        matching = self.matching(doc.get("model_matching") or {})
         cfg = DiscoveryConfig(
             consumer=str(doc.get("consumer") or ""), catalog=catalog, lanes=tuple(lanes),
             site=doc.get("site") or None, enabled=bool(doc.get("enabled", True)),
             creators=creators, limits=limits, budget=budget, pricing=pricing,
             active_phases=active_phases, reject_rules=reject_rules, measures=measures,
             rotation=rotation, seed_files=seed_files, seed_queries=seed_queries, qa=qa,
-            confidence=confidence, source=source, fingerprint=fingerprint(doc))
+            confidence=confidence, matching=matching, source=source, fingerprint=fingerprint(doc))
         if not cfg.consumer:
             self.fail("consumer", "required")
         if not self.problems:
