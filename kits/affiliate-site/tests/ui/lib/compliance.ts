@@ -14,10 +14,16 @@
  *                    earnings disclosure in plain view, before the first link
  *   prices (2(i))    a price or availability statement shows only inside a
  *                    stamp dated within the quotable window (24h minus the HTML
- *                    cache lifetimes) that carries the exact 2(i) disclaimer,
- *                    in view or behind a control inside the stamp; never in
- *                    head metadata; pages with prices are not cached past the
- *                    window by a browser, a shared cache or a CDN
+ *                    cache lifetimes) that SHOWS the date and time of the check
+ *                    with a time zone (matching its <time datetime>), carries a
+ *                    visible "Details" control revealing the exact 2(i)
+ *                    disclaimer, and holds one price; never in head metadata;
+ *                    any price elsewhere fails, inside a sentence too: text a
+ *                    reader sees, text only crawlers and assistants read
+ *                    (hidden), aria-label / title / alt, and an Amazon price
+ *                    in data-kit-not-a-price (meant for rates and budgets);
+ *                    pages with prices are not cached past the window by a
+ *                    browser, a shared cache or a CDN
  *   notice (2(k))    a page that shows Amazon content (a data-amazon-content
  *                    marker, a stamp, or a known Amazon title, whole or
  *                    truncated) shows the exact 2(k) notice in plain view
@@ -87,6 +93,13 @@ export interface ComplianceStamp {
    * <summary> shows.
    */
   linkedTexts: string[];
+  /**
+   * Text revealed by the stamp's visible controls labelled "Details" (a
+   * popover button, an aria-controls button, an href="#..." link, or a
+   * <details> whose <summary> says Details): 2(i)'s disclosure, as Amazon's
+   * own example writes it ("as of 01/07/2008 14:11 PST - Details").
+   */
+  detailsTexts: string[];
   /** The .ssr-price text inside it ('' for availability). */
   priceText: string;
   insideAnchor: boolean;
@@ -131,7 +144,17 @@ export interface ComplianceSnapshot {
    * whitespace-collapsed. The price and availability rules read it.
    */
   unstampedText: string[];
-  /** .ssr-price elements outside any stamp (their text). */
+  /**
+   * Text outside every stamp that a reader does not see (display:none,
+   * hidden, a closed popover) but that crawlers and assistants read from the
+   * HTML; one entry per block, as unstampedText.
+   */
+  hiddenUnstampedText: string[];
+  /** aria-label, title and alt values of elements outside every stamp and data-kit-not-a-price element. */
+  attributeTexts: Array<{ where: string; text: string }>;
+  /** What a reader sees inside data-kit-not-a-price elements (rates and budgets, never an Amazon price). */
+  notAPriceText: string[];
+  /** .ssr-price elements outside any stamp (their text), data-kit-not-a-price ones included. */
   strayPriceElements: string[];
   /** Elements marked data-amazon-notice="2k". */
   noticeElements: Array<{ text: string; visible: boolean }>;
@@ -218,6 +241,15 @@ export function collapse(s: string | null | undefined): string {
 export const PRICE_WITH_CENTS_RE = /(?<![\w$])\$\s?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![\d])/;
 /** Any amount said to be the price on Amazon ("$349 on Amazon", "$1,299.99 at Amazon"). */
 export const PRICE_AT_AMAZON_RE = /(?<![\w$])\$\s?\d[\d,]*(?:\.\d{1,2})?\s*(?:on|at|from|via)\s+Amazon\b/i;
+/** An amount with cents written with a currency code ("USD 349.99", "349.99 USD", "US$349.99"). */
+export const PRICE_CURRENCY_CODE_RE = /(?<![\w$])(?:USD|US\$)\s?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?!\d)|(?<![\w$.,])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}\s?USD\b/i;
+/**
+ * An amount given a check time, the shape of a hand-made stamp in a sentence
+ * ("the cheapest is X, $349 (as of Nov 17)", "$349 on Amazon.com as of 14:11
+ * UTC", "$349 (checked Nov 17)"): a quoted price, whatever its cents or cue
+ * words, unless a budget word comes right before it (datedPrices).
+ */
+export const DATED_PRICE_RE = /(?<![\w$])\$\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?\s*\(?\s*(?:(?:on|at)\s+Amazon(?:\.com)?\s*)?(?:as\s+of|checked)\b/i;
 
 /** A whole-dollar amount ("$449", "$1,099"): no cents, not a "$1k" shorthand. */
 const WHOLE_DOLLAR_RE = /(?<![\w$])\$\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?![\d,.]?\d)(?![kKmM]\b)/g;
@@ -265,10 +297,131 @@ export function wholeDollarPrices(text: string): string[] {
   return out;
 }
 
+/**
+ * Amounts the text gives a check time ("$349 (as of Nov 17)"), except a
+ * budget ("Best under $500 as of November"): DATED_PRICE_RE with the same
+ * budget words wholeDollarPrices skips.
+ */
+export function datedPrices(text: string): string[] {
+  const s = String(text ?? '');
+  const out: string[] = [];
+  for (const m of s.matchAll(new RegExp(DATED_PRICE_RE.source, 'gi'))) {
+    const at = m.index ?? 0;
+    if (BUDGET_BEFORE_RE.test(s.slice(sentenceStart(s, at), at))) continue;
+    out.push(m[0]);
+  }
+  return out;
+}
+
 /** True when the text holds something that reads as a quoted product price. */
 export function looksLikePrice(text: string): boolean {
-  return PRICE_WITH_CENTS_RE.test(text) || PRICE_AT_AMAZON_RE.test(text) || wholeDollarPrices(text).length > 0;
+  return PRICE_WITH_CENTS_RE.test(text) || PRICE_AT_AMAZON_RE.test(text) || PRICE_CURRENCY_CODE_RE.test(text)
+    || datedPrices(text).length > 0 || wholeDollarPrices(text).length > 0;
 }
+
+/** The amount of a price mention ('$1,299.00 on Amazon' -> '1299.00'). */
+function amountOf(mention: string): string {
+  return (/\d[\d,]*(?:\.\d+)?/.exec(mention)?.[0] ?? mention).replace(/,/g, '');
+}
+
+/**
+ * The distinct amounts `text` quotes as prices (every price pattern, cents or
+ * not), in order: one stamp may hold exactly one.
+ */
+export function priceAmounts(text: string): string[] {
+  const s = String(text ?? '');
+  const found: Array<{ at: number; amount: string }> = [];
+  for (const re of [PRICE_WITH_CENTS_RE, PRICE_AT_AMAZON_RE, PRICE_CURRENCY_CODE_RE]) {
+    for (const m of s.matchAll(new RegExp(re.source, `${re.flags.replace('g', '')}g`))) found.push({ at: m.index ?? 0, amount: amountOf(m[0]) });
+  }
+  for (const list of [datedPrices(s), wholeDollarPrices(s)]) {
+    let from = 0;
+    for (const w of list) {
+      const at = s.indexOf(w, from);
+      from = at < 0 ? from : at + w.length;
+      found.push({ at: at < 0 ? s.length : at, amount: amountOf(w) });
+    }
+  }
+  const out: string[] = [];
+  for (const f of found.sort((a, b) => a.at - b.at)) if (!out.includes(f.amount)) out.push(f.amount);
+  return out;
+}
+
+// ─── the 2(i) date and time a stamp shows ──────────────────────────────────
+
+const MONTHS_SRC = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+/** A date a reader can read: 2026-11-17, 11/17/2026, Nov 17[, 2026], 17 Nov [2026]. */
+const DATE_SRC = `(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{2,4}|(?:${MONTHS_SRC})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?|\\d{1,2}\\s+(?:${MONTHS_SRC})\\.?(?:,?\\s+\\d{4})?)`;
+/** A clock time: 14:11, 2:11 PM, 14:11:05. */
+const TIME_SRC = '(?<![\\d:])(?:[01]?\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d)?(?:\\s?[ap]\\.?m\\.?)?';
+/** A time zone right after it: UTC or GMT (with an offset or not), Z, a numeric offset, a US zone abbreviation. */
+const ZONE_SRC = '\\s?\\(?(?:(?:UTC|GMT)(?:\\s?[+-]\\d{1,2}(?::?\\d{2})?)?|Z|[+-]\\d{2}:?\\d{2}|[ECMP][SD]?T|AK[SD]T|H[SD]T)(?![A-Za-z0-9])\\)?';
+/**
+ * A check time as a reader sees it: a date, then (after a comma, "at", "@"
+ * or ISO's "T") a time with its zone, or the time with its zone, then "on"
+ * the date. "2026-11-17 14:11 UTC" (the kit's), "01/07/2008 14:11 PST"
+ * (Amazon's example), "Nov 17, 2026, 9:11 AM EST", "14:11 UTC on 2026-11-17".
+ */
+export const SHOWN_CHECK_TIME_RE = new RegExp(
+  `${DATE_SRC}(?:,?\\s+(?:at\\s+|@\\s*)?|T)${TIME_SRC}${ZONE_SRC}|${TIME_SRC}${ZONE_SRC},?\\s+(?:on\\s+)?${DATE_SRC}`,
+  'i',
+);
+
+const MONTH_INDEX: Readonly<Record<string, number>> = Object.freeze({
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+});
+/** Fixed offsets (minutes) of the zones a check time may name; the generic ET/CT/MT/PT are not fixed. */
+const ZONE_OFFSET_MIN: Readonly<Record<string, number>> = Object.freeze({
+  UTC: 0, GMT: 0, Z: 0, EST: -300, EDT: -240, CST: -360, CDT: -300, MST: -420, MDT: -360, PST: -480, PDT: -420,
+  AKST: -540, AKDT: -480, HST: -600, HDT: -540,
+});
+
+/**
+ * The instant a shown check time names (ms), or null when it cannot be told
+ * exactly: no year, a two-digit year, a generic zone (ET, PT), a day that
+ * does not exist. Minute precision unless it shows seconds.
+ */
+export function shownCheckTimeMs(shown: string): number | null {
+  const t = String(shown ?? '');
+  let y: number; let mo: number; let d: number;
+  let m = /(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  if (m) { y = +(m[1] as string); mo = +(m[2] as string) - 1; d = +(m[3] as string); }
+  else if ((m = /(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(t))) { mo = +(m[1] as string) - 1; d = +(m[2] as string); y = +(m[3] as string); }
+  else if ((m = new RegExp(`(${MONTHS_SRC})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})`, 'i').exec(t))) {
+    mo = MONTH_INDEX[(m[1] as string).slice(0, 3).toLowerCase()] as number; d = +(m[2] as string); y = +(m[3] as string);
+  } else if ((m = new RegExp(`(\\d{1,2})\\s+(${MONTHS_SRC})\\.?,?\\s+(\\d{4})`, 'i').exec(t))) {
+    d = +(m[1] as string); mo = MONTH_INDEX[(m[2] as string).slice(0, 3).toLowerCase()] as number; y = +(m[3] as string);
+  } else return null;
+  const tm = /(?<![\d:])(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s?([ap])\.?m\.?)?/i.exec(t);
+  if (!tm) return null;
+  let h = +(tm[1] as string);
+  const ap = (tm[4] ?? '').toLowerCase();
+  if (ap) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (ap === 'p' ? 12 : 0);
+  }
+  const rest = t.slice((tm.index ?? 0) + tm[0].length);
+  const z = /^\s?\(?(?:(UTC|GMT)\s?([+-])(\d{1,2})(?::?(\d{2}))?|(UTC|GMT|Z)(?![A-Za-z0-9])|([+-])(\d{2}):?(\d{2})|(EST|EDT|CST|CDT|MST|MDT|PST|PDT|AKST|AKDT|HST|HDT)(?![A-Za-z0-9]))/i.exec(rest);
+  if (!z) return null;
+  let offset: number;
+  if (z[1]) offset = (z[2] === '-' ? -1 : 1) * (+(z[3] as string) * 60 + +(z[4] ?? '0'));
+  else if (z[5]) offset = 0;
+  else if (z[6]) offset = (z[6] === '-' ? -1 : 1) * (+(z[7] as string) * 60 + +(z[8] as string));
+  else offset = ZONE_OFFSET_MIN[(z[9] as string).toUpperCase()] as number;
+  const local = Date.UTC(y, mo, d, h, +(tm[2] as string), +(tm[3] ?? '0'));
+  const back = new Date(local);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo || back.getUTCDate() !== d) return null;
+  return local - offset * 60_000;
+}
+
+/** Every check time `text` shows (date, time and zone), as written. */
+export function shownCheckTimes(text: string): string[] {
+  const re = new RegExp(SHOWN_CHECK_TIME_RE.source, 'gi');
+  return Array.from(String(text ?? '').matchAll(re), (m) => collapse(m[0]));
+}
+
+/** A "Details" control's label: the word alone, punctuation around it allowed ("Details", "(Details)", "Details ›"). */
+export const DETAILS_LABEL_RE = /^[^\p{L}\p{N}]*details[^\p{L}\p{N}]*$/iu;
 
 const ASIN_IN_PATH_RE = /\/(?:dp|gp\/product|gp\/aw\/d|exec\/obidos\/ASIN)\/([A-Z0-9]{10})(?=[/?#]|$)/i;
 const REDIRECT_PATH_RE = /^\/r\/([A-Z0-9]{10})\/?$/i;
@@ -429,6 +582,29 @@ export function priceDisplayProblems(snap: ComplianceSnapshot, rules: Pick<Compl
     }
     if (s.insideAnchor) out.push(`${label}: inside a link (its Details control cannot work there)`);
     if (s.kind === 'price' && !PRICE_WITH_CENTS_RE.test(s.priceText)) out.push(`${label}: price stamp without a $X.XX price ("${s.priceText}")`);
+    // 2(i): the date and time a reader sees, with its zone (a <time datetime> attribute alone is not shown).
+    const shown = shownCheckTimes(s.visibleText);
+    if (!shown.length) {
+      out.push(`${label}: does not show the date and time of the check with a time zone (2(i): "as of <date> <time> <zone>", e.g. 2026-11-17 14:11 UTC; a <time datetime> attribute is not shown to readers)`);
+    } else {
+      for (const text of shown) {
+        const at = shownCheckTimeMs(text);
+        if (at === null || !times.length) continue;
+        const withSeconds = /\d:\d{2}:\d{2}/.test(text);
+        const unit = withSeconds ? 1000 : 60_000;
+        if (!times.some((t) => Math.floor(t / unit) === Math.floor(at / unit))) {
+          out.push(`${label}: shows "${text}" but its <time datetime> says ${times.map((t) => new Date(t).toISOString()).join(', ')}`);
+        }
+      }
+    }
+    // 2(i)'s disclosure behind a visible "Details" control, as the kit's stamp and Amazon's example do.
+    if (!s.detailsTexts.some((t) => collapse(t).includes(disclaimer))) {
+      out.push(`${label}: no visible "Details" control that reveals the exact 2(i) disclaimer`);
+    }
+    // One price per stamp: a second amount rides along without its own check time.
+    const amounts = priceAmounts(s.visibleText);
+    if (s.kind === 'price' && amounts.length > 1) out.push(`${label}: holds ${amounts.length} prices ($${amounts.join(', $')}): each price needs its own stamp`);
+    if (s.kind === 'availability' && amounts.length) out.push(`${label}: an availability stamp holds a price ($${amounts.join(', $')}): a price needs its own price stamp`);
   });
   let orphans = 0;
   for (const t of snap.unstampedText) {
@@ -436,6 +612,27 @@ export function priceDisplayProblems(snap: ComplianceSnapshot, rules: Pick<Compl
     if (looksLikePrice(t)) {
       orphans++;
       out.push(`${where(snap)}: price outside a dated stamp: "${t.slice(0, 120)}"`);
+    }
+  }
+  for (const t of snap.hiddenUnstampedText) {
+    if (orphans >= 20) break;
+    if (looksLikePrice(t)) {
+      orphans++;
+      out.push(`${where(snap)}: price outside a dated stamp, in text a reader does not see but crawlers and assistants read: "${t.slice(0, 120)}"`);
+    }
+  }
+  for (const a of snap.attributeTexts) {
+    if (orphans >= 20) break;
+    if (looksLikePrice(a.text)) {
+      orphans++;
+      out.push(`${where(snap)}: price outside a dated stamp, in ${a.where}: "${a.text.slice(0, 120)}"`);
+    }
+  }
+  for (const t of snap.notAPriceText) {
+    if (orphans >= 20) break;
+    if (PRICE_AT_AMAZON_RE.test(t) || datedPrices(t).length) {
+      orphans++;
+      out.push(`${where(snap)}: an Amazon price inside data-kit-not-a-price (that marker is for rates and budgets): "${t.slice(0, 120)}"`);
     }
   }
   for (const p of snap.strayPriceElements.slice(0, 20)) out.push(`${where(snap)}: price outside a dated stamp: "${p.slice(0, 60)}" (a .ssr-price outside a stamp)`);

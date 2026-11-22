@@ -8,6 +8,8 @@
     "canonicalOrigin": "https://example.com",
     "language": "en-US"
   },
+  "indexing": "open",
+  "redirectFromHosts": [],
   "routes": {
     "product": "/product/{asin}"
   },

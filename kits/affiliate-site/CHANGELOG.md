@@ -12,6 +12,141 @@ mechanics (price rule, CTA, Offer, click classification) has to be applied in
 both places. Record each one under "Parity" in the release that carries it;
 `unit/drift.test.ts` lists upstream changes since the port commit.
 
+## 0.2.0 (2026-11-21)
+
+Staging and launch controls for a site that serves real pages before it may
+be found (K2), a stricter 2(i) price rule in the gate (K5), and a database
+connection ceiling in the deploy scripts (K6). Nothing changes for a site
+that sets none of the new keys, except the gate rule, which every kit site's
+gate now runs.
+
+### Added
+
+#### site.json `indexing` and `redirectFromHosts` (K2)
+
+- `"indexing": "open" | "closed"` (default `open`; schema, loader
+  `ctx.indexing`, `INDEXING_MODES`). Closed:
+  - `mountKit` installs `closedIndexingMiddleware()` first, so every response
+    carries `X-Robots-Tag: noindex`: pages, sitemaps (XML), robots.txt and
+    llms.txt (text), `/health` and the beacon (JSON), `/r/` and every other
+    redirect, 404s, error pages and static files. It also wraps the
+    response's `writeHead()`, so a handler that overwrites the header, removes
+    it or passes its own to `writeHead()` cannot take it away; a value scoped
+    to one crawler (`googlebot: noindex`) gets a plain `noindex` beside it
+    (`robotsTagNoindexForAll`, `ensureNoindexHeader`).
+  - The IndexNow submit path refuses before it builds or sends anything:
+    the new `indexNowSubmission()` (one POST body: host, key, keyLocation,
+    URLs on the canonical origin only, at most 10,000) and `submitIndexNow()`
+    (batched POSTs to api.indexnow.org, one result per batch, injectable
+    fetch), and `indexableUrls()` (the sitemaps' set, "the URLs to submit to
+    IndexNow or any ping") throw `IndexingClosedError` (kit barrel, with
+    `assertIndexingOpen` and `indexingClosed`). `sitemapUrlsFrom()` and the
+    sitemaps themselves are unchanged.
+  - robots.txt does not change: a Disallow would stop crawlers from reading
+    the noindex and leave URLs indexed bare. Pages keep their own robots
+    meta, so the gate still checks each family's decision for opening day.
+- `"redirectFromHosts": [host, ...]` (default `[]`; lowercase host names, never
+  the canonical origin's host). `hostRedirectMiddleware()`, mounted by
+  `mountKit` right after the AI-traffic logger (an assistant fetching an old
+  URL is logged with its 301): GET and HEAD on a listed host get a 301 to
+  `canonicalOrigin` + the path and query exactly as sent (no decoding or
+  re-encoding; an absolute-form target keeps only its path and query),
+  `Cache-Control: public, max-age=86400` so a redirect can be taken back.
+  Served on every host instead, and marked noindex there: `/health`,
+  `/robots.txt`, the IndexNow key file and site-verification files
+  (`/google*.html`, `/BingSiteAuth.xml`, `/.well-known/*`). robots.txt is
+  served, not redirected: RFC 9309 asks crawlers to follow up to five
+  robots.txt redirects, but one that does not reads "no robots.txt" (crawl
+  everything, training crawlers included), and the same policy on both
+  hosts lets every crawler fetch the old URLs and see their 301s. Other
+  methods are served as is: a 301 would make a browser repeat a click
+  beacon's POST as a GET and lose the click.
+- `mountKit().routes` reports `USE closed-indexing` and `USE host-redirect`
+  when they are mounted.
+
+### Changed
+
+- `indexableUrls(ctx, candidates)` now reads `ctx.indexing` (its context type
+  is `Pick<SiteContext, 'site' | 'crawlers' | 'indexing'>`; a full
+  SiteContext has it) and refuses while it is closed.
+
+#### The 2(i) stamp rule (K5)
+
+kit-compliance's price rule (`priceDisplayProblems`, the same test title) now
+fails, besides what it failed before:
+- a stamp that does not SHOW its check time as a date and a time with a time
+  zone (`SHOWN_CHECK_TIME_RE`: "2026-11-17 14:11 UTC", Amazon's
+  "01/07/2008 14:11 PST", "Nov 17, 2026, 9:11 AM EST", ISO with `T`/`Z`,
+  offsets); a `<time datetime>` attribute alone is not shown to readers;
+- a stamp whose shown time is another instant than its `<time datetime>`
+  (`shownCheckTimeMs`; compared when the shown time names one instant: a
+  year and a fixed zone; generic ET/PT and year-less dates are not compared);
+- a stamp without a visible control labelled "Details" (`DETAILS_LABEL_RE`: a
+  popover button, an aria-controls button, an `href="#..."` link or a
+  `<details>` summary) that reveals the exact 2(i) disclaimer. An inline
+  disclaimer alone, which 2(i) allows as "adjacent", no longer passes: the
+  kit's stamp and Amazon's example both use "Details";
+- a price stamp holding a second price, or an availability stamp holding
+  one (`priceAmounts`): every price, inside a sentence too, is its own stamp;
+- a price outside every stamp that only crawlers and assistants read (text in
+  a hidden element), or in an `aria-label`, `title` or `alt`;
+- an Amazon price ("$N on Amazon", "$N (as of ...)") or a `.ssr-price` inside
+  `data-kit-not-a-price`, which is for rates and budgets.
+`looksLikePrice` (the unstamped-text, head-metadata and llms.txt checks) also
+reads a currency-code amount ("USD 349.99", "349.99 USD", `PRICE_CURRENCY_CODE_RE`)
+and a whole-dollar amount given a check time ("$349 (as of Nov 17)",
+"$349 (checked ...)": `DATED_PRICE_RE` / `datedPrices`, budgets excepted).
+The collector records what these need (`ComplianceStamp.detailsTexts`;
+`ComplianceSnapshot.hiddenUnstampedText`, `attributeTexts`, `notAPriceText`).
+Each rule is proven both ways in `tests/unit/compliance.test.ts` and in the
+in-browser detector test; the fixture's violations scenario seeds one note per
+new failure (`fixture-site/db/migrations/0006_fixture_stamp_violations.sql`,
+`tests/selftest` names each), and `db/freshen.sql` now re-stamps the shown
+time of 0005's two hand-made stamps with their datetime, so each stays red
+for its own reason only.
+
+#### DB_CONNECTION_LIMIT (K6)
+
+- `deploy.env` `DB_CONNECTION_LIMIT` (optional; empty or unset leaves the
+  database's limit as the server has it): the database phase of
+  `azure/provision.sh` and `aws/provision.sh` (`kd_sql_cluster`, shared) runs
+  `ALTER DATABASE ... WITH CONNECTION LIMIT n` once the database exists and is
+  marked, then checks on the server, like the role limits, that `datconnlimit`
+  is n and the four roles' limits fit under it. Validated before anything
+  runs: an integer from 1 to 5000, at least the sum of the four
+  `DB_*_CONNECTION_LIMIT` (refused below it; a warning when equal, since on
+  Azure flexible server and RDS the admin is no superuser and its own
+  sessions count too). Both clouds' check and database phases log the limits
+  (`kd_db_limits_summary`). In `deploy.env.example`; dry-run tests for both
+  clouds and parity; `unit/deploy/postgres.it.test.ts` proves it on a real
+  Postgres as a non-superuser admin (set, converged, left alone when unset,
+  enforced).
+
+### What a site must do
+
+- Nothing, to keep today's behaviour: both site.json keys default to what a
+  0.1.0 site had, and `DB_CONNECTION_LIMIT` is optional.
+- Re-render `Dockerfile.azure` after the sync (its header names the kit
+  version): `bash vendor/affiliate-kit/deploy/render-dockerfile.sh --env deploy.env --write`.
+- A renderer that prints its own stamps (rather than `priceStamp()` /
+  `availabilityStamp()`) must show the check time with a zone and a
+  "Details" control, one price per stamp; the kit's own stamps already do.
+
+### Verification
+
+`./test.sh` and `npm run typecheck`. `tests/selftest/gate-selftest.mjs` was not
+run for this release (it takes the host's gate locks); instead the fixture
+app was run from this tree against a throwaway Postgres and the gate's
+Playwright specs were run directly: the clean scenario passed all 58 tests,
+and in the violations scenario every kit-compliance rule failed with every
+needle the self-test names (0006's included) while the detector test passed.
+Run the self-test before relying on it as the release proof.
+
+### Parity
+
+- SpecPicks' SSR stamps ("as of <date> (price may vary)", no "Details") would
+  fail the new rule; queue with 0.1.0's 2(i) parity item for P3-1.
+
 ## 0.1.0 (2026-11-17)
 
 First release: the complete kit, build items K1 to K7. Ported from SpecPicks

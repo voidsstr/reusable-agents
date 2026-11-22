@@ -81,6 +81,7 @@ describe('barrel', () => {
       'boundedQuery', 'withBudget', 'SwrCache', 'verifiedClicks30dByAsin',
       'inactiveReason', 'inactivePageRenders', 'amazonSearchUrlFor',
       'SubstituteMemo', 'rememberSubstitute', 'recallSubstitute',
+      'INDEXING_MODES', 'IndexingClosedError', 'indexingClosed', 'assertIndexingOpen',
     ]) {
       expect((kit as Record<string, unknown>)[name]).toBeDefined();
     }

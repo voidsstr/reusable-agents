@@ -7,12 +7,15 @@ deploy gate. It holds the money mechanics SpecPicks proved (price rule, CTA,
 Offer JSON-LD, click classification), parameterised by one `site.json`, so a
 new site is configuration plus its own niche code instead of a fork.
 
-Status: **0.1.0**, the first complete kit (build items K1 to K7):
+Status: **0.2.0**. 0.1.0 was the first complete kit (build items K1 to K7);
+0.2.0 adds the site-wide `indexing` switch and `redirectFromHosts` (K2), the
+2(i) stamp rule that fails any price without its shown date, time, zone and
+"Details" control (K5), and `DB_CONNECTION_LIMIT` (K6). See `CHANGELOG.md`.
 
 | Part | Where | Build item |
 |---|---|---|
 | SiteContext and the leaf modules (offer, links, price, notices, bot and AI-crawler verification, ...) | `server/src` | K1 |
-| HTTP middleware (`mountKit`: AI-traffic log, beacon, `/r/`, robots, llms, IndexNow, health) and the browser bundle | `server/src/http`, `client/` | K2 |
+| HTTP middleware (`mountKit`: the closed-indexing header, AI-traffic log, host redirects, beacon, `/r/`, robots, llms, IndexNow key and submit path, health) and the browser bundle | `server/src/http`, `client/` | K2 |
 | Render helpers (layout shell, SEO head, JSON-LD, Markdown with GFM tables, sitemaps) | `server/src/render` | K3 |
 | Migrations (clicks, AI traffic, articles, verified-human views), the runner, the publish-guard template | `migrations/`, `server/src/db` | K4 |
 | The deploy gate (runner, all-pages engine, kit-compliance spec) and its fixture site | `tests/`, `fixture-site/` | K5 |
@@ -122,7 +125,7 @@ import { pendingMigrations, kitMigrationSources } from '../vendor/affiliate-kit/
 
 const ctx = loadSiteContext('site.json');             // throws SiteContextError listing every problem
 const app = express();
-const kit = mountKit(app, ctx, {                      // first: AI-traffic logger, /health, robots, llms, IndexNow, beacon
+const kit = mountKit(app, ctx, {                      // first: noindex header (closed), AI-traffic logger, host redirects, /health, robots, llms, IndexNow, beacon
   db: createPgKitDb(pool),
   redirectLookup: pgRedirectLookup(pool, CATALOG_SQL),    // GET /r/:asin, once the site has a catalog
   llms: LLMS_CONTENT,
@@ -149,6 +152,8 @@ Schema: `schema/site.schema.json` (JSON Schema 2020-12). Example:
 | Section | Holds |
 |---|---|
 | `site` | `id` (written to `site_id` columns), `brandName`, `domain`, `canonicalOrigin`, `language` |
+| `indexing` | `open` (default) or `closed`. Closed: every response carries `X-Robots-Tag: noindex` (HTML, XML, text, JSON, redirects, errors; mountKit installs it ahead of everything and it survives a handler that overwrites or removes the header) and the IndexNow submit path refuses (`indexNowSubmission`, `submitIndexNow`, `indexableUrls` throw `IndexingClosedError`). robots.txt does not change: a Disallow would hide the noindex from crawlers and leave URLs indexed bare. Pages keep their own robots meta, so the gate still checks each family's decision for the day the site opens |
+| `redirectFromHosts` | hosts (a temporary platform address, `www`) whose GET and HEAD requests get a 301 to `canonicalOrigin` with the path and query exactly as sent, cacheable for a day. Served on every host instead: `/health`, `/robots.txt` (crawlers that do not follow a robots.txt redirect would otherwise read "no robots.txt"), the IndexNow key file and verification files (`/google*.html`, `/BingSiteAuth.xml`, `/.well-known/*`), marked noindex there. Other methods are served as is (a 301 would turn a click beacon's POST into a GET). Never the canonical host itself |
 | `routes` | product page template, default `/product/{asin}` |
 | `amazon` | `partnerTag`; `placementTags` (segment tag per `data-cta-placement`); `sourceTags` (tag per page kind, for `/r/`); `acceptSegmentTagParam`; CTA labels. The marketplace is the US store: `www.amazon.com`, `Amazon.com`, USD |
 | `sources` | referer-path rules for `classifySource` (first match wins) |
@@ -185,7 +190,7 @@ environment can only shorten the window, and is honoured even below that hour
 | Types | `SiteContext`, `SiteJson` (the file), `ThemePalette`, `SourceRule`, `CrawlerClass`, `CrawlerPolicy`, `StaticCrawlerRange` |
 
 Cross-field rules checked on load: the canonical origin's host is the domain
-or `www.` of it; source rules name each kind once, claim each exact path once
+or `www.` of it, and is not one of `redirectFromHosts`; source rules name each kind once, claim each exact path once
 and never use a reserved kind (`home`, `direct`, `other`); every `sourceTags`
 kind has a rule; the disclosure states the Operating Agreement section 5
 sentence; every theme pair passes its contrast ratio; static crawler and
@@ -245,7 +250,14 @@ records (`deploy/README.md`), where `edge.cdn` stays `none`.
   layout CSS. Never put a stamp inside an `<a>`. Pass each stamp a `key`
   (e.g. `` `${asin}|${placement}` ``) for stable markup; without one its
   popover id is unique per call, so ids never collide but change per render.
-  A kind `availabilityStamp` does not know renders the neutral copy.
+  A kind `availabilityStamp` does not know renders the neutral copy. Every
+  price, inside a sentence too, is one `priceStamp()`: the gate (0.2.0) fails
+  a stamp that does not show its date and time with a zone (or shows another
+  time than its `<time datetime>`), has no visible "Details" control
+  revealing the exact disclaimer, or holds a second price; and any price
+  outside a stamp, in visible text, in text only crawlers and assistants read
+  (hidden elements), in an `aria-label` / `title` / `alt`, or an Amazon price
+  marked `data-kit-not-a-price`.
 - **No prices in head metadata**: `<meta name="description">`,
   `og:description` and `twitter:description` cannot carry the "as of" time or
   the 2(i) disclaimer, and search engines keep them for days. Name a
@@ -294,6 +306,7 @@ The wording in `notices.ts` was checked against
 | Module | What it does | Ported from (SpecPicks) |
 |---|---|---|
 | `siteContext.ts` | load, validate and resolve `site.json`; theme CSS; Cache-Control | new (SpecPicks' unused `sites/<slug>/site.json` idea) |
+| `indexing.ts` | the `indexing` switch's refusal: `IndexingClosedError`, `assertIndexingOpen`, `indexingClosed` | new |
 | `notices.ts` | 2(i), 2(k) and section 5 texts and HTML | new |
 | `offer.ts` | quotable price, honest list price, Offer / Product / ListItem JSON-LD | `affiliateOffer.ts` |
 | `links.ts` | `esc`, CTA and link builders, tags, `classifySource`, `pickTrackingId` | `ssrRender.ts`, `index.ts` |

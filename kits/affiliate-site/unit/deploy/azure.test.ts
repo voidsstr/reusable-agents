@@ -11,6 +11,9 @@ import {
   type Sandbox,
 } from './harness';
 
+/** The kit release the scripts label images and tag apps with (its VERSION file). */
+const KIT_VERSION = fs.readFileSync(path.join(__dirname, '..', '..', 'VERSION'), 'utf8').trim();
+
 let sb: Sandbox;
 beforeAll(() => {
   sb = makeSandbox();
@@ -77,6 +80,10 @@ describe('azure/provision.sh --dry-run all (fresh: nothing exists)', () => {
     expect(cluster).toContain("RAISE EXCEPTION 'affiliate-kit: roles without a statement_timeout: %', bad;");
     expect(r.stdout).toContain("psql 'host=<db-host> port=5432 dbname=postgres user=kitadmin sslmode=require");
     expect(r.stdout).toContain('PGPASSWORD=<env:KIT_TEST_PG_ADMIN_PASSWORD>');
+    // DB_CONNECTION_LIMIT unset: the database's own limit is left as the server has it.
+    expect(cluster).not.toMatch(/ALTER DATABASE "kitexample" WITH CONNECTION LIMIT/);
+    expect(cluster).not.toContain('datconnlimit');
+    expect(r.stdout).toContain('connection limits: roles owner 3, app 20, agents 10, publisher 2 (sum 35); database left as the server has it (DB_CONNECTION_LIMIT unset)');
 
     expect(db).toMatch(/^-- affiliate-kit: privileges inside database "kitexample"/);
     expect(db).toContain('BEGIN;\nSET LOCAL ROLE "kitexample_owner";\nREVOKE ALL ON SCHEMA public FROM PUBLIC;');
@@ -135,6 +142,47 @@ describe('azure/provision.sh --dry-run all (fresh: nothing exists)', () => {
     expect(checks).toHaveLength(2);
     expect(checks[0]).toContain("--expect-txt 'asuid.kit-example.test=<verification-id>' --expect-a '<static-ip>'");
     expect(checks[1]).toContain("--expect-cname '<fqdn>'");
+  });
+});
+
+describe('azure/provision.sh database: DB_CONNECTION_LIMIT', () => {
+  it('sets the database\'s own CONNECTION LIMIT once it exists and is marked, and checks it like the roles\'', () => {
+    const f = editEnv((t) => `${t}DB_CONNECTION_LIMIT=40\n`);
+    const r = dry('azure/provision.sh', ['--env', f, 'database']);
+    expect(r.status).toBe(0);
+    const [cluster] = sqlBlocks(r.stdout);
+    const alter = cluster.indexOf('ALTER DATABASE "kitexample" WITH CONNECTION LIMIT 40;');
+    expect(alter).toBeGreaterThan(cluster.indexOf(`COMMENT ON DATABASE "kitexample" IS 'affiliate-kit app=kitexample';`));
+    expect(alter).toBeGreaterThan(cluster.indexOf('ALTER DATABASE "kitexample" OWNER TO "kitexample_owner";'));
+    expect(alter).toBeLessThan(cluster.indexOf('GRANT CONNECT ON DATABASE "kitexample"'));
+    expect(cluster).toContain("IF NOT EXISTS (SELECT FROM pg_catalog.pg_database WHERE datname = 'kitexample' AND datconnlimit = 40) THEN");
+    expect(cluster).toContain("RAISE EXCEPTION 'affiliate-kit: database kitexample does not have CONNECTION LIMIT 40';");
+    expect(cluster).toContain("IF (SELECT sum(rolconnlimit) FROM pg_catalog.pg_roles WHERE rolname IN ('kitexample_owner', 'kitexample_app', 'kitexample_agents', 'kitexample_publisher')) > 40 THEN");
+    expect(r.stdout).toContain('connection limits: roles owner 3, app 20, agents 10, publisher 2 (sum 35); database 40');
+    expect(r.stderr).not.toContain('equals the four role limits');
+  });
+
+  it('warns when it leaves no room beyond the roles\' sum, and normalises the number', () => {
+    const f = editEnv((t) => `${t}DB_CONNECTION_LIMIT=035\n`);
+    const r = dry('azure/provision.sh', ['--env', f, 'database']);
+    expect(r.status).toBe(0);
+    expect(sqlBlocks(r.stdout)[0]).toContain('ALTER DATABASE "kitexample" WITH CONNECTION LIMIT 35;');
+    expect(r.stderr).toContain("WARN: DB_CONNECTION_LIMIT=35 equals the four role limits' sum");
+  });
+
+  it('refuses a limit below the roles\' sum, zero, or not a number, before anything runs', () => {
+    for (const [v, why] of [
+      ['34', 'DB_CONNECTION_LIMIT=34 is below the sum of the four role limits (35)'],
+      ['0', "DB_CONNECTION_LIMIT='0' must be an integer from 1 to 5000"],
+      ['-1', "DB_CONNECTION_LIMIT='-1' must be an integer from 1 to 5000"],
+      ['unlimited', "DB_CONNECTION_LIMIT='unlimited' must be an integer from 1 to 5000"],
+    ] as const) {
+      const f = editEnv((t) => `${t}DB_CONNECTION_LIMIT=${v}\n`);
+      const r = runScript(sb, 'azure/provision.sh', ['--env', f, '--dry-run', 'database']);
+      expect([v, r.status]).toEqual([v, 2]);
+      expect(r.stderr).toContain(why);
+      expect(r.calls).toEqual([]);
+    }
   });
 });
 
@@ -243,7 +291,7 @@ describe('azure/deploy.sh --dry-run', () => {
     expect(oneCommand(r.stdout, 'bash ')).toMatch(/predeploy-gate\.sh --site-root \S+\/fx\/site --suite tests\/run-local-suite\.sh -- --workers=4$/);
     const build = oneCommand(r.stdout, 'docker build ');
     expect(build).toMatch(/^\[dry-run\] docker build --platform linux\/amd64 --file \S+\/site\/Dockerfile\.azure --tag kittestacrdoesnotexist\.azurecr\.io\/kitexample:20261117-120000 /);
-    expect(build).toContain('--label affiliate-kit.app=kitexample --label affiliate-kit.version=0.1.0');
+    expect(build).toContain(`--label affiliate-kit.app=kitexample --label affiliate-kit.version=${KIT_VERSION}`);
     expect(oneCommand(r.stdout, 'az acr login ')).toBe('[dry-run] az acr login --name kittestacrdoesnotexist');
     expect(dryCommands(r.stdout, 'docker push ')).toEqual([
       '[dry-run] docker push kittestacrdoesnotexist.azurecr.io/kitexample:20261117-120000',
@@ -566,7 +614,7 @@ describe('ownership: only this site\'s Container App is changed', () => {
     const a = runScript(sb, 'azure/provision.sh', ['--env', sb.envFile, '--dry-run', 'app', '--adopt-existing'], env);
     expect(a.status).toBe(0);
     const tag = oneCommand(a.stdout, 'az containerapp update --name kitexample --resource-group kit-test-rg-does-not-exist --tags ');
-    expect(tag).toContain('--tags affiliate-kit=0.1.0 affiliate-kit-app=kitexample -o none');
+    expect(tag).toContain(`--tags affiliate-kit=${KIT_VERSION} affiliate-kit-app=kitexample -o none`);
     expect(a.stdout.indexOf(tag)).toBeLessThan(a.stdout.indexOf('[dry-run] az containerapp ingress update'));
   });
 

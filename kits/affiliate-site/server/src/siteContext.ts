@@ -3,7 +3,9 @@
  *
  * A site keeps one site.json (schema: schema/site.schema.json). It carries
  * everything SpecPicks hard-codes in its source: brand, domain and canonical
- * origin, the Associates partner tag and per-placement segment tags, the
+ * origin, whether search engines may index the site yet (indexing) and the
+ * hosts that redirect to it (redirectFromHosts), the Associates partner tag
+ * and per-placement segment tags, the
  * Amazon Site named in notices, the earnings disclosure, the byline, theme
  * tokens, the robots / AI-crawler policy, extra static crawler ranges, the
  * CDN in front of the app (edge), the IndexNow key, the HTML cache limits and
@@ -37,6 +39,14 @@ export type CrawlerPolicy = 'allow' | 'block';
 export type CdnName = 'cloudflare';
 /** What site.json edge.cdn accepts. */
 export const EDGE_CDN_CHOICES: ReadonlyArray<CdnName | 'none'> = deepFreeze<ReadonlyArray<CdnName | 'none'>>(['none', 'cloudflare']);
+/**
+ * site.json `indexing`: 'open', or 'closed' while the site must stay out of
+ * search indexes (X-Robots-Tag: noindex on every response; the IndexNow
+ * submit path refuses). See indexing.ts and http/indexing.ts.
+ */
+export type IndexingMode = 'open' | 'closed';
+/** What site.json `indexing` accepts. */
+export const INDEXING_MODES: readonly IndexingMode[] = deepFreeze<readonly IndexingMode[]>(['open', 'closed']);
 
 export interface ThemePalette {
   readonly bg: string;
@@ -77,6 +87,18 @@ export interface SiteContext {
     readonly canonicalOrigin: string;
     readonly language: string;
   };
+  /**
+   * 'closed': every response carries X-Robots-Tag: noindex (mountKit mounts
+   * closedIndexingMiddleware first) and the IndexNow submit path refuses
+   * (assertIndexingOpen). robots.txt is unchanged: crawlers must be able to
+   * fetch a page to read its noindex.
+   */
+  readonly indexing: IndexingMode;
+  /**
+   * Hosts that answer GET and HEAD with a 301 to canonicalOrigin, path and
+   * query kept (hostRedirectMiddleware). Lower case, never the canonical host.
+   */
+  readonly redirectFromHosts: readonly string[];
   readonly routes: {
     /** Product page path template, e.g. '/product/{asin}'. */
     readonly product: string;
@@ -140,6 +162,8 @@ export interface SiteJson {
   $schema?: string;
   schemaVersion: 1;
   site: { id: string; brandName: string; domain: string; canonicalOrigin: string; language?: string };
+  indexing?: IndexingMode;
+  redirectFromHosts?: string[];
   routes?: { product?: string };
   amazon: {
     partnerTag: string;
@@ -202,6 +226,7 @@ export const RESERVED_SOURCE_KINDS: readonly string[] = deepFreeze(['home', 'dir
 
 export const KIT_DEFAULTS = deepFreeze({
   language: 'en-US',
+  indexing: 'open' as IndexingMode,
   productRoute: '/product/{asin}',
   marketplaceHost: 'www.amazon.com',
   siteName: 'Amazon.com',
@@ -236,7 +261,7 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:reusable-agents:affiliate-site-kit:site:1",
   "title": "Affiliate site configuration (site.json)",
-  "description": "Everything a site built on the affiliate-site kit used to hard-code: identity, Amazon tags, notices, byline, theme, crawler policy, the CDN in front of the app, IndexNow key, cache and price-freshness limits. Loaded and checked by server/src/siteContext.ts (loadSiteContext). Niche values live here, never in kit code.",
+  "description": "Everything a site built on the affiliate-site kit used to hard-code: identity, whether search engines may index it yet, the hosts that redirect to it, Amazon tags, notices, byline, theme, crawler policy, the CDN in front of the app, IndexNow key, cache and price-freshness limits. Loaded and checked by server/src/siteContext.ts (loadSiteContext). Niche values live here, never in kit code.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "site", "amazon", "disclosure", "byline", "theme", "indexNow"],
@@ -250,6 +275,20 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
       "description": "site.json format version. The kit refuses versions it does not know."
     },
     "site": { "$ref": "#/$defs/site" },
+    "indexing": {
+      "type": "string",
+      "enum": ["open", "closed"],
+      "default": "open",
+      "description": "Whether search engines may index the site yet. closed (staging, a temporary host): every response the app sends carries X-Robots-Tag: noindex (HTML, XML, text, JSON and redirects alike; mountKit installs it first) and the kit's IndexNow submit path refuses (indexNowSubmission, submitIndexNow, indexableUrls). robots.txt keeps allowing crawls: a Disallow would stop crawlers from ever reading the noindex and leave URLs indexed bare. Pages keep their own robots meta, so the gate still checks each family's indexing decision for the day the site opens."
+    },
+    "redirectFromHosts": {
+      "type": "array",
+      "description": "Hosts (the old or alternate names of the site, e.g. a temporary platform address or www) that answer every GET and HEAD with a permanent (301), path- and query-preserving redirect to canonicalOrigin. Served on every host as is: /health, robots.txt, the IndexNow key file and site-verification files (/google*.html, /BingSiteAuth.xml, /.well-known/*), which also carry X-Robots-Tag: noindex there. Other methods are served as is (a 301 would turn a click beacon's POST into a GET). Never the canonical origin's own host.",
+      "items": { "$ref": "#/$defs/hostname" },
+      "uniqueItems": true,
+      "maxItems": 20,
+      "default": []
+    },
     "routes": { "$ref": "#/$defs/routes" },
     "amazon": { "$ref": "#/$defs/amazon" },
     "sources": {
@@ -563,6 +602,11 @@ export const SITE_SCHEMA: { readonly [keyword: string]: unknown } = deepFreeze({
           "description": "Hours an Amazon price (or availability) may be shown after it was fetched, before cache layers are subtracted. IP License 2(h) caps it at 24."
         }
       }
+    },
+    "hostname": {
+      "type": "string",
+      "pattern": "^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$",
+      "description": "A lowercase DNS host name without scheme, port or trailing dot."
     },
     "trackingId": {
       "type": "string",
@@ -948,6 +992,13 @@ export function parseSiteContext(raw: unknown, opts: ParseSiteContextOptions = {
     issues.push(`/site/canonicalOrigin host ${host} is neither ${input.site.domain} nor www.${input.site.domain}`);
   }
 
+  // indexing, and the hosts that redirect here (never the canonical host itself: a loop)
+  const indexing = input.indexing ?? KIT_DEFAULTS.indexing;
+  const redirectFromHosts = [...(input.redirectFromHosts ?? [])];
+  redirectFromHosts.forEach((h, i) => {
+    if (h === host) issues.push(`/redirectFromHosts/${i} '${h}' is the canonical origin's host: it would redirect to itself`);
+  });
+
   // routes
   const productRoute = input.routes?.product ?? KIT_DEFAULTS.productRoute;
   if (productRoute.split('{asin}').length !== 2) issues.push('/routes/product must contain {asin} exactly once');
@@ -1080,6 +1131,8 @@ export function parseSiteContext(raw: unknown, opts: ParseSiteContextOptions = {
       canonicalOrigin: origin,
       language: input.site.language ?? KIT_DEFAULTS.language,
     },
+    indexing,
+    redirectFromHosts,
     routes: { product: productRoute },
     amazon: {
       partnerTag: a.partnerTag,

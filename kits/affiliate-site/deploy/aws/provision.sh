@@ -11,9 +11,10 @@
 #               created by reusable-agents/install/deploy-aws.sh provision, never here
 #   check       credentials and account, the ALB and cluster, the config, and
 #               which secrets resolve (by name; values are never shown)
-#   database    the same roles, database and grants as azure/provision.sh, on
-#               the RDS instance (AWS_DB_HOST, else RDS_ENDPOINT), with the same
-#               ownership markers and the same refusal of another site's objects
+#   database    the same roles, database (and DB_CONNECTION_LIMIT) and grants
+#               as azure/provision.sh, on the RDS instance (AWS_DB_HOST, else
+#               RDS_ENDPOINT), with the same ownership markers and the same
+#               refusal of another site's objects
 #   secrets     Secrets Manager secret AWS_SECRET_ID = {secret-name: value} from
 #               AWS_APP_SECRETS (default APP_SECRETS), written from a 0600 file
 #               (file://); --restart forces a new deployment so tasks read it
@@ -108,6 +109,7 @@ phase_check() {
   [[ -n $v ]] || kd_die "ECS cluster $AWS_CLUSTER is not active" 2
   kd_log "app $APP_NAME on $AWS_CLUSTER; image $AWS_REGISTRY/$AWS_REPO; ALB ${AWSS[ALB_DNS]}"
   kd_log "compute ${KD_CPU_UNITS} CPU units / ${KD_MEMORY_MIB} MiB, tasks $MIN_REPLICAS..$MAX_REPLICAS; hostnames $SITE_HOSTNAMES"
+  kd_log "$(kd_db_limits_summary)"
   local -a items=()
   read -ra items <<< "$AWS_APP_SECRETS"
   for e in "${items[@]}"; do
@@ -131,6 +133,7 @@ phase_database() {
   kd_require_keys AWS_DB_ADMIN_USER AWS_DB_ADMIN_PASSWORD
   local host=${AWS_DB_HOST:-${AWSS[RDS_ENDPOINT]-}}
   [[ -n $host ]] || kd_die "no database host: set AWS_DB_HOST or RDS_ENDPOINT in $AWS_STATE_FILE" 2
+  kd_log "$(kd_db_limits_summary)"
   kd_db_provision "$host" "$AWS_DB_ADMIN_USER" "$AWS_DB_ADMIN_PASSWORD" "$NEW_DSNS" AWS_DB
 }
 

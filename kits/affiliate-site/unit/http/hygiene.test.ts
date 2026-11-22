@@ -50,6 +50,8 @@ describe('the http barrel', () => {
       'kitClientScriptTag', 'stickyBuyBarHtml', 'STICKY_BAR_CSS', 'createPgKitDb', 'pgRedirectLookup',
       'redirectProductFromRow', 'REDIRECT_BUYABLE_COLUMN', 'BackgroundWriter', 'defaultMaxSheddable', 'BEACON_PATH',
       'STICKY_ACTIVE_CLASS',
+      'closedIndexingMiddleware', 'ensureNoindexHeader', 'robotsTagNoindexForAll', 'hostRedirectMiddleware', 'hostRedirectLocation',
+      'requestHostname', 'HOST_REDIRECT_VERIFICATION_PATHS', 'indexNowSubmission', 'submitIndexNow', 'INDEXNOW_ENDPOINT', 'INDEXNOW_MAX_URLS',
     ]) {
       expect((http as Record<string, unknown>)[name]).toBeDefined();
     }

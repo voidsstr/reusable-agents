@@ -99,13 +99,18 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
     if (!el || (mustShow && !isVisible(el))) return '';
     return collapse(el.textContent);
   };
+  // A control labelled "Details" (2(i)'s disclosure); the same pattern as compliance.ts DETAILS_LABEL_RE.
+  const DETAILS_LABEL = /^[^\p{L}\p{N}]*details[^\p{L}\p{N}]*$/iu;
+  const labelOf = (c: Element): string => collapse(c.getAttribute('aria-label') || c.textContent);
   const stamps: ComplianceStamp[] = Array.from(document.querySelectorAll(STAMP)).map((s) => {
     const linked: string[] = [];
+    const details: string[] = [];
     // Only a control a reader can see and use reveals anything.
     for (const c of Array.from(s.querySelectorAll('[popovertarget],[aria-controls],[aria-describedby],a[href^="#"]'))) {
       if (!isVisible(c)) continue;
+      const revealed: string[] = [];
       for (const attr of ['popovertarget', 'aria-controls']) {
-        for (const id of (c.getAttribute(attr) || '').split(/\s+/)) if (id) linked.push(textOfId(id, false));
+        for (const id of (c.getAttribute(attr) || '').split(/\s+/)) if (id) revealed.push(textOfId(id, false));
       }
       // A description is only read where it shows; it is not a disclosure control.
       for (const id of (c.getAttribute('aria-describedby') || '').split(/\s+/)) if (id) linked.push(textOfId(id, true));
@@ -113,8 +118,10 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
       if (href.length > 1) {
         let id = href.slice(1);
         try { id = decodeURIComponent(id); } catch { /* keep it raw */ }
-        linked.push(textOfId(id, false));
+        revealed.push(textOfId(id, false));
       }
+      linked.push(...revealed);
+      if (DETAILS_LABEL.test(labelOf(c))) details.push(...revealed);
     }
     for (const d of Array.from(s.querySelectorAll('details'))) {
       const summary = d.querySelector(':scope > summary');
@@ -122,6 +129,7 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
       const body = d.cloneNode(true) as Element;
       body.querySelector(':scope > summary')?.remove();
       linked.push(collapse(body.textContent));
+      if (DETAILS_LABEL.test(labelOf(summary))) details.push(collapse(body.textContent));
     }
     return {
       kind: s.getAttribute('data-price-stamp') || '',
@@ -129,6 +137,7 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
       visibleText: collapse((s as HTMLElement).innerText ?? s.textContent),
       times: Array.from(s.querySelectorAll('time[datetime]')).map((t) => t.getAttribute('datetime') || ''),
       linkedTexts: linked.filter(Boolean),
+      detailsTexts: details.filter(Boolean),
       priceText: collapse(s.querySelector('.ssr-price')?.textContent),
       insideAnchor: !!s.closest('a'),
     };
@@ -148,21 +157,42 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
     for (let cur: Element | null = el; cur && cur !== document.body; cur = cur.parentElement) if (isBlock(cur)) return cur;
     return document.body;
   };
+  // Outside every stamp: what a reader sees, what only crawlers and assistants
+  // read (in the HTML, not rendered), and what is marked as not a price.
   const blocks = new Map<Element, string[]>();
+  const hiddenBlocks = new Map<Element, string[]>();
+  const notAPriceBlocks = new Map<Element, string[]>();
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const t = n.nodeValue || '';
     if (!t.trim()) continue;
     const el = n.parentElement;
-    if (!el || el.closest(SKIP) || el.closest(STAMP) || el.closest(NOT_A_PRICE) || !isRendered(el)) continue;
+    if (!el || el.closest(SKIP) || el.closest(STAMP)) continue;
+    const rendered = isRendered(el);
+    const into = el.closest(NOT_A_PRICE) ? (rendered ? notAPriceBlocks : null) : rendered ? blocks : hiddenBlocks;
+    if (!into) continue;
     const b = blockOf(el);
-    const parts = blocks.get(b);
+    const parts = into.get(b);
     if (parts) parts.push(t);
-    else if (blocks.size < 4000) blocks.set(b, [t]);
+    else if (into.size < 4000) into.set(b, [t]);
   }
-  const unstampedText = [...blocks.values()].map((parts) => collapse(parts.join('')).slice(0, 1000)).filter(Boolean);
+  const texts = (m: Map<Element, string[]>): string[] => [...m.values()].map((parts) => collapse(parts.join('')).slice(0, 1000)).filter(Boolean);
+  const unstampedText = texts(blocks);
+  const hiddenUnstampedText = texts(hiddenBlocks);
+  const notAPriceText = texts(notAPriceBlocks);
+  // What assistive technology announces (and a hover shows) outside every stamp.
+  const attributeTexts: Array<{ where: string; text: string }> = [];
+  for (const el of Array.from(document.body.querySelectorAll('[aria-label],[title],img[alt],input[type="image"][alt],area[alt]'))) {
+    if (attributeTexts.length >= 2000) break;
+    if (el.closest(SKIP) || el.closest(STAMP) || el.closest(NOT_A_PRICE)) continue;
+    for (const attr of ['aria-label', 'title', 'alt']) {
+      const v = collapse(el.getAttribute(attr));
+      if (v) attributeTexts.push({ where: `${attr} of <${el.tagName.toLowerCase()}>`, text: v.slice(0, 300) });
+    }
+  }
+  // The kit's price markup belongs in a stamp, data-kit-not-a-price or not.
   const strayPriceElements = Array.from(document.querySelectorAll('.ssr-price'))
-    .filter((p) => !p.closest(STAMP) && !p.closest(NOT_A_PRICE))
+    .filter((p) => !p.closest(STAMP))
     .map((p) => collapse(p.textContent));
 
   const noticeElements = Array.from(document.querySelectorAll('[data-amazon-notice="2k"]')).map((n) => ({
@@ -236,6 +266,9 @@ export function collectCompliance(arg: CollectComplianceArgs): InPageCompliance 
     anchors,
     stamps,
     unstampedText,
+    hiddenUnstampedText,
+    attributeTexts,
+    notAPriceText,
     strayPriceElements,
     noticeElements,
     visibleText,

@@ -61,6 +61,13 @@ Every script takes `--env deploy.env`, `--dry-run` and `--help`.
   `statement_timeout`, checked inside the database after every run. Grants may
   name columns: the publisher gets `SELECT` and `UPDATE (status, published_at)`
   on `editorial_articles`, no more (the publish guard's contract).
+  `DB_CONNECTION_LIMIT` (optional) also caps the database itself (`ALTER
+  DATABASE ... CONNECTION LIMIT n`), a ceiling over all four roles on a
+  server other sites share; it must be at least the sum of the four role
+  limits (checked before anything runs, and on the server after the run, like
+  the role limits), equal to it is allowed with a warning (on Azure flexible
+  server and RDS the admin is no superuser, so its own sessions count too),
+  and unset leaves whatever limit the database has.
 - **Untested code does not ship.** `deploy.sh` runs the pre-deploy gate before
   it builds. A run that builds without the gate stage must say why:
   `--gated-by=WHO` when an outer pipeline ran the gate on that tree (the

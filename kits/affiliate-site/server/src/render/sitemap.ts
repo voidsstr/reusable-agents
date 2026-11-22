@@ -8,7 +8,10 @@
  * entries; everything else is reported in `excluded` with a reason. The same
  * filter (indexableUrls) feeds IndexNow, so the sitemaps, IndexNow and the
  * pages' robots meta agree (binding amendment 7: "Sitemaps and IndexNow carry
- * only indexable URLs").
+ * only indexable URLs"). indexableUrls is the submit path's list, so it
+ * refuses while site.json `indexing` is "closed" (../indexing.ts); the
+ * sitemaps themselves are still served then (the gate checks them, and
+ * every response carries X-Robots-Tag: noindex).
  *
  * Ported from SpecPicks src/routes/sitemap.ts (see
  * unit/render/fixtures/ported-from-render.json): escapeXml, formatDate
@@ -37,6 +40,7 @@
  * view, a variant ASIN) says so with `canonical` and is left out.
  */
 import * as crypto from 'crypto';
+import { assertIndexingOpen } from '../indexing';
 import type { SiteContext } from '../siteContext';
 import type { PageIndexing } from './seo';
 import { collapseWhitespace } from './text';
@@ -324,9 +328,12 @@ export function sitemapUrlsFrom(
 
 /**
  * The URLs to submit to IndexNow (or any ping): exactly the ones the
- * sitemaps would list, in order, de-duplicated.
+ * sitemaps would list, in order, de-duplicated. Refuses (IndexingClosedError)
+ * while site.json `indexing` is "closed": a closed site pings nothing. To
+ * count or list the URLs without submitting them, use sitemapUrlsFrom().
  */
-export function indexableUrls(ctx: SitemapCtx, candidates: readonly SitemapCandidate[]): string[] {
+export function indexableUrls(ctx: SitemapCtx & Pick<SiteContext, 'indexing'>, candidates: readonly SitemapCandidate[]): string[] {
+  assertIndexingOpen(ctx, 'indexableUrls (the IndexNow / ping list)');
   return sitemapUrlsFrom(ctx, 'indexnow', candidates).urls.map((u) => u.loc);
 }
 

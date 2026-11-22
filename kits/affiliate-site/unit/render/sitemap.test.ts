@@ -8,6 +8,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { IndexingClosedError } from '../../server/src/indexing';
 import { loadSiteContext, parseSiteContext, type SiteJson } from '../../server/src/siteContext';
 import { INDEXABLE_PAGE, noindexPage } from '../../server/src/render/seo';
 import { canonicalUrl } from '../../server/src/render/urls';
@@ -150,6 +151,15 @@ describe('only indexable, canonical URLs are listed', () => {
 
   it('IndexNow gets exactly the sitemap set', () => {
     expect(indexableUrls(ctx, candidates)).toEqual(r.urls.map((u) => u.loc));
+  });
+
+  it('while site.json indexing is closed the ping list refuses, and the sitemaps are still built', () => {
+    const closed = parseSiteContext({ ...JSON.parse(fs.readFileSync(path.join(KIT, 'fixtures/site.example.json'), 'utf8')), indexing: 'closed' }, { env: {} });
+    expect(() => indexableUrls(closed, candidates)).toThrow(IndexingClosedError);
+    expect(() => indexableUrls(closed, candidates)).toThrow(/indexableUrls \(the IndexNow \/ ping list\) refused/);
+    // Counting or listing without submitting still works, and the sitemaps are unchanged.
+    expect(sitemapUrlsFrom(closed, 'all', candidates).urls).toEqual(r.urls);
+    expect(buildSitemapSet(closed, [{ kind: 'all', candidates }]).total).toBe(r.urls.length);
   });
 
   it('lists a URL in the form its own head declares, and leaves out one whose page canonicalises elsewhere', () => {

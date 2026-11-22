@@ -7,13 +7,15 @@
  * different order or path.
  *
  *   mountKit.ts       mountKit(app, ctx, deps)
+ *   indexing.ts       site.json indexing "closed": X-Robots-Tag: noindex on every response
+ *   hostRedirect.ts   site.json redirectFromHosts: 301 to the canonical origin, path and query kept
  *   runtime.ts        KitDeps, createKitRuntime (shared clock, writer, verifier, client address via siteClientIp)
  *   aiTraffic.ts      AI-traffic logger -> ai_traffic_log (IP-verified)
  *   outboundClick.ts  POST /api/outbound-click beacon -> outbound_clicks (via='beacon')
  *   redirect.ts       GET /r/:asin -> Amazon, logged (via='redirect')
  *   robots.ts         robots.txt from SiteContext.crawlers (search + agent allowed, training blocked)
  *   llms.ts           llms.txt (site copy + assistant-cited pages + latest articles)
- *   indexNow.ts       GET /<key>.txt
+ *   indexNow.ts       GET /<key>.txt; the IndexNow submit path (refuses while indexing is closed)
  *   health.ts         GET /health
  *   clientAsset.ts    serving the built browser bundle under a content hash
  *   stickyBar.ts      sticky mobile buy bar markup + CSS
@@ -25,6 +27,8 @@ export * from './types';
 export * from './clientContract';
 export * from './backgroundWriter';
 export * from './runtime';
+export * from './indexing';
+export * from './hostRedirect';
 export * from './aiTraffic';
 export * from './outboundClick';
 export * from './redirect';

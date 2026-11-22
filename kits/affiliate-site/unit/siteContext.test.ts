@@ -8,6 +8,7 @@ import * as path from 'path';
 import {
   CRAWLER_CLASSES,
   EDGE_CDN_CHOICES,
+  INDEXING_MODES,
   KIT_DEFAULTS,
   KIT_DEFAULT_CRAWLER_USER_AGENTS,
   KIT_DEFAULT_SOURCES,
@@ -97,6 +98,11 @@ describe('the embedded schema', () => {
     expect(d.edge.properties.cdn.default).toBe(KIT_DEFAULTS.cdn);
     expect(d.edge.properties.cdn.enum).toEqual(EDGE_CDN_CHOICES);
     expect(d.edge.properties.extraTrustedProxies.default).toEqual([]);
+    const top = (SITE_SCHEMA as any).properties;
+    expect(top.indexing.default).toBe(KIT_DEFAULTS.indexing);
+    expect(top.indexing.default).toBe('open');
+    expect(top.indexing.enum).toEqual(INDEXING_MODES);
+    expect(top.redirectFromHosts.default).toEqual([]);
     // Every CDN site.json can name has kit edge ranges.
     for (const cdn of EDGE_CDN_CHOICES) if (cdn !== 'none') expect(CDN_EDGE_RANGES[cdn].cidrs.length).toBeGreaterThan(0);
   });
@@ -205,6 +211,12 @@ describe('kit defaults fill a minimal site.json', () => {
     expect(ctx.edge).toEqual({ cdn: 'none', trustedProxyCidrs: [] });
   });
 
+  it('is open to indexing and redirects no host unless site.json says otherwise (other sites are unaffected)', () => {
+    expect(ctx.indexing).toBe('open');
+    expect(ctx.redirectFromHosts).toEqual([]);
+    expect(Object.isFrozen(ctx.redirectFromHosts)).toBe(true);
+  });
+
   it('a class listed in site.json replaces that class only', () => {
     const c = parseSiteContext({ ...minimal(), crawlers: { userAgents: { training: ['GPTBot'] } } }, { env: {} });
     expect(c.crawlers.userAgents.training).toEqual(['GPTBot']);
@@ -255,6 +267,14 @@ describe('schema violations are refused, all at once', () => {
     ['a duplicate disallow path', (j) => { j.crawlers.disallowPaths = ['/api/', '/api/']; }, /^\/crawlers\/disallowPaths\/1 duplicates item 0$/],
     ['a bad crawler policy', (j) => { j.crawlers.policy.training = 'allow-some'; }, /^\/crawlers\/policy\/training must be one of "allow", "block"$/],
     ['an unknown CDN', (j) => { j.edge.cdn = 'akamai'; }, /^\/edge\/cdn must be one of "none", "cloudflare"$/],
+    ['an indexing value other than open or closed', (j) => { j.indexing = 'noindex'; }, /^\/indexing must be one of "open", "closed"$/],
+    ['indexing as a boolean', (j) => { j.indexing = false; }, /^\/indexing must be string$/],
+    ['a redirect host with a scheme', (j) => { j.redirectFromHosts = ['https://old.example.net']; }, /^\/redirectFromHosts\/0 must match/],
+    ['a redirect host with a port', (j) => { j.redirectFromHosts = ['old.example.net:8080']; }, /^\/redirectFromHosts\/0 must match/],
+    ['a redirect host in upper case', (j) => { j.redirectFromHosts = ['Old.Example.net']; }, /^\/redirectFromHosts\/0 must match/],
+    ['a redirect host with a path', (j) => { j.redirectFromHosts = ['old.example.net/x']; }, /^\/redirectFromHosts\/0 must match/],
+    ['a redirect host listed twice', (j) => { j.redirectFromHosts = ['old.example.net', 'old.example.net']; }, /^\/redirectFromHosts\/1 duplicates item 0$/],
+    ['redirect hosts as a string', (j) => { j.redirectFromHosts = 'old.example.net'; }, /^\/redirectFromHosts must be array$/],
     ['a trusted proxy that is not a CIDR', (j) => { j.edge.extraTrustedProxies = ['proxy.example.com']; }, /^\/edge\/extraTrustedProxies\/0 must match/],
   ])('%s', (_label, edit, want) => {
     const issues = issuesOf(edit);
@@ -269,6 +289,28 @@ describe('schema violations are refused, all at once', () => {
   it('rejects non-objects', () => {
     expect(() => parseSiteContext(null)).toThrow(SiteContextError);
     expect(() => parseSiteContext([])).toThrow(/must be object/);
+  });
+});
+
+describe('indexing and redirectFromHosts', () => {
+  it('loads a closed site with the hosts that redirect to it (a temporary address, www)', () => {
+    const c = parseWith((j) => {
+      j.indexing = 'closed';
+      j.redirectFromHosts = ['example-app.happyhill-123.eastus.azurecontainerapps.io', 'www.example.com'];
+    });
+    expect(c.indexing).toBe('closed');
+    expect(c.redirectFromHosts).toEqual(['example-app.happyhill-123.eastus.azurecontainerapps.io', 'www.example.com']);
+    expect(Object.isFrozen(c.redirectFromHosts)).toBe(true);
+  });
+
+  it('never redirects the canonical origin\'s own host (a loop), apex or www', () => {
+    expect(issuesOf((j) => { j.redirectFromHosts = ['old.example.net', 'example.com']; }))
+      .toEqual(["/redirectFromHosts/1 'example.com' is the canonical origin's host: it would redirect to itself"]);
+    expect(issuesOf((j) => { j.site.canonicalOrigin = 'https://www.example.com'; j.redirectFromHosts = ['www.example.com']; }))
+      .toEqual(["/redirectFromHosts/0 'www.example.com' is the canonical origin's host: it would redirect to itself"]);
+    // The other name of the same domain is fine: that is the www -> apex (or apex -> www) fold.
+    expect(parseWith((j) => { j.site.canonicalOrigin = 'https://www.example.com'; j.redirectFromHosts = ['example.com']; }).redirectFromHosts)
+      .toEqual(['example.com']);
   });
 });
 

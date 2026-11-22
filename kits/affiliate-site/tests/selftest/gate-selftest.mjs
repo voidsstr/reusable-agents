@@ -53,6 +53,15 @@ const EXPECTED_FAILURES = [
     '/notes/availability-claim-note: availability outside a dated stamp',
     '/notes/hidden-disclaimer-note price stamp 1', '(it is in the stamp but hidden)',
     '/notes/edge-stamp-note price stamp 1', 'quotable window',
+    // 0006 (kit 0.2.0): the stamp itself, and prices that are not in one.
+    '/notes/sentence-price-note: price outside a dated stamp',
+    '/notes/stamp-no-time-note price stamp 1', 'does not show the date and time of the check with a time zone',
+    '/notes/stamp-inline-disclaimer-note price stamp 1', 'no visible "Details" control that reveals the exact 2(i) disclaimer',
+    '/notes/two-price-stamp-note price stamp 1', 'holds 2 prices ($349.99, $229.95)',
+    '/notes/stamp-wrong-time-note price stamp 1', 'shows "2026-11-17 18:30 UTC" but its <time datetime> says 2026-11-17T12:00:00.000Z',
+    '/notes/hidden-price-note: price outside a dated stamp, in text a reader does not see but crawlers and assistants read',
+    '/notes/hidden-price-note: price outside a dated stamp, in aria-label of <a>',
+    '/notes/not-a-price-note: an Amazon price inside data-kit-not-a-price',
   ]],
   ['kit-compliance: pages that show Amazon content carry the exact 2(k) notice', [
     '/notes/amazon-title-note: shows Amazon content (the Amazon title',

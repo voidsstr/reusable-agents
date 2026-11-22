@@ -7,9 +7,10 @@
  */
 
 /** Kit version; must equal ../../VERSION and package.json (unit/index.test.ts checks). */
-export const KIT_VERSION = '0.1.0';
+export const KIT_VERSION = '0.2.0';
 
 export * from './siteContext';
+export * from './indexing';
 export * from './notices';
 export * from './offer';
 export * from './links';

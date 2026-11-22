@@ -119,6 +119,8 @@ describeIt('database phase against a real Postgres (opt-in)', () => {
       set(`DB_${k.toUpperCase()}_DSN`, `env:KIT_IT_DSN_${k.toUpperCase()}`);
     }
     set('APP_SECRETS', '"database-url=env:KIT_IT_DSN_APP"');
+    // The database's own ceiling over the four roles (3 + 20 + 10 + 2 = 35).
+    set('DB_CONNECTION_LIMIT', '40');
     envFile = path.join(sb.fx, 'it.env');
     fs.writeFileSync(envFile, text);
   });
@@ -153,8 +155,8 @@ describeIt('database phase against a real Postgres (opt-in)', () => {
       kitit_owner: ['idle_in_transaction_session_timeout=60s', 'statement_timeout=15min'],
       kitit_publisher: ['idle_in_transaction_session_timeout=60s', 'statement_timeout=30s'],
     });
-    const owner = await su((c) => c.query(`SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname = $1`, [DB]));
-    expect(owner.rows[0].owner).toBe('kitit_owner');
+    const owner = await su((c) => c.query(`SELECT pg_get_userbyid(datdba) AS owner, datconnlimit FROM pg_database WHERE datname = $1`, [DB]));
+    expect(owner.rows[0]).toEqual({ owner: 'kitit_owner', datconnlimit: 40 });
     const stranger = await su((c) => c.query(`SELECT has_database_privilege('kitit_stranger', $1, 'CONNECT') AS ok`, [DB]));
     expect(stranger.rows[0].ok).toBe(false);
   });
@@ -205,6 +207,29 @@ describeIt('database phase against a real Postgres (opt-in)', () => {
     expect(await allowed('publisher', `UPDATE editorial_articles SET slug = 'renamed'`)).toBe(false);
     expect(await allowed('publisher', 'SELECT * FROM products')).toBe(false);
     expect(await allowed('publisher', `INSERT INTO editorial_articles (slug) VALUES ('x')`)).toBe(false);
+  });
+
+  it('DB_CONNECTION_LIMIT converges on a re-run, an unset one leaves the database\'s limit as it is, and it is enforced', async () => {
+    const f = variantEnv('dblimit.env', { DB_CONNECTION_LIMIT: '36' });
+    expect(runScript(sb, 'azure/provision.sh', ['--env', f, 'database'], env()).status).toBe(0);
+    const limit = async () => (await su((c) => c.query(`SELECT datconnlimit FROM pg_database WHERE datname = $1`, [DB]))).rows[0].datconnlimit;
+    expect(await limit()).toBe(36);
+    const unset = variantEnv('dblimit-unset.env', { DB_CONNECTION_LIMIT: '' });
+    const r = runScript(sb, 'azure/provision.sh', ['--env', unset, 'database'], env());
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('database left as the server has it (DB_CONNECTION_LIMIT unset)');
+    expect(await limit()).toBe(36);
+    // The server enforces it on the kit's (non-superuser) roles: with the limit at 1 a second session is refused.
+    await su((c) => c.query(`ALTER DATABASE ${DB} WITH CONNECTION LIMIT 1`));
+    const held = new Client({ host: HOST, port: PORT, user: ROLES.app, password: PW.app, database: DB });
+    await held.connect();
+    try {
+      await expect(withClient(ROLES.agents, PW.agents, DB, async () => 0)).rejects.toThrow(/too many connections for database/);
+    } finally {
+      await held.end();
+    }
+    expect(provision().status).toBe(0);
+    expect(await limit()).toBe(40);
   });
 
   it('marks every role and the database as this site\'s', async () => {

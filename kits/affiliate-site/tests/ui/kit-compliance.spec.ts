@@ -363,12 +363,19 @@ test('kit-compliance detectors: catch each violation in a fixture document, pass
   const tag = ctx.amazon.partnerTag;
   const canonical = ctx.site.canonicalOrigin;
   const now = new Date(r.now - 2 * 3600 * 1000).toISOString();
+  // What a reader sees of that check time (the kit's format), and a different one.
+  const shownNow = `${now.slice(0, 10)} ${now.slice(11, 16)} UTC`;
+  const later = new Date(r.now - 3600 * 1000).toISOString();
+  const shownLater = `${later.slice(0, 10)} ${later.slice(11, 16)} UTC`;
   // Past the quotable window (24h minus the cache lifetimes) but inside 24h: only the window rule catches it.
   const edge = new Date(r.now - Math.round(((r.quotableWindowMs as number) + 24 * 3600 * 1000) / 2)).toISOString();
   const disclaimer = r.priceDisclaimer;
   const earnings = ctx.disclosure.earnings;
   const longTitle = 'Contoso Volt 1000 Widget with Four AC Outlets and Pass-Through Charging, 1024Wh';
-  const goodStamp = `<span data-price-stamp="price"><span class="ssr-price">$129.00</span> on Amazon.com as of <time datetime="${now}">x</time> <button popovertarget="pd1">Details</button> <span id="pd1" popover>${disclaimer}</span></span>`;
+  const goodStamp = `<span data-price-stamp="price"><span class="ssr-price">$129.00</span> on Amazon.com as of <time datetime="${now}">${shownNow}</time> <button popovertarget="pd1">Details</button> <span id="pd1" popover>${disclaimer}</span></span>`;
+  // The same disclosure as a <details> (Details as its summary), in a sentence: also fine. (A <details>
+  // closes an open <p> when parsed, so this sentence is a <div>.)
+  const detailsStamp = `<span data-price-stamp="price"><span class="ssr-price">$139.00</span> on Amazon.com as of <time datetime="${now}">${shownNow}</time> <details><summary>Details</summary>${disclaimer}</details></span>`;
   const clean = `<!doctype html><html><head><meta charset="utf-8"><title>Clean page</title><meta name="description" content="A clean page about widgets under $500.">
     <meta property="og:title" content="Clean page">
     <meta property="og:image" content="https://cdn.example.org/card.png">
@@ -377,6 +384,8 @@ test('kit-compliance detectors: catch each violation in a fixture document, pass
     <h1>Clean</h1>
     <p data-earnings-disclosure>${earnings}</p>
     <p><span data-amazon-content>Widget Title From Amazon, 512Wh, Gray</span> ${goodStamp}</p>
+    <div>The cheapest widget that runs a fridge all day is the Volt 500, at ${detailsStamp}.</div>
+    <p><a href="/product/B0FIXCLEAN" aria-label="Volt 500 details" title="A 512 Wh widget">Volt 500</a></p>
     <p><a href="https://www.amazon.com/dp/B0FIXCLEAN?tag=${tag}&amp;linkCode=ll1" rel="sponsored nofollow noopener" target="_blank" data-cta-placement="pdp-hero">View</a></p>
     <p><a href="${canonical}/r/B0FIXCLEAN" rel="sponsored nofollow">Through our redirect</a></p>
     <p>We do not offer price alerts or a price history, and we never claim a lowest-ever price.</p>
@@ -397,6 +406,14 @@ test('kit-compliance detectors: catch each violation in a fixture document, pass
     <p><span data-price-stamp="price"><span class="ssr-price">$129.00</span> as of <time datetime="2026-01-02T00:00:00Z">x</time></span></p>
     <p><span data-price-stamp="price"><span class="ssr-price">$139.00</span> as of <time datetime="${now}">x</time> <span style="display:none">${disclaimer}</span></span></p>
     <p><span data-price-stamp="price"><span class="ssr-price">$149.00</span> as of <time datetime="${edge}">x</time> <button popovertarget="pd2">Details</button> <span id="pd2" popover>${disclaimer}</span></span></p>
+    <p><span data-price-stamp="price"><span class="ssr-price">$159.00</span> on Amazon.com as of <time datetime="${now}">the last check</time> <button popovertarget="pd3">Details</button> <span id="pd3" popover>${disclaimer}</span></span></p>
+    <p><span data-price-stamp="price"><span class="ssr-price">$169.00</span> on Amazon.com as of <time datetime="${now}">${shownNow}</time> <span>${disclaimer}</span></span></p>
+    <p><span data-price-stamp="price">The Volt is <span class="ssr-price">$179.00</span> and the Cell sells for $189.00 on Amazon.com as of <time datetime="${now}">${shownNow}</time> <button popovertarget="pd4">Details</button> <span id="pd4" popover>${disclaimer}</span></span></p>
+    <p><span data-price-stamp="price"><span class="ssr-price">$199.00</span> on Amazon.com as of <time datetime="${now}">${shownLater}</time> <button popovertarget="pd5">Details</button> <span id="pd5" popover>${disclaimer}</span></span></p>
+    <p>The cheapest that runs a fridge all day is the River 3, $349 (as of Nov 17).</p>
+    <div hidden>Today only: $219.99 on Amazon.</div>
+    <p><a href="/product/B0FIXCLEAN" aria-label="The Volt 1000, $699.00 on Amazon">Volt 1000</a></p>
+    <p data-kit-not-a-price>The Volt is $699 on Amazon right now. <span class="ssr-price">$709.00</span></p>
     <p>The widget is $349.99 right now.</p>
     <p>It sells for $449 at the moment, and the full kit totals $1,249.</p>
     <p>In stock on Amazon today, and only 2 left.</p>
@@ -476,6 +493,15 @@ test('kit-compliance detectors: catch each violation in a fixture document, pass
     ['stamp without 2(i)', /without the exact 2\(i\) disclaimer/],
     ['hidden 2(i) disclaimer', /\$139\.00.*without the exact 2\(i\) disclaimer .*\(it is in the stamp but hidden\)/],
     ['orphan price', /price outside a dated stamp: "The widget is \$349\.99 right now\."/],
+    ['stamp with no check time shown', /\$159\.00.*does not show the date and time of the check with a time zone/],
+    ['stamp with no Details control', /\$169\.00.*no visible "Details" control that reveals the exact 2\(i\) disclaimer/],
+    ['two prices in one stamp', /holds 2 prices \(\$179\.00, \$189\.00\): each price needs its own stamp/],
+    ['shown time is not the <time>', new RegExp(`\\$199\\.00.*shows "${esc(shownLater)}" but its <time datetime> says ${esc(now)}`)],
+    ['dated price in a sentence', /price outside a dated stamp: "The cheapest that runs a fridge all day is the River 3, \$349 \(as of Nov 17\)\."/],
+    ['hidden price', /in text a reader does not see but crawlers and assistants read: "Today only: \$219\.99 on Amazon\."/],
+    ['price in an aria-label', /in aria-label of <a>: "The Volt 1000, \$699\.00 on Amazon"/],
+    ['Amazon price marked not-a-price', /an Amazon price inside data-kit-not-a-price \(that marker is for rates and budgets\): "The Volt is \$699 on Amazon right now\./],
+    ['.ssr-price inside not-a-price', /price outside a dated stamp: "\$709\.00" \(a \.ssr-price outside a stamp\)/],
     ['whole-dollar price', /price outside a dated stamp: "It sells for \$449 at the moment, and the full kit totals \$1,249\."/],
     ['price in <title>', /price in <title>/],
     ['price in og:title', /price in og:title .*from \$449/],

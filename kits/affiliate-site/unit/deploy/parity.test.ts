@@ -126,6 +126,8 @@ describe('the deploy.env contract', () => {
     ['DB_APP_ROLE=kitexample_app', 'DB_APP_ROLE=kitexample_agents', 'must be distinct'],
     ['DB_APP_STATEMENT_TIMEOUT=15s', 'DB_APP_STATEMENT_TIMEOUT=0', 'positive Postgres duration'],
     ['DB_APP_CONNECTION_LIMIT=20', 'DB_APP_CONNECTION_LIMIT=10', 'exceeds DB_APP_CONNECTION_LIMIT'],
+    ['TARGET_PORT=8080', 'TARGET_PORT=8080\nDB_CONNECTION_LIMIT=30', 'is below the sum of the four role limits (35)'],
+    ['TARGET_PORT=8080', 'TARGET_PORT=8080\nDB_CONNECTION_LIMIT=5001', 'must be an integer from 1 to 5000'],
     ['SMOKE_PATHS="/ /health', 'SMOKE_PATHS="health /', 'must be /path'],
     ['MIGRATE_COMMAND="node dist/src/migrate.js"', 'MIGRATE_COMMAND="node x.js; curl evil"', 'run without a shell'],
     ['SITE_HOSTNAMES="kit-example.test www.kit-example.test"', 'SITE_HOSTNAMES="kit-example.test other.test"', 'not kit-example.test or a subdomain'],

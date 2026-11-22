@@ -10,10 +10,14 @@ import { priceStamp } from '../../server/src/price';
 import { htmlCacheControl } from '../../server/src/siteContext';
 import { parseSiteContext, type SiteContext } from '../../server/src/siteContext';
 import {
+  DATED_PRICE_RE,
+  DETAILS_LABEL_RE,
   MAX_STAMP_AGE_MS,
   PRICE_AT_AMAZON_RE,
+  PRICE_CURRENCY_CODE_RE,
   PRICE_WITH_CENTS_RE,
   RENDER_ALLOWANCE_MS,
+  SHOWN_CHECK_TIME_RE,
   affiliateLinkProblems,
   amazonContentReason,
   amazonSearchKey,
@@ -30,9 +34,12 @@ import {
   negationGoverns,
   offerProblems,
   priceAgeLimitMs,
+  priceAmounts,
   priceDisplayProblems,
   priceTrackingProblems,
   recallProblems,
+  shownCheckTimeMs,
+  shownCheckTimes,
   sitemapImageProblems,
   tableProblems,
   titleNeedles,
@@ -43,6 +50,7 @@ import {
   type ComplianceSnapshot,
   type ComplianceStamp,
 } from '../ui/lib/compliance';
+import { collectCompliance } from '../ui/lib/complianceCollect';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -63,7 +71,8 @@ const rules: ComplianceRules = {
 
 function snap(over: Partial<ComplianceSnapshot> = {}): ComplianceSnapshot {
   return {
-    path: '/p', status: 200, headTexts: [], priceMetas: [], anchors: [], stamps: [], unstampedText: [], strayPriceElements: [],
+    path: '/p', status: 200, headTexts: [], priceMetas: [], anchors: [], stamps: [], unstampedText: [], hiddenUnstampedText: [],
+    attributeTexts: [], notAPriceText: [], strayPriceElements: [],
     noticeElements: [], visibleText: '', earningsBeforeFirstLink: null, amazonMarkers: 0, jsonld: [], socialImages: [], heroImages: [],
     forms: [], mdTables: [], rawTableText: [], recallNotices: 0, cacheControl: '', cdnCacheControl: '', surrogateControl: '', ...over,
   };
@@ -92,9 +101,19 @@ function kitStamp(fetchedAt: Date): ComplianceStamp {
     visibleText: textOf(html.replace((popover as RegExpExecArray)[0], '')),
     times: [time],
     linkedTexts: [textOf((popover as RegExpExecArray)[1] as string)],
+    // Its one control is labelled Details and points at the disclaimer.
+    detailsTexts: [textOf((popover as RegExpExecArray)[1] as string)],
     priceText: '$349.99',
     insideAnchor: false,
   };
+}
+
+/** The kit stamp as if checked at `at` (shown time and <time datetime> both), even outside the window priceStamp quotes in. */
+function stampAt(at: Date): ComplianceStamp {
+  const base = kitStamp(new Date(NOW - 3600_000));
+  const shown = `${at.toISOString().slice(0, 10)} ${at.toISOString().slice(11, 16)} UTC`;
+  const retime = (t: string) => t.replace(/\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/, shown);
+  return { ...base, times: [at.toISOString()], text: retime(base.text), visibleText: retime(base.visibleText) };
 }
 
 describe('price patterns', () => {
@@ -108,6 +127,12 @@ describe('price patterns', () => {
     ['The best widgets for under $500', false], ['Best widgets for $500', false], ['priced around $500', false],
     ['models from $200 to $500', false], ['It costs about $40 a year to run', false], ['now $300+ models', false],
     ['a $1,000 budget', false], ['costs $0.15 per kWh at home', true], ['it costs $40 per year', false], ['spend $1k', false],
+    // A currency code instead of a dollar sign, and a whole-dollar amount given a check time (K5, kit 0.2.0).
+    ['USD 349.99', true], ['349.99 USD', true], ['US$1,299.00', true], ['a USD 500 budget', false], ['1.5 USD/kWh', false],
+    ['The cheapest that runs it all day is the EcoFlow River 3, $349 (as of Nov 17).', true],
+    ['$349 on Amazon.com as of 14:11 UTC', true], ['$349 (checked Nov 17)', true],
+    ['Our $500 tier, as of this winter, holds three stations.', false], ['the $500 updated ladder', false],
+    ['Best power stations under $500 as of November 2026', false], ['between $300 and $500 (as of Nov 17)', false],
   ])('%s -> %s', (text, want) => {
     expect(looksLikePrice(text)).toBe(want);
   });
@@ -118,6 +143,61 @@ describe('price patterns', () => {
     expect(PRICE_AT_AMAZON_RE.test('$5 via eBay')).toBe(false);
     expect(wholeDollarPrices('It sells for $449, and the kit totals $1,249.')).toEqual(['$449', '$1,249']);
     expect(wholeDollarPrices('From $200 to $500.')).toEqual([]);
+    expect(PRICE_CURRENCY_CODE_RE.test('USD 12.50')).toBe(true);
+    expect(DATED_PRICE_RE.test('$12 (as of today)')).toBe(true);
+    expect(DATED_PRICE_RE.test('$12 a month')).toBe(false);
+  });
+
+  it('priceAmounts lists each distinct amount once, in order', () => {
+    expect(priceAmounts('$349.99 on Amazon.com as of 2026-11-17 14:11 UTC (price may vary) Details')).toEqual(['349.99']);
+    expect(priceAmounts('$1,299.00 on Amazon, list $1,499.00')).toEqual(['1299.00', '1499.00']);
+    expect(priceAmounts('It sells for $449; the kit totals $1,249 and the cord $19.99.')).toEqual(['449', '1249', '19.99']);
+    expect(priceAmounts('Best widgets under $500, as of 2026-11-17 14:11 UTC')).toEqual([]);
+    expect(priceAmounts('Best widgets under $500 as of 2026-11-17 14:11 UTC')).toEqual([]);
+    expect(priceAmounts('The Volt, $349 (as of Nov 17), or the Cell, $229 (as of Nov 17)')).toEqual(['349', '229']);
+  });
+});
+
+describe('the check time a stamp shows (2(i): date and time, with a zone)', () => {
+  it.each<[string, string | null]>([
+    // The kit's own stamp, Amazon's example, and the other common ways to write it.
+    ['$349.99 on Amazon.com as of 2026-11-17 14:11 UTC (price may vary) Details', '2026-11-17T14:11:00.000Z'],
+    ['Amazon.com Price: $32.77 (as of 01/07/2008 14:11 PST- Details)', '2008-01-07T22:11:00.000Z'],
+    ['as of Nov 17, 2026, 9:11 AM EST', '2026-11-17T14:11:00.000Z'],
+    ['as of November 17, 2026 at 9:11 a.m. EST', '2026-11-17T14:11:00.000Z'],
+    ['as of 17 Nov 2026 14:11 GMT', '2026-11-17T14:11:00.000Z'],
+    ['as of 2026-11-17T14:11:30Z', '2026-11-17T14:11:30.000Z'],
+    ['as of 2026-11-17 15:11 +01:00', '2026-11-17T14:11:00.000Z'],
+    ['as of 2026-11-17 06:11 (UTC-8)', '2026-11-17T14:11:00.000Z'],
+    ['checked 14:11 UTC on 2026-11-17', '2026-11-17T14:11:00.000Z'],
+    ['as of 12:05 AM PST, Nov 18, 2026', '2026-11-18T08:05:00.000Z'],
+    // Shown with a zone, but not one instant: no year, or a generic zone.
+    ['as of Nov 17, 2:11 PM ET', null],
+    ['as of Nov 17 14:11 UTC', null],
+  ])('%s', (text, iso) => {
+    const shown = shownCheckTimes(text);
+    expect(shown).toHaveLength(1);
+    const at = shownCheckTimeMs(shown[0] as string);
+    expect(at === null ? null : new Date(at).toISOString()).toBe(iso);
+  });
+
+  it.each([
+    'as of 2026-11-17',
+    'as of 14:11 UTC',
+    'as of 2026-11-17 14:11',
+    'as of the last check',
+    'as of x',
+    'updated today at noon',
+    '(price may vary) Details',
+  ])('not a check time a reader can use: %s', (text) => {
+    expect(SHOWN_CHECK_TIME_RE.test(text)).toBe(false);
+  });
+
+  it('the Details label: the word alone', () => {
+    for (const ok of ['Details', 'details', '(Details)', ' Details › ', '- Details']) expect([ok, DETAILS_LABEL_RE.test(ok)]).toEqual([ok, true]);
+    for (const no of ['More', 'Price details for this item', 'Disclaimer', 'Info']) expect([no, DETAILS_LABEL_RE.test(no)]).toEqual([no, false]);
+    // The in-browser collector carries the same pattern (it cannot import it).
+    expect(collectCompliance.toString()).toContain(DETAILS_LABEL_RE.source);
   });
 });
 
@@ -189,10 +269,73 @@ describe('priceDisplayProblems', () => {
     expect(priceDisplayProblems(s, rules)).toEqual([]);
   });
 
-  it('accepts the disclaimer in view, or behind a control', () => {
+  it('accepts any visible Details control that reveals the disclaimer: a popover, a link to it, a <details>', () => {
     const base = kitStamp(new Date(NOW - 3600_000));
-    expect(priceDisplayProblems(snap({ stamps: [{ ...base, visibleText: base.text, linkedTexts: [] }] }), rules)).toEqual([]);
-    expect(priceDisplayProblems(snap({ stamps: [{ ...base, text: '$10.00 on Amazon.com as of x Details', visibleText: '$10.00 x Details', linkedTexts: [rules.priceDisclaimer] }] }), rules)).toEqual([]);
+    const at = base.times[0] as string;
+    const shownAt = `${at.slice(0, 10)} ${at.slice(11, 16)} UTC`;
+    const other = { ...base, text: `$10.00 on Amazon.com as of ${shownAt} Details ${rules.priceDisclaimer}`, visibleText: `$10.00 on Amazon.com as of ${shownAt} Details`, priceText: '$10.00' };
+    expect(priceDisplayProblems(snap({ stamps: [{ ...other, linkedTexts: [rules.priceDisclaimer], detailsTexts: [rules.priceDisclaimer] }] }), rules)).toEqual([]);
+  });
+
+  it('a stamp needs the Details control even when the disclaimer is in view beside it (K5, kit 0.2.0)', () => {
+    const base = kitStamp(new Date(NOW - 3600_000));
+    // The disclaimer printed inline, with no Details control: 2(i) allows "adjacent", the kit's rule asks for Details.
+    const inline = { ...base, visibleText: base.text, linkedTexts: [], detailsTexts: [] };
+    expect(priceDisplayProblems(snap({ stamps: [inline] }), rules)).toEqual([
+      `/p price stamp 1 ("${base.text.slice(0, 70)}"): no visible "Details" control that reveals the exact 2(i) disclaimer`,
+    ]);
+    // A control that reveals it but is not labelled Details ("More info") does not count either.
+    const more = { ...base, detailsTexts: [] };
+    expect(priceDisplayProblems(snap({ stamps: [more] }), rules).join('\n')).toMatch(/no visible "Details" control/);
+    // A Details control that reveals something else does not count.
+    const wrong = { ...base, detailsTexts: ['Prices may change.'] };
+    expect(priceDisplayProblems(snap({ stamps: [wrong] }), rules).join('\n')).toMatch(/no visible "Details" control that reveals the exact 2\(i\) disclaimer/);
+  });
+
+  it('a stamp shows its check time with a zone, and that time is its <time datetime> (K5, kit 0.2.0)', () => {
+    const base = kitStamp(new Date(NOW - 3600_000));
+    const at = base.times[0] as string;
+    const swap = (visible: string) => ({ ...base, visibleText: base.visibleText.replace(/as of .* UTC/, visible) });
+    const problems = (visible: string) => priceDisplayProblems(snap({ stamps: [swap(visible)] }), rules).join('\n');
+    // The machine-readable time alone ("as of the last check"), a date without a time, a time without a zone.
+    expect(problems('as of the last check')).toMatch(/does not show the date and time of the check with a time zone/);
+    expect(problems(`as of ${at.slice(0, 10)}`)).toMatch(/does not show the date and time/);
+    expect(problems(`as of ${at.slice(0, 10)} ${at.slice(11, 16)}`)).toMatch(/does not show the date and time/);
+    // Another format with a zone is fine; a generic zone cannot be pinned, so it is not compared.
+    expect(problems('as of Nov 17, 2026, 6:00 AM EST')).toBe('');
+    expect(problems('as of Nov 17, 6:00 AM ET')).toBe('');
+    // A shown time that is not the stamp's <time>: a renderer printing the render time instead of the fetch time.
+    expect(problems('as of 2026-11-17 12:00 UTC')).toBe(`/p price stamp 1 ("${base.text.slice(0, 70)}"): shows "2026-11-17 12:00 UTC" but its <time datetime> says ${at}`);
+  });
+
+  it('one price per stamp; no price in an availability stamp (K5, kit 0.2.0)', () => {
+    const base = kitStamp(new Date(NOW - 3600_000));
+    const two = { ...base, visibleText: base.visibleText.replace('$349.99', '$349.99 (list $399.99)') };
+    expect(priceDisplayProblems(snap({ stamps: [two] }), rules).join('\n')).toMatch(/holds 2 prices \(\$349\.99, \$399\.99\): each price needs its own stamp/);
+    const sentence = { ...base, visibleText: `The cheapest is the Volt at ${base.visibleText}, and the Cell 300 sells for $229 there.` };
+    expect(priceDisplayProblems(snap({ stamps: [sentence] }), rules).join('\n')).toMatch(/holds 2 prices \(\$349\.99, \$229\)/);
+    const avail = { ...base, kind: 'availability', priceText: '', visibleText: base.visibleText.replace('$349.99 on Amazon.com', 'In stock on Amazon.com at $349.99') };
+    expect(priceDisplayProblems(snap({ stamps: [avail] }), rules).join('\n')).toMatch(/an availability stamp holds a price \(\$349\.99\)/);
+  });
+
+  it('catches a price in a sentence outside the stamp, in hidden text, in an attribute, and an Amazon price marked not-a-price (K5, kit 0.2.0)', () => {
+    const s = snap({
+      stamps: [kitStamp(new Date(NOW - 3600_000))],
+      unstampedText: [
+        '5 of 12 stations run a fridge for 24 h; the cheapest is the River 3, $349 (as of Nov 17).',
+        'It costs USD 349.99 today.',
+      ],
+      hiddenUnstampedText: ['Price: $349.99'],
+      attributeTexts: [{ where: 'aria-label of <a>', text: 'Buy the Volt 1000 for $699.00 on Amazon' }, { where: 'title of <abbr>', text: 'Watt-hours' }],
+      notAPriceText: ['Electricity costs about $0.15 per kWh.', 'The Volt is $699 on Amazon.'],
+    });
+    expect(priceDisplayProblems(s, rules)).toEqual([
+      '/p: price outside a dated stamp: "5 of 12 stations run a fridge for 24 h; the cheapest is the River 3, $349 (as of Nov 17)."',
+      '/p: price outside a dated stamp: "It costs USD 349.99 today."',
+      '/p: price outside a dated stamp, in text a reader does not see but crawlers and assistants read: "Price: $349.99"',
+      '/p: price outside a dated stamp, in aria-label of <a>: "Buy the Volt 1000 for $699.00 on Amazon"',
+      '/p: an Amazon price inside data-kit-not-a-price (that marker is for rates and budgets): "The Volt is $699 on Amazon."',
+    ]);
   });
 
   it('catches a stale stamp, a future one, no time, no disclaimer, a stamp in a link, a stamp without a price', () => {
@@ -228,15 +371,14 @@ describe('priceDisplayProblems', () => {
     const windowMs = priceAgeLimitMs(ctx);
     // 600 s s-maxage + 60 s max-age + 0 s SSR cache off 24h, plus the render allowance.
     expect(windowMs).toBe((24 * 3600 - 660) * 1000 + RENDER_ALLOWANCE_MS);
-    const inside = kitStamp(new Date(NOW - 3600_000));
-    const past = { ...inside, times: [new Date(NOW - 23 * 3600_000 - 55 * 60_000).toISOString()] };
+    const past = stampAt(new Date(NOW - 23 * 3600_000 - 55 * 60_000));
     const out = priceDisplayProblems(snap({ stamps: [past] }), rules).join('\n');
     expect(out).toMatch(/23\.9h ago \(past the 23\.8h quotable window/);
     expect(out).not.toMatch(/older than 24h/);
     // Without a window it is 24h.
     expect(priceDisplayProblems(snap({ stamps: [past] }), { ...rules, quotableWindowMs: undefined })).toEqual([]);
     // takenAt, not the clock at judging time: a snapshot judged an hour later is not an hour older.
-    const edge = { ...inside, times: [new Date(NOW - windowMs + 60_000).toISOString()] };
+    const edge = stampAt(new Date(NOW - windowMs + 60_000));
     expect(priceDisplayProblems(snap({ stamps: [edge], takenAt: NOW }), { ...rules, now: NOW + 10 * 60_000 })).toEqual([]);
     expect(priceDisplayProblems(snap({ stamps: [edge] }), { ...rules, now: NOW + 10 * 60_000 }).join('\n')).toMatch(/quotable window/);
   });

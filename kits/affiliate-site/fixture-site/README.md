@@ -28,7 +28,7 @@ timers; the gate starts it and removes the app container afterwards.
 | | Database | Overlays | Gate result |
 |---|---|---|---|
 | clean (`tests/suite.env`) | `kit_fixture` | none | every test passes |
-| violations (`tests/suite.violations.env`) | `kit_fixture_violations` (`db/migrations/0003_fixture_violations.sql` and `0005_fixture_more_violations.sql` seed it) | `site.violations.json` (assistants blocked, training crawlers allowed), `llms.violations.json` (a price) | every kit-compliance rule fails on its own violation |
+| violations (`tests/suite.violations.env`) | `kit_fixture_violations` (`db/migrations/0003_fixture_violations.sql`, `0005_fixture_more_violations.sql` and `0006_fixture_stamp_violations.sql` seed it) | `site.violations.json` (assistants blocked, training crawlers allowed), `llms.violations.json` (a price) | every kit-compliance rule fails on its own violation |
 
 Seeded violations (0003): an Amazon link with someone else's tag and no rel;
 prices printed without a stamp; a hand-made stamp a week old without the 2(i)
@@ -49,6 +49,15 @@ window); a truncated Amazon title with no 2(k) notice; "never miss a deal",
 "don't miss", "no other store" and "get notified" copy; an Amazon image link
 stored in an article body; raw JSON-LD with an Amazon Product image and a
 rating.
+
+And (0006, kit 0.2.0's stamp rule): a price dated by hand inside a sentence
+("$349 (as of Nov 17)") with no stamp; stamps that show a date but no time or
+zone, print the 2(i) disclaimer inline with no "Details" control, hold two
+prices, or show a time that is not their own `<time datetime>`; and prices a
+reader never sees (a hidden element, an `aria-label`) or that hide inside
+`data-kit-not-a-price`. `db/freshen.sql` now re-stamps the shown time of
+0005's two hand-made stamps along with their datetime, so each stays red for
+its own reason only.
 
 Both databases live in one long-lived Postgres container (`kitfixture_postgres`,
 port 5434; `db/Dockerfile` adds the second database at init). The app applies

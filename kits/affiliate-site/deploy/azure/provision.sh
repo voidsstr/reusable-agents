@@ -14,7 +14,9 @@
 #   database    on the Postgres server: four login roles (owner, app, agents,
 #               publisher), each with a CONNECTION LIMIT and a statement_timeout,
 #               passwords taken from their DSNs and sent as SCRAM verifiers;
-#               the database (owned by the owner role); CONNECT for the others;
+#               the database (owned by the owner role), with its own CONNECTION
+#               LIMIT when DB_CONNECTION_LIMIT is set (at least the roles' sum;
+#               unset leaves it as it is); CONNECT for the others;
 #               and the DB_*_GRANTS, converged (re-run it after migrations).
 #               Every role and the database are marked as this site's
 #               (COMMENT 'affiliate-kit app=APP_NAME'); one that exists without
@@ -167,6 +169,7 @@ phase_check() {
   az_db_host host
   kd_log "app $APP_NAME in $AZ_RESOURCE_GROUP/$AZ_ENVIRONMENT; image $AZ_REGISTRY/$AZ_REPO; database $DB_NAME on $host"
   kd_log "compute $CPU vCPU / $MEMORY, replicas $MIN_REPLICAS..$MAX_REPLICAS; hostnames $SITE_HOSTNAMES"
+  kd_log "$(kd_db_limits_summary)"
   local -a items=()
   read -ra items <<< "$APP_SECRETS"
   for e in "${items[@]}"; do
@@ -190,6 +193,7 @@ phase_database() {
   kd_require_keys AZ_DB_ADMIN_USER AZ_DB_ADMIN_PASSWORD
   local host
   az_db_host host
+  kd_log "$(kd_db_limits_summary)"
   kd_db_provision "$host" "$AZ_DB_ADMIN_USER" "$AZ_DB_ADMIN_PASSWORD" "$NEW_DSNS" DB
 }
 

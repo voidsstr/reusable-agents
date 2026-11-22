@@ -94,6 +94,7 @@ KD_KNOWN_KEYS=(
   DB_OWNER_ROLE DB_APP_ROLE DB_AGENTS_ROLE DB_PUBLISHER_ROLE
   DB_OWNER_DSN DB_APP_DSN DB_AGENTS_DSN DB_PUBLISHER_DSN
   DB_OWNER_CONNECTION_LIMIT DB_APP_CONNECTION_LIMIT DB_AGENTS_CONNECTION_LIMIT DB_PUBLISHER_CONNECTION_LIMIT
+  DB_CONNECTION_LIMIT
   DB_OWNER_STATEMENT_TIMEOUT DB_APP_STATEMENT_TIMEOUT DB_AGENTS_STATEMENT_TIMEOUT DB_PUBLISHER_STATEMENT_TIMEOUT
   DB_IDLE_IN_TRANSACTION_TIMEOUT
   DB_APP_GRANTS DB_AGENTS_GRANTS DB_PUBLISHER_GRANTS
@@ -627,6 +628,8 @@ kd_apply_defaults() {
   : "${DB_APP_CONNECTION_LIMIT:=20}"
   : "${DB_AGENTS_CONNECTION_LIMIT:=10}"
   : "${DB_PUBLISHER_CONNECTION_LIMIT:=2}"
+  # The database's own CONNECTION LIMIT; empty leaves the server's value as it is.
+  : "${DB_CONNECTION_LIMIT=}"
   : "${DB_OWNER_STATEMENT_TIMEOUT:=15min}"
   : "${DB_APP_STATEMENT_TIMEOUT:=15s}"
   : "${DB_AGENTS_STATEMENT_TIMEOUT:=5min}"
@@ -792,6 +795,18 @@ kd_validate_common() {
         || kd_die "$KD_ENV_FILE: DB_${kind}_DSN must be env:NAME or file:PATH" 2
     done
   done
+  # The database's own ceiling over all four roles (ALTER DATABASE ... CONNECTION
+  # LIMIT), on a server other sites share. Empty: left as the server has it.
+  if [[ -n $DB_CONNECTION_LIMIT ]]; then
+    kd_check_int DB_CONNECTION_LIMIT 1 5000
+    DB_CONNECTION_LIMIT=$((10#$DB_CONNECTION_LIMIT))
+    local role_sum
+    role_sum=$(kd_role_connection_sum)
+    ((10#$DB_CONNECTION_LIMIT >= role_sum)) \
+      || kd_die "$KD_ENV_FILE: DB_CONNECTION_LIMIT=$DB_CONNECTION_LIMIT is below the sum of the four role limits ($role_sum): they could not all connect at once. Raise it, or lower DB_*_CONNECTION_LIMIT" 2
+    ((10#$DB_CONNECTION_LIMIT > role_sum)) \
+      || kd_warn "DB_CONNECTION_LIMIT=$DB_CONNECTION_LIMIT equals the four role limits' sum: on a server whose admin is not a superuser (Azure flexible server, RDS) the admin's own sessions on $DB_NAME count against it too, so with every role at its limit the database phase cannot connect"
+  fi
   [[ $DB_IDLE_IN_TRANSACTION_TIMEOUT == off ]] \
     || kd_check_re DB_IDLE_IN_TRANSACTION_TIMEOUT '^[1-9][0-9]*(ms|s|min|h)?$' "a positive Postgres duration or 'off'"
   local privs
@@ -834,6 +849,23 @@ kd_validate_common() {
   local shell_re='[;&|<>`$]'
   [[ ! $MIGRATE_COMMAND =~ $shell_re ]] \
     || kd_die "$KD_ENV_FILE: MIGRATE_COMMAND is run without a shell: plain words only" 2
+}
+
+# kd_role_connection_sum: the four DB_*_CONNECTION_LIMIT values added up
+# (each already checked as an integer).
+kd_role_connection_sum() {
+  local kind sum=0
+  for kind in "${KD_ROLE_KINDS[@]}"; do sum=$((sum + 10#$(kd_var "DB_${kind}_CONNECTION_LIMIT"))); done
+  printf '%s' "$sum"
+}
+
+# kd_db_limits_summary: one line naming every connection limit the database
+# phase applies (the four roles', their sum, and the database's own).
+kd_db_limits_summary() {
+  local kind roles=""
+  for kind in "${KD_ROLE_KINDS[@]}"; do roles+="${roles:+, }${kind,,} $(kd_var "DB_${kind}_CONNECTION_LIMIT")"; done
+  printf 'connection limits: roles %s (sum %s); database %s' "$roles" "$(kd_role_connection_sum)" \
+    "${DB_CONNECTION_LIMIT:-left as the server has it (DB_CONNECTION_LIMIT unset)}"
 }
 
 # kd_grant_privs PRIVS OUTVAR: a DB_*_GRANTS privilege list as SQL, e.g.
@@ -1046,9 +1078,21 @@ SQL
 }
 
 kd_sql_cluster() {
-  local kind role limit timeout idle=$DB_IDLE_IN_TRANSACTION_TIMEOUT dq="\$kit\$" names marker
+  local kind role limit timeout idle=$DB_IDLE_IN_TRANSACTION_TIMEOUT dq="\$kit\$" names marker db_limit="" db_check=""
   names=$(kd_sql_role_literals)
   marker=$(kd_marker)
+  if [[ -n ${DB_CONNECTION_LIMIT:-} ]]; then
+    db_limit="
+-- the database's own CONNECTION LIMIT (DB_CONNECTION_LIMIT), a ceiling over all four roles
+ALTER DATABASE \"${DB_NAME}\" WITH CONNECTION LIMIT ${DB_CONNECTION_LIMIT};"
+    db_check="
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_database WHERE datname = '${DB_NAME}' AND datconnlimit = ${DB_CONNECTION_LIMIT}) THEN
+    RAISE EXCEPTION 'affiliate-kit: database ${DB_NAME} does not have CONNECTION LIMIT ${DB_CONNECTION_LIMIT}';
+  END IF;
+  IF (SELECT sum(rolconnlimit) FROM pg_catalog.pg_roles WHERE rolname IN (${names})) > ${DB_CONNECTION_LIMIT} THEN
+    RAISE EXCEPTION 'affiliate-kit: the four roles may hold more connections than database ${DB_NAME} allows (%)', ${DB_CONNECTION_LIMIT};
+  END IF;"
+  fi
   printf -- '-- affiliate-kit: cluster objects for database "%s" (roles, database, CONNECT)\n' "$DB_NAME"
   printf 'SET client_min_messages = warning;\n\n'
   printf -- '-- before anything changes: every one of these that exists must be this site%ss\n' "'"
@@ -1083,7 +1127,7 @@ COMMIT;
 SELECT 'CREATE DATABASE "${DB_NAME}" WITH OWNER "${DB_OWNER_ROLE}" ENCODING ''UTF8'' TEMPLATE template0'
  WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_database WHERE datname = '${DB_NAME}') \gexec
 COMMENT ON DATABASE "${DB_NAME}" IS '${marker}';
-ALTER DATABASE "${DB_NAME}" OWNER TO "${DB_OWNER_ROLE}";
+ALTER DATABASE "${DB_NAME}" OWNER TO "${DB_OWNER_ROLE}";${db_limit}
 REVOKE ALL ON DATABASE "${DB_NAME}" FROM PUBLIC;
 GRANT CONNECT ON DATABASE "${DB_NAME}" TO $(kd_sql_role_list APP AGENTS PUBLISHER);
 
@@ -1114,7 +1158,7 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_database
                   WHERE datname = '${DB_NAME}' AND shobj_description(oid, 'pg_database') = '${marker}') THEN
     RAISE EXCEPTION 'affiliate-kit: database ${DB_NAME} lacks the marker %', '${marker}';
-  END IF;
+  END IF;${db_check}
 END
 ${dq};
 SQL

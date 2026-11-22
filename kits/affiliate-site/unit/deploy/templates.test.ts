@@ -9,6 +9,8 @@ import { BASH, DEPLOY, makeSandbox, removeSandbox, runScript, which, type Sandbo
 
 jest.setTimeout(60_000);
 
+const KIT_VERSION = fs.readFileSync(path.join(DEPLOY, '..', 'VERSION'), 'utf8').trim();
+
 let sb: Sandbox;
 beforeAll(() => {
   sb = makeSandbox({ real: ['git'] });
@@ -23,7 +25,7 @@ describe('Dockerfile.azure.tmpl', () => {
 
   it('renders completely, starting with the drift marker', () => {
     expect(df).not.toMatch(/\{\{|\}\}/);
-    expect(df.split('\n')[0]).toBe('# rendered-from: affiliate-kit/deploy/Dockerfile.azure.tmpl (kit 0.1.0)');
+    expect(df.split('\n')[0]).toBe(`# rendered-from: affiliate-kit/deploy/Dockerfile.azure.tmpl (kit ${KIT_VERSION})`);
   });
 
   it('is SSR only: deps, build and a runtime stage, no SPA/frontend stage', () => {

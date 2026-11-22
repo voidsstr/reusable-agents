@@ -180,6 +180,11 @@ describe('sync-site-kit.sh catches and repairs edits to the vendored copy', () =
   });
 });
 
+/** A release newer than this kit, and one between it and that release that no commit holds (derived, so a bump never breaks them). */
+const [KIT_MAJOR, KIT_MINOR, KIT_PATCH] = KIT_VERSION.split('.').map(Number) as [number, number, number];
+const NEWER_VERSION = `${KIT_MAJOR}.${KIT_MINOR + 1}.0`;
+const NEVER_COMMITTED_VERSION = `${KIT_MAJOR}.${KIT_MINOR}.${KIT_PATCH + 5}`;
+
 describe('sync-site-kit.sh version rules', () => {
   let tmp = '';
   beforeAll(() => { tmp = tmpDir('sync-versions'); });
@@ -187,15 +192,15 @@ describe('sync-site-kit.sh version rules', () => {
 
   it('upgrades to a newer kit, refuses a downgrade unless asked, and --check says out of date', () => {
     const site = bareSite(tmp, 'versions');
-    const newer = fakeKit(tmp, '0.2.0');
+    const newer = fakeKit(tmp, NEWER_VERSION);
     expect(sync(site, '--quiet').status).toBe(0);
     let c = sync(site, '--check', '--kit', newer);
     expect(c.status).toBe(1);
-    expect(c.stderr).toContain(`out of date: vendored ${KIT_VERSION}, kit 0.2.0`);
+    expect(c.stderr).toContain(`out of date: vendored ${KIT_VERSION}, kit ${NEWER_VERSION}`);
     const up = sync(site, '--kit', newer);
     expect(describeRun(up)).toMatch(/^exit 0/);
-    expect(up.stdout).toContain(`vendored kit 0.2.0 (was ${KIT_VERSION})`);
-    expect(fs.readFileSync(path.join(site, 'vendor', 'affiliate-kit', 'KIT_VERSION'), 'utf8')).toBe('0.2.0\n');
+    expect(up.stdout).toContain(`vendored kit ${NEWER_VERSION} (was ${KIT_VERSION})`);
+    expect(fs.readFileSync(path.join(site, 'vendor', 'affiliate-kit', 'KIT_VERSION'), 'utf8')).toBe(`${NEWER_VERSION}\n`);
     const down = sync(site, '--quiet');
     expect(down.status).toBe(2);
     expect(down.stderr).toContain('a downgrade');
@@ -334,8 +339,8 @@ describe('sync-site-kit.sh --verify-anchored anchors a vendored copy to the kit 
     const site = bareSite(tmp);
     syncFrom(ra, site);
     const raKit = path.join(ra, 'kits', 'affiliate-site');
-    setKitVersion(raKit, '0.2.0');
-    commitAll(ra, 'kit 0.2.0');
+    setKitVersion(raKit, NEWER_VERSION);
+    commitAll(ra, `kit ${NEWER_VERSION}`);
     // Still the older release, still committed: passes.
     expect(describeRun(anchored(ra, site))).toMatch(/^exit 0/);
 
@@ -344,16 +349,16 @@ describe('sync-site-kit.sh --verify-anchored anchors a vendored copy to the kit 
       rewriteManifestLine(site, 'KIT_VERSION');
       return anchored(ra, site);
     };
-    const never = claim('0.1.5');
+    const never = claim(NEVER_COMMITTED_VERSION);
     expect(never.status).toBe(1);
-    expect(never.stderr).toContain('kit 0.1.5, which no commit');
-    expect(never.stderr).toContain(`${KIT_VERSION}, 0.2.0`);
+    expect(never.stderr).toContain(`kit ${NEVER_COMMITTED_VERSION}, which no commit`);
+    expect(never.stderr).toContain(`${KIT_VERSION}, ${NEWER_VERSION}`);
 
     const newer = claim('9.0.0');
     expect(newer.status).toBe(4);
     expect(newer.stderr).toContain('cannot anchor');
-    expect(newer.stderr).toContain('no commit there holds kit 9.0.0 yet (the newest committed kit is 0.2.0)');
-    expect(newer.stderr).toContain('its working tree is kit 0.2.0');
+    expect(newer.stderr).toContain(`no commit there holds kit 9.0.0 yet (the newest committed kit is ${NEWER_VERSION})`);
+    expect(newer.stderr).toContain(`its working tree is kit ${NEWER_VERSION}`);
 
     const junk = claim('latest');
     expect(junk.status).toBe(1);

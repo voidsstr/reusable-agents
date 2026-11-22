@@ -46,6 +46,23 @@ describe('aws/provision.sh --dry-run all (fresh)', () => {
     expect(r.stdout).toContain('PGPASSWORD=<env:KIT_TEST_RDS_ADMIN_PASSWORD>');
     expect(cluster).toContain('CONNECTION LIMIT 20');
     expect(cluster).toContain(`ALTER ROLE "kitexample_app" SET statement_timeout = '15s';`);
+    expect(cluster).not.toMatch(/ALTER DATABASE "kitexample" WITH CONNECTION LIMIT/);
+  });
+
+  it('sets DB_CONNECTION_LIMIT on the database exactly as azure/provision.sh does, and refuses one below the roles\' sum', () => {
+    const f = path.join(sb.fx, 'aws-dblimit.env');
+    fs.writeFileSync(f, `${fs.readFileSync(sb.envFile, 'utf8')}DB_CONNECTION_LIMIT=40\n`);
+    const aws = runScript(sb, 'aws/provision.sh', ['--env', f, '--dry-run', 'database']);
+    const az = runScript(sb, 'azure/provision.sh', ['--env', f, '--dry-run', 'database']);
+    expect([aws.status, az.status]).toEqual([0, 0]);
+    expect(sqlBlocks(aws.stdout)[0]).toContain('ALTER DATABASE "kitexample" WITH CONNECTION LIMIT 40;');
+    expect(sqlBlocks(aws.stdout)).toEqual(sqlBlocks(az.stdout));
+    expect(aws.stdout).toContain('connection limits: roles owner 3, app 20, agents 10, publisher 2 (sum 35); database 40');
+    fs.writeFileSync(f, `${fs.readFileSync(sb.envFile, 'utf8')}DB_CONNECTION_LIMIT=20\n`);
+    const low = runScript(sb, 'aws/provision.sh', ['--env', f, '--dry-run', 'check']);
+    expect(low.status).toBe(2);
+    expect(low.stderr).toContain('DB_CONNECTION_LIMIT=20 is below the sum of the four role limits (35)');
+    expect(low.calls).toEqual([]);
   });
 
   it('stores the container secrets in Secrets Manager from a 0600 file', () => {
