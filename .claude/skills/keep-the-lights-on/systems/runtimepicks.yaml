@@ -257,6 +257,21 @@ catalog_health:
       db: runtimepicks
       sql: "select count(*)::int from ai_traffic_log where kind = 'referral' and ts > now() - interval '30 days'"
       note: "KPI: AI referrals per 30 days (D60 >= 1, D90 >= 3), first-party (no GA4 property yet)."
+    - name: l1_model_matched_pdps
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from v_indexable_pages ip
+          join products p on p.asin = ip.key
+          join models m on m.id = p.model_id
+          join v_model_readiness r on r.model_id = m.id
+          join v_offer_state os on os.product_id = p.id
+         where ip.family = 'product' and ip.indexable
+           and r.specs_sourced
+           and os.offer_state = 'quotable'
+           and (m.kind not in ('station', 'kit')
+                or exists (select 1 from v_model_station ms join runtime_estimates re on re.model_id = ms.station_model_id
+                            where ms.model_id = m.id))
+      note: "THE L1 BAR (launch plan E.1, 12-08: >= 300): model-matched indexable product pages with sourced specs (v_model_readiness.specs_sourced, the kind's own bar) and a fresh price (v_offer_state quotable: USD, >= $1, inside the 24 h window minus the HTML cache age); stations and kits also need a runtime card (runtime_estimates for the page's station). One page per model (variants are not indexable). Read it after that day's recall sync: a new link stays 'recall-unchecked' until the next real sync. It reads 0 until runtimepicks-price-refresh fills amazon_item_cache (commerce off or on: the bar is the data, not the display)."
     - name: indexable_runtime_card_pdps
       db: runtimepicks
       sql: >-
@@ -264,7 +279,15 @@ catalog_health:
           join products p on p.asin = ip.key
           join models m on m.id = p.model_id
          where ip.family = 'product' and ip.indexable and m.kind in ('station', 'kit')
-      note: "KPI: model-matched product pages with sourced specs and a runtime card (an indexable station or kit page meets exactly that bar). D30 >= 300."
+      note: "Second gauge, the station + kit subset of l1_model_matched_pdps without the price condition: indexable station and kit product pages (an indexable station or kit page has sourced specs and a runtime card). The plan's D30 >= 300 is read on l1_model_matched_pdps; this one shows how much of it the runtime-card page kinds carry."
+    - name: held_models_with_listings
+      db: runtimepicks
+      sql: >-
+        select count(*)::int from products p join models m on m.id = p.model_id
+         where p.is_active and m.policy_hold = 'other'
+      expect_max: 0
+      owner_class: catalog-match
+      note: "Models held as store-only or multi-configuration kits (policy_hold 'other', db/data/2026-11-22-matching-fixes.sql) that ASIN-first has since linked to a live listing: Amazon sells it after all, and the hold keeps its page noindex and without a buy button (it fails closed). Check that the listing is that kit (the discovery run report row, or scripts/reconfirm-links.py), then clear the hold: UPDATE models SET policy_hold = NULL WHERE id = <model id>. Never clear a 240v-output, generator or medical hold this way."
     - name: unmatched_active_products
       db: runtimepicks
       sql: "select count(*)::int from products where is_active and model_id is null"
@@ -432,6 +455,7 @@ conversion:
     pick-coverage:      {agent: runtimepicks-pick-builder, action: escalate}
     pricing-integrity:  {action: escalate}
     year1-boundary:     {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
+    catalog-match:      {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
     content-volume:     {action: escalate}
     shared-db:          {action: escalate}
     template-drop:      {action: escalate}
