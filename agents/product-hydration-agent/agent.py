@@ -108,6 +108,22 @@ def _v_pros_cons(v: Any) -> str | None:
     return json.dumps({"pros": pros, "cons": cons})
 
 
+# The user message labels the input "PRODUCT CONTEXT (JSON)", and the model
+# echoes that label into reader-facing answers ("The product context doesn't
+# state warranty terms"), which then ship in FAQPage JSON-LD. Prompt-side
+# nouns are rewritten to the reader-facing source before storage.
+_PROMPT_LEAK_RE = re.compile(
+    r"\b(?:(this|the)\s+)?(?:product\s+context|provided\s+(?:data|context)|given\s+context)\b",
+    re.IGNORECASE,
+)
+
+
+def _scrub_prompt_leak(text: str) -> str:
+    def _sub(m: "re.Match[str]") -> str:
+        return "The listing summary" if m.group(0)[:1].isupper() else "the listing summary"
+    return _PROMPT_LEAK_RE.sub(_sub, text)
+
+
 def _v_faq(v: Any) -> str | None:
     if not isinstance(v, list):
         return None
@@ -115,8 +131,8 @@ def _v_faq(v: Any) -> str | None:
     for item in v:
         if not isinstance(item, dict):
             continue
-        q = (item.get("question") or "").strip()
-        a = (item.get("answer") or "").strip()
+        q = _scrub_prompt_leak((item.get("question") or "").strip())
+        a = _scrub_prompt_leak((item.get("answer") or "").strip())
         if q and a:
             out.append({"question": q, "answer": a})
     if not out:
