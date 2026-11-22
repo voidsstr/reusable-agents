@@ -247,6 +247,9 @@ def dry_run(args, *, environ: Optional[Mapping[str, str]] = None, storage=None, 
         ro = ReadOnlyStorage(inner)
         # every framework module that calls get_storage() (LLM usage logs) gets the read-only view
         register_backend("article-engine-dry-run", lambda: ro)
+        # Child processes (the claude-pool shim) cannot resolve this in-process
+        # backend; isolated_cli() hands them the parent's real one.
+        os.environ.setdefault("AAE_PARENT_STORAGE_BACKEND", os.environ.get("STORAGE_BACKEND", ""))
         os.environ["STORAGE_BACKEND"] = "article-engine-dry-run"
         reset_default_backend()
         storage = ro

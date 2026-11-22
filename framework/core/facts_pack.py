@@ -51,9 +51,11 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 #: Column names that can only hold commerce data. Matched per underscore
 #: segment, so "usable_wh" passes and "list_price" / "offer_state" / "title" fail.
+#: "detail_page" (Amazon's detail_page_url) is matched as a pair: a plain
+#: "detail" key (a compat assumption's params.detail) is our own text.
 DEFAULT_FORBIDDEN_COLUMN_RE = (r"(?i)(?:^|_)(?:price|prices|pricing|currency|offer|offers|availability|"
                                r"available|buybox|rating|ratings|review|reviews|image|images|title|titles|"
-                               r"amazon|detail|discount|sale|deal|deals|msrp|cost)(?:_|$)")
+                               r"amazon|detail_page|discount|sale|deal|deals|msrp|cost)(?:_|$)")
 #: Values that are prices or Amazon text / hosts.
 MONEY_RE = re.compile(r"(?:[$€£¥₹]\s?\d|\b(?:USD|CAD|GBP|EUR|INR)\s?\d|\d\s?(?:USD|dollars?)\b)", re.I)
 AMAZON_RE = re.compile(r"(?i)(?:amazon\.[a-z.]{2,}|amzn\.(?:to|com|eu|asia)|media-amazon|images-amazon|"

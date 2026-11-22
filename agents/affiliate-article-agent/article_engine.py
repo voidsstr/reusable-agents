@@ -213,17 +213,27 @@ def isolated_cli(settings) -> Iterator[str]:
     fresh empty temp dir (no project CLAUDE.md, no project memory)."""
     prev_cmd = os.environ.get("CLAUDE_CLI_CMD")
     prev_real = os.environ.get(REAL_CLAUDE_ENV)
+    prev_backend = os.environ.get("STORAGE_BACKEND")
+    parent_backend = os.environ.get("AAE_PARENT_STORAGE_BACKEND")
     prev_cwd = os.getcwd()
     with tempfile.TemporaryDirectory(prefix="aae-cli-") as td:
         try:
             if prev_cmd and Path(prev_cmd).resolve() != Path(cli_wrapper(settings)).resolve():
                 os.environ[REAL_CLAUDE_ENV] = prev_cmd
             os.environ["CLAUDE_CLI_CMD"] = cli_wrapper(settings)
+            # A dry run swaps in an in-process read-only storage backend; the
+            # child CLI (the pool shim) only knows real backends, so it gets
+            # the parent's. The engine's own writes stay read-only.
+            if parent_backend is not None and prev_backend == "article-engine-dry-run":
+                if parent_backend:
+                    os.environ["STORAGE_BACKEND"] = parent_backend
+                else:
+                    os.environ.pop("STORAGE_BACKEND", None)
             os.chdir(td)
             yield td
         finally:
             os.chdir(prev_cwd)
-            for k, v in (("CLAUDE_CLI_CMD", prev_cmd), (REAL_CLAUDE_ENV, prev_real)):
+            for k, v in (("CLAUDE_CLI_CMD", prev_cmd), (REAL_CLAUDE_ENV, prev_real), ("STORAGE_BACKEND", prev_backend)):
                 if v is None:
                     os.environ.pop(k, None)
                 else:
