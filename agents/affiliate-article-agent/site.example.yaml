@@ -1,0 +1,521 @@
+# Template for a site instance of the affiliate article engine
+# (agents/affiliate-article-agent). Copy to <site-repo>/agents/<instance>/site.yaml
+# and change the VALUES; the engine has no site names and no site branches.
+#
+# This example targets the affiliate-site kit's editorial_articles table and a
+# home-power data contract (load presets, runtime estimates, compat edges, the
+# pick and indexable views). Every SQL string here is the site's: the engine
+# only runs it (read-only, except the article INSERT / UPDATE) and asserts
+# that no facts query reads a price, an offer or Amazon text.
+#
+# Validate offline:
+#   python3 agents/affiliate-article-agent/agent.py --config --site-yaml agents/affiliate-article-agent/site.example.yaml
+# Dry run (canned model, files only):
+#   DATABASE_URL_EXAMPLE_SITE=... python3 agents/affiliate-article-agent/agent.py --dry-run --no-storage \
+#     --out /tmp/aae --site-yaml agents/affiliate-article-agent/site.example.yaml
+article_engine:
+  site: example-site
+  audience: home-power
+  # The canonical origin; extra_hosts are other hosts that serve the same site.
+  host: https://www.example-site.test
+  extra_hosts: [example-site.test]
+
+  database:
+    dsn_env: DATABASE_URL_EXAMPLE_SITE        # env var NAME of the author role's DSN: reads + the INSERT
+    statement_timeout_ms: 30000
+
+  calendar:
+    path: fixtures/calendar.example.yaml   # relative to this file
+    max_entries_per_run: 8                 # entries tried when one cannot be used (facts refused, too few links)
+
+  # Operator switches a calendar requirement can name ({flag: commerce}).
+  flags:
+    commerce: false
+
+  # No Opus call inside a blackout, before not_before (live runs) or before
+  # dry_run_not_before (dry runs with the live model). Example dates only.
+  schedule:
+    not_before: "2026-12-04T00:00:00Z"
+    dry_run_not_before: "2026-12-02T00:00:00Z"
+    blackouts:
+      - {start: "2026-11-26T02:00:00Z", end: "2026-12-02T00:00:00Z", reason: "Black Friday / Cyber Monday quiet build"}
+
+  # Proceed only when 2+ distinct pool accounts can serve Opus (the manifest
+  # also sets CLAUDE_POOL_RESERVE=1, so the pool shim itself refuses at <= 1)
+  # and no production article author deferred for want of Opus in 6 h.
+  pool:
+    min_ready_profiles: 2
+    peer_defer_watch:
+      agent_patterns: ["*-article-proposal-agent", "*-news-writer", "*-head-to-head-agent"]
+      reasons: ["required-model-unavailable"]
+      lookback_hours: 6
+
+  model:
+    dispatch_kind: article-author          # config/required-models.json: opus, never a fallback
+    required_tier: opus
+    provider: ""                           # ai_client_for resolves it (agent override, then manifest metadata.ai)
+    allowed_provider_kinds: [claude-cli, anthropic]
+    max_tokens: 16000
+    temperature: 0.3
+    max_minutes_per_day: 20                # cost cap: a host-local ledger shared by live runs and live-model dry runs
+    max_calls_per_run: 2                   # the draft + one re-prompt with the failure addendum
+    max_dry_run_calls_per_day: 50          # live-model dry runs (red team): 25 runs x 2 calls a day at most
+    # claude-cli calls run through bin/claude-isolated (no tools, no MCP) from
+    # an empty working directory; a live call is refused until the operator has
+    # checked the wrapper's flags against the installed claude and set verified.
+    claude_cli: {verified: false}
+
+  # Occasions this site writes for (all audience home-power). The engine reads
+  # this list itself (seasonal_calendar.active_signal with occasions=...); the
+  # same ids belong in config/seasonal-calendar.json so the output gate's
+  # seasonal override and featured_rotation know them.
+  occasions:
+    source: site
+    list:
+      - {id: winter-storm-season, label: "Winter storm season", month_day: "12-01", length_days: 90, audience: home-power,
+         recipe_keywords: [power outage, refrigerator, sump pump, wi-fi, starlink, lights, electric blanket]}
+      - {id: after-christmas-sales, label: "After-Christmas sales", month_day: "12-26", length_days: 7, audience: home-power,
+         kind: retail-deal}
+      - {id: presidents-day-sales, label: "Presidents' Day sales", month_day: "nth-weekday:3:monday:2", length_days: 4,
+         audience: home-power, kind: retail-deal}
+      - {id: spring-storm-season, label: "Spring storm season", month_day: "03-15", length_days: 77, audience: home-power,
+         recipe_keywords: [sump pump, refrigerator, wi-fi]}
+      - {id: hurricane-season, label: "Hurricane season", month_day: "06-01", length_days: 183, audience: home-power,
+         recipe_keywords: [refrigerator, freezer, wi-fi, fans]}
+
+  # The article output gate's per-site block , deep-merged
+  # over the framework defaults by article_output_gate.resolve_config.
+  proposals:
+    output_gate:
+      max_proposals_per_day: 1                      # unchanged; never raised without a traffic signal
+      traffic_gate:
+        article_path_prefixes: ["/guides/"]
+        affiliate_clicks: {enabled: true, table: outbound_clicks, match: {target: amazon, via: beacon},
+                           group_col: source_page, min_clicks: 1}
+      seasonal_override:
+        max_per_occasion_by_id:
+          winter-storm-season:   {max_per_occasion: 8, until: "2027-02-28"}
+          after-christmas-sales: 2
+          presidents-day-sales:  2
+      format_lanes:
+        launch: {max_per_window: 0, window_days: 30, boost: {max_per_window: 15, until: "2027-01-15"}}
+  # Every guide carries lane:launch, so the launch lane admits it while the
+  # traffic gate is closed (through 2027-01-15).
+  gate_lanes: [launch]
+
+  # Data readiness: each calendar requirement names one of these (a SELECT
+  # returning one count; params from the entry's scope + the requirement).
+  readiness:
+    checks:
+      runtime_stations:
+        sql: >-
+          SELECT count(DISTINCT re.model_id) FROM runtime_estimates re
+            JOIN models m ON m.id = re.model_id AND m.kind = 'station' AND m.lifecycle = 'live'
+            JOIN v_model_readiness r ON r.model_id = m.id AND r.page_reason IS NULL
+           WHERE re.preset_id = %(preset)s
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = m.id)
+      runtime_hub_live:
+        sql: "SELECT count(*) FROM v_indexable_pages WHERE family = 'runtime' AND key = %(preset)s AND indexable"
+      surge_checked_stations:
+        sql: >-
+          SELECT count(*) FROM runtime_estimates re
+            JOIN v_model_readiness r ON r.model_id = re.model_id AND r.page_reason IS NULL
+           WHERE re.preset_id = %(preset)s AND re.surge_ok IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = re.model_id)
+      list_picks:
+        sql: >-
+          SELECT count(*) FROM pick_list_items i
+            JOIN pick_lists pl ON pl.id = i.list_id AND pl.status = 'active'
+            JOIN v_pick_eligible e ON e.product_id = i.product_id
+           WHERE pl.slug = %(list)s
+      list_live:
+        sql: "SELECT count(*) FROM v_indexable_pages WHERE family = 'best' AND key = %(list)s AND indexable"
+      ladder_tiers_with_station:
+        sql: >-
+          SELECT count(DISTINCT t.id) FROM ladder_tiers t
+            JOIN ladders l ON l.id = t.ladder_id AND l.status = 'active'
+            JOIN ladder_slots s ON s.tier_id = t.id AND s.role = 'station'
+            JOIN v_pick_eligible e ON e.product_id = s.product_id
+           WHERE l.slug = %(ladder)s
+      ladder_live:
+        sql: "SELECT count(*) FROM v_indexable_pages WHERE family = 'kits' AND key = %(ladder)s AND indexable"
+      compat_hubs_live:
+        sql: "SELECT count(*) FROM v_indexable_pages WHERE family = 'compat' AND indexable"
+      expansion_fits:
+        sql: >-
+          SELECT count(*) FROM compat_edges ce
+            JOIN models b ON b.id = ce.b_model_id AND b.lifecycle = 'live' AND b.kind = 'battery'
+           WHERE ce.relation = 'expands' AND ce.verdict = 'fits'
+             AND ce.confidence IN ('manufacturer-listed', 'manual')
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = b.id)
+      solar_fits:
+        sql: >-
+          SELECT count(*) FROM compat_edges ce
+           WHERE ce.relation = 'charges_from'
+             AND ce.verdict IN ('fits', 'fits_in_series', 'fits_in_parallel', 'fits_with_adapter')
+             AND NOT (ce.config -> 'flags') ?| array['computed-check-unknown', 'computed-check-disagrees', 'computed-check-incomplete']
+      cold_charge_stations:
+        sql: >-
+          SELECT count(*) FROM station_specs ss
+            JOIN v_model_readiness r ON r.model_id = ss.model_id AND r.page_reason IS NULL
+           WHERE ss.charge_temp_min_c IS NOT NULL
+      adapter_fits:
+        sql: >-
+          SELECT count(*) FROM compat_edges ce
+           WHERE ce.relation = 'adapter_for' AND ce.verdict = 'fits'
+             AND ce.confidence IN ('manufacturer-listed', 'manual')
+      kits_ready:
+        sql: >-
+          SELECT count(*) FROM v_model_readiness r JOIN models m ON m.id = r.model_id AND m.lifecycle = 'live'
+           WHERE r.kind = 'kit' AND r.page_reason IS NULL
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = m.id)
+
+  # The facts pack (framework.core.facts_pack): `entities` columns scope a
+  # row's numbers to the model it is about (a sentence naming a model may only
+  # use that model's figures, plus figures of rows about no model, such as the
+  # load presets). Model names from models (never
+  # an Amazon title), sourced specs with units, runtime_estimates with basis
+  # and range, compat verdicts with their assumptions, dated certification
+  # text, recall status. NO price, currency, offer, title or Amazon column, and
+  # never a read of the Amazon cache or the offer views (asserted in code).
+  facts:
+    forbidden_relations: [amazon_item_cache, v_offer_display, v_offer_state, v_redirect_product, v_refresh_catalog]
+    params:                                   # defaults for keys an entry's scope leaves out
+      presets: []
+      lists: []
+      ladders: []
+      compat_stations: []
+      relations: []                           # compat rows only for entries that ask (relations in their scope)
+      include_connectors: false
+      stations_limit: 40
+      stations_per_preset: 15                 # the longest-running stations per preset join the topic's own models
+      compat_limit: 60
+    queries:
+      - name: presets
+        sql: >-
+          SELECT lp.id, lp.label, lp.category, lp.avg_w, lp.surge_w, lp.duty_cycle, lp.wh_per_day,
+                 lp.source_kind, lp.source_url, lp.source_note, lp.surge_source_url,
+                 '/runtime/' || lp.id AS hub_path
+            FROM load_presets lp
+           WHERE lp.id = ANY(%(presets)s) AND lp.active AND NOT lp.medical
+           ORDER BY lp.sort_order, lp.id
+        units: {avg_w: W, surge_w: W, wh_per_day: Wh}
+        names: [label]
+        paths: [hub_path]
+      - name: picks
+        sql: >-
+          SELECT pl.slug AS list_slug, '/best/' || pl.slug AS list_path, i.rank, p.asin, '/product/' || p.asin AS product_path,
+                 m.id AS model_id, m.model_name, b.name AS brand, pw.usable_wh, pw.capacity_wh, pw.ac_cont_w,
+                 pw.ac_surge_w, pw.rt_refrigerator_h, pw.rt_sump_pump_h, pw.rt_starlink_h, pw.rt_router_h,
+                 CASE WHEN i.reason ~* '[$€£¥₹]|[0-9] ?(usd|dollars?)' THEN NULL ELSE i.reason END AS pick_reason
+            FROM pick_list_items i
+            JOIN pick_lists pl ON pl.id = i.list_id AND pl.status = 'active'
+            JOIN products p ON p.id = i.product_id
+            JOIN v_pick_eligible e ON e.product_id = p.id
+            JOIN models m ON m.id = p.model_id
+            JOIN brands b ON b.id = m.brand_id
+            LEFT JOIN v_model_power pw ON pw.model_id = m.id
+           WHERE pl.slug = ANY(%(lists)s)
+           ORDER BY pl.slug, i.rank
+        units: {usable_wh: Wh, capacity_wh: Wh, ac_cont_w: W, ac_surge_w: W, rt_refrigerator_h: h, rt_sump_pump_h: h,
+                rt_starlink_h: h, rt_router_h: h}
+        names: [model_name, brand]
+        entities: [model_name]
+        paths: [product_path, list_path]
+      - name: ladder_slots
+        sql: >-
+          SELECT l.slug AS ladder, '/kits/' || l.slug AS ladder_path, t.budget_usd AS tier_budget_label,
+                 t.required_wh, s.role, s.rank, m.id AS model_id, m.model_name, b.name AS brand,
+                 CASE WHEN e.product_id IS NOT NULL THEN '/product/' || p.asin END AS product_path,
+                 (e.product_id IS NOT NULL) AS filled
+            FROM ladders l
+            JOIN ladder_tiers t ON t.ladder_id = l.id
+            JOIN ladder_slots s ON s.tier_id = t.id
+            LEFT JOIN products p ON p.id = s.product_id
+            LEFT JOIN v_pick_eligible e ON e.product_id = s.product_id
+            LEFT JOIN models m ON m.id = p.model_id AND e.product_id IS NOT NULL
+            LEFT JOIN brands b ON b.id = m.brand_id
+           WHERE l.slug = ANY(%(ladders)s) AND l.status = 'active'
+           ORDER BY l.slug, t.budget_usd, s.role, s.rank
+        units: {required_wh: Wh}
+        names: [model_name, brand]
+        entities: [model_name]
+        paths: [ladder_path, product_path]
+      - name: stations
+        # Scoped to the entry: the models its picks and ladder slots name, its
+        # compat stations, and the longest-running stations on its presets come
+        # first; the rest of the page-ready stations fill up to the limit.
+        sql: >-
+          WITH wanted AS (
+                 SELECT unnest(%(picks__model_id)s::bigint[]) AS id
+                 UNION SELECT unnest(%(ladder_slots__model_id)s::bigint[])
+                 UNION SELECT m2.id FROM models m2 WHERE m2.slug = ANY(%(compat_stations)s::text[])
+                 UNION SELECT x.model_id FROM (
+                         SELECT re.model_id, row_number() OVER (PARTITION BY re.preset_id
+                                                                ORDER BY re.hours_est DESC, re.model_id) AS rn
+                           FROM runtime_estimates re WHERE re.preset_id = ANY(%(presets)s::text[])) x
+                  WHERE x.rn <= %(stations_per_preset)s)
+          SELECT m.id AS model_id, m.slug, b.name AS brand, m.model_name,
+                 '/product/' || mp.asin AS product_path, '/compat/' || m.slug AS compat_path,
+                 ss.capacity_wh, ss.usable_wh_measured, ss.chemistry, ss.cycle_life, ss.ac_cont_w, ss.ac_surge_w,
+                 ss.ac_outlets, ss.ups_supported, ss.pv_voc_max, ss.pv_a_max, ss.pv_w_max, ss.pv_ports,
+                 ss.ac_charge_w, ss.car_charge_w, ss.expansion_port, ss.max_expansion_units, ss.max_expansion_wh,
+                 ss.charge_temp_min_c, ss.discharge_temp_min_c, ss.self_heating, ss.weight_kg,
+                 CASE WHEN EXISTS (SELECT 1 FROM v_recall_notices n WHERE n.model_id = m.id) THEN 'recall notice'
+                      ELSE 'no recall match' END AS recall_status,
+                 (m.id IN (SELECT id FROM wanted)) AS in_scope
+            FROM models m
+            JOIN brands b ON b.id = m.brand_id
+            JOIN station_specs ss ON ss.model_id = m.id
+            JOIN v_model_readiness r ON r.model_id = m.id AND r.page_reason IS NULL
+            JOIN v_model_primary mp ON mp.model_id = m.id
+           WHERE m.kind = 'station' AND m.lifecycle = 'live'
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = m.id)
+           ORDER BY (m.id IN (SELECT id FROM wanted)) DESC, ss.capacity_wh NULLS LAST, m.model_name
+           LIMIT %(stations_limit)s
+        units: {capacity_wh: Wh, usable_wh_measured: Wh, ac_cont_w: W, ac_surge_w: W, pv_voc_max: V, pv_a_max: A,
+                pv_w_max: W, ac_charge_w: W, car_charge_w: W, max_expansion_wh: Wh, charge_temp_min_c: C,
+                discharge_temp_min_c: C}
+        names: [brand, model_name]
+        entities: [model_name]
+        paths: [product_path, compat_path]
+        required: true
+        max_rows: 60
+      - name: runtimes
+        sql: >-
+          SELECT re.model_id, m.model_name, re.preset_id, re.basis, re.usable_wh, re.hours_est, re.hours_low,
+                 re.hours_high, re.surge_ok
+            FROM runtime_estimates re
+            JOIN models m ON m.id = re.model_id
+           WHERE re.preset_id = ANY(%(presets)s) AND re.model_id = ANY(%(stations__model_id)s)
+           ORDER BY re.preset_id, re.usable_wh, m.model_name
+        units: {usable_wh: Wh, hours_est: h, hours_low: h, hours_high: h}
+        names: [model_name]
+        entities: [model_name]
+        max_rows: 400
+      - name: spec_sources
+        sql: >-
+          SELECT DISTINCT sv.model_id, src.kind AS source_kind, src.publisher, src.url AS source_url
+            FROM spec_values sv JOIN spec_sources src ON src.id = sv.source_id
+           WHERE sv.status = 'accepted' AND sv.model_id = ANY(%(stations__model_id)s)
+           ORDER BY sv.model_id, src.publisher
+        max_rows: 200
+      - name: certifications
+        sql: >-
+          SELECT c.model_id, m.model_name, c.standard, c.nrtl, c.file_number, c.status, c.verified_at,
+                 'listing ' || c.status || ' ' || to_char(c.verified_at, 'YYYY-MM-DD') AS dated_text
+            FROM certifications c JOIN models m ON m.id = c.model_id
+           WHERE c.model_id = ANY(%(stations__model_id)s)
+           ORDER BY m.model_name, c.standard
+        names: [model_name]
+        entities: [model_name]
+        max_rows: 200
+      - name: ladder_goals
+        sql: >-
+          SELECT l.slug AS ladder, t.budget_usd AS tier_budget_label, g ->> 'preset' AS preset,
+                 (g ->> 'hours')::numeric AS hours
+            FROM ladders l JOIN ladder_tiers t ON t.ladder_id = l.id
+            CROSS JOIN LATERAL jsonb_array_elements(t.params -> 'goal') g
+           WHERE l.slug = ANY(%(ladders)s) AND l.status = 'active'
+           ORDER BY l.slug, t.budget_usd
+        units: {hours: h}
+      - name: compat
+        sql: >-
+          SELECT a.slug AS station_slug, '/compat/' || a.slug AS compat_path, a.model_name AS station,
+                 bm.model_name AS other, bb.name AS other_brand, bm.kind AS other_kind,
+                 CASE WHEN bmp.asin IS NOT NULL THEN '/product/' || bmp.asin END AS other_product_path,
+                 ce.relation, ce.verdict, ce.confidence,
+                 (ce.config ->> 'cold_voc_v')::numeric AS cold_voc_v,
+                 (ce.config ->> 'max_input_v')::numeric AS max_input_v,
+                 (ce.config ->> 'allowed_v')::numeric AS allowed_v,
+                 (ce.config ->> 'design_current_a')::numeric AS design_current_a,
+                 (ce.config ->> 'usable_w')::numeric AS usable_w,
+                 (ce.config ->> 'series')::int AS series, (ce.config ->> 'parallel')::int AS parallel,
+                 (ce.config ->> 'design_temp_c')::numeric AS design_temp_c,
+                 ce.config -> 'assumptions' AS assumptions, ce.config -> 'flags' AS flags,
+                 ce.config -> 'evidence' ->> 'source_url' AS evidence_source_url,
+                 ps.rated_w AS other_rated_w, ps.voc AS other_voc, ps.isc AS other_isc, bs.capacity_wh AS other_capacity_wh
+            FROM compat_edges ce
+            JOIN models a ON a.id = ce.a_model_id AND a.kind = 'station' AND a.lifecycle = 'live'
+            JOIN models bm ON bm.id = ce.b_model_id AND bm.lifecycle = 'live'
+            JOIN brands bb ON bb.id = bm.brand_id
+            LEFT JOIN v_model_primary bmp ON bmp.model_id = bm.id
+            LEFT JOIN panel_specs ps ON ps.model_id = bm.id
+            LEFT JOIN battery_specs bs ON bs.model_id = bm.id
+           WHERE ce.relation = ANY(%(relations)s) AND ce.verdict <> 'unknown'
+             AND (a.slug = ANY(%(compat_stations)s)
+                  OR (cardinality(%(compat_stations)s::text[]) = 0 AND a.id = ANY(%(stations__model_id)s)))
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id IN (a.id, bm.id))
+           ORDER BY (ce.verdict = 'over_limit'), a.slug, ce.relation, bm.model_name
+           LIMIT %(compat_limit)s
+        units: {cold_voc_v: V, max_input_v: V, allowed_v: V, design_current_a: A, usable_w: W, other_rated_w: W,
+                other_voc: V, other_isc: A, other_capacity_wh: Wh, design_temp_c: C}
+        names: [station, other, other_brand]
+        entities: [station, other]
+        paths: [compat_path, other_product_path]
+        max_rows: 120
+      - name: connectors
+        sql: "SELECT id, label, family, max_a, max_v FROM connectors WHERE %(include_connectors)s ORDER BY family, id"
+        units: {max_a: A, max_v: V}
+        names: [label]
+
+  links:
+    # framework.core.article_link_classes shape; only links to LIVE, INDEXABLE
+    # pages count (the engine checks every internal link against
+    # v_indexable_pages and fails a draft that links any page that is not).
+    classes:
+      product: {roots: ["/product/"], min: 5, own_host_only: true}
+      compat:  {roots: ["/compat/"],  min: 2, own_host_only: true}
+    families: {"/product/": product, "/compat/": compat, "/runtime/": runtime, "/kits/": kits, "/best/": best,
+               "/guides/": guide, "/brands/": brand, "/recalls/": recall}
+    static_paths: [/how-we-calculate, /recalls, /about, /tools/backup-power-planner, /tools/runtime-calculator,
+                   /tools/solar-calculator]
+    indexable_sql: >-
+      SELECT family, key FROM v_indexable_pages
+       WHERE indexable AND family = ANY(%(families)s) AND key = ANY(%(keys)s)
+
+  # src/render/guides/placeholders.ts grammar; a placeholder renders only when
+  # its key resolves (the renderer holds the page otherwise).
+  placeholders:
+    kinds:
+      "table:runtime":
+        describe: "the runtime of a load (a presets id from FACTS) on every page-ready station, as a table"
+        resolve_sql: "SELECT 1 FROM load_presets WHERE id = %(key)s AND active"
+      picks:
+        describe: "an active best list's ranked picks with a buy button each (a list_slug from FACTS)"
+        resolve_sql: "SELECT 1 FROM pick_lists WHERE slug = %(key)s AND status = 'active'"
+      compat:
+        describe: "a station's solar limits and the panels that fit it (a station slug from FACTS)"
+        resolve_sql: >-
+          SELECT 1 FROM models m JOIN station_specs ss ON ss.model_id = m.id
+           WHERE m.slug = %(key)s AND m.kind = 'station' AND m.lifecycle = 'live'
+             AND NOT EXISTS (SELECT 1 FROM v_model_year1_block x WHERE x.model_id = m.id)
+
+  # related_product_asins (the page's buystrip): only ASINs in the pick pool.
+  buystrip:
+    max: 6
+    eligible_sql: "SELECT asin FROM v_pick_eligible WHERE asin = ANY(%(asins)s)"
+
+  content_policy:
+    rule_sets: [electrical, electrical-year1, medical]
+
+  # framework.core.guide_claims_guard: the generic 6(y) / price / link rules
+  # plus this site's year-1 boundary as outright topic bans (any mention, in
+  # any field; a negated mention is still refused).
+  claims:
+    units: [W, Wh, h, V, A, C]               # C: temperatures (charge limits, the -40 C design point); F is converted
+    always_allowed: {h: [24, 48, 72], V: [12, 120]}   # hours pass only as the scenario ("a 72-hour outage"), never as a runtime
+    budget_labels: [300, 500, 1000, 2500, 5000]   # the ladder tiers and best-list budgets; no other $N is a label
+    budget_label_anywhere: true              # "kits at $500, $1,000 and $2,500" is a label; "costs $500" is not
+    external_hosts_allowed: []
+    allow_markdown_tables: false
+    # A pair whose verdict is not a fit (over_limit, no_fit) or that carries a
+    # computed-check flag is never called a fit in a sentence naming both sides.
+    verdicts:
+      - rows: compat
+        subjects: [station, other]
+        verdict: verdict
+        positive: [fits, fits_with_adapter, fits_in_series, fits_in_parallel]
+        flags: flags
+        negative_flags: [computed-check-unknown, computed-check-disagrees, computed-check-incomplete]
+    # A certification sentence matches the row: status verified, and its date.
+    statuses:
+      - rows: certifications
+        subject: model_name
+        key: standard
+        status: status
+        positive: [verified]
+        date: verified_at
+    # What a figure measures: a temperature in a sentence about charging must
+    # be the model's charging limit (charge_temp_min_c), never its discharge
+    # limit or the -40 C design point.
+    contexts:
+      - {pattern: '\b(?:re)?charg', unit: C, columns: [charge_temp_min_c]}
+    # Year-1 boundary as outright topic bans: any mention, in any field, a
+    # negated mention included. Keyword lists lose to euphemism, so each list
+    # also names the gear by what it does (the red-team regressions in
+    # reusable-agents agents/affiliate-article-agent/fixtures/).
+    topic_bans:
+      - id: medical
+        pattern: '\b(?:c-?pap|bi-?pap|apap|auto-?pap|oxygen|concentrators?|ventilators?|nebuli[sz]ers?|dialysis|apnea|medical|medicine|medication|insulin|life[- ]support|resmed|airsense|dream ?station|inogen|respironics|breathing (?:machines?|devices?|equipment)|therapy (?:machines?|devices?)|wheel ?chairs?|power ?chairs?|mobility (?:scooters?|devices?|aids?)|stair ?lifts?|hospital beds?|feeding pumps?|suction (?:machines?|pumps?))\b'
+        why: "Year-1 boundary: no medical load, by type or model, in any form."
+      - id: furnace
+        pattern: '\b(?:furnaces?|boilers?|hvac|forced[- ]air|blowers?|heat pumps?|air handlers?|ducts?|ductwork|warm air|hot air|circulators?|circulator pumps?|hydronic|baseboard|radiators?|radiant (?:heat|floor)\w*|igniters?|ignitors?|pilot lights?|gas[- ]fired|oil[- ]fired|central (?:heat|heating|air)|mini[- ]?splits?|heating (?:system|loop|zone)s?)\b'
+        why: "Year-1 boundary: no furnace, boiler or HVAC content, by name or by what it does."
+      - id: 240v
+        pattern: '\b(?:208|220|230|240)\s*-?\s*v(?:olts?|ac)?\b|\b(?:nema\s*-?\s*)?l\s*-?\s*(?:5|6|14|15|16|21)(?:\s*-\s*(?:20|30|50)\s*[prc]?)?\b|\bnema\s*-?\s*(?:6|10|14)\s*-\s*(?:15|20|30|50)\b|\b14-50\b|\bss2-?50\b|\bcs\s*-?\s*636[45]\b|\bsplit[- ]phase\b|\bdog ?bones?\b|\btwist[- ]?lock\w*\b|\blocking (?:receptacles?|outlets?|plugs?|connectors?|cords?)\b|\bdryer (?:outlets?|plugs?|receptacles?)\b|\b50\s*-?\s*a(?:mps?)?\s+(?:rv|shore)\b|\bboth (?:legs|hots|phases)\b|\b(?:two|2) (?:legs|hots|phases)\b|\b(?:120\s*/\s*240|two[- ]forty|two hundred (?:and )?(?:eight|twenty|thirty|forty))\b|\b(?:double|dual)[- ]voltage\b|\bwell pumps?\b|\b(?:electric (?:ranges?|ovens?|stoves?|cooktops?)|kitchen ranges?|range outlets?|the outlet (?:behind|for|your) (?:your |the )?range|(?:clothes )?dryers?|water heaters?|welders?|ev chargers?)\b'
+        why: "Year-1 boundary: no 240 V gear, cords, plugs, loads or compatibility, by name or by what it does."
+      - id: wiring
+        pattern: '\b(?:hard-?wir\w*|rewir\w*|electrical panels?|breaker (?:panels?|box(?:es)?)|service panels?|sub-?panels?|main breakers?|circuit panels?|circuit breakers?|interlock(?: kits?)?|power inlets?|inlet box(?:es)?|wiring (?:a|the|your|it|into)\b|(?:smart |home |backup |load |critical[- ]loads? )panels?|switch(?:es|ing)? over|auto(?:matic(?:ally)?)?[- ]?(?:switch\w*|transfer\w*|changeover\w*)|take over the|(?<!open[- ])(?<!short[- ])circuits?|the main (?:off|breaker|switch|panel)|(?:switch|turn|flip|shut)\w* (?:off )?the main)\b'
+        why: "Year-1 boundary: no home-wiring, circuit or panel content."
+      - id: transfer-switch
+        pattern: '\b(?:transfer|change-?over|throw-?over|manual transfer|power transfer)[- ](?:switch(?:es)?|panels?|devices?|kits?)\b'
+        why: "Year-1 boundary: no transfer switches, by any name."
+      - id: backfeed
+        pattern: '\b(?:back-?feed\w*|double[- ]male|male[- ]to[- ]male|suicide cords?|(?:plugs?|prongs?|male ends?) on (?:each|both) ends?|two male ends|cheater cords?)\b'
+        why: "Year-1 boundary: backfeeding kills line workers; never mentioned, even as a warning or a euphemism."
+      - id: generator
+        pattern: '(?<!solar )(?<!solar-)\b(?:generators?|genset|gas[- ]powered|gasoline|petrol|diesel|dual[- ]fuel|tri[- ]fuel|fuel[- ]powered|inverter gens?|honda eu\w*|eu ?[0-9]{4}i\w*|generac|champion [0-9]{3,4}|predator [0-9]{3,4}|firman|duromax|pull[- ]start|recoil start|carbon monoxide|exhaust)\b'
+        why: "Year-1 boundary: no fuel generators, by name, brand or model (a 'solar generator kit' is the only allowed use of the word)."
+      - id: fuel
+        pattern: '\b(?:propane|kerosene|butane|paraffin|lamp oil|heating oil|white gas|charcoal|sterno|(?:oil|hurricane|gas|fuel|kerosene) lamps?|gas (?:heaters?|stoves?|lanterns?)|mr\.? ?heater|buddy heaters?|catalytic heaters?|candles?|pellet stoves?|wood stoves?|camp stoves?|fireplaces?|wood[- ]burning|tea lights?)\b'
+        why: "Year-1 boundary: no fuel lighting or heating, by type or brand."
+      - id: ebike
+        pattern: '\b(?:e-?bikes?|e-?scooters?|bikes?|bicycles?|scooters?|hoverboards?|onewheels?|unicycles?|e-?motorcycles?|golf carts?|electric (?:bikes?|bicycles?|scooters?|motorcycles?|mopeds?)|mopeds?)\b'
+        why: "Year-1 boundary: no e-bike, scooter or other mobility batteries."
+      - id: grid-tie
+        pattern: '\b(?:grid[- ]tie\w*|grid[- ]interactive|net metering|micro-?inverters?|sell(?:ing)? (?:power )?back to the grid)\b'
+        why: "Year-1 boundary: no grid-tie equipment."
+      - id: ul-mark
+        pattern: '\bUL[- ](?:certified|approved|listed|mark)\b'
+        why: "Certification only as dated text ('UL 2743 listing verified <date>'), never a mark."
+        fix: "Write the standard, the lab and the date from FACTS certifications, e.g. 'UL 2743 listing verified 2026-11-21 (Intertek)'."
+      - id: safety-claim
+        pattern: '\b(?:safe|safer|safest|safely|recall[- ]free|risk[- ]free|harmless)\b'
+        why: "Never call a model or a use safe (or recall-free) beyond what FACTS says: state the dated listing or recall status instead."
+
+  honesty_guard: {enabled: true}
+
+  prompt:
+    brand: ExampleSite
+    site_description: >-
+      answers home backup-power questions with numbers: how long a portable power station runs a fridge, a sump
+      pump or a router; which solar panels, expansion batteries and cables fit it; what an outage kit keeps
+      running. Pages are rendered from the site's own sourced data; prices and buy buttons render live beside
+      the text.
+    voice: >-
+      Plain, calm, exact; read during an outage. Short sentences, numbers first, assumptions stated, no hype,
+      no exclamation marks, no 'we tested'. Credit the site as an organization, never a person.
+    rules:
+      - "Runtimes only from FACTS runtimes: hours_est with its range (hours_low to hours_high) and its basis ('measured', or rated capacity x 0.842 usable). Never compute a runtime, never give one for a load that is not in FACTS presets, never round a range into a promise. Link /how-we-calculate once."
+      - "Compatibility only from FACTS compat rows, with the assumptions they record (-40 C design temperature, the cold-voltage factor, 5% headroom, the adapter when one is needed). A verdict of over_limit or a row with a computed-check flag is never called a fit."
+      - "Certification only as dated text from FACTS certifications (standard, lab, verified date). Never 'UL certified', 'UL listed' or a mark."
+      - "Year-1 boundary, never mentioned in any form (not even as a warning): medical devices or medical loads; furnaces, boilers or HVAC; 240 V gear, plugs or cords (L14-30, L5-30, 14-50, SS2-50, dryer outlets, split phase); generators (a 'solar generator kit' is the only allowed use of the word), transfer switches, inlets, interlocks, backfeeding or double-male cords; home wiring, panels or installation steps; grid-tie; fuel lighting or heating; e-bike or scooter batteries."
+      - "A sump pump or any load is described plugged into the station's AC outlet only. A guide that mentions a sump pump or whole-home backup carries this sentence once, verbatim: 'Plug the pump straight into the station's AC outlet; connecting a power station to your home's wiring is a job for a licensed electrician.' Never 'no electrician needed'."
+      - "Recall status comes from FACTS (recall_status); never call a model safe or recall-free beyond what FACTS says."
+      - "Budget tiers ('under $500', 'the $1,000 kit') are labels; never a price, a price range, a discount or a value-per-dollar figure."
+
+  articles:
+    table: editorial_articles
+    category: guides
+    insert_status: pending                  # the K4 publish guard forces it for every role but the publisher
+    byline: Example Editorial Team          # the site's byline
+
+  publish:
+    enabled: true
+    timeout_s: 300
+    extra_args: []
+    retry_pending: 2                        # re-run the gate (no model call) for this engine's held drafts first
+
+  signals:
+    data_sql: >-
+      SELECT (SELECT max(computed_at) FROM runtime_estimates), (SELECT max(computed_at) FROM compat_edges),
+             (SELECT max(updated_at) FROM pick_list_items), (SELECT max(updated_at) FROM ladder_slots),
+             (SELECT max(updated_at) FROM models), (SELECT max(updated_at) FROM load_presets),
+             (SELECT count(*) FROM v_pick_eligible), (SELECT count(*) FROM v_indexable_pages WHERE indexable),
+             (SELECT max(synced_at) FROM recall_sync_log WHERE NOT dry_run)
+    published_sql: "SELECT slug FROM editorial_articles ORDER BY slug"
+
+  post_publish:
+    # Turn on once the site is open to indexing. IndexNow is the indexnow-submitter's job.
+    featured_rotation: {enabled: false, max_features: 4}

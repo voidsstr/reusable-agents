@@ -1,0 +1,228 @@
+# Example editorial calendar for agents/affiliate-article-agent (format:
+# framework/core/editorial_calendar.py). Topics are written in order once their
+# data requirements hold; used by site.example.yaml and the engine's tests.
+version: 1
+entries:
+- id: fridge-24h-outage
+  order: 20
+  slug: best-power-station-refrigerator-24-hour-outage
+  working_title: Best power station to keep a refrigerator running through a 24-hour outage
+  format: best-for
+  lane: station
+  occasion: winter-storm-season
+  brief: 'How the refrigerator''s type changes the answer on the same station: the presets for full-size, top-freezer,
+    French-door and side-by-side refrigerators differ in daily energy, so the same station covers a different share
+    of a 24-hour outage. Then the ranked picks.'
+  questions:
+  - How many hours does the same station give a top-freezer, a French-door and a side-by-side refrigerator?
+  - Which stations both start the compressor and carry a full-size refrigerator for 24 hours?
+  - What does 'usable' capacity mean for this answer, and where does the range come from?
+  link_instead_of_repeating:
+  - /runtime/refrigerator
+  - /best/power-station-for-refrigerator
+  placeholders:
+  - '{{picks:power-station-for-refrigerator}}'
+  scope:
+    presets:
+    - refrigerator
+    - refrigerator-top-freezer
+    - refrigerator-french-door
+    - refrigerator-side-by-side
+    lists:
+    - power-station-for-refrigerator
+  scenario:
+    h:
+    - 24
+  requires:
+  - check: runtime_stations
+    min: 12
+    params:
+      preset: refrigerator
+  - check: surge_checked_stations
+    min: 10
+    params:
+      preset: refrigerator
+  - check: list_picks
+    min: 3
+    params:
+      list: power-station-for-refrigerator
+  - check: compat_hubs_live
+    min: 2
+- id: starlink-and-wifi-outage
+  order: 30
+  slug: power-station-for-starlink-and-wifi-in-an-outage
+  working_title: Best power station for Starlink and home Wi-Fi in an outage
+  format: best-for
+  lane: station
+  occasion: winter-storm-season
+  brief: 'Staying online in an outage: a cable router and modem, Starlink Standard and Starlink Mini are three different
+    loads. Compare the hours one station gives each (FACTS runtimes), then the ranked picks. Never add loads together:
+    give each load''s hours separately.'
+  questions:
+  - On the same station, how many hours for the router and modem alone, for Starlink Mini and for Starlink Standard?
+  - Which stations carry Starlink Standard through a 12-hour night?
+  - Why does Starlink Mini change the station size you need?
+  link_instead_of_repeating:
+  - /runtime/starlink-standard
+  - /runtime/starlink-mini
+  - /runtime/wifi-router-modem
+  placeholders:
+  - '{{picks:power-station-for-starlink}}'
+  scope:
+    presets:
+    - wifi-router-modem
+    - starlink-mini
+    - starlink-standard
+    lists:
+    - power-station-for-starlink
+  scenario:
+    h:
+    - 12
+  requires:
+  - check: runtime_stations
+    min: 10
+    params:
+      preset: starlink-standard
+  - check: runtime_stations
+    min: 10
+    params:
+      preset: wifi-router-modem
+  - check: list_picks
+    min: 3
+    params:
+      list: power-station-for-starlink
+  - check: compat_hubs_live
+    min: 2
+- id: expansion-battery-fit
+  order: 40
+  slug: expansion-batteries-and-the-stations-they-fit
+  working_title: Every expansion battery and the stations it fits
+  format: compatibility explainer
+  lane: expansion
+  brief: 'Maker-listed fits only (FACTS compat rows with relation ''expands''): which expansion battery works with
+    which station, how much capacity each adds (other_capacity_wh), and the station''s own expansion limits (max_expansion_units,
+    max_expansion_wh). Stations with no listed battery are named as such.'
+  questions:
+  - Which expansion batteries does each station accept, according to its maker?
+  - How much capacity does one battery add, and how many units does the station take?
+  - Which stations in our data take no expansion battery at all?
+  link_instead_of_repeating: []
+  placeholders: []
+  scope:
+    relations:
+    - expands
+    compat_limit: 80
+  requires:
+  - check: expansion_fits
+    min: 10
+  - check: compat_hubs_live
+    min: 3
+- id: sump-pump-start-and-hours
+  order: 50
+  slug: best-power-station-for-a-sump-pump
+  working_title: 'Best power station for a sump pump: which models start a 1/2 HP pump, and for how long'
+  format: best-for
+  lane: station
+  occasion: winter-storm-season
+  brief: 'A sump pump has to start before capacity matters: the preset''s start (surge_w) against each station''s
+    surge rating (surge_ok), then hours at the running draw, taken as drawn the whole time because no duty cycle
+    is published. Plugged into the station only.'
+  questions:
+  - Which stations start a 1/2 HP pump, and which carry its running draw but cannot start it?
+  - How many hours of continuous pumping does each starting station give (the worst case)?
+  - Why is there no 'cycles per charge' figure?
+  link_instead_of_repeating:
+  - /runtime/sump-pump-half-hp
+  - /best/power-station-for-sump-pump
+  placeholders:
+  - '{{picks:power-station-for-sump-pump}}'
+  scope:
+    presets:
+    - sump-pump-half-hp
+    lists:
+    - power-station-for-sump-pump
+  requires:
+  - check: surge_checked_stations
+    min: 10
+    params:
+      preset: sump-pump-half-hp
+  - check: runtime_stations
+    min: 10
+    params:
+      preset: sump-pump-half-hp
+  - check: list_picks
+    min: 3
+    params:
+      list: power-station-for-sump-pump
+  - check: compat_hubs_live
+    min: 2
+- id: home-backup-under-1000
+  order: 60
+  slug: best-home-backup-power-stations-under-1000
+  working_title: 'Best home backup power stations under $1,000: 1-2 kWh LiFePO4 picks'
+  format: best-under
+  lane: station
+  occasion: winter-storm-season
+  brief: 'The under-$1,000 list explained: what 1 to 2 kWh of usable energy runs in an outage (refrigerator and
+    router runtimes from FACTS), chemistry and cycle life from the specs, then the ranked picks (prices render live
+    in the list).'
+  questions:
+  - 'What does a 1-2 kWh station keep running for a day: refrigerator, router, lights?'
+  - Why LiFePO4 matters for a backup station you rarely use (cycle life from the makers' specs)?
+  - What do you give up at this budget compared with the $2,500 kit?
+  link_instead_of_repeating:
+  - /best/power-stations-under-1000
+  - /kits/winter-outage-kit
+  placeholders:
+  - '{{picks:power-stations-under-1000}}'
+  scope:
+    lists:
+    - power-stations-under-1000
+    presets:
+    - refrigerator
+    - wifi-router-modem
+    - led-light-bulbs
+  scenario:
+    kWh:
+    - 1
+    - 2
+    h:
+    - 24
+  requires:
+  - flag: commerce
+    note: budget pages wait for live prices (L0b)
+  - check: list_picks
+    min: 5
+    params:
+      list: power-stations-under-1000
+  - check: list_live
+    min: 1
+    params:
+      list: power-stations-under-1000
+  - check: compat_hubs_live
+    min: 2
+- id: cold-weather-voc-check
+  order: 70
+  slug: will-this-solar-panel-work-with-my-power-station-cold-voc
+  working_title: Will this solar panel work with my power station? A cold-weather Voc check
+  format: compatibility explainer
+  lane: panel
+  occasion: winter-storm-season
+  brief: 'Why a panel that fits on a mild day can exceed a station''s solar input limit on a cold morning: our verdicts
+    use -40 C, the panel''s temperature coefficient (or the NEC 690.7 factor), and 5% headroom (FACTS compat assumptions).
+    Walk two or three real pairs from FACTS: a fit, an over-limit, and a series or parallel fit if FACTS has one.'
+  questions:
+  - Why does open-circuit voltage rise in the cold, and by how much for the pairs we checked?
+  - Which panel and station pairs fit with 5% headroom, and which are over the limit?
+  - When is a series or parallel connection of panels still a fit?
+  link_instead_of_repeating: []
+  placeholders: []
+  scope:
+    relations:
+    - charges_from
+    compat_limit: 40
+  requires:
+  - check: solar_fits
+    min: 5
+  - check: compat_hubs_live
+    min: 5

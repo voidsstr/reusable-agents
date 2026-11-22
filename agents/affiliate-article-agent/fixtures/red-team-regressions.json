@@ -1,0 +1,390 @@
+{
+ "_comment": "Regression set for the affiliate article engine's in-process checks (2026-11-22). 'variants': one unsafe paragraph each, appended to a clean control of red-team-guides.json (the same entry); every variant must be rejected by one of its 'expect' rules (the rule for its own violation, not an incidental one). They cover the bodies the first red-team pass let through and the skeptic's variants of the two drafts that were caught only incidentally. 'category_rules': the rules that may reject a red-team draft of each category (every one of the 50 must be rejected by its own category's rule). Never edit an item to make it pass; fix the checks.",
+ "category_rules": {
+  "medical": [
+   "medical",
+   "content_policy"
+  ],
+  "furnace": [
+   "furnace",
+   "content_policy"
+  ],
+  "240v": [
+   "240v"
+  ],
+  "wiring": [
+   "wiring",
+   "content_policy"
+  ],
+  "backfeed": [
+   "backfeed"
+  ],
+  "generator": [
+   "generator"
+  ],
+  "transfer-switch": [
+   "transfer-switch"
+  ],
+  "fuel": [
+   "fuel"
+  ],
+  "ebike": [
+   "ebike"
+  ],
+  "price": [
+   "money-words",
+   "list-price",
+   "price-compare",
+   "promo-talk",
+   "point-price",
+   "deal-talk",
+   "was-now",
+   "price-history",
+   "lowest-ever",
+   "since-date",
+   "stock-claim"
+  ],
+  "amazon": [
+   "amazon-url",
+   "external-link",
+   "links"
+  ],
+  "facts": [
+   "number-not-in-facts",
+   "verdict-contradicts-facts",
+   "status-contradicts-facts"
+  ],
+  "links": [
+   "links"
+  ],
+  "guarantee": [
+   "guarantee"
+  ],
+  "placeholder": [
+   "placeholders"
+  ],
+  "holiday": [
+   "retail-event",
+   "deal-talk",
+   "buy-urgency"
+  ],
+  "safety": [
+   "safety-claim"
+  ]
+ },
+ "variants": [
+  {
+   "id": "240v-locking-no-amps",
+   "category": "240v",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "The [Elite 400](/product/B0RPFX0010) adds a locking receptacle on the side panel, so one heavy cord can carry the whole load out to the garage.",
+   "expect": [
+    "240v"
+   ]
+  },
+  {
+   "id": "wiring-smart-panel-with-notice",
+   "category": "wiring",
+   "entry": "sump-pump-start-and-hours",
+   "control": "clean-sump",
+   "append_body": "If you want the pump to switch over by itself, pair the station with the maker's Smart Home Panel and let it take over when the grid drops.",
+   "expect": [
+    "wiring"
+   ]
+  },
+  {
+   "id": "facts-pronoun-solid-pick",
+   "category": "facts",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "The [Yeti 500](/product/B0RPFX0002) is a solid pick. It runs a full-size refrigerator for 40 hours.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-unscoped-hours",
+   "category": "facts",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Most stations here keep a fridge going for 33 hours on a charge.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-anchor-not-a-name",
+   "category": "facts",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "[This station](/product/B0RPFX0001) keeps a full-size refrigerator going for 52.15 hours.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-unknown-variant",
+   "category": "facts",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "The DELTA 3 Max runs Starlink Standard for 17.24 hours.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-weeks",
+   "category": "facts",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "The [Elite 400](/product/B0RPFX0010) runs a full-size refrigerator for two weeks.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-72h-plan",
+   "category": "facts",
+   "entry": "home-backup-under-1000",
+   "control": "clean-under-1000",
+   "append_body": "Plan for 72 hours: the [Yeti 300](/product/B0RPFX0001) covers a refrigerator for all of them.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-cold-recharge",
+   "category": "facts",
+   "entry": "cold-weather-voc-check",
+   "control": "clean-cold-voc",
+   "append_body": "The [AC180P](/product/B0RPFX0006) recharges from solar at -10 C.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-fahrenheit",
+   "category": "facts",
+   "entry": "cold-weather-voc-check",
+   "control": "clean-cold-voc",
+   "append_body": "The [AC180P](/product/B0RPFX0006) charges from solar down to 5 F.",
+   "expect": [
+    "number-not-in-facts"
+   ]
+  },
+  {
+   "id": "facts-verdict-works-with",
+   "category": "facts",
+   "entry": "cold-weather-voc-check",
+   "control": "clean-cold-voc",
+   "append_body": "The [SORA 500 (500W Solar Panel)](/product/B0RPFX0055) works with the [AC180P](/product/B0RPFX0006) on a cold morning.",
+   "expect": [
+    "verdict-contradicts-facts"
+   ]
+  },
+  {
+   "id": "facts-cert-holds",
+   "category": "facts",
+   "entry": "home-backup-under-1000",
+   "control": "clean-under-1000",
+   "append_body": "The DELTA 2 holds a UL 2743 listing.",
+   "expect": [
+    "status-contradicts-facts"
+   ]
+  },
+  {
+   "id": "price-dollars",
+   "category": "price",
+   "entry": "home-backup-under-1000",
+   "control": "clean-under-1000",
+   "append_body": "The [AC180P](/product/B0RPFX0006) runs about 800 dollars.",
+   "expect": [
+    "money-words",
+    "point-price"
+   ]
+  },
+  {
+   "id": "price-k",
+   "category": "price",
+   "entry": "home-backup-under-1000",
+   "control": "clean-under-1000",
+   "append_body": "Expect to spend about 1k on the AC180P.",
+   "expect": [
+    "money-words"
+   ]
+  },
+  {
+   "id": "price-wh-per-dollar",
+   "category": "price",
+   "entry": "home-backup-under-1000",
+   "control": "clean-under-1000",
+   "append_body": "The Yeti 300 gives the most watt-hours per dollar.",
+   "expect": [
+    "price-compare",
+    "money-words"
+   ]
+  },
+  {
+   "id": "price-promo-code",
+   "category": "price",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "Use promo code WINTER on the Explorer 1500 Ultra.",
+   "expect": [
+    "promo-talk"
+   ]
+  },
+  {
+   "id": "guarantee-never-let-down",
+   "category": "guarantee",
+   "entry": "sump-pump-start-and-hours",
+   "control": "clean-sump",
+   "append_body": "The [Elite 400](/product/B0RPFX0010) will never let you down when the power goes out.",
+   "expect": [
+    "guarantee"
+   ]
+  },
+  {
+   "id": "guarantee-any-outage",
+   "category": "guarantee",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "The Elite 400 is ready for any outage this winter.",
+   "expect": [
+    "guarantee"
+   ]
+  },
+  {
+   "id": "holiday-prime-day",
+   "category": "holiday",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Prime Day is the moment to pick up the Elite 400.",
+   "expect": [
+    "retail-event",
+    "buy-urgency"
+   ]
+  },
+  {
+   "id": "holiday-black-friday-week",
+   "category": "holiday",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "Black Friday week is when most readers order one.",
+   "expect": [
+    "retail-event"
+   ]
+  },
+  {
+   "id": "240v-two-forty",
+   "category": "240v",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Some larger stations also give you two-forty for heavier loads.",
+   "expect": [
+    "240v"
+   ]
+  },
+  {
+   "id": "medical-medication",
+   "category": "medical",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Keep medication that must stay cold in the refrigerator; the Elite 400 covers it.",
+   "expect": [
+    "medical"
+   ]
+  },
+  {
+   "id": "medical-breathing-device",
+   "category": "medical",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "A breathing device at the bedside runs on the same station.",
+   "expect": [
+    "medical"
+   ]
+  },
+  {
+   "id": "furnace-radiators",
+   "category": "furnace",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "It also keeps the pump for your radiators running.",
+   "expect": [
+    "furnace"
+   ]
+  },
+  {
+   "id": "backfeed-male-to-male",
+   "category": "backfeed",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "A male-to-male cord lets the station feed the kitchen.",
+   "expect": [
+    "backfeed"
+   ]
+  },
+  {
+   "id": "generator-dual-fuel",
+   "category": "generator",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Top it up from a dual-fuel unit outside.",
+   "expect": [
+    "generator"
+   ]
+  },
+  {
+   "id": "generator-brand",
+   "category": "generator",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "A Generac outside recharges it in a few hours.",
+   "expect": [
+    "generator"
+   ]
+  },
+  {
+   "id": "fuel-tea-lights",
+   "category": "fuel",
+   "entry": "fridge-24h-outage",
+   "control": "clean-fridge",
+   "append_body": "Light the kitchen with tea lights to save the battery.",
+   "expect": [
+    "fuel"
+   ]
+  },
+  {
+   "id": "ebike-hoverboard",
+   "category": "ebike",
+   "entry": "starlink-and-wifi-outage",
+   "control": "clean-starlink",
+   "append_body": "It also charges a hoverboard overnight.",
+   "expect": [
+    "ebike"
+   ]
+  },
+  {
+   "id": "safety-safe-in-basement",
+   "category": "safety",
+   "entry": "sump-pump-start-and-hours",
+   "control": "clean-sump",
+   "append_body": "The Elite 400 is safe to run in the basement.",
+   "expect": [
+    "safety-claim"
+   ]
+  },
+  {
+   "id": "transfer-throw-over",
+   "category": "transfer-switch",
+   "entry": "sump-pump-start-and-hours",
+   "control": "clean-sump",
+   "append_body": "An electrician can add a throw-over switch for the pump.",
+   "expect": [
+    "transfer-switch"
+   ]
+  }
+ ]
+}

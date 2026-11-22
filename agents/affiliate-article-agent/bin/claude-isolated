@@ -1,0 +1,22 @@
+#!/bin/sh
+# claude-isolated: the article engine's claude-cli entry point (thin exec
+# wrapper; no orchestration). framework.core.ai_providers runs
+#   $CLAUDE_CLI_CMD --print ... --max-turns 1 --dangerously-skip-permissions <prompt>
+# with tools on. The engine points CLAUDE_CLI_CMD here for its own calls (and
+# runs them from a fresh empty working directory), so the model gets no
+# built-in tools and no MCP servers. The real binary is
+# $AFFILIATE_ARTICLE_REAL_CLAUDE, else the claude-pool shim, else `claude`.
+#
+# Verify against the installed claude before setting
+# model.claude_cli.verified: true in the site config (go-live checklist):
+#   claude --help | grep -E -- '--tools|--strict-mcp-config|--disallowedTools'
+# Post-12-02 follow-up: a no-tools mode in ai_providers replaces this file.
+set -eu
+real="${AFFILIATE_ARTICLE_REAL_CLAUDE:-}"
+if [ -z "$real" ]; then
+    pool="${CLAUDE_POOL_ROOT:-$HOME/.reusable-agents/claude-pool}/bin/claude"
+    if [ -x "$pool" ]; then real="$pool"; else real="claude"; fi
+fi
+exec "$real" --tools "" --strict-mcp-config \
+    --disallowedTools "Bash Edit Write MultiEdit NotebookEdit Read Glob Grep WebFetch WebSearch Task TodoWrite" \
+    "$@"

@@ -1,0 +1,56 @@
+{
+  "schema_version": "1",
+  "agent_id": "affiliate-article-agent",
+  "_comment": "Engine defaults. A per-site instance seeds its own goals under its own id at registration (install/seed-default-goals.sh or PUT /api/agents/<id>/goals). Every target_metric is a key of the engine's RunResult.metrics (article_engine.METRIC_KEYS), so progress records itself each run.",
+  "goals": [
+    {
+      "id": "goal-guides-published",
+      "title": "One guide published per allowed day",
+      "description": "Guides the publish gate promoted this run (0 or 1). The output gate caps it at one a day; a day with 0 is right when the gate, the pool or the data said no, and wrong when checks or the publish gate held a draft. Emitted key: guides_published.",
+      "target_metric": "guides_published",
+      "metric": {"name": "guides_published", "current": 0, "target": 1, "direction": "increase", "unit": "guides/run"},
+      "directives": [
+        "Read the run's outcome before anything else: no-topic means data, gate-closed means traffic, deferred means Opus capacity, held means the draft",
+        "Never raise the output gate's daily cap or open a lane to move this number without a traffic signal on the last batch"
+      ]
+    },
+    {
+      "id": "goal-checks-clean",
+      "title": "Drafts pass every in-process check",
+      "description": "Failed checks across the run's drafts (content policy, claims guard, links, placeholders, shape, honesty). Repeated failures of one rule point at the prompt or the facts pack, never at loosening the rule. Emitted key: checks_failed.",
+      "target_metric": "checks_failed",
+      "metric": {"name": "checks_failed", "current": 0, "target": 0, "direction": "decrease", "unit": "checks"},
+      "directives": [
+        "Read engine-report.json attempts[].checks: the failing rule and the excerpt",
+        "Fix the facts pack (a missing figure the model keeps estimating) or the site's prompt rules; never weaken a claims, link or content-policy rule"
+      ]
+    },
+    {
+      "id": "goal-no-pool-starvation",
+      "title": "Authoring never starves production authors",
+      "description": "Runs that deferred because the claude-pool lacked Opus headroom, a production author deferred recently, or the provider cannot serve Opus. Deferring is correct; a high rate means the schedule collides with the fleet's authors. Emitted key: deferred_pool.",
+      "target_metric": "deferred_pool",
+      "metric": {"name": "deferred_pool", "current": 0, "target": 0, "direction": "decrease", "unit": "runs"},
+      "directives": [
+        "Move the instance's cron to a quieter hour before touching min_ready_profiles or CLAUDE_POOL_RESERVE",
+        "Never add a fallback model: editorial prose is Opus-only"
+      ]
+    },
+    {
+      "id": "goal-opus-minutes-cap",
+      "title": "Opus wall time within the site's daily cap",
+      "description": "Minutes of live model calls this run. The engine also refuses a call once the day's total reaches model.max_minutes_per_day. Emitted key: opus_minutes.",
+      "target_metric": "opus_minutes",
+      "metric": {"name": "opus_minutes", "current": 0, "target": 20, "direction": "decrease", "unit": "min"},
+      "directives": ["A run above 10 minutes means a re-prompt loop or a very large facts pack: trim the calendar entry's scope"]
+    },
+    {
+      "id": "goal-gate-respected",
+      "title": "No model call while the output gate is closed",
+      "description": "1 when this run stopped at a closed output gate (no model call). Informational: a run of closed days means the last guides earned no impressions, AI visits or verified clicks; improve them, do not open the gate. Emitted key: gate_closed.",
+      "target_metric": "gate_closed",
+      "metric": {"name": "gate_closed", "current": 0, "target": 0, "direction": "decrease", "unit": "runs"},
+      "directives": ["Read the gate's reason in engine-report.json; the fix is a better guide or better data, never a bigger cap"]
+    }
+  ]
+}

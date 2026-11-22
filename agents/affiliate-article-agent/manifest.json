@@ -1,0 +1,24 @@
+{
+  "id": "affiliate-article-agent",
+  "name": "Affiliate Article Engine",
+  "description": "Generic engine for data-backed editorial guides on affiliate sites whose pages render from their own tables. One run writes at most one guide: the topic is the next entry of the site's editorial calendar whose data is ready (chosen in code), the facts are the site's own SQL (asserted free of prices and Amazon text), the prose is ONE Opus call through ai_client_for returning strict JSON (one re-prompt), and in-process checks (content policy, claims guard with every number tied to the facts pack, live-and-indexable link classes, placeholders, honesty guard) run before the row is INSERTed in the site's queue status. Only framework.cli.article_publish_gate promotes it. Blackout windows, a not-before date, the article output gate, claude-pool readiness and recent production-author defers stop a run before any model call. Per-site instances are config-only directories in the site repos.",
+  "category": "seo",
+  "task_type": "scheduled-cron",
+  "enabled": false,
+  "owner": "framework",
+  "runbook": "AGENT.md",
+  "metadata": {
+    "framework": "reusable-agents",
+    "blueprint": "llm-code-editor",
+    "code_repo": "reusable-agents",
+    "code_path": "agents/affiliate-article-agent",
+    "config_env": "AFFILIATE_ARTICLE_CONFIG",
+    "config_block": "article_engine",
+    "config_template": "agents/affiliate-article-agent/site.example.yaml",
+    "dispatch_kind": "article-author",
+    "llm": "opus-only (required_model, no fallback)",
+    "ai": {"provider": "claude-cli", "model": "claude-opus-5-5"},
+    "created_at": "2026-11-22T08:00:00Z"
+  },
+  "runnable_modes": ["cron", "manual"]
+}
