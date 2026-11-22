@@ -420,3 +420,265 @@ SPECS_FILE = os.environ.get("MODEL_MATCHER_SPECS_FILE")
 def test_fixture_is_current_with_the_dataset():
     data = json.loads(Path(SPECS_FILE).read_text())
     assert {m["id"] for m in data["models"]} == {r["id"] for r in ROWS}
+
+
+# ---------------------------------------------------------------------------
+# Matcher fixes of 2026-11-22: bundle families, named kits, panel specs with no
+# connector word, common bundle phrasing, panel identity, digit / measure-only
+# names, code-alone names, and Amazon's manufacturer model fields (rule 13).
+# ---------------------------------------------------------------------------
+
+J1000P = "jackery-explorer-1000-plus"
+KIT_X2000V2_200 = "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-200w-x-2"
+KIT_X2000V2_DUNE = "jackery-solar-generator-bundle-explorer-2000-v2-solarsaga-200w-dune-white-x-2"
+KIT_R1500_SF200 = "allpowers-solar-generator-kit-1800w-r1500-sf200-200w-flexible-solar-panel"
+
+
+def _index(patch=None):
+    """The fixture index with some rows patched (our data only)."""
+    rows = [dict(r, **(patch or {}).get(r["id"], {})) for r in ROWS + EXTRA]
+    return M.ModelIndex([M.ModelRecord.from_row(r) for r in rows], brand_aliases=ALIASES)
+
+
+@pytest.fixture(scope="module")
+def fam():
+    # Kit aliases are the maker's bundle-family names (rule 12).
+    return _index({KIT_J1000P_AIR2: {"aliases": ["Solar Generator 1000 Plus"]}})
+
+
+FAMILY_CASES = [
+    ("Jackery Solar Generator 1000 Plus 1264Wh with 2x100W Solar Panels, LiFePO4 Portable Power Station",
+     KIT_J1000P_AIR2, "matched"),
+    ("Jackery Solar Generator 1000 Plus with 2 x SolarSaga 100 Air", KIT_J1000P_AIR2, "matched"),
+    # the family name alone, or with panels no kit of ours has: never the bare station
+    ("Jackery Solar Generator 1000 Plus, 1264Wh LiFePO4 Portable Power Station, 2000W AC Output", None,
+     "bundle-unverified"),
+    ("Jackery Solar Generator 1000 Plus with 200W Solar Panel, 1264Wh", None, "bundle-no-kit"),
+    ("Jackery Solar Generator 1000 Plus Pro with 2x100W Solar Panels", None, "unknown-variant"),
+    # the station's own name keeps its own rules
+    ("Jackery Explorer 1000 Plus Portable Power Station, 1264Wh LiFePO4, 2000W AC Output", J1000P, "matched"),
+]
+
+
+@pytest.mark.parametrize("title,model_id,reason", FAMILY_CASES)
+def test_kit_aliases_are_bundle_families_that_force_the_bundle_path(fam, title, model_id, reason):
+    res = M.match("Jackery", title, fam)
+    assert (res.model_id, res.reason_code) == (model_id, reason)
+    if model_id:
+        assert res.rule == ("designation" if model_id == J1000P else "bundle-kit")
+
+
+def test_bundle_family_index_rules(fam, idx):
+    assert fam.brands["jackery"].family == {"solargenerator1000plus": {J1000P}}
+    assert not idx.brands["jackery"].family     # the fixture's kits carry no family alias
+    # an alias holding one of our designations, a maker's name or no number is not a family name
+    other = _index({KIT_J1000P_AIR2: {"aliases": ["Explorer 1000 Plus Solar Generator", "Jackery",
+                                                  "Solar Generator Bundle Deluxe"]}})
+    assert not other.brands["jackery"].family
+    assert M.match("Jackery", "Jackery Explorer 1000 Plus Solar Generator, 1264Wh LiFePO4",
+                   other).model_id == J1000P
+    # one family name on kits of two stations: ambiguous
+    two = _index({KIT_J1000P_AIR2: {"aliases": ["Solar Generator 9000"]},
+                  KIT_X2000V2_200: {"aliases": ["Solar Generator 9000"]}})
+    assert M.match("Jackery", "Jackery Solar Generator 9000 with 2 x SolarSaga 100 Air",
+                   two).reason_code == "ambiguous"
+    # without the alias the station after 'with' is still a bundled part
+    assert M.match("Jackery", "Jackery Solar Generator 1000 Plus with 2 x SolarSaga 100 Air",
+                   idx).reason_code == "bundle-component"
+
+
+NAMED_KIT_CASES = [
+    ("EF ECOFLOW RIVER 3 Max Plus Portable Power Station, 858Wh LiFePO4 Battery, 600W AC Output",
+     "ecoflow-river-3-max-plus", "matched"),
+    ("EF ECOFLOW RIVER 3 Max Portable Power Station, 572Wh LiFePO4", "ecoflow-river-3-max", "matched"),
+    ("EF ECOFLOW RIVER 3 Max Portable Power Station, 858Wh LiFePO4", None, "capacity-mismatch"),
+    ("EF ECOFLOW RIVER 3 Max Plus with 220W Solar Panel", None, "bundle-no-kit"),
+    ("EF ECOFLOW RIVER 3 Max Plus Carrying Case", None, "accessory"),
+    ("EF ECOFLOW RIVER 3 Max Portable Power Station 572Wh, 2-Pack", None, "multi-pack"),
+    ("EF ECOFLOW RIVER 3 Max Plus Wireless Portable Power Station", None, "unknown-variant"),
+    ("EF ECOFLOW 220W Solar Panel with RIVER 3 Max", None, "bundle-component"),
+]
+
+
+@pytest.mark.parametrize("title,model_id,reason", NAMED_KIT_CASES)
+def test_a_kit_named_by_its_own_name(idx, title, model_id, reason):
+    res = M.match("EF ECOFLOW", title, idx)
+    assert (res.model_id, res.reason_code) == (model_id, reason)
+    if model_id:
+        assert res.rule == "designation"
+
+
+def test_only_kits_whose_name_holds_no_component_designation_are_named(idx):
+    ef = idx.brands["ecoflow"]
+    assert ef.designations["river3max"] == {"ecoflow-river-3-max"}
+    assert ef.designations["river3maxplus"] == {"ecoflow-river-3-max-plus"}
+    kits = set(ef.kits)
+    named = {m for ids in ef.designations.values() for m in ids if m in kits}
+    # 'DELTA 3 Max Plus Solar Generator (...)' names its station: not a named kit
+    assert named == {"ecoflow-river-3-max", "ecoflow-river-3-max-plus"}
+
+
+SPEC_AND_PHRASING_CASES = [
+    # (b) a panel spec in parentheses or a comma clause, no connector word
+    ("EcoFlow", "EcoFlow DELTA 3 Max Plus Solar Generator (2 x 100W Rigid Solar Panel), 2048Wh", KIT_2X100, "matched"),
+    ("EcoFlow", "EcoFlow DELTA 3 Max Plus Portable Power Station, 2 x 100W Rigid Solar Panels Included, 2048Wh",
+     KIT_2X100, "matched"),
+    ("EcoFlow", "EcoFlow DELTA 3 Max Plus Solar Generator (220W Bifacial Solar Panel), 2048Wh", None, "bundle-no-kit"),
+    ("EcoFlow", "EcoFlow DELTA 3 Max Plus Portable Power Station 2048Wh (200W Solar Panel Sold Separately)",
+     "ecoflow-delta-3-max-plus", "matched"),
+    # (c) 'Power Station Kit', a generic head before 'with', 'and' before a quantity, decimal / comma Wh
+    ("EcoFlow", "EcoFlow DELTA 3 Max Plus Portable Power Station Kit with 2 x 100W Rigid Solar Panels, 2048Wh",
+     KIT_2X100, "matched"),
+    ("Anker", "Anker SOLIX F3800 Plus Home Backup Kit", None, "accessory"),   # no bundle evidence: an accessory kit
+    ("EcoFlow", "EcoFlow Solar Generator Kit with DELTA 3 Max Plus Power Station and 2 x 100W Rigid Solar Panels",
+     KIT_2X100, "matched"),
+    ("EcoFlow", "EcoFlow 100W Rigid Solar Panel with DELTA 3 Max Plus Power Station", None, "bundle-component"),
+    ("Jackery", "Jackery Explorer 1000 Plus and 2 x SolarSaga 100 Air Solar Panels Combo, 1264Wh",
+     KIT_J1000P_AIR2, "matched"),
+    ("BLUETTI", "BLUETTI AC180 1,152Wh Portable Power Station, 1800W AC Output", "bluetti-ac180", "matched"),
+    ("BLUETTI", "BLUETTI AC180P 1440.0Wh Portable Power Station", "bluetti-ac180p", "matched"),
+    ("BLUETTI", "BLUETTI AC180 1,440Wh Portable Power Station", None, "capacity-mismatch"),
+    # (d) 'expandable with <battery>' is what the station takes, unless the battery is included
+    ("BLUETTI", "BLUETTI AC180P Portable Power Station 1440Wh, 1800W AC Output, Expandable with B230 Battery",
+     "bluetti-ac180p", "matched"),
+    ("BLUETTI", "BLUETTI AC180P Portable Power Station 1440Wh, Expandable with B230 Battery (Included)", None,
+     "bundle-no-kit"),
+    ("EF ECOFLOW", "EF ECOFLOW RIVER 3 Plus Portable Power Station 286Wh, Expandable with Smart Extra Battery",
+     "ecoflow-river-3-plus", "matched"),
+    # (e) a generation / version qualifier in parentheses continues the name
+    ("Anker SOLIX", "Anker SOLIX C1000 (Gen 2) Portable Power Station, 1024Wh", "anker-solix-c1000-gen-2", "matched"),
+    ("Anker SOLIX", "Anker SOLIX C1000 (2nd Gen) Portable Power Station, 1024Wh", "anker-solix-c1000-gen-2",
+     "matched"),
+    ("EcoFlow", "EcoFlow DELTA 2 (Gen 3) Portable Power Station, 1024Wh", None, "unknown-variant"),
+    # (h) a panel model named in the title must be the kit's; a stated panel build must be its build
+    ("Jackery", "Jackery Explorer 1000 Plus Solar Generator with 2 x SolarSaga 100W Solar Panels, 1264Wh", None,
+     "bundle-no-kit"),
+    ("Jackery", "Jackery Explorer 2000 v2 with 2 x SolarSaga 200W Solar Panels, 2042Wh", KIT_X2000V2_200, "matched"),
+    ("Jackery", "Jackery Explorer 2000 v2 with 2 x 200W Solar Panels, 2042Wh", None, "bundle-ambiguous"),
+    ("ALLPOWERS", "ALLPOWERS R1500 Solar Generator with 200W Foldable Solar Panel, 1152Wh", None, "bundle-no-kit"),
+    ("ALLPOWERS", "ALLPOWERS R1500 Solar Generator with SF200 200W Flexible Solar Panel, 1152Wh", KIT_R1500_SF200,
+     "matched"),
+    # a kit name's '200W(Dune White) x 2' is two panels: a one-panel bundle is not that kit
+    ("Jackery", "Jackery SolarSaga 200W Solar Panel + Explorer 2000 v2 Portable Power Station Bundle, 2042Wh", None,
+     "bundle-no-kit"),
+]
+
+
+@pytest.mark.parametrize("brand,title,model_id,reason", SPEC_AND_PHRASING_CASES,
+                         ids=[f"s{i:02d}-{c[3]}" for i, c in enumerate(SPEC_AND_PHRASING_CASES)])
+def test_panel_specs_phrasing_and_panel_identity(idx, brand, title, model_id, reason):
+    res = M.match(brand, title, idx)
+    assert (res.model_id, res.reason_code) == (model_id, reason)
+
+
+def test_kit_names_read_panel_counts_identity_and_build(idx):
+    assert idx.kit_info(KIT_X2000V2_DUNE).panels == {200: 2}           # '200W(Dune White) x 2'
+    assert idx.kit_info(KIT_X2000V2_DUNE).named_panel_ids == {"jackery-solarsaga-200w"}
+    assert idx.kit_info(KIT_X2000V2_200).panel_ids == {"jackery-solarsaga-200w"}
+    assert idx.kit_info(
+        "jackery-solar-generator-bundle-homepower-2000-plus-battery-pack-2000-plus-v2-200w-dune-white-x2").panels \
+        == {200: 2}
+    assert idx.kit_info(KIT_R1500_SF200).panel_forms == {"flexible"}
+    assert idx.kit_info(KIT_2X100).panel_forms == {"rigid"}
+    assert idx.kit_info("ecoflow-delta-3-max-plus-solar-generator-2-x-160w-solar-panel").panel_forms == frozenset()
+
+
+def test_digit_and_measure_only_names_are_not_designations():
+    assert M.designations_of(["DJI Power 1000"], brand_prefixes=["DJI Power"])[0] == set()
+    assert M.designations_of(["200W 12V N-Type Portable Solar Panel Suitcase Kit"])[0] == set()
+    assert M.designations_of(["Power 1000"], brand_prefixes=["DJI"])[0] == {"power1000"}
+    recs = [M.ModelRecord(model_id="p1000", brand="DJI", kind="station", name="Power 1000",
+                          aliases=("DJI Power 1000",), capacity_wh=1024, power_w=2200),
+            M.ModelRecord(model_id="p2000", brand="DJI", kind="station", name="Power 2000",
+                          aliases=("DJI Power 2000",), capacity_wh=2048, power_w=3000)]
+    index = M.ModelIndex(recs, brand_aliases={"DJI": ["DJI Power"]})
+    assert "1000" not in index.brands["dji"].designations
+    title = "DJI Power 2000 Portable Power Station, 2048Wh LiFePO4, 3000W Output, Recharges at 1000 Watts from AC"
+    assert M.match("DJI", title, index).model_id == "p2000"
+
+
+def test_a_code_read_alone_never_takes_another_models_code():
+    station = M.ModelRecord(model_id="st", brand="BougeRV", kind="station", name="ROVER2000 Semi-Solid State",
+                            capacity_wh=2008, power_w=2500)
+    battery = M.ModelRecord(model_id="bat", brand="BougeRV", kind="battery",
+                            name="ROVER2000 Semi-Solid Extra Battery", capacity_wh=2008)
+    index = M.ModelIndex([station, battery])
+    assert "rover2000" not in index.brands["bougerv"].designations
+    assert M.match("BougeRV", "BougeRV Rover 2000 Portable Power Station, 2008Wh", index).model_id is None
+    assert M.match("BougeRV", "BougeRV ROVER2000 Semi-Solid Extra Battery 2008Wh", index).model_id == "bat"
+    index = M.ModelIndex([M.ModelRecord(**{**station.__dict__, "aliases": ("ROVER2000",)}), battery])
+    assert index.brands["bougerv"].designations["rover2000"] == {"st"}
+    assert M.match("BougeRV", "BougeRV ROVER2000 Portable Power Station, 2008Wh", index).model_id == "st"
+    # a code no other model uses still names its model alone
+    assert "ps200" in _index().brands["ankersolix"].designations
+
+
+def test_bundle_no_kit_carries_our_signature_only(idx):
+    res = M.match("EcoFlow", "EcoFlow DELTA 3 Max Plus with 220W Bifacial Solar Panel QZXSENTINEL", idx)
+    assert res.reason_code == "bundle-no-kit"
+    assert res.to_dict()["bundle"] == {"station_id": "ecoflow-delta-3-max-plus", "panels": {"220": 1},
+                                       "battery": False, "panel_ids": [], "battery_ids": []}
+    assert "qzx" not in json.dumps(res.to_dict()).lower()
+    hash(res)
+    res = M.match("Jackery", "Jackery Explorer 1000 Plus with 2 x SolarSaga 100 Prime Solar Panels", idx)
+    assert res.bundle.to_dict() == {"station_id": J1000P, "panels": {"100": 2}, "battery": False,
+                                    "panel_ids": ["jackery-solarsaga-100-prime"], "battery_ids": []}
+    assert M.match("EcoFlow", "EcoFlow DELTA 3 Max Plus with Solar Panel", idx).bundle is None   # unverified
+    assert M.match("EcoFlow", "EcoFlow DELTA 2 Portable Power Station 1024Wh", idx).to_dict().keys() == {
+        "model_id", "confidence", "rule", "reason_code"}
+
+
+FIELD_TITLE = "EcoFlow Portable Power Station 1024Wh LiFePO4, 1800W AC Output for Camping"
+# (brand field, title, manufacturer field values, expected model id or None, expected reason)
+MODEL_FIELD_CASES = [
+    ("EcoFlow", FIELD_TITLE, ["EFD330"], "ecoflow-delta-2", "matched"),
+    ("EcoFlow", FIELD_TITLE, ["EFD330", "EFD330"], "ecoflow-delta-2", "matched"),
+    ("EcoFlow", FIELD_TITLE, ["DELTA 2"], "ecoflow-delta-2", "matched"),
+    ("EcoFlow", FIELD_TITLE, ["EFD330-US"], "ecoflow-delta-2", "matched"),
+    ("Jackery", "Jackery Portable Power Station 1264Wh LiFePO4, 2000W AC Output", ["JE-1000C"], J1000P, "matched"),
+    ("GRECELL", "GRECELL Portable Power Station 1000W, 999Wh Solar Generator with 3 AC Outlets", ["T1000"],
+     "grecell-t1000-1000w-999wh", "matched"),
+    # values that never count, or that disagree
+    ("EcoFlow", FIELD_TITLE, ["EFD330", "EFD350"], None, "ambiguous"),
+    ("EcoFlow", FIELD_TITLE, ["DELTA 2 / DELTA 2 Max"], None, "ambiguous"),
+    ("EcoFlow", FIELD_TITLE, ["1024"], None, "no-designation"),
+    ("EcoFlow", FIELD_TITLE, ["1800W"], None, "no-designation"),
+    ("EcoFlow", FIELD_TITLE, ["Portable Power Station"], None, "no-designation"),
+    ("EcoFlow", FIELD_TITLE, ["DELTA 2 Ultra"], None, "unknown-variant"),
+    # the title still decides what the listing is, and its stated specs veto or confirm
+    ("EcoFlow", "EcoFlow Portable Power Station 2048Wh LiFePO4", ["EFD330"], None, "capacity-mismatch"),
+    ("EcoFlow", "EcoFlow Portable Power Station for Camping and Home Backup", ["EFD330"], None,
+     "model-field-unconfirmed"),
+    ("EcoFlow", "EcoFlow Waterproof Bag for Portable Power Station, Dustproof Cover", ["EFD330"], None, "accessory"),
+    ("EcoFlow", "EcoFlow Smart Extra Battery 2048Wh LiFePO4 for Portable Power Station", ["EFD350"], None,
+     "item-kind-mismatch"),
+    ("EcoFlow", "EcoFlow Portable Power Station 1024Wh (Renewed)", ["EFD330"], None, "condition"),
+    ("EcoFlow", "EcoFlow Portable Power Station 1024Wh, 2 Pack", ["EFD330"], None, "multi-pack"),
+    # a title naming a designation never consults the fields; an unknown brand never does either
+    ("EcoFlow", "EcoFlow DELTA 2 Max Portable Power Station 2048Wh", ["EFD330"], "ecoflow-delta-2-max", "matched"),
+    ("Acme", "Acme Portable Power Station 1024Wh LiFePO4, 1800W AC Output", ["EFD330"], None, "brand-unknown"),
+    # kits: only through the bundle path
+    ("EF ECOFLOW", "EF ECOFLOW Portable Power Station 572Wh LiFePO4, 600W AC Output", ["RIVER 3 Max"], None,
+     "bundle-unverified"),
+    ("EcoFlow", "EcoFlow Solar Generator with 2 x 100W Rigid Solar Panels, 2048Wh", ["DELTA 3 Max Plus"],
+     KIT_2X100, "matched"),
+    ("EcoFlow", "EcoFlow Solar Generator with 220W Bifacial Solar Panel, 2048Wh", ["DELTA 3 Max Plus"], None,
+     "bundle-no-kit"),
+]
+
+
+@pytest.mark.parametrize("brand,title,fields,model_id,reason", MODEL_FIELD_CASES,
+                         ids=[f"f{i:02d}-{c[4]}" for i, c in enumerate(MODEL_FIELD_CASES)])
+def test_manufacturer_model_fields(idx, brand, title, fields, model_id, reason):
+    res = M.match(brand, title, idx, model_fields=fields)
+    assert (res.model_id, res.reason_code) == (model_id, reason)
+    if model_id and res.rule == "model-field":
+        assert res.confidence == M.RULE_CONFIDENCE["model-field"]
+
+
+def test_model_field_links_are_their_own_rule_and_carry_no_field_text(idx):
+    assert 0.9 <= M.RULE_CONFIDENCE["model-field"] < M.RULE_CONFIDENCE["designation"]
+    res = M.match("EcoFlow", FIELD_TITLE, idx, model_fields=["EFD330 QZXSENTINEL"])
+    assert (res.model_id, res.rule) == ("ecoflow-delta-2", "model-field")
+    assert "qzx" not in json.dumps(res.to_dict()).lower()
+    assert M.match("EcoFlow", FIELD_TITLE, idx).reason_code == "no-designation"     # no fields: as before

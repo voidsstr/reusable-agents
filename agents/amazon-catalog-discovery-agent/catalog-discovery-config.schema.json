@@ -187,6 +187,26 @@
             "retry_hours": {"type": "number", "minimum": 0, "description": "A model searched without a link is searched again after this long. Default 168."},
             "search_index": {"type": "string", "minLength": 1, "description": "Default creators.search_index."}
           }
+        },
+        "model_fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Also ask getItems and searchItems for itemInfo.manufactureInfo and, when the title names none of the maker's designations, accept the exact designation or model number from these fields (operator decision 2026-11-22; matcher rule id model-field). The brand must still resolve; the ambiguity, variant, condition, quantity, item-noun and capacity / wattage checks still apply; a digit-only or measure-only value never counts; a kit links only through the bundle path. Should Creators refuse the resource, the call is repeated once without it and the fields stay off for the run. Default false."},
+            "fields": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["model", "itemPartNumber"]}, "description": "Which itemInfo.manufactureInfo values to read: model (manufactureInfo.model.displayValue) and / or itemPartNumber. Default both."}
+          },
+          "description": "Amazon's manufacturer model / part-number fields as designation evidence. The values are read in memory at match time and never stored, logged or reported."
+        },
+        "brand_census": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {"^_": {}},
+          "properties": {
+            "enabled": {"type": "boolean", "description": "Count brand-unknown listings by the configured keys (report match.brand_census). Default false."},
+            "keys": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1}, "description": "Maker keys, e.g. our makers' names. Each brand-unknown listing adds one to every key its brand field contains after case, spacing and punctuation fold, or to 'none'. Counts only: the brand field itself is never kept."}
+          },
+          "description": "Which of our makers the unresolved brand fields name, so a missing brand alias can be verified and added."
         }
       },
       "description": "ASIN-to-model matching ('search and confirm'): links products to the site's own models with framework.core.model_matcher. Amazon's title and brand are read in memory at match time and never stored; only the ASIN, model id, rule id, confidence and time persist."

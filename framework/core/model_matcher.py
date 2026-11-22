@@ -53,6 +53,21 @@ THE RULES ("search and confirm")
     kit check used.
 11. **'+' glued to a name** reads 'plus' ('Max+' = 'Max Plus', 'Nomad 100+'),
     so the base model never takes it.
+12. **Bundle families and named kits.** An alias on a kit row is the maker's
+    bundle-family name ('Solar Generator 1000 Plus'): it names that kit's
+    station and forces the bundle path, so panel / battery evidence must
+    select exactly one kit, never the bare station. A kit whose own name holds
+    none of its components' designations ('RIVER 3 Max') is a designation of
+    that kit; its stated panels, batteries and capacity must agree with it.
+13. **Manufacturer model fields** (operator decision 2026-11-22, opt-in via
+    ``model_fields``). Only when the title names none of the maker's
+    designations, the exact designation or model number may come from
+    Amazon's ``itemInfo.manufactureInfo.model`` / ``itemPartNumber`` values.
+    The brand gate, the ambiguity, variant, condition and quantity rules still
+    apply; a digit-only or measure-only value never counts; a value naming two
+    models, or two values naming different models, is ambiguous; the title
+    must say what the listing is and state a capacity or wattage that agrees;
+    a kit links only through the bundle path. Rule id ``model-field``.
 
 Never on brand alone. Everything here is a pure function of its inputs.
 """
@@ -87,10 +102,14 @@ DEFAULT_KIND_ROLES: Mapping[str, str] = {
 RULE_MODEL_NUMBER = "model-number"
 RULE_DESIGNATION = "designation"
 RULE_BUNDLE_KIT = "bundle-kit"
+#: The designation came from Amazon's manufacturer model / part-number field,
+#: not the title (rule 13): its own id, so these links can be audited.
+RULE_MODEL_FIELD = "model-field"
 RULE_CONFIDENCE: Mapping[str, float] = {
     RULE_MODEL_NUMBER: 0.97,
     RULE_DESIGNATION: 0.95,
     RULE_BUNDLE_KIT: 0.92,
+    RULE_MODEL_FIELD: 0.91,
 }
 
 REASON_MATCHED = "matched"
@@ -110,6 +129,8 @@ REASON_ACCESSORY = "accessory"            # 'DELTA 2 Max Bag', 'AC180 Replacemen
 REASON_ITEM_KIND = "item-kind-mismatch"   # 'DELTA 3 Max Smart Extra Battery' is not the station
 REASON_MULTI_PACK = "multi-pack"          # '2 Pack', 'x2', 'Set of 2' of a single-unit model
 REASON_BUNDLE_COMPONENT = "bundle-component"  # the designation is the part after 'with' / '+'
+#: A manufacturer-field designation whose title states no agreeing capacity / wattage.
+REASON_FIELD_UNCONFIRMED = "model-field-unconfirmed"
 #: Reason codes that mean "more than one reading": reported as ambiguous.
 AMBIGUOUS_REASONS = frozenset({REASON_AMBIGUOUS, REASON_BUNDLE_AMBIGUOUS, REASON_BUNDLE_UNVERIFIED})
 
@@ -147,20 +168,42 @@ class Token:
     start: int = 0       # character span in normalize_text(...)
     end: int = 0
     synthetic: bool = False   # the 'plus' read from a '+' glued to the word before ('Max+')
+    gap: str = ""        # the separator characters before it (never a letter or digit)
 
 
 #: A '+' glued to the end of a word ('Max+', 'Nomad 100+') is part of the name: 'plus'.
 _GLUED_PLUS_RE = re.compile(r"(?<=[^\W_])\+(?![^\W_])")
+#: A parenthesised group holding only a generation / version qualifier
+#: ('C2000 (Gen 2)', 'Elite 200 (V2)', 'C1000 (2nd Gen)') continues the name
+#: before it: its '(' is not a phrase break, and '2nd Gen' reads 'Gen 2'.
+_QUALIFIER_GROUP_RE = re.compile(
+    r"\(\s*(?:gen(?:eration)?\s*-?\s*\d{1,2}|v(?:ersion)?\s*-?\s*\d{1,2}"
+    r"|(?P<o>\d{1,2})\s*(?:st|nd|rd|th)\s*gen(?:eration)?)\s*\)")
 
 
 def tokenize(text: Any) -> list[Token]:
     s = normalize_text(text)
+    groups = [(g.start(), g.end(), g.group("o")) for g in _QUALIFIER_GROUP_RE.finditer(s)]
     out: list[Token] = []
     prev_end = 0
+    skip_group = -1
     for m in _TOKEN_RE.finditer(s):
         gap = s[prev_end:m.start()]
-        hard = bool(out) and (any(c in _HARD_CHARS for c in gap) or bool(_SOFT_DASH_RE.search(gap)))
-        out.append(Token(_NON_WORD_RE.sub("", m.group(0)), hard, m.start(), m.end()))
+        gi = next((i for i, g in enumerate(groups) if g[0] < m.start() < g[1]), -1)
+        if gi >= 0 and gi == skip_group:
+            prev_end = m.end()       # the rest of a '(2nd Gen)' group, already read as 'gen 2'
+            continue
+        test = gap
+        if gi >= 0 and prev_end <= groups[gi][0]:
+            test = gap.replace("(", "", 1)    # the first word of a qualifier group
+        hard = bool(out) and (any(c in _HARD_CHARS for c in test) or bool(_SOFT_DASH_RE.search(test)))
+        if gi >= 0 and groups[gi][2] is not None:
+            out.append(Token("gen", hard, m.start(), m.end(), gap=gap))
+            out.append(Token(str(int(groups[gi][2])), False, m.end(), m.end()))
+            skip_group = gi
+            prev_end = m.end()
+            continue
+        out.append(Token(_NON_WORD_RE.sub("", m.group(0)), hard, m.start(), m.end(), gap=gap))
         prev_end = m.end()
         if _GLUED_PLUS_RE.match(s, m.end()):
             # 'DELTA 3 Max+' reads 'DELTA 3 Max plus'; the word after the '+'
@@ -210,13 +253,18 @@ def _valid_designation(words: Sequence[str]) -> bool:
     c = compact(" ".join(words))
     if len(c) < 2:
         return False
+    # Only a number ('1000', left once 'DJI Power' is stripped) or only a
+    # measure ('200w', left by the measure cut) names no model.
+    if c.isdigit() or _MEASURE_WORD_RE.match(c):
+        return False
     if all(compact(w) in GENERIC_WORDS for w in words):
         return False
     return any(ch.isdigit() for ch in c) or sum(ch.isalpha() for ch in c) >= 4
 
 
 def designations_of(texts: Iterable[str], *, brand_prefixes: Iterable[str] = (),
-                    codes_from_parens: bool = True) -> tuple[set[str], set[str]]:
+                    codes_from_parens: bool = True, code_alone: Optional[set] = None,
+                    leads: Optional[set] = None) -> tuple[set[str], set[str]]:
     """(names, model numbers) as compact strings, from a model's name and aliases.
 
     Parenthesised parts are dropped from the name ('DELTA 3 Max (2048Wh)
@@ -227,10 +275,14 @@ def designations_of(texts: Iterable[str], *, brand_prefixes: Iterable[str] = (),
     -> 'Flash300', but 'SolarSaga 200W' stays whole). Codes after 'for' name
     another product ('Cascade Cable for EP3800-48V') and are never taken; a
     kit passes ``codes_from_parens=False`` (its parentheses list components).
+    ``code_alone`` (if given) receives the names read only from a leading code
+    ('PS200' of 'PS200 Bifacial Portable Solar Panel'), ``leads`` every
+    leading model code of a name.
     """
     prefixes = sorted({p for p in (compact(b) for b in brand_prefixes) if p}, key=len, reverse=True)
     names: set[str] = set()
     numbers: set[str] = set()
+    alone: set[str] = set()
     for raw in texts:
         text = _GLUED_PLUS_RE.sub(" plus", normalize_text(raw))   # 'Nomad 100+' -> 'nomad100plus'
         if not text:
@@ -266,18 +318,32 @@ def designations_of(texts: Iterable[str], *, brand_prefixes: Iterable[str] = (),
                     break
             if words and _valid_designation(words):
                 names.add(compact(" ".join(words)))
+            if words and leads is not None and model_number_like(words[0]):
+                leads.add(compact(words[0]))
             rest = {compact(w) for w in words[1:]}
             if (len(words) > 2 and model_number_like(words[0]) and rest & _PRODUCT_NOUNS
                     and not rest & (_ACCESSORY_NOUNS | _CUE_WORDS)
                     and not any(_VARIANT_WORD_RE.match(w) for w in rest)):
                 # 'PS200 Bifacial Portable Solar Panel': the code alone names it too
-                names.add(compact(words[0]))
+                alone.add(compact(words[0]))
             for w in words:
                 if compact(w) in _CUE_WORDS:
                     break
                 if "-" in w and model_number_like(w):
                     numbers.add(compact(w))
-    return names, numbers
+    if code_alone is not None:
+        code_alone.update(alone - names)
+    return names | alone, numbers
+
+
+def _name_parts(texts: Iterable[str]) -> list[str]:
+    """The name parts :func:`designations_of` reads: parentheses dropped, the
+    text before ' - ' / ':', each side of ' / '."""
+    out = []
+    for raw in texts:
+        main = _PAREN_RE.sub(" ", _GLUED_PLUS_RE.sub(" plus", normalize_text(raw)))
+        out.extend(p for p in re.split(r"\s/\s", re.split(r"\s-\s|:", main)[0]) if p.strip())
+    return out
 
 
 def model_numbers_of(texts: Iterable[Any]) -> set[str]:
@@ -354,6 +420,25 @@ class ModelRecord:
 
 
 @dataclass(frozen=True)
+class BundleSignature:
+    """Our reading of a bundle no kit of ours fits: OUR station id, the panels
+    (watts, or 'm:<our panel id>' -> count; None = count not stated) and whether
+    a battery comes with it. Derived values and our ids only, never listing text:
+    enough for an operator to add the missing kit row."""
+
+    station_id: Any
+    panels: tuple = ()       # ((key, qty), ...), sorted
+    battery: bool = False
+    panel_ids: tuple = ()    # our panel / battery models the title names, sorted
+    battery_ids: tuple = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"station_id": self.station_id, "panels": {k: q for k, q in self.panels},
+                "battery": self.battery, "panel_ids": list(self.panel_ids),
+                "battery_ids": list(self.battery_ids)}
+
+
+@dataclass(frozen=True)
 class MatchResult:
     """The derived outcome; never carries listing text."""
 
@@ -361,6 +446,8 @@ class MatchResult:
     confidence: float
     rule: str
     reason_code: str
+    #: Set on ``bundle-no-kit`` results only.
+    bundle: Optional[BundleSignature] = None
 
     @property
     def matched(self) -> bool:
@@ -371,18 +458,25 @@ class MatchResult:
         return self.reason_code in AMBIGUOUS_REASONS
 
     def to_dict(self) -> dict[str, Any]:
-        return {"model_id": self.model_id, "confidence": self.confidence, "rule": self.rule,
-                "reason_code": self.reason_code}
+        out = {"model_id": self.model_id, "confidence": self.confidence, "rule": self.rule,
+               "reason_code": self.reason_code}
+        if self.bundle is not None:
+            out["bundle"] = self.bundle.to_dict()
+        return out
 
 
-def _no(reason: str) -> MatchResult:
-    return MatchResult(None, 0.0, "", reason)
+def _no(reason: str, bundle: Optional[BundleSignature] = None) -> MatchResult:
+    return MatchResult(None, 0.0, "", reason, bundle)
 
 
 # -- title evidence --------------------------------------------------------------------
 
 #: Words that start a compatibility context ('for DELTA 3', 'compatible with ...').
-_CUE_SINGLE = frozenset({"for", "compatible", "compatibility", "fits", "replacement", "replaces"})
+#: 'Expandable with B230' names an add-on the station takes, not a bundled part,
+#: unless the clause says it is included ('... Expandable with B230, Battery Included').
+_EXPAND_CUES = frozenset({"expandable", "expand", "expands", "expanding"})
+_INCLUDED_WORDS = frozenset({"included", "includes", "including", "bundle", "bundled"})
+_CUE_SINGLE = frozenset({"for", "compatible", "compatibility", "fits", "replacement", "replaces"}) | _EXPAND_CUES
 _CUE_PAIRS = frozenset({("works", "with"), ("work", "with"), ("use", "with"), ("pairs", "with"),
                         ("fit", "for")})
 
@@ -391,6 +485,9 @@ _CONNECTOR = r"(?:with|w/|\+|plus|and|&|includ(?:es|ing|ed)?|bundled?|combo)"
 _NOT_BUNDLE_BEFORE_RE = re.compile(
     r"\b(?:compatible|compatibility|work|works|use|used|pair|pairs|paired|support|supports|"
     r"charge|charges|charging|connect|connects|connecting|recharge|rechargeable)\W*$")
+_EXPAND_BEFORE_RE = re.compile(r"\b(?:expandable|expand|expands|expanding)\W*$")
+_INCLUDED_RE = re.compile(r"\b(?:included|includes|including|bundled?)\b")
+_CLAUSE_END_RE = re.compile(r"[,;|]")
 _EXCLUDED_CLAUSE_RE = re.compile(r"optional|not included|sold separately|without|\bno (?:solar )?panel")
 _CLAUSE_SPLIT_RE = re.compile(r"[,;()\[\]|]")
 _PANEL_NOUN = r"(?:solar\s+)?(?:panels?|modules?|blankets?|suitcases?)\b"
@@ -405,12 +502,32 @@ _BATTERY_WORDING_RE = re.compile(
     _CONNECTOR + r"\s+(?:(?:\d\s*(?:x|pcs?)?)\s*)?(?:[\w-]+\s+){0,4}?"
     r"(?:(?:extra|expansion|additional|external)\s+batter(?:y|ies)\b"
     r"|batter(?:y|ies)\s+(?:packs?|expansion)\b|expansion\s+packs?\b)")
+#: A panel spec that is a whole parenthesised group ('(2 x 160W Solar Panel)') or
+#: a comma clause of included panels (', 2 x 160W Solar Panels Included'): bundle
+#: panel evidence without a connector word.
+_PANEL_SPEC = (r"(?:(?P<q1>\d{1,2})\s*(?:x|pcs?|pieces?)\s*)?(?<!\d)(?P<w>\d{2,3})\s?w(?:atts?)?\b"
+               r"(?:\s*x\s*(?P<q2>\d{1,2})\b)?(?:\s+[a-z][\w-]*){0,3}?\s+(?:solar\s+)?"
+               r"(?P<noun>panels?|modules?|blankets?|suitcases?)")
+_PAREN_PANEL_RE = re.compile(r"\(\s*" + _PANEL_SPEC + r"(?:\s+included)?\s*\)")
+_COMMA_PANEL_RE = re.compile(r"(?:^|[,;])\s*" + _PANEL_SPEC + r"\s+included\b")
+#: A kit's '200W(Dune White) x 2': a colour / edition group may sit between watts and count.
 _KIT_PANEL_WATTS_RE = re.compile(
-    r"(?:(?P<q1>\d{1,2})\s*(?:x|pcs?|pieces?)\s*)?(?<!\d)(?P<w>\d{2,3})\s?w(?:atts?)?\b(?:\s*x\s*(?P<q2>\d{1,2})\b)?")
+    r"(?:(?P<q1>\d{1,2})\s*(?:x|pcs?|pieces?)\s*)?(?<!\d)(?P<w>\d{2,3})\s?w(?:atts?)?\b"
+    r"(?:\s*\([^()\d]*\))?(?:\s*x\s*(?P<q2>\d{1,2})\b)?")
 _KIT_BATTERY_RE = re.compile(r"extra batter|expansion batter|battery pack|smart extra|"
                              r"(?:\+|with|and)\s*(?:\d\s*x?\s*)?batter(?:y|ies)\b")
 #: After a wattage in a kit's name: the station's own rating, not a panel's.
 _NOT_PANEL_AFTER_RE = re.compile(r"^\s*(?:solar\s+)?(?:generator|output|ac\b|inverter|station|surge|peak)")
+#: Panel build words: a stated build that contradicts a kit's panels rules the kit out.
+_PANEL_FORMS: Mapping[str, str] = {
+    "flexible": "flexible", "flex": "flexible", "rigid": "rigid",
+    "foldable": "foldable", "folding": "foldable", "portable": "foldable", "suitcase": "foldable",
+    "briefcase": "foldable", "blanket": "foldable",
+}
+
+
+def _forms_of(*texts: Any) -> frozenset:
+    return frozenset(_PANEL_FORMS[t.text] for x in texts for t in tokenize(x) if t.text in _PANEL_FORMS)
 
 _WH_RE = re.compile(r"(?<![\d.,])(\d{1,2},\d{3}(?:\.\d+)?|\d+(?:\.\d+)?)\s?(kwh|wh|watt[- ]?hours?)\b")
 _W_RE = re.compile(r"(?<![\d.,])(\d{1,2},\d{3}|\d{2,5})\s?(?:w|watts?)\b")
@@ -465,6 +582,7 @@ class _Occurrence:
     model_ids: frozenset
     number: bool          # found through a model number
     variant_after: bool   # an unknown variant word follows it
+    family: bool = False  # a bundle-family name: model_ids are stations, the bundle path is forced
 
 
 @dataclass(frozen=True)
@@ -474,6 +592,9 @@ class _KitInfo:
     battery: bool
     battery_wh: float               # 0 when unknown
     battery_ids: frozenset = frozenset()   # the kit's battery components (model ids)
+    panel_ids: frozenset = frozenset()     # the kit's panel components (model ids)
+    named_panel_ids: frozenset = frozenset()   # without panel components: the panel models its name names
+    panel_forms: frozenset = frozenset()   # 'flexible' / 'rigid' / 'foldable', when known
 
 
 @dataclass
@@ -482,6 +603,8 @@ class _Brand:
     name: str
     designations: dict[str, set] = field(default_factory=dict)   # compact -> model ids
     numbers: dict[str, set] = field(default_factory=dict)        # compact -> model ids
+    #: Bundle-family names from kit aliases: compact -> station ids (rule 12).
+    family: dict[str, set] = field(default_factory=dict)
     prefixes: set = field(default_factory=set)                   # every prefix of a key above
     kits: list = field(default_factory=list)
     #: Suffixes that, in this maker's own catalog, turn one model into another
@@ -533,19 +656,41 @@ class ModelIndex:
                 self.problems.append(f"brand alias {alias!r} names {len(keys)} makers; it resolves to none")
         prefixes: dict[str, set[str]] = {k: {a for a, ks in self._alias_to_brands.items() if k in ks}
                                          for k in self.brands}
+        alone_of: dict[Any, set[str]] = {}
+        regular: dict[str, dict[str, set]] = {}    # maker -> designation -> models it names in full
+        leads: dict[str, dict[str, set]] = {}      # maker -> leading model code -> models
         for r in recs:
             b = self.brands[compact(r.brand)]
             is_kit = self.roles[r.model_id] == ROLE_KIT
+            alone: set[str] = set()
+            lead: set[str] = set()
             names, numbers = designations_of((r.name, *r.aliases), brand_prefixes=prefixes[b.key],
-                                             codes_from_parens=not is_kit)
+                                             codes_from_parens=not is_kit, code_alone=alone, leads=lead)
             if is_kit:
                 numbers = set()  # a kit's name lists its components' codes, not its own
             numbers |= model_numbers_of(r.model_numbers)
             if self.roles[r.model_id] != ROLE_KIT:
                 for d in names:
                     b.designations.setdefault(d, set()).add(r.model_id)
+                    if d not in alone:
+                        regular.setdefault(b.key, {}).setdefault(d, set()).add(r.model_id)
+                for c in lead:
+                    leads.setdefault(b.key, {}).setdefault(c, set()).add(r.model_id)
+                alone_of[r.model_id] = alone
             for n in numbers:
                 b.numbers.setdefault(n, set()).add(r.model_id)
+        # A code read alone from a longer name ('ROVER2000 Semi-Solid Extra Battery'
+        # -> 'rover2000') never takes a code that designates another of the maker's
+        # models: its designation, its model number or the code its own name leads with.
+        for mid, alone in alone_of.items():
+            b = self.brands[compact(self.records[mid].brand)]
+            for c in alone:
+                others = (regular.get(b.key, {}).get(c, set()) | b.numbers.get(c, set())
+                          | leads.get(b.key, {}).get(c, set())) - {mid}
+                if others and c in b.designations:
+                    b.designations[c].discard(mid)
+                    if not b.designations[c]:
+                        del b.designations[c]
         for r in recs:
             if self.roles[r.model_id] == ROLE_KIT:
                 self.brands[compact(r.brand)].kits.append(r.model_id)
@@ -567,6 +712,57 @@ class ModelIndex:
         for b in self.brands.values():
             for kid in b.kits:
                 self._kits[kid] = self._kit_info(b, self.records[kid])
+        for b in self.brands.values():
+            self._add_kit_designations(b, prefixes[b.key])
+
+    def _add_kit_designations(self, b: _Brand, brand_prefixes: Iterable[str]) -> None:
+        """Rule 12, once every kit is read (neither changes what a kit is made of).
+
+        A kit whose name holds none of its components' designations ('RIVER 3
+        Max' = RIVER 3 Plus + EB300) is named by that name. A kit's aliases are
+        the maker's bundle-family names ('Solar Generator 1000 Plus'): they
+        name the kit's station and force the bundle path. Neither ever takes a
+        designation or model number one of our models already has, and an alias
+        that holds such a designation ('Explorer 1000 Plus Solar Generator') is
+        not a family name: the model it names keeps its own rules."""
+        brand_words = set(brand_prefixes)
+
+        def new_name(d: str) -> bool:
+            # never one of our designations or numbers, never just a maker's name, and a size or
+            # number in it ('Solar Generator 1000 Plus', 'RIVER 3 Max')
+            return (d not in b.designations and d not in b.numbers and d not in brand_words
+                    and any(ch.isdigit() for ch in d))
+
+        named: dict[str, set] = {}
+        for kid in b.kits:
+            info = self._kits.get(kid)
+            if info is None:
+                continue
+            rec = self.records[kid]
+            parts = {c for c, _q in rec.components} | {info.station_id}
+            if any(o.model_ids & parts for o in self.occurrences(b.key, tokenize(rec.name), family=False)):
+                continue
+            for d in designations_of((rec.name,), brand_prefixes=brand_prefixes, codes_from_parens=False)[0]:
+                named.setdefault(d, set()).add(kid)
+        for d, kids in named.items():
+            if new_name(d):
+                b.designations[d] = set(kids)
+        for kid in b.kits:
+            info = self._kits.get(kid)
+            rec = self.records[kid]
+            if info is None or not rec.aliases:
+                continue
+            for part in _name_parts(rec.aliases):
+                if self.occurrences(b.key, tokenize(part), family=False):
+                    continue
+                for d in designations_of((part,), brand_prefixes=brand_prefixes, codes_from_parens=False)[0]:
+                    if new_name(d):
+                        b.family.setdefault(d, set()).add(info.station_id)
+                        if len(b.family[d]) == 2:
+                            self.problems.append(f"a bundle-family alias of kit {kid!r} also names another "
+                                                 f"station's kits: titles naming it stay ambiguous")
+        for key in (*b.designations, *b.family):
+            b.prefixes.update(key[:i] for i in range(1, len(key) + 1))
 
     # -- brands --------------------------------------------------------------------------
 
@@ -592,6 +788,8 @@ class ModelIndex:
 
     def _is_variant_word(self, tokens: Sequence[Token], j: int, brand: Optional[_Brand] = None) -> bool:
         t = tokens[j].text
+        if t.isdigit() and _measure_follows(tokens, j):
+            return False        # '1,152Wh' / '2073.6Wh' right after the name: a measure
         if brand is not None and t in brand.variant_words:
             return True
         if self._variant_words is not None:
@@ -606,14 +804,18 @@ class ModelIndex:
             return not (nxt is not None and not nxt.hard_before and nxt.text in _UNIT_WORDS)
         return False
 
-    def occurrences(self, brand_key: str, tokens: Sequence[Token]) -> list[_Occurrence]:
-        """Every designation / model number of the maker's models in ``tokens``."""
+    def occurrences(self, brand_key: str, tokens: Sequence[Token], *, family: bool = True) -> list[_Occurrence]:
+        """Every designation / model number (and, with ``family``, bundle-family
+        name) of the maker's models in ``tokens``."""
         b = self.brands.get(brand_key)
         if b is None or not tokens:
             return []
         found: dict[tuple[int, int], _Occurrence] = {}
         n = len(tokens)
-        for table, is_number in ((b.designations, False), (b.numbers, True)):
+        tables = [(b.designations, False, False), (b.numbers, True, False)]
+        if family:
+            tables.append((b.family, False, True))
+        for table, is_number, is_family in tables:
             if not table:
                 continue
             for i in range(n):
@@ -631,10 +833,11 @@ class ModelIndex:
                         if prev is None:
                             after = j + 1 < n and not tokens[j + 1].hard_before and \
                                 self._is_variant_word(tokens, j + 1, b)
-                            found[span] = _Occurrence(i, j + 1, ids, is_number, after)
+                            found[span] = _Occurrence(i, j + 1, ids, is_number, after, is_family)
                         else:
                             prev.model_ids = prev.model_ids | ids
                             prev.number = prev.number or is_number
+                            prev.family = prev.family or is_family
         return sorted(found.values(), key=lambda o: (o.start, -o.end))
 
     # -- kits ----------------------------------------------------------------------------------
@@ -668,17 +871,30 @@ class ModelIndex:
             stations = {m for o in occ for m in o.model_ids if self.roles.get(m) == ROLE_STATION}
             if len(stations) == 1:
                 station = next(iter(stations))
+        station_end = max((tokens[o.end - 1].end for o in occ if station in o.model_ids), default=0)
+        panel_occ = [(o, ids[0]) for o in occ
+                     for ids in ([m for m in o.model_ids if self.roles.get(m) == ROLE_PANEL],) if len(ids) == 1]
+        panel_ids = {cid for cid, _q in kit.components if self.roles.get(cid) == ROLE_PANEL}
+        named_panel_ids = set() if panel_ids else {pid for _o, pid in panel_occ}
+        forms = _forms_of(*(t for cid in (panel_ids or named_panel_ids) if cid in self.records
+                            for t in (self.records[cid].name, *self.records[cid].aliases)))
+        if not forms:
+            # The panel words of the kit's own name, from its first panel mention after the station.
+            marks = [tokens[o.start].start for o, _p in panel_occ if tokens[o.start].start >= station_end]
+            marks += [m.start() for m in _KIT_PANEL_WATTS_RE.finditer(text) if m.start() >= station_end
+                      and not _NOT_PANEL_AFTER_RE.match(text[m.end():m.end() + 24])]
+            if marks:
+                forms = _forms_of(text[min(marks):])
         if not panels or panel_unknown:
             # Components lack panel ratings: read the kit's own name instead,
             # after the station's designation ('Kit 600W (R600 + 100W Panel)':
             # the 600W is the station's).
             from_name: Counter = Counter()
-            station_end = max((tokens[o.end - 1].end for o in occ if station in o.model_ids), default=0)
-            for o in occ:
-                ids = [m for m in o.model_ids if self.roles.get(m) == ROLE_PANEL]
-                if len(ids) == 1 and self.records[ids[0]].power_w:
-                    from_name[int(round(self.records[ids[0]].power_w))] += max(
-                        _qty_after(tokens, o.end)[0], _qty_before(tokens, o.start)[0])
+            for o, pid in panel_occ:
+                if self.records[pid].power_w:
+                    from_name[int(round(self.records[pid].power_w))] += max(
+                        _qty_after(tokens, o.end)[0], _qty_before(tokens, o.start)[0],
+                        _qty_after(tokens, _past_paren_words(text, tokens, o.end))[0])
             for m in _KIT_PANEL_WATTS_RE.finditer(text):
                 w = int(m.group("w"))
                 if m.start() < station_end or _NOT_PANEL_AFTER_RE.match(text[m.end():m.end() + 24]):
@@ -699,7 +915,8 @@ class ModelIndex:
         if station is None:
             return None
         return _KitInfo(station_id=station, panels=dict(panels), battery=battery, battery_wh=battery_wh,
-                        battery_ids=frozenset(battery_ids))
+                        battery_ids=frozenset(battery_ids), panel_ids=frozenset(panel_ids),
+                        named_panel_ids=frozenset(named_panel_ids), panel_forms=forms)
 
     def kit_info(self, kit_id: Any) -> Optional[_KitInfo]:
         return self._kits.get(kit_id)
@@ -754,6 +971,37 @@ def _qty_after(tokens: Sequence[Token], end: int) -> tuple[int, _Span]:
     return 1, None
 
 
+def _past_paren_words(text: str, tokens: Sequence[Token], k: int) -> int:
+    """The index after a words-only group ('(Dune White)') opening at tokens[k],
+    so a kit's 'SolarSaga 200W(Dune White) x 2' still reads the 'x 2'."""
+    if k <= 0 or k >= len(tokens) or "(" not in text[tokens[k - 1].end:tokens[k].start]:
+        return k
+    close = text.find(")", tokens[k].start)
+    if close < 0:
+        return k
+    j = k
+    while j < len(tokens) and tokens[j].start < close:
+        if any(ch.isdigit() for ch in tokens[j].text):
+            return k      # '(2 x 200W)' is a spec, not a colour
+        j += 1
+    return j
+
+
+_MEASURE_TOKEN_RE = re.compile(r"^\d+(?:wh|kwh|w|v|ah|mah)$")
+
+
+def _measure_follows(tokens: Sequence[Token], j: int) -> bool:
+    """tokens[j] (digits) is the whole part of a decimal or comma-thousands
+    measure: '2073.6Wh' -> '2073' '6wh', '1,152Wh' -> '1' '152wh', '1,152 Wh'."""
+    if j + 1 >= len(tokens) or tokens[j + 1].gap not in (".", ","):
+        return False
+    nxt = tokens[j + 1].text
+    if _MEASURE_TOKEN_RE.match(nxt):
+        return True
+    return (nxt.isdigit() and j + 2 < len(tokens) and not tokens[j + 2].hard_before
+            and tokens[j + 2].text in ("wh", "kwh", "w", "watt", "watts", "v", "ah", "mah"))
+
+
 def _resolve_nesting(occ: Sequence[_Occurrence]) -> list[_Occurrence]:
     """Drop every occurrence whose span lies inside a longer one."""
     out = []
@@ -774,6 +1022,16 @@ def _head_end(tokens: Sequence[Token]) -> int:
     return len(tokens)
 
 
+def _included_after(tokens: Sequence[Token], k: int) -> bool:
+    """An 'included' / 'bundle' word after tokens[k], before the next ',' / ';'."""
+    for j in range(k + 1, len(tokens)):
+        if any(c in ",;|" for c in tokens[j].gap):
+            return False
+        if tokens[j].text in _INCLUDED_WORDS:
+            return True
+    return False
+
+
 def _cue_mask(tokens: Sequence[Token], occ: Sequence[_Occurrence]) -> list[bool]:
     """True for every token inside a compatibility context ('for DELTA 3 ...').
 
@@ -788,6 +1046,9 @@ def _cue_mask(tokens: Sequence[Token], occ: Sequence[_Occurrence]) -> list[bool]
         t = tokens[k].text
         if not (t in _CUE_SINGLE or (k + 1 < n and (t, tokens[k + 1].text) in _CUE_PAIRS)):
             k += 1
+            continue
+        if t in _EXPAND_CUES and _included_after(tokens, k):
+            k += 1      # 'Expandable with B230 Battery (Included)': a bundled part after all
             continue
         h = next((j for j in range(k + 1, n) if tokens[j].hard_before), n)
         if h < n and not any(k < s < h for s in starts):
@@ -819,12 +1080,21 @@ _PANEL_ITEM_WORDS = frozenset({"panel", "panels", "module", "modules", "blanket"
 _BATTERY_QUALIFIERS = frozenset({"extra", "expansion", "additional", "external", "expandable", "addon"})
 #: Words that end the designation's own phrase: the start of a bundled part.
 _BUNDLE_CONNECTOR_WORDS = frozenset({"with", "including", "includes", "included"})
+#: 'and' / 'combo' start a bundled part only before a quantity or a panel
+#: ('... and 2 x SolarSaga 100 Air Solar Panels', '... and SF200 200W Flexible Solar Panel').
+_PART_WORDS = frozenset({"and", "combo"})
+_PART_PANEL_NOUNS = frozenset({"panel", "panels", "module", "modules", "blanket", "blankets", "suitcase",
+                               "suitcases", "briefcase"})
+_QTY_TOKEN_RE = re.compile(r"^\d{1,2}(?:x|pcs?|pieces?|pk)?$")
+#: In a bundle, 'Power Station Kit' / 'Home Backup Kit' / 'Bundle Kit' is the bundle, not an accessory kit.
+_KIT_AS_BUNDLE_AFTER = frozenset({"station", "stations", "backup", "power", "bundle"})
 _REPLACEMENT_CUES = frozenset({"replacement", "replaces"})
 _COMPAT_CUES = frozenset({"compatible", "compatibility", "fits"})
 
 
-def _item_word(tokens: Sequence[Token], k: int) -> Optional[str]:
-    """What tokens[k] says the listing is: a role, ITEM_ACCESSORY, or None."""
+def _item_word(tokens: Sequence[Token], k: int, *, bundle: bool = False) -> Optional[str]:
+    """What tokens[k] says the listing is: a role, ITEM_ACCESSORY, or None.
+    ``bundle``: the title has bundle evidence, so '<station> Kit' is the bundle."""
     t = tokens[k].text
     prev = tokens[k - 1].text if k > 0 and not tokens[k].hard_before else ""
     nxt = tokens[k + 1].text if k + 1 < len(tokens) and not tokens[k + 1].hard_before else ""
@@ -844,6 +1114,8 @@ def _item_word(tokens: Sequence[Token], k: int) -> Optional[str]:
         return ROLE_PANEL            # 'Foldable Solar Charger' is a panel
     if t in ("kit", "kits") and prev in ("solar", "generator", "generators", "panel", "panels"):
         return None                  # 'Solar Generator Kit': the bundle check decides
+    if bundle and t in ("kit", "kits") and prev in _KIT_AS_BUNDLE_AFTER:
+        return None                  # 'Portable Power Station Kit with 350W Solar Panel'
     if t in ("case", "cases") and prev == "in":
         return None                  # 'in case of an outage'
     if t in _ACCESSORY_ITEM_WORDS:
@@ -852,10 +1124,20 @@ def _item_word(tokens: Sequence[Token], k: int) -> Optional[str]:
 
 
 def _starts_part(tokens: Sequence[Token], title: str, k: int) -> bool:
-    """tokens[k] begins a bundled part: after '+' / '&', or it is 'with', 'w/', 'including'."""
+    """tokens[k] begins a bundled part: after '+' / '&', or it is 'with', 'w/',
+    'including', or 'and' / 'combo' before a quantity or a panel."""
     t = tokens[k]
     if t.text in _BUNDLE_CONNECTOR_WORDS or (t.text == "w" and title[t.end:t.end + 1] == "/"):
         return True
+    if t.text in _PART_WORDS and k + 1 < len(tokens) and not tokens[k + 1].hard_before:
+        nxt = tokens[k + 1].text
+        if _QTY_TOKEN_RE.match(nxt) or nxt in _NUM_WORDS:
+            return True
+        for j in range(k + 1, min(len(tokens), k + 7)):
+            if j > k + 1 and tokens[j].hard_before:
+                break
+            if tokens[j].text in _PART_PANEL_NOUNS:
+                return True
     if k > 0 and not t.synthetic:
         gap = title[tokens[k - 1].end:t.start]
         return "+" in gap or "&" in gap
@@ -867,7 +1149,8 @@ def _first_part_start(tokens: Sequence[Token], title: str, in_cue: Sequence[bool
                 len(tokens))
 
 
-def _item_kind(tokens: Sequence[Token], title: str, o: _Occurrence, in_cue: Sequence[bool]) -> Optional[str]:
+def _item_kind(tokens: Sequence[Token], title: str, o: _Occurrence, in_cue: Sequence[bool], *,
+               bundle: bool = False) -> Optional[str]:
     """What the listing is, read from the designation's own phrase (its last
     item noun); failing that, the nearest phrase after it, then before it,
     never across a bundled part ('with', '+') and never from a compatibility
@@ -878,7 +1161,7 @@ def _item_kind(tokens: Sequence[Token], title: str, o: _Occurrence, in_cue: Sequ
         out = None
         for k in ks:
             if not in_cue[k]:
-                kind = _item_word(tokens, k)
+                kind = _item_word(tokens, k, bundle=bundle)
                 # Our own model's name says what it is ('... Solar Panel Suitcase Kit'):
                 # an accessory word inside the designation is not evidence.
                 if kind is not None and not (kind == ITEM_ACCESSORY and o.start <= k < o.end):
@@ -937,6 +1220,36 @@ def _item_reason(role: str, item: Optional[str]) -> str:
     return REASON_ACCESSORY if item == ITEM_ACCESSORY else REASON_ITEM_KIND
 
 
+#: Item nouns of two kinds ('... Power Station, Foldable Solar Panel'): the listing is neither.
+_ITEM_MIXED = "mixed"
+
+
+def _listing_item(tokens: Sequence[Token], title: str, in_cue: Sequence[bool], *,
+                  bundle: bool = False) -> Optional[str]:
+    """What a title that names none of our designations says it is (rule 13):
+    the item nouns of its phrases outside compatibility contexts and bundled
+    parts. Any accessory or replacement noun makes it an accessory; nouns of
+    two kinds make it neither (_ITEM_MIXED); no noun at all is None."""
+    n = len(tokens)
+    bounds = [0] + [k for k in range(1, n) if tokens[k].hard_before or _starts_part(tokens, title, k)] + [n]
+    kinds: list[str] = []
+    for a, b in zip(bounds, bounds[1:]):
+        if a > 0 and _starts_part(tokens, title, a):
+            continue          # a bundled part names a component, not the listing
+        for k in range(a, b):
+            if in_cue[k]:
+                if tokens[k].text in _REPLACEMENT_CUES:
+                    return ITEM_ACCESSORY
+                break         # the rest of the phrase is a compatibility context
+            kind = _item_word(tokens, k, bundle=bundle)
+            if kind is not None:
+                kinds.append(kind)
+    if ITEM_ACCESSORY in kinds:
+        return ITEM_ACCESSORY
+    distinct = set(kinds)
+    return next(iter(distinct)) if len(distinct) == 1 else (None if not distinct else _ITEM_MIXED)
+
+
 # -- condition and unit counts -------------------------------------------------------------
 
 _CONDITION_RE = re.compile(
@@ -986,6 +1299,12 @@ class _BundleEvidence:
     battery_ids: set = field(default_factory=set)   # battery models named in the title
     spans: list = field(default_factory=list)    # char spans of panel wattages (not station watts)
     used: list = field(default_factory=list)     # char spans of the counts the evidence read
+    panel_ids: set = field(default_factory=set)  # panel models named in the title
+    forms: set = field(default_factory=set)      # panel build words stated ('flexible', 'foldable', ...)
+
+    @property
+    def present(self) -> bool:
+        return bool(self.wording or self.battery or self.panels)
 
 
 def _clauses(text: str) -> list[tuple[int, str]]:
@@ -998,27 +1317,86 @@ def _clauses(text: str) -> list[tuple[int, str]]:
 
 def _bundle_evidence(text: str) -> _BundleEvidence:
     ev = _BundleEvidence()
+
+    def panel(m: re.Match, offset: int = 0) -> None:
+        w = int(m.group("w"))
+        q = m.group("q1") or m.group("q2")
+        # No count written: 'panel' is one, 'panels' is any number.
+        ev.panels[w] = int(q) if q else (None if m.group("noun").endswith("s") else 1)
+        ev.spans.append((offset + m.start(), offset + m.end()))
+        ev.used.append((offset + m.start(), offset + m.end()))
+        ev.forms.update(_forms_of(m.group(0)))
+        ev.wording = True
+
+    def negated(clause: str, offset: int, m: re.Match) -> bool:
+        before = clause[:m.start()]
+        if _NOT_BUNDLE_BEFORE_RE.search(before):
+            return True
+        if not _EXPAND_BEFORE_RE.search(before):
+            return False
+        end = _CLAUSE_END_RE.search(text, offset + m.end())
+        return not _INCLUDED_RE.search(text, offset + m.start(), end.start() if end else len(text))
+
     for offset, clause in _clauses(text):
         if _EXCLUDED_CLAUSE_RE.search(clause):
             continue
         for m in _PANEL_WATTS_RE.finditer(clause):
-            if _NOT_BUNDLE_BEFORE_RE.search(clause[:m.start()]):
+            if negated(clause, offset, m):
                 continue
-            w = int(m.group("w"))
-            q = m.group("q1") or m.group("q2")
-            # No count written: 'panel' is one, 'panels' is any number.
-            ev.panels[w] = int(q) if q else (None if m.group("noun").endswith("s") else 1)
-            ev.spans.append((offset + m.start(), offset + m.end()))
-            ev.used.append((offset + m.start(), offset + m.end()))
-            ev.wording = True
+            panel(m, offset)
         for m in _PANEL_WORDING_RE.finditer(clause):
-            if not _NOT_BUNDLE_BEFORE_RE.search(clause[:m.start()]):
+            if not negated(clause, offset, m):
                 ev.wording = True
         for m in _BATTERY_WORDING_RE.finditer(clause):
-            if not _NOT_BUNDLE_BEFORE_RE.search(clause[:m.start()]):
+            if not negated(clause, offset, m):
                 ev.battery = True
                 ev.used.append((offset + m.start(), offset + m.end()))
+    # '(2 x 160W Solar Panel)', ', 2 x 160W Solar Panels Included': a panel spec
+    # with no connector word is bundle evidence too, so the bare station is never taken.
+    for rx in (_PAREN_PANEL_RE, _COMMA_PANEL_RE):
+        for m in rx.finditer(text):
+            if not _EXCLUDED_CLAUSE_RE.search(m.group(0)):
+                panel(m)
     return ev
+
+
+def _evidence(index: "ModelIndex", title: str, tokens: Sequence[Token], all_occ: Sequence[_Occurrence],
+              in_cue: Sequence[bool]) -> _BundleEvidence:
+    """Bundle evidence: the title's wording, plus panel / battery designations
+    anywhere outside a compatibility context ('+ SolarSaga 100W', '+ Battery
+    Pack 2000 Plus')."""
+    ev = _bundle_evidence(title)
+    for o in _resolve_nesting(all_occ):
+        if len(o.model_ids) != 1 or o.variant_after or o.family:
+            continue
+        mid = next(iter(o.model_ids))
+        role = index.role(mid)
+        if role not in (ROLE_PANEL, ROLE_BATTERY) or (in_cue[o.start] and _cue_before(tokens, o.start)):
+            continue
+        q_after, span_after = _qty_after(tokens, o.end)
+        q_before, span_before = _qty_before(tokens, o.start)
+        ev.used.extend(s for s in (span_after, span_before) if s)
+        if role == ROLE_PANEL:
+            rec = index.record(mid)
+            key = int(round(rec.power_w)) if rec and rec.power_w else f"m:{mid}"
+            q = max(q_after, q_before)
+            plural = any(t.text in ("panels", "modules") for t in tokens[o.end:o.end + 2])
+            ev.panels[key] = q if q > 1 else (ev.panels.get(key, None if plural else 1) if key in ev.panels
+                                              else (None if plural else 1))
+            ev.panel_ids.add(mid)
+            ev.wording = True
+        else:
+            ev.battery = True
+            ev.battery_ids.add(mid)
+    return ev
+
+
+def _signature(station_id: Any, ev: _BundleEvidence, *, battery: Optional[bool] = None) -> BundleSignature:
+    def order(key: Any) -> tuple:
+        return (0, key, "") if isinstance(key, int) else (1, 0, str(key))
+    panels = tuple((str(k), ev.panels[k]) for k in sorted(ev.panels, key=order))
+    return BundleSignature(station_id, panels, ev.battery if battery is None else battery,
+                           tuple(sorted(ev.panel_ids, key=order)), tuple(sorted(ev.battery_ids, key=order)))
 
 
 def _blank(text: str, spans: Iterable[tuple[int, int]]) -> str:
@@ -1034,12 +1412,15 @@ def _blank(text: str, spans: Iterable[tuple[int, int]]) -> str:
 
 def match(item_brand: Any, item_title: Any,
           candidates: "ModelIndex | Iterable[ModelRecord]", *,
-          brand_aliases: Optional[Mapping[str, Iterable[str]]] = None) -> MatchResult:
+          brand_aliases: Optional[Mapping[str, Iterable[str]]] = None,
+          model_fields: Sequence[Any] = ()) -> MatchResult:
     """Link one listing to one model, or say why not (see the module rules).
 
     ``candidates`` is a :class:`ModelIndex` (build it once per run) or the
-    model records themselves. The result names a model id, a rule id, a
-    confidence and a reason code, never any listing text.
+    model records themselves. ``model_fields`` are Amazon's manufacturer
+    model / part-number values (rule 13), read only when the title names none
+    of the maker's designations. The result names a model id, a rule id, a
+    confidence and a reason code, never any listing or field text.
     """
     index = candidates if isinstance(candidates, ModelIndex) else ModelIndex(
         candidates, brand_aliases=brand_aliases)
@@ -1056,6 +1437,8 @@ def match(item_brand: Any, item_title: Any,
     in_cue = _cue_mask(tokens, all_occ)
     occ = _resolve_nesting([o for o in all_occ if not any(in_cue[o.start:o.end])])
     if not occ:
+        if model_fields:
+            return _match_model_fields(index, brand, title, tokens, all_occ, in_cue, model_fields)
         return _no(REASON_NO_DESIGNATION)
     if _CONDITION_RE.search(title):
         return _no(REASON_CONDITION)
@@ -1073,47 +1456,32 @@ def match(item_brand: Any, item_title: Any,
     for m in ids:
         by_role.setdefault(index.role(m), set()).add(m)
     stations = by_role.get(ROLE_STATION, set())
-    ev = _bundle_evidence(title)
-    # Panel / battery designations anywhere outside a compatibility context
-    # are bundle evidence too ('+ SolarSaga 100W', '+ Battery Pack 2000 Plus').
-    for o in _resolve_nesting(all_occ):
-        if len(o.model_ids) != 1 or o.variant_after:
-            continue
-        mid = next(iter(o.model_ids))
-        role = index.role(mid)
-        if role not in (ROLE_PANEL, ROLE_BATTERY) or (in_cue[o.start] and _cue_before(tokens, o.start)):
-            continue
-        q_after, span_after = _qty_after(tokens, o.end)
-        q_before, span_before = _qty_before(tokens, o.start)
-        ev.used.extend(s for s in (span_after, span_before) if s)
-        if role == ROLE_PANEL:
-            rec = index.record(mid)
-            key = int(round(rec.power_w)) if rec and rec.power_w else f"m:{mid}"
-            q = max(q_after, q_before)
-            plural = any(t.text in ("panels", "modules") for t in tokens[o.end:o.end + 2])
-            ev.panels[key] = q if q > 1 else (ev.panels.get(key, None if plural else 1) if key in ev.panels
-                                              else (None if plural else 1))
-            ev.wording = True
-        else:
-            ev.battery = True
-            ev.battery_ids.add(mid)
+    # A bundle-family name ('Solar Generator 1000 Plus') names its station but
+    # only ever a kit of it (rule 12).
+    forced = any(o.family for o in usable)
+    named_kits = {next(iter(o.model_ids)) for o in usable
+                  if not o.number and not o.family and index.role(next(iter(o.model_ids))) == ROLE_KIT}
+    ev = _evidence(index, title, tokens, all_occ, in_cue)
     part_start = _first_part_start(tokens, title, in_cue)
     cue_spans = _cue_spans(tokens, in_cue, len(title))
-    if len(stations) == 1 and (ev.wording or ev.battery or ev.panels):
+    named = [(tokens[o.start].start, tokens[o.end - 1].end) for o in usable]
+    if named_kits:
+        return _match_named_kit(index, title, tokens, in_cue, usable, ids, named_kits, ev, part_start,
+                                cue_spans, named)
+    if len(stations) == 1 and (forced or ev.present):
         sid = next(iter(stations))
         own = [o for o in usable if sid in o.model_ids]
-        if all(o.start > part_start for o in own):
+        if all(o.start > part_start for o in own) and not _generic_head(index, brand, tokens, part_start):
             return _no(REASON_BUNDLE_COMPONENT)
-        reason = _item_reason(ROLE_STATION, _item_kind(tokens, title, own[0], in_cue))
+        reason = _item_reason(ROLE_STATION, _item_kind(tokens, title, own[0], in_cue, bundle=True))
         if reason:
             return _no(reason)
-        named = [(tokens[o.start].start, tokens[o.end - 1].end) for o in usable]
         # Every unit count in the title must be one the kit check read.
         if any(not any(a <= s < b for a, b in ev.used)
                for s, _e, _n in _count_markers(title, skip=[*cue_spans, *named])):
             return _no(REASON_BUNDLE_UNVERIFIED)
-        return _match_bundle(index, brand, sid, ev, title, named=named)
-    if len(ids) > 1:
+        return _match_bundle(index, brand, sid, ev, title, named=named, forced=forced)
+    if len(ids) > 1 or forced:
         return _no(REASON_AMBIGUOUS)
     mid = next(iter(ids))
     if all(o.start > part_start for o in usable):
@@ -1126,13 +1494,204 @@ def match(item_brand: Any, item_title: Any,
     rec = index.record(mid)
     # A number inside the matched designation ('300W Portable Power Station')
     # is the name, not a claim about the spec.
-    named = [(tokens[o.start].start, tokens[o.end - 1].end) for o in usable]
     if role != ROLE_OTHER and _count_markers(title, skip=[*cue_spans, *named]):
         return _no(REASON_MULTI_PACK)
     reason = _contradiction(index, rec, _blank(title, named), exclude=ev.spans)
     if reason:
         return _no(reason)
     return MatchResult(mid, RULE_CONFIDENCE[rule], rule, REASON_MATCHED)
+
+
+#: Words a bundle title's head may hold besides the maker's name ('ALLPOWERS
+#: Solar Generator Kit with R1500 ...'): the station named after 'with' is the item.
+_HEAD_WORDS = frozenset({"solar", "generator", "generators", "kit", "kits", "bundle", "bundles", "combo",
+                         "set", "package", "system", "systems", "portable", "power", "station", "stations",
+                         "home", "backup", "complete", "camping", "outdoor", "emergency", "new", "the", "a",
+                         "an", "off", "grid"})
+_HEAD_BUNDLE_WORDS = frozenset({"generator", "generators", "kit", "kits", "bundle", "bundles", "combo",
+                                "package", "set", "system", "systems"})
+
+
+def _generic_head(index: "ModelIndex", brand: str, tokens: Sequence[Token], part_start: int) -> bool:
+    """The title's head (before its first bundled part) is only the maker's
+    name and generic bundle words ('Solar Generator Kit'), so the first station
+    designation after 'with' is the listing, not a bundled part."""
+    head = tokens[:part_start]
+    if not head or not any(t.text in _HEAD_BUNDLE_WORDS for t in head):
+        return False
+    rest = "".join(t.text for t in head if t.text not in _HEAD_WORDS and not _MEASURE_WORD_RE.match(t.text))
+    return not rest or index.resolve_brand(rest) == brand
+
+
+def _match_named_kit(index: "ModelIndex", title: str, tokens: Sequence[Token], in_cue: Sequence[bool],
+                     usable: Sequence[_Occurrence], ids: set, named_kits: set, ev: _BundleEvidence,
+                     part_start: int, cue_spans: Sequence[tuple[int, int]],
+                     named: Sequence[tuple[int, int]]) -> MatchResult:
+    """A kit named by its own name ('RIVER 3 Max'): its components may be named
+    beside it; stated panels, batteries, counts and capacity must agree."""
+    if len(named_kits) > 1:
+        return _no(REASON_AMBIGUOUS)
+    kid = next(iter(named_kits))
+    info = index.kit_info(kid)
+    if info is None:
+        return _no(REASON_BUNDLE_NO_KIT)
+    if ids - {kid, info.station_id} - info.battery_ids - info.panel_ids - info.named_panel_ids:
+        return _no(REASON_AMBIGUOUS)
+    own = [o for o in usable if kid in o.model_ids]
+    if all(o.start > part_start for o in own):
+        return _no(REASON_BUNDLE_COMPONENT)
+    reason = _item_reason(ROLE_KIT, _item_kind(tokens, title, own[0], in_cue, bundle=True))
+    if reason:
+        return _no(reason)
+    if any(not any(a <= s < b for a, b in ev.used)
+           for s, _e, _n in _count_markers(title, skip=[*cue_spans, *named])):
+        return _no(REASON_MULTI_PACK)
+    if info.panels and not ev.panels:
+        return _no(REASON_BUNDLE_UNVERIFIED)    # which configuration is unknowable
+    if not _named_kit_consistent(info, ev):
+        return _no(REASON_BUNDLE_NO_KIT, _signature(info.station_id, ev, battery=ev.battery or info.battery))
+    reason = _kit_contradiction(index, info, _blank(title, named), exclude=ev.spans)
+    if reason:
+        return _no(reason)
+    return MatchResult(kid, RULE_CONFIDENCE[RULE_DESIGNATION], RULE_DESIGNATION, REASON_MATCHED)
+
+
+def _named_kit_consistent(info: _KitInfo, ev: _BundleEvidence) -> bool:
+    """A named kit's own name stands for its battery; stated panels must be its panels."""
+    if info.panels:
+        if not _panels_agree(info, ev):
+            return False
+    elif ev.panels or ev.wording:
+        return False
+    if ev.battery_ids and info.battery_ids and not ev.battery_ids <= info.battery_ids:
+        return False
+    return not (ev.battery and not info.battery)
+
+
+def _kit_contradiction(index: "ModelIndex", info: _KitInfo, title: str, *,
+                       exclude: Sequence[tuple[int, int]] = ()) -> str:
+    """A stated Wh must be the station's or the kit's total; a stated W the station's."""
+    station = index.record(info.station_id)
+    if station is None:
+        return ""
+    tol = index.capacity_tolerance
+    if station.capacity_wh:
+        caps = [station.capacity_wh] + ([station.capacity_wh + info.battery_wh] if info.battery_wh else [])
+        stated = _wh_values(title, exclude=exclude)
+        if stated and not any(_close(v, c, tol) for v in stated for c in caps):
+            return REASON_CAPACITY
+    if station.power_w:
+        watts = _w_values(title, exclude=exclude)
+        if watts and not any(_close(v, station.power_w, tol) for v in watts):
+            return REASON_WATTAGE
+    return ""
+
+
+def _identifying(tokens: Sequence[Token], o: _Occurrence) -> bool:
+    """A manufacturer-field designation counts only with a word that is neither
+    a number, a measure, a unit nor a generic word ('T1000', 'Explorer'; never
+    '1000', '200W' or 'Power 1000')."""
+    return any(not t.text.isdigit() and not _MEASURE_WORD_RE.match(t.text) and t.text not in GENERIC_WORDS
+               and t.text not in _UNIT_WORDS for t in tokens[o.start:o.end])
+
+
+_LISTING_ROLE = {ROLE_STATION: ROLE_STATION, ROLE_BATTERY: ROLE_BATTERY, ROLE_PANEL: ROLE_PANEL}
+
+
+def _match_model_fields(index: "ModelIndex", brand: str, title: str, tokens: Sequence[Token],
+                        all_occ: Sequence[_Occurrence], in_cue: Sequence[bool],
+                        values: Sequence[Any]) -> MatchResult:
+    """Rule 13: the title names none of the maker's designations; Amazon's
+    manufacturer model / part-number values may, exactly. The values are read
+    here and dropped: only our outcome leaves."""
+    if _CONDITION_RE.search(title):
+        return _no(REASON_CONDITION)
+    found: set = set()
+    family = False
+    for raw in values:
+        text = normalize_text(raw)
+        c = compact(text)
+        if not c or c.isdigit() or _MEASURE_WORD_RE.match(c):
+            continue          # a digit-only or measure-only value never counts
+        ftoks = tokenize(text)
+        focc = index.occurrences(brand, ftoks)
+        fcue = _cue_mask(ftoks, focc)
+        focc = [o for o in _resolve_nesting([o for o in focc if not any(fcue[o.start:o.end])])
+                if _identifying(ftoks, o)]
+        if not focc:
+            continue
+        if any(o.variant_after for o in focc):
+            return _no(REASON_UNKNOWN_VARIANT)
+        ids = {m for o in focc for m in o.model_ids}
+        if len(ids) > 1:
+            return _no(REASON_AMBIGUOUS)        # one value naming two of our models
+        found |= ids
+        family = family or any(o.family for o in focc)
+    if not found:
+        return _no(REASON_NO_DESIGNATION)
+    if len(found) > 1:
+        return _no(REASON_AMBIGUOUS)            # the model and part-number values disagree
+    mid = next(iter(found))
+    role = index.role(mid)
+    ev = _evidence(index, title, tokens, all_occ, in_cue)
+    cue_spans = _cue_spans(tokens, in_cue, len(title))
+    if role in (ROLE_STATION, ROLE_KIT):
+        want = None
+        forced = family
+        sid = mid
+        if role == ROLE_KIT:
+            info = index.kit_info(mid)
+            if info is None:
+                return _no(REASON_BUNDLE_NO_KIT)
+            want, forced, sid = mid, True, info.station_id    # a kit only ever through the bundle path
+        if forced or ev.present:
+            item = _listing_item(tokens, title, in_cue, bundle=True)
+            if item != ROLE_STATION:
+                return _no(REASON_ACCESSORY if item == ITEM_ACCESSORY else REASON_ITEM_KIND)
+            if any(not any(a <= s < b for a, b in ev.used) for s, _e, _n in _count_markers(title, skip=cue_spans)):
+                return _no(REASON_BUNDLE_UNVERIFIED)
+            res = _match_bundle(index, brand, sid, ev, title, forced=forced)
+            if not res.matched:
+                return res
+            if want is not None and res.model_id != want:
+                return _no(REASON_AMBIGUOUS)
+            return MatchResult(res.model_id, RULE_CONFIDENCE[RULE_MODEL_FIELD], RULE_MODEL_FIELD, REASON_MATCHED)
+    elif role not in _LISTING_ROLE:
+        return _no(REASON_NO_DESIGNATION)
+    elif ev.present:
+        return _no(REASON_BUNDLE_NO_KIT)        # a battery or panel bundle is no single unit
+    item = _listing_item(tokens, title, in_cue)
+    if item != _LISTING_ROLE[role]:
+        return _no(REASON_ACCESSORY if item == ITEM_ACCESSORY else REASON_ITEM_KIND)
+    if _count_markers(title, skip=cue_spans):
+        return _no(REASON_MULTI_PACK)
+    rec = index.record(mid)
+    reason = _contradiction(index, rec, title, exclude=ev.spans)
+    if reason:
+        return _no(reason)
+    if not _spec_confirmed(index, rec, title, exclude=ev.spans):
+        return _no(REASON_FIELD_UNCONFIRMED)
+    return MatchResult(mid, RULE_CONFIDENCE[RULE_MODEL_FIELD], RULE_MODEL_FIELD, REASON_MATCHED)
+
+
+def _spec_confirmed(index: "ModelIndex", rec: Optional[ModelRecord], title: str, *,
+                    exclude: Sequence[tuple[int, int]] = ()) -> bool:
+    """The title states a capacity (station, battery) or wattage (station, panel)
+    that agrees with the model's rated value."""
+    if rec is None:
+        return False
+    tol = index.capacity_tolerance
+    role = index.role(rec.model_id)
+    if rec.capacity_wh and role in (ROLE_STATION, ROLE_BATTERY):
+        if any(_close(v, rec.capacity_wh, tol) for v in _wh_values(title, exclude=exclude)):
+            return True
+    if rec.power_w and role in (ROLE_STATION, ROLE_PANEL):
+        watts = _w_values(title, exclude=exclude) if role == ROLE_STATION else \
+            [float(m.group(1).replace(",", "")) for m in _W_RE.finditer(title)
+             if not any(a <= m.start() < b for a, b in exclude)]
+        if any(_close(v, rec.power_w, tol) for v in watts):
+            return True
+    return False
 
 
 def _cue_before(tokens: Sequence[Token], start: int) -> bool:
@@ -1144,18 +1703,28 @@ def _cue_before(tokens: Sequence[Token], start: int) -> bool:
 
 
 def _match_bundle(index: ModelIndex, brand: str, station_id: Any, ev: _BundleEvidence,
-                  title: str, *, named: Sequence[tuple[int, int]] = ()) -> MatchResult:
+                  title: str, *, named: Sequence[tuple[int, int]] = (), forced: bool = False) -> MatchResult:
+    """The kit of ``station_id`` the evidence selects. ``forced``: a bundle-family
+    name says it is a bundle, so without panel / battery evidence no kit is known."""
+    if forced and not ev.present:
+        return _no(REASON_BUNDLE_UNVERIFIED)
+    sig = _signature(station_id, ev)
     kits = [k for k in index.brands[brand].kits
             if (info := index.kit_info(k)) is not None and info.station_id == station_id]
     if not kits:
-        return _no(REASON_BUNDLE_NO_KIT)
+        return _no(REASON_BUNDLE_NO_KIT, sig)
     if ev.wording and not ev.panels:
         # Panel wording without a wattage or a panel model: which kit is unknowable.
         if any(index.kit_info(k).panels for k in kits):
             return _no(REASON_BUNDLE_UNVERIFIED)
     fits = [k for k in kits if _kit_consistent(index.kit_info(k), ev)]
     if not fits:
-        return _no(REASON_BUNDLE_NO_KIT)
+        return _no(REASON_BUNDLE_NO_KIT, sig)
+    if len(fits) > 1 and ev.panel_ids:
+        # A panel model named in the title: prefer the kits whose panel components are that model.
+        preferred = [k for k in fits if ev.panel_ids <= index.kit_info(k).panel_ids]
+        if preferred:
+            fits = preferred
     station = index.record(station_id)
     plain = _blank(title, named)
     stated = _wh_values(plain)
@@ -1187,13 +1756,28 @@ def _match_bundle(index: ModelIndex, brand: str, station_id: Any, ev: _BundleEvi
     return MatchResult(kid, RULE_CONFIDENCE[RULE_BUNDLE_KIT], RULE_BUNDLE_KIT, REASON_MATCHED)
 
 
+def _panels_agree(info: _KitInfo, ev: _BundleEvidence) -> bool:
+    """The stated panels are the kit's: the same keys (watts or panel model) and
+    every stated count; a panel model named in the title is one of the kit's
+    panel models (as battery models are); a stated build ('flexible',
+    'foldable', 'rigid') is one the kit's panels have."""
+    if set(ev.panels) != set(info.panels):
+        return False
+    for key, q in ev.panels.items():
+        if q is not None and info.panels.get(key) != q:
+            return False
+    known = info.panel_ids or info.named_panel_ids
+    if ev.panel_ids and known and not ev.panel_ids <= known:
+        return False     # 'with SolarSaga 100W' is not the kit that ships the SolarSaga 100 Air
+    if ev.forms and info.panel_forms and not ev.forms & info.panel_forms:
+        return False     # '200W Foldable Solar Panel' is not the kit with the 200W flexible panel
+    return True
+
+
 def _kit_consistent(info: _KitInfo, ev: _BundleEvidence) -> bool:
     if ev.panels:
-        if set(ev.panels) != set(info.panels):
+        if not _panels_agree(info, ev):
             return False
-        for key, q in ev.panels.items():
-            if q is not None and info.panels.get(key) != q:
-                return False
     elif info.panels and not ev.wording:
         return False
     elif ev.wording and not info.panels:

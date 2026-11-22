@@ -139,6 +139,11 @@ def link_guard_ok(sql: str) -> bool:
     return any(_GUARD_TERM_RE.match(" ".join(t.split())) for t in terms)
 _UPDATE_RE = re.compile(r"^\s*(?:--[^\n]*\n\s*)*update\b", re.IGNORECASE)
 MATCHER_ROLES = ("station", "kit", "panel", "battery", "other")
+#: Amazon's manufacturer fields model_matching.model_fields may read
+#: (itemInfo.manufactureInfo.<name>.displayValue; operator decision 2026-11-22).
+MODEL_FIELD_NAMES = ("model", "itemPartNumber")
+#: Most maker keys a brand census may count.
+BRAND_CENSUS_MAX_KEYS = 100
 
 _PARAM_RE = re.compile(r"%\((\w+)\)s")
 # A '%' that is not '%%' and does not start a named parameter.
@@ -473,6 +478,25 @@ class ModelFirstSettings:
 
 
 @dataclass(frozen=True)
+class ModelFieldSettings:
+    """``model_matching.model_fields``: also read Amazon's manufacturer model /
+    part-number fields, as designation evidence when the title names none
+    (matcher rule 13). Off by default."""
+
+    enabled: bool = False
+    fields: tuple[str, ...] = MODEL_FIELD_NAMES
+
+
+@dataclass(frozen=True)
+class BrandCensusSettings:
+    """``model_matching.brand_census``: count which of these maker keys the
+    brand field of each brand-unknown listing holds (counts only)."""
+
+    enabled: bool = False
+    keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class MatchingSettings:
     """``model_matching``: link products to the site's own models (see matching.py)."""
 
@@ -489,6 +513,8 @@ class MatchingSettings:
     stats_sql: str = ""
     asin_first: AsinFirstSettings = AsinFirstSettings()
     model_first: ModelFirstSettings = ModelFirstSettings()
+    model_fields: ModelFieldSettings = ModelFieldSettings()
+    brand_census: BrandCensusSettings = BrandCensusSettings()
 
     @staticmethod
     def paged(sql: str) -> str:
@@ -512,6 +538,10 @@ class MatchingSettings:
                                 "item_count": self.model_first.item_count,
                                 "queries_per_run": self.model_first.queries_per_run,
                                 "retry_hours": self.model_first.retry_hours},
+                "model_fields": {"enabled": self.model_fields.enabled,
+                                 "fields": list(self.model_fields.fields)},
+                "brand_census": {"enabled": self.brand_census.enabled,
+                                 "keys": len(self.brand_census.keys)},
                 "stats": bool(self.stats_sql)}
 
 
@@ -715,6 +745,12 @@ def fingerprint(doc: Any) -> str:
 # ---------------------------------------------------------------------------
 # Semantic builder
 # ---------------------------------------------------------------------------
+
+def _compact_key(text: Any) -> str:
+    """A brand-census key as the matcher folds it (model_matcher.compact)."""
+    from framework.core.model_matcher import compact
+    return compact(text)
+
 
 def _num(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
@@ -1131,6 +1167,14 @@ class _Builder:
             aliases[str(maker)] = tuple(" ".join(str(n).split()) for n in (names or []) if str(n).strip())
         roles = raw.get("kind_roles")
         compat = raw.get("compatible_kinds")
+        mfd = _strip_comments(raw.get("model_fields") or {})
+        model_fields = ModelFieldSettings(
+            enabled=bool(mfd.get("enabled", False)),
+            fields=tuple(str(f) for f in (mfd["fields"] if "fields" in mfd else MODEL_FIELD_NAMES) or ()))
+        bcd = _strip_comments(raw.get("brand_census") or {})
+        brand_census = BrandCensusSettings(
+            enabled=bool(bcd.get("enabled", False)),
+            keys=tuple(" ".join(str(k).split()) for k in (bcd.get("keys") or [])))
         cfg = MatchingSettings(
             enabled=bool(raw.get("enabled", False)),
             max_calls_per_run=int(raw.get("max_calls_per_run", 20)),
@@ -1142,7 +1186,8 @@ class _Builder:
             capacity_tolerance=float(raw.get("capacity_tolerance", 0.03)),
             models_sql=sql_of("models_sql"), candidates_sql=sql_of("candidates_sql"),
             link_sql=sql_of("link_sql"), stats_sql=sql_of("stats_sql"),
-            asin_first=asin_first, model_first=model_first)
+            asin_first=asin_first, model_first=model_first, model_fields=model_fields,
+            brand_census=brand_census)
         for key, sql in (("models_sql", cfg.models_sql), ("candidates_sql", cfg.candidates_sql),
                          ("stats_sql", cfg.stats_sql)):
             if sql:
@@ -1183,6 +1228,26 @@ class _Builder:
         for kind, role in (cfg.kind_roles or {}).items():
             if role not in MATCHER_ROLES:
                 self.fail(f"{w}.kind_roles.{kind}", f"must be one of {', '.join(MATCHER_ROLES)}")
+        fields = cfg.model_fields.fields
+        for name in fields:
+            if name not in MODEL_FIELD_NAMES:
+                self.fail(f"{w}.model_fields.fields", f"{name!r} is not one of {', '.join(MODEL_FIELD_NAMES)}")
+        if len(set(fields)) != len(fields):
+            self.fail(f"{w}.model_fields.fields", "lists a field twice")
+        if cfg.model_fields.enabled and not fields:
+            self.fail(f"{w}.model_fields.fields", "required when model_fields is enabled")
+        keys = cfg.brand_census.keys
+        compacts = [_compact_key(k) for k in keys]
+        if any(not c for c in compacts):
+            self.fail(f"{w}.brand_census.keys", "a key has no letters or digits")
+        if "none" in compacts:
+            self.fail(f"{w}.brand_census.keys", "'none' is the count of listings with no key")
+        if len(set(compacts)) != len(compacts):
+            self.fail(f"{w}.brand_census.keys", "two keys are the same after folding case and punctuation")
+        if len(keys) > BRAND_CENSUS_MAX_KEYS:
+            self.fail(f"{w}.brand_census.keys", f"at most {BRAND_CENSUS_MAX_KEYS} keys")
+        if cfg.brand_census.enabled and not keys:
+            self.fail(f"{w}.brand_census.keys", "required when brand_census is enabled")
         return cfg
 
     # -- whole document ------------------------------------------------------------

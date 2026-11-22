@@ -11,7 +11,8 @@ TWO PASSES, ONE ALLOWANCE
 -------------------------
 1. **ASIN-first.** Products from ``candidates_sql`` (e.g. active, no model),
    in keyset pages of ``asin_first.batch`` (<= 10), one ``getItems`` call per
-   page asking only for ``itemInfo.title`` + ``itemInfo.byLineInfo``. A title
+   page asking only for ``itemInfo.title`` + ``itemInfo.byLineInfo`` (plus
+   ``itemInfo.manufactureInfo`` with ``model_fields.enabled``). A title
    that hits a global reject pattern is never linked (``global-reject:<id>``,
    reported), nor is one no active lane accepts by its title (``lane:<reason>``;
    the lane's kind must also fit the model's). Every other item goes through
@@ -36,11 +37,26 @@ capped with ``asin_first.max_calls`` so model-first always gets the rest. A
 429, a spent budget or the allowance stops the phase cleanly; the next run
 resumes from the saved cursor and search times.
 
+MANUFACTURER FIELDS AND BRAND CENSUS (operator decision 2026-11-22)
+-------------------------------------------------------------------
+With ``model_fields.enabled`` both calls also ask for
+``itemInfo.manufactureInfo``, and the configured ``model`` /
+``itemPartNumber`` display values go to the matcher with the title (rule 13:
+used only when the title names none of the maker's designations; rule id
+``model-field``). Should Creators refuse that resource, the call is repeated
+once without it and the fields stay off for the rest of the run
+(``model_fields.resource_refused``). With ``brand_census.enabled``, every
+brand-unknown listing adds one to each configured maker key its brand field
+contains (after ``compact()``), or to ``none``: counts keyed by our own keys.
+A ``bundle-no-kit`` row carries our derived bundle signature (our station id,
+panel watts -> count, battery yes/no, our panel / battery ids).
+
 WHAT NEVER LEAVES MEMORY
 ------------------------
-Titles, brands and every other Amazon field are read here and dropped. The
-report rows, the counters, the state and the DB writes carry only the ASIN,
-our model id, the matcher's rule / reason id, our confidence and the time.
+Titles, brands, manufacturer fields and every other Amazon field are read
+here and dropped. The report rows, the counters, the state and the DB writes
+carry only the ASIN, our model id, the matcher's rule / reason id, our
+confidence, the time and (bundle-no-kit) our derived bundle signature.
 Nothing here logs. An unexpected error is reported by its class name only
 (``failure``), never its text, because a matcher bug could quote a title.
 """
@@ -60,6 +76,10 @@ from .lanes import LaneClassifier, normalize_title
 
 #: getItems resources: the two fields the matcher reads, nothing else.
 MATCH_RESOURCES = ("itemInfo.title", "itemInfo.byLineInfo")
+#: Asked for too (both calls) only with ``model_fields.enabled``.
+MANUFACTURE_INFO = "itemInfo.manufactureInfo"
+#: The brand-census count of brand-unknown listings that hold none of the keys.
+CENSUS_NONE = "none"
 REPORT_ROW_CAP = 500
 SERVER_ERROR_STREAK_STOP = 3
 TRANSIENT_STATUSES = frozenset({408}) | frozenset(range(500, 600))
@@ -150,16 +170,26 @@ class MatchReport:
     stats: Optional[dict[str, int]] = None
     index_problems: list[str] = field(default_factory=list)
     failure: str = ""
+    model_fields_enabled: bool = False
+    model_fields_refused: int = 0       # calls Creators refused for itemInfo.manufactureInfo
+    #: Configured maker key (or 'none') -> brand-unknown listings whose brand field
+    #: holds it; None when the census is off.
+    brand_census: Optional[Counter] = None
+    census_listings: int = 0
 
     @property
     def models_with_product(self) -> int:
         return self.models_linked_before + len(self.models_newly_linked)
 
-    def row(self, asin: str, model_id: Any, rule: str, confidence: float) -> None:
+    def row(self, asin: str, model_id: Any, rule: str, confidence: float, *,
+            bundle: Optional[mm.BundleSignature] = None) -> None:
         self.rows_total += 1
         if len(self.rows) < REPORT_ROW_CAP:
-            self.rows.append({"asin": asin, "model_id": model_id, "rule": rule,
-                              "confidence": round(float(confidence or 0.0), 4)})
+            row = {"asin": asin, "model_id": model_id, "rule": rule,
+                   "confidence": round(float(confidence or 0.0), 4)}
+            if bundle is not None:
+                row["bundle"] = bundle.to_dict()     # our ids and derived counts only
+            self.rows.append(row)
 
     def products_model_matched_pct(self, *, dry_run: bool) -> Optional[float]:
         if not self.stats:
@@ -193,6 +223,10 @@ class MatchReport:
             "index_problems": list(self.index_problems)[:20],
             "rows": list(self.rows), "rows_total": self.rows_total,
             "failure": self.failure,
+            "model_fields": {"enabled": self.model_fields_enabled,
+                             "resource_refused": self.model_fields_refused},
+            "brand_census": None if self.brand_census is None else {
+                "listings": self.census_listings, "counts": dict(self.brand_census.most_common())},
         }
 
 
@@ -256,6 +290,10 @@ class MatchPhase:
         self.now = now
         self.run_ts = run_ts
         self.classifier = classifier or LaneClassifier(cfg)
+        #: Manufacturer fields asked for and read (off for the rest of the run if refused).
+        self._fields_on = bool(cfg.matching.model_fields.enabled)
+        self._census_keys = tuple((k, mm.compact(k)) for k in cfg.matching.brand_census.keys)
+        self._census_seen: set[str] = set()
 
     # -- entry ---------------------------------------------------------------------------
 
@@ -263,7 +301,11 @@ class MatchPhase:
             max_new: Optional[int] = None) -> MatchReport:
         """Mutates ``state['match']`` (cursor, search times). Never raises for
         a Creators or matcher problem: ``report.failure`` names its class."""
-        rep = MatchReport(allowance=max(0, int(allowed_calls)))
+        census = None
+        if self.mcfg.brand_census.enabled:     # every key reported, zeros included
+            census = Counter({**{k: 0 for k in self.mcfg.brand_census.keys}, CENSUS_NONE: 0})
+        rep = MatchReport(allowance=max(0, int(allowed_calls)), model_fields_enabled=self._fields_on,
+                          brand_census=census)
         st = state.get("match")
         if not isinstance(st, dict):
             st = {}
@@ -385,8 +427,10 @@ class MatchPhase:
             rep.calls += 1
             rep.asin_first_calls += 1
             try:
-                items, errors = client.get_items(asins, resources=MATCH_RESOURCES)
+                items, errors = client.get_items(asins, resources=self._get_resources())
             except amazon_creators.CreatorsRequestError as exc:
+                if self._refused_fields(exc, rep):
+                    continue                                  # the same page again, without the fields
                 status = int(getattr(exc, "status", 0) or 0)
                 if status in TRANSIENT_STATUSES:
                     rep.transient_errors += 1
@@ -427,7 +471,7 @@ class MatchPhase:
                     self._reject(rep, asin, f"lane:{decision.reason}")
                     continue
                 lane = self.cfg.lane(decision.lane)
-                res = self._match(parsed, rep)
+                res = self._match(parsed, rep, asin=asin, fields=self._model_fields(item))
                 del parsed, item
                 self._decide(store, rep, asin, res, product_kind=kinds.get(asin), source="asin-first",
                              lane_kind=lane.kind if lane else None)
@@ -477,7 +521,7 @@ class MatchPhase:
             rep.calls += 1
             rep.model_first_calls += 1
             try:
-                raw = client.search_items(keywords, search_index=index_name, item_count=mf.item_count)
+                raw = self._search(client, rep, keywords, index_name, mf.item_count, mf.queries_per_run)
             except amazon_creators.CreatorsRequestError as exc:
                 status = int(getattr(exc, "status", 0) or 0)
                 if status in TRANSIENT_STATUSES:
@@ -490,6 +534,8 @@ class MatchPhase:
                 rep.request_errors += 1
                 st["models_queried"][str(meta.model_id)] = _iso(self.now)
                 continue
+            if raw is None:
+                return          # the fields were refused and no call is left to search again
             streak = 0
             if (getattr(client, "last_search_meta", None) or {}).get("throttled"):
                 rep.throttled += 1
@@ -497,19 +543,20 @@ class MatchPhase:
                 return
             rep.models_searched += 1
             parsed = [amazon_creators.parse_item(r) for r in raw or []]
+            fields = [self._model_fields(r) for r in raw or []]
             asins = [str(p.get("asin") or "").upper() for p in parsed]
             valid = [a for a in asins if self.cfg.catalog.asin_re.match(a)]
             known = catalog.known(valid) if valid else set()
-            for p, asin in zip(parsed, asins):
-                self._listing(store, catalog, rep, p, asin, known=asin in known)
-            del parsed
+            for p, asin, f in zip(parsed, asins, fields):
+                self._listing(store, catalog, rep, p, asin, known=asin in known, fields=f)
+            del parsed, fields
             catalog.commit()
             # Only once its listings are committed: a failure above rolls them back
             # and the model is searched again next run, not after retry_hours.
             st["models_queried"][str(meta.model_id)] = _iso(self.now)
 
     def _listing(self, store: MatchStore, catalog: Catalog, rep: MatchReport, p: dict[str, Any],
-                 asin: str, *, known: bool) -> None:
+                 asin: str, *, known: bool, fields: Sequence[str] = ()) -> None:
         if not asin or asin in self._seen:
             return
         self._seen.add(asin)
@@ -530,20 +577,95 @@ class MatchPhase:
             self._reject(rep, asin, f"{decision.reason}:{decision.rule}" if decision.rule else decision.reason)
             return
         lane = self.cfg.lane(decision.lane)
-        res = self._match(p, rep)
+        res = self._match(p, rep, asin=asin, fields=fields)
         self._decide(store, rep, asin, res, product_kind=lane.kind if lane else None, source="model-first",
                      insert=None if known else (lane, decision.confidence), catalog=catalog)
 
     # -- shared ----------------------------------------------------------------------------
 
-    def _match(self, parsed: Mapping[str, Any], rep: MatchReport) -> mm.MatchResult:
+    def _match(self, parsed: Mapping[str, Any], rep: MatchReport, *, asin: str = "",
+               fields: Sequence[str] = ()) -> mm.MatchResult:
         try:
-            return mm.match(parsed.get("brand"), parsed.get("title"), self._index)
+            res = mm.match(parsed.get("brand"), parsed.get("title"), self._index, model_fields=fields)
         except Exception as exc:  # noqa: BLE001 -- counted by class; the text never leaves
             rep.errors += 1
             if len(rep.error_samples) < 5:
                 rep.error_samples.append(f"matcher: {type(exc).__name__}")
             return mm.MatchResult(None, 0.0, "", R_MATCHER_ERROR)
+        if res.reason_code == mm.REASON_BRAND_UNKNOWN and rep.brand_census is not None:
+            self._census(rep, asin, parsed.get("brand"))
+        return res
+
+    def _census(self, rep: MatchReport, asin: str, brand: Any) -> None:
+        """Counts only: which configured maker keys a brand-unknown listing's
+        brand field holds after compact(), each listing once per run."""
+        if asin in self._census_seen:
+            return
+        self._census_seen.add(asin)
+        text = mm.compact(brand)
+        hits = [key for key, ck in self._census_keys if ck and ck in text]
+        rep.census_listings += 1
+        for key in hits:
+            rep.brand_census[key] += 1
+        if not hits:
+            rep.brand_census[CENSUS_NONE] += 1
+
+    # -- manufacturer fields ---------------------------------------------------------------
+
+    def _get_resources(self) -> tuple[str, ...]:
+        return MATCH_RESOURCES + (MANUFACTURE_INFO,) if self._fields_on else MATCH_RESOURCES
+
+    def _search_resources(self) -> tuple[str, ...]:
+        base = tuple(amazon_creators.SEARCH_RESOURCES)
+        return base + (MANUFACTURE_INFO,) if self._fields_on else base
+
+    def _model_fields(self, raw: Any) -> tuple[str, ...]:
+        """The configured ``itemInfo.manufactureInfo`` display values of a raw
+        item (``parse_item`` does not keep them). In memory only: they go to
+        the matcher and are dropped with the item."""
+        if not self._fields_on or not isinstance(raw, Mapping):
+            return ()
+        info = raw.get("itemInfo")
+        info = info.get("manufactureInfo") if isinstance(info, Mapping) else None
+        if not isinstance(info, Mapping):
+            return ()
+        out = []
+        for name in self.mcfg.model_fields.fields:
+            node = info.get(name)
+            value = node.get("displayValue") if isinstance(node, Mapping) else None
+            if isinstance(value, str) and value.strip():
+                out.append(value)
+        return tuple(out)
+
+    def _refused_fields(self, exc: Exception, rep: MatchReport) -> bool:
+        """True (once per run) when Creators refused a call for asking for
+        itemInfo.manufactureInfo: the fields stay off for the rest of the run.
+        The error text is only tested here, never kept."""
+        if not self._fields_on:
+            return False
+        status = int(getattr(exc, "status", 0) or 0)
+        if not 400 <= status < 500 or "manufactureinfo" not in str(getattr(exc, "detail", "") or "").casefold():
+            return False
+        self._fields_on = False
+        rep.model_fields_refused += 1
+        return True
+
+    def _search(self, client: Any, rep: MatchReport, keywords: str, index_name: Optional[str],
+                item_count: int, queries_per_run: int) -> Optional[list]:
+        """One searchItems; repeated once without the manufacturer fields if
+        Creators refuses them (None: no call left for that, search next run)."""
+        try:
+            return client.search_items(keywords, search_index=index_name, item_count=item_count,
+                                       resources=self._search_resources())
+        except amazon_creators.CreatorsRequestError as exc:
+            if not self._refused_fields(exc, rep):
+                raise
+        if rep.model_first_calls >= queries_per_run or not self._can_call(client, rep):
+            return None
+        rep.calls += 1
+        rep.model_first_calls += 1
+        return client.search_items(keywords, search_index=index_name, item_count=item_count,
+                                   resources=self._search_resources())
 
     def _global_reject(self, title: Any) -> str:
         text = normalize_title(title)
@@ -572,7 +694,8 @@ class MatchPhase:
             else:
                 rep.unmatched += 1
             rep.reasons[res.reason_code] += 1
-            rep.row(asin, None, res.reason_code, res.confidence)
+            bundle = getattr(res, "bundle", None) if res.reason_code == mm.REASON_BUNDLE_NO_KIT else None
+            rep.row(asin, None, res.reason_code, res.confidence, bundle=bundle)
             return
         if res.confidence < self.mcfg.confidence:
             rep.unmatched += 1

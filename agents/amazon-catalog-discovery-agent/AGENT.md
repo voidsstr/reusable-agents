@@ -251,6 +251,61 @@ name reads 'plus' ('Max+', 'Nomad 100+'); a name ending in 'Max' no longer
 hides a contradicting wattage. The regressions are the `ADVERSARIAL` table in
 `test_model_matcher.py`.
 
+Matcher fixes of 2026-11-22 (all within the rule; tables in
+`test_model_matcher.py` after `ADVERSARIAL`):
+
+- **Bundle families.** An alias on a kit row is the maker's bundle-family
+  name ('Solar Generator 1000 Plus'): it names the kit's station and forces
+  the bundle path, so panel / battery evidence must select exactly one kit
+  (`bundle-unverified` / `bundle-no-kit` otherwise, never the bare station).
+  An alias that holds one of our designations, is only a maker's name or has
+  no number is not a family name. Load family names as kit aliases.
+- **Named kits.** A kit whose name holds none of its components'
+  designations ('RIVER 3 Max' = RIVER 3 Plus + EB300) is named by it; stated
+  panels, batteries, counts and Wh (the station's, or station + battery) must
+  agree.
+- **Panel specs without a connector**: '(2 x 160W Solar Panel)' and ', 2 x
+  160W Solar Panels Included' are bundle evidence with their count.
+- **Phrasing**: in a bundle, 'Power Station Kit' / 'Home Backup Kit' is the
+  bundle (alone it is still an accessory kit); a head that is only the maker
+  and generic bundle words ('Solar Generator Kit with R1500 ...') takes the
+  station after 'with'; 'and' / 'combo' before a quantity or a panel starts a
+  part; '1,152Wh' / '2073.6Wh' after a name is a measure; 'Expandable with
+  <battery>' is what the station takes unless the clause says included; a
+  parenthesised '(Gen 2)' / '(V2)' / '(2nd Gen)' continues the name.
+- **Panel identity**: a panel model named in the title must be one of the
+  kit's panel models (preferring kits whose components hold it), and a stated
+  build ('foldable' / 'flexible' / 'rigid') must be the kit's panels' build. A
+  kit name's '200W(Dune White) x 2' counts two panels.
+- **Names that name nothing**: only a number ('1000' once 'DJI Power' is
+  stripped) or only a measure ('200W') is never a designation, and a code read
+  alone from a longer name ('ROVER2000 Semi-Solid Extra Battery') never takes
+  a code another of the maker's models uses.
+
+**Manufacturer model fields (operator decision 2026-11-22, opt-in).** With
+`model_matching.model_fields: {enabled: true, fields: [model,
+itemPartNumber]}` both calls also ask for `itemInfo.manufactureInfo`, and,
+only when the title names none of the maker's designations, the exact
+designation or model number may come from those values (rule id
+`model-field`, confidence 0.91). The brand must resolve; the title must still
+say what the listing is (a station, battery or panel noun, no accessory), pass
+the condition and quantity checks, and state a Wh / W that agrees with the
+model (`model-field-unconfirmed` otherwise); a digit-only or measure-only value
+never counts; a value naming two models, or two values naming different
+models, is `ambiguous`; a kit links only through the bundle path. Should
+Creators refuse the resource, the call is repeated once without it and the
+fields stay off for the run (`match.model_fields.resource_refused`). The
+values stay in memory like titles.
+
+**Brand census.** `model_matching.brand_census: {enabled: true, keys:
+[...]}` counts, for each brand-unknown listing, every configured key its
+brand field contains after case / punctuation folding, or `none`
+(`match.brand_census.counts`): our keys and counts only, so a missing alias
+can be verified on the maker's page and added. A `bundle-no-kit` row carries
+our derived `bundle` signature: our station id, panel watts (or `m:<our
+panel id>`) -> count (null = not stated), battery yes / no and the panel /
+battery models of ours the title names, so the missing kit row can be added.
+
 The phase (`catalog_discovery/matching.py`), after seeds and search:
 
 1. **ASIN-first.** `candidates_sql` (e.g. active products with no model) in
@@ -293,9 +348,11 @@ name as `models_sql` returns it -> other spellings of the brand field.
 Report: `discovery-report.json` gains `match` with `counts` (checked,
 matched, linked, inserted, ambiguous, unmatched, rejected, calls), reason
 counts, and `rows` of `{asin, model_id, rule, confidence}` only (`rule` is
-the reason code when unlinked). Metrics: `models_with_product`,
-`products_model_matched_pct`, `match_ambiguous`, `match_calls_per_link`,
-`match_calls`, `match_checked`, `match_matched`, `match_linked`,
+the reason code when unlinked; a `bundle-no-kit` row adds our `bundle`
+signature), plus `model_fields` and `brand_census` (null when off).
+Metrics: `models_with_product`, `products_model_matched_pct`,
+`match_ambiguous`, `match_calls_per_link`, `match_calls`, `match_checked`,
+`match_matched`, `match_linked`,
 `match_inserted`, `match_unmatched`, `match_rejected`, `match_errors`,
 `match_allowed_calls`; `budget_overrun_calls` covers both phases. A test runs
 the phase with fixture titles carrying a sentinel and asserts it appears in
@@ -417,7 +474,9 @@ COMMIT is read-only.
 | `insert_errors > 0` | the site's `insert_sql` failed for some rows (CHECK, FK); samples in the decisions; other rows landed |
 | seed source "labelled record(s) without a title were not imported" | list the lanes you trust under the source's `lanes` (or set `trust_labels: true`) after checking where the labels came from |
 | precision metrics missing | fewer than `qa.min_observations` labelled listings seen yet |
-| `match.reasons` mostly `brand-unknown` | the brand field's spelling is not an alias: add it to `model_matching.brand_aliases` |
+| `match.reasons` mostly `brand-unknown` | the brand field's spelling is not an alias: turn on `model_matching.brand_census` with our makers as keys, verify a counted spelling on the maker's page, then add it to `model_matching.brand_aliases` |
+| `match.reasons` shows `bundle-no-kit` | a bundle of our station that no kit row describes: the row's `bundle` signature (station, panel watts and count, battery) is the kit row to add |
+| `match.model_fields.resource_refused` > 0 | Creators refused `itemInfo.manufactureInfo`; the run went on without the fields. Turn `model_fields` off until the resource is accepted |
 | `match.reasons` mostly `no-designation` / `unknown-variant` | the listings are models (or variants) the site does not carry, or a name / alias differs: add the model or alias; never loosen the matcher |
 | `match_ambiguous` high | two of the site's records share a designation, or a bundle fits several kits: fix the records (aliases, kit components) |
 | `model matching stopped by <Class>` (failure) | an unexpected error; the class name is all that is kept. Work linked before it is committed; rerun with `--dry-run --match-only` to reproduce |

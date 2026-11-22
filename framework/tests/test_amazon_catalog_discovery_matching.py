@@ -39,6 +39,7 @@ from catalog_discovery import catalog as K  # noqa: E402
 from catalog_discovery import config as C  # noqa: E402
 from catalog_discovery import engine as E  # noqa: E402
 from catalog_discovery import matching as MP  # noqa: E402
+from framework.core import amazon_creators  # noqa: E402
 from framework.core.amazon_creators import CreatorsRequestError, CreatorsUnavailable  # noqa: E402
 
 _spec = iu.spec_from_file_location("amazon_catalog_discovery_agent_match_test", AGENT_DIR / "agent.py")
@@ -331,11 +332,28 @@ def test_model_matching_block_validates_and_describes():
     ({"kind_roles": {"station": "spaceship"}}, "kind_roles"),
     ({"asin_first": {"enabled": False}, "model_first": {"enabled": False}}, "neither asin_first"),
     ({"typo_key": 1}, "unknown key(s): typo_key"),
+    ({"model_fields": {"enabled": True, "fields": ["model", "warranty"]}}, "warranty"),
+    ({"model_fields": {"enabled": True, "fields": []}}, "model_fields/fields"),
+    ({"model_fields": {"enabled": True, "typo": 1}}, "unknown key(s): typo"),
+    ({"brand_census": {"enabled": True}}, "brand_census.keys: required when brand_census is enabled"),
+    ({"brand_census": {"keys": ["None"]}}, "'none' is the count"),
+    ({"brand_census": {"keys": ["EcoFlow", "eco-flow"]}}, "the same after folding"),
+    ({"brand_census": {"keys": ["--"]}}, "no letters or digits"),
 ])
 def test_model_matching_config_errors(over, expect):
     with pytest.raises(C.ConfigError) as err:
         build(**over)
     assert expect in str(err.value)
+
+
+def test_model_fields_and_brand_census_default_off():
+    m = build().matching
+    assert not m.model_fields.enabled and m.model_fields.fields == ("model", "itemPartNumber")
+    assert not m.brand_census.enabled and m.brand_census.keys == ()
+    d = build(model_fields={"enabled": True, "fields": ["itemPartNumber"]},
+              brand_census={"enabled": True, "keys": ["EcoFlow", "Jackery"]}).describe()["model_matching"]
+    assert d["model_fields"] == {"enabled": True, "fields": ["itemPartNumber"]}
+    assert d["brand_census"] == {"enabled": True, "keys": 2}
 
 
 def test_budget_allowance_takes_the_phase_cap():
@@ -789,6 +807,178 @@ def test_match_code_names_no_site():
     for path in (AGENT_DIR / "catalog_discovery" / "matching.py", _ROOT / "framework/core/model_matcher.py",
                  Path(__file__)):
         assert not pattern.search(path.read_text()), path
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-22: manufacturer model fields, their refusal, the brand census, and
+# bundle signatures on bundle-no-kit rows. Every field value carries a sentinel.
+# ---------------------------------------------------------------------------
+
+FIELD_SENTINEL = "QZXFIELD8"
+BRAND_SENTINEL = "QZXBRAND9"
+
+
+def raw_item_mfr(asin, title, *, brand, model=None, part=None, **kw):
+    """A Creators item that also carries itemInfo.manufactureInfo."""
+    it = raw_item(asin, title, brand=brand, **kw)
+    info = {}
+    if model is not None:
+        info["model"] = {"displayValue": model, "label": "Model", "locale": "en_US"}
+    if part is not None:
+        info["itemPartNumber"] = {"displayValue": part, "label": "Part Number", "locale": "en_US"}
+    it["itemInfo"]["manufactureInfo"] = info
+    return it
+
+
+class ResourceCreators(FakeCreators):
+    """Records the resources each call asks for; with ``refuse_fields`` it answers
+    a call that asks for itemInfo.manufactureInfo with Creators' 400 for an
+    unknown resource."""
+
+    def __init__(self, *a, refuse_fields=False, **k):
+        super().__init__(*a, **k)
+        self.resources: list = []
+        self.refuse_fields = refuse_fields
+
+    def _refuse(self, resources):
+        if self.refuse_fields and MP.MANUFACTURE_INFO in (resources or ()):
+            raise CreatorsRequestError("HTTP 400", status=400,
+                                       detail="InvalidParameterValue: The value [itemInfo.manufactureInfo] "
+                                              "provided in the request for Resources is invalid.")
+
+    def get_items(self, asins, *, resources=None):
+        self.resources.append(("getItems", tuple(resources or ())))
+        if self.refuse_fields and MP.MANUFACTURE_INFO in (resources or ()):
+            self.calls.append(("getItems", tuple(asins), tuple(resources or ())))
+            self._refuse(resources)
+        return super().get_items(asins, resources=resources)
+
+    def search_items(self, keywords, *, resources=None, **kw):
+        self.resources.append(("searchItems", tuple(resources or ())))
+        if self.refuse_fields and MP.MANUFACTURE_INFO in (resources or ()):
+            self.calls.append(("searchItems", keywords, kw.get("search_index"), kw.get("item_count")))
+            self._refuse(resources)
+        return super().search_items(keywords, **kw)
+
+
+FIELD_ITEMS = {
+    # no designation in the title: only the part number names the DELTA 2
+    "B0MFRFLD01": raw_item_mfr("B0MFRFLD01", "EF ECOFLOW Portable Power Station 1024Wh LiFePO4, 1800W AC Output",
+                               brand="EF ECOFLOW", model=f"{FIELD_SENTINEL} 1800W", part="EFD330"),
+    # the field names the DELTA 2, the title's capacity does not
+    "B0MFRFLD02": raw_item_mfr("B0MFRFLD02", "EF ECOFLOW Portable Power Station 2048Wh LiFePO4",
+                               brand="EF ECOFLOW", model=f"EFD330 {FIELD_SENTINEL}"),
+    # an accessory whose seller copied the station's model
+    "B0MFRFLD03": raw_item_mfr("B0MFRFLD03", "EF ECOFLOW Waterproof Bag for Portable Power Station",
+                               brand="EF ECOFLOW", model="EFD330"),
+}
+
+
+def test_model_fields_link_a_title_without_a_designation_and_stay_in_memory(caplog):
+    caplog.set_level(logging.DEBUG)
+    conn = FakeConn([{"asin": a, "kind": None} for a in FIELD_ITEMS])
+    client = ResourceCreators(FIELD_ITEMS)
+    rep, state = run_phase(build(model_first={"enabled": False}, model_fields={"enabled": True}), client, conn)
+    assert client.resources == [("getItems", MP.MATCH_RESOURCES + (MP.MANUFACTURE_INFO,))]
+    assert {a: r["model_id"] for a, r in conn.rows.items() if r["model_id"]} == {"B0MFRFLD01": "ecoflow-delta-2"}
+    row = next(r for r in rep.rows if r["asin"] == "B0MFRFLD01")
+    assert row == {"asin": "B0MFRFLD01", "model_id": "ecoflow-delta-2", "rule": "model-field", "confidence": 0.91}
+    assert conn.rows["B0MFRFLD01"]["category_confidence"] == 0.9
+    assert rep.reasons["model-field"] == 1 and rep.reasons["capacity-mismatch"] == 1
+    assert sum(n for k, n in rep.reasons.items() if k.startswith("lane:")) + rep.reasons["accessory"] == 1
+    assert rep.to_dict()["model_fields"] == {"enabled": True, "resource_refused": 0}
+    blob = json.dumps(rep.to_dict()) + json.dumps(state) + json.dumps(conn.executed, default=str)
+    assert FIELD_SENTINEL not in blob and SENTINEL not in blob and FIELD_SENTINEL not in caplog.text
+
+
+def test_model_fields_off_ask_for_and_read_nothing_more():
+    conn = FakeConn([{"asin": a, "kind": None} for a in FIELD_ITEMS])
+    client = ResourceCreators(FIELD_ITEMS)
+    rep, _ = run_phase(build(model_first={"enabled": False}), client, conn)
+    assert client.resources == [("getItems", MP.MATCH_RESOURCES)]
+    assert rep.linked == 0 and rep.reasons["no-designation"] >= 1
+    assert rep.to_dict()["model_fields"] == {"enabled": False, "resource_refused": 0}
+
+
+def test_model_first_reads_the_fields_of_search_results():
+    searches = {"EcoFlow DELTA 2": [
+        raw_item_mfr("B0MFRSRCH1", "EF ECOFLOW Portable Power Station 1024Wh LiFePO4, 1800W AC Output",
+                     brand="EF ECOFLOW", model="DELTA 2", part=f"{FIELD_SENTINEL}")]}
+    rows = model_rows(linked=[m for m in MODEL_IDS if m != "ecoflow-delta-2"])
+    conn = FakeConn(models=rows)
+    client = ResourceCreators(searches=searches)
+    rep, state = run_phase(build(asin_first={"enabled": False}, model_fields={"enabled": True}), client, conn)
+    assert client.resources == [("searchItems", amazon_creators.SEARCH_RESOURCES + (MP.MANUFACTURE_INFO,))]
+    assert conn.rows["B0MFRSRCH1"]["model_id"] == "ecoflow-delta-2" and rep.inserted == 1
+    assert rep.rows[-1]["rule"] == "model-field"
+    assert FIELD_SENTINEL not in json.dumps(rep.to_dict()) + json.dumps(state)
+
+
+def test_a_refused_manufacture_info_resource_is_dropped_for_the_run():
+    rows = model_rows(linked=[m for m in MODEL_IDS if m != "bluetti-ac180p"])
+    conn = FakeConn([{"asin": "B0DELTA3P1"}], models=rows)
+    client = ResourceCreators(ITEMS, searches=SEARCHES, refuse_fields=True)
+    rep, state = run_phase(build(model_fields={"enabled": True}), client, conn)
+    assert client.resources == [("getItems", MP.MATCH_RESOURCES + (MP.MANUFACTURE_INFO,)),
+                                ("getItems", MP.MATCH_RESOURCES),
+                                ("searchItems", amazon_creators.SEARCH_RESOURCES)]
+    assert rep.calls == len(client.calls) == 3 and rep.request_errors == 0
+    assert rep.to_dict()["model_fields"] == {"enabled": True, "resource_refused": 1}
+    assert conn.rows["B0DELTA3P1"]["model_id"] == "ecoflow-delta-3-plus"
+    assert conn.rows["B0AC180P01"]["model_id"] == "bluetti-ac180p"
+    assert "bluetti-ac180p" in state["match"]["models_queried"]
+    # model-first alone: the same model is searched again without the fields
+    client = ResourceCreators(searches=SEARCHES, refuse_fields=True)
+    rep, state = run_phase(build(asin_first={"enabled": False}, model_fields={"enabled": True}), client,
+                           FakeConn(models=rows))
+    assert [c[1] for c in client.calls] == ["BLUETTI AC180P", "BLUETTI AC180P"] and rep.linked == 1
+    # no call left for the repeat: the model waits for the next run, not retry_hours
+    rep, state = run_phase(build(asin_first={"enabled": False}, model_fields={"enabled": True}),
+                           ResourceCreators(searches=SEARCHES, refuse_fields=True), FakeConn(models=rows),
+                           allowed=1)
+    assert rep.calls == 1 and rep.stopped_reason == "max-calls"
+    assert "bluetti-ac180p" not in state["match"].get("models_queried", {})
+
+
+def test_other_request_errors_are_not_taken_for_a_refused_resource():
+    rows = model_rows(linked=[m for m in MODEL_IDS if m != "bluetti-ac180p"])
+    rep, state = run_phase(build(asin_first={"enabled": False}, model_fields={"enabled": True}),
+                           FakeCreators(searches=SEARCHES, search_status={"BLUETTI AC180P": 400}),
+                           FakeConn(models=rows))
+    assert rep.request_errors == 1 and rep.model_fields_refused == 0
+    assert "bluetti-ac180p" in state["match"]["models_queried"]
+
+
+def test_brand_census_counts_our_keys_only():
+    title = "Portable Power Station 1024Wh LiFePO4, 1800W AC Output"
+    items = {
+        "B0CENSUS01": raw_item("B0CENSUS01", title, brand=f"EcoFlow Official Store {BRAND_SENTINEL}"),
+        "B0CENSUS02": raw_item("B0CENSUS02", title, brand=f"Zorgo {BRAND_SENTINEL}"),
+        "B0CENSUS03": raw_item("B0CENSUS03", title, brand=f"Jackery-EcoFlow {BRAND_SENTINEL}"),
+        "B0DELTA3P1": ITEMS["B0DELTA3P1"],
+    }
+    conn = FakeConn([{"asin": a} for a in items])
+    cfg = build(model_first={"enabled": False},
+                brand_census={"enabled": True, "keys": ["EcoFlow", "Jackery", "BLUETTI"]})
+    rep, state = run_phase(cfg, FakeCreators(items), conn)
+    assert rep.to_dict()["brand_census"] == {"listings": 3,
+                                             "counts": {"EcoFlow": 2, "Jackery": 1, "BLUETTI": 0, "none": 1}}
+    assert rep.linked == 1 and rep.reasons["brand-unknown"] == 3
+    assert BRAND_SENTINEL not in json.dumps(rep.to_dict()) + json.dumps(state)
+    rep, _ = run_phase(build(model_first={"enabled": False}), FakeCreators(items),
+                       FakeConn([{"asin": a} for a in items]))
+    assert rep.to_dict()["brand_census"] is None
+
+
+def test_bundle_no_kit_rows_carry_our_signature():
+    items = {"B0BUNDLE01": raw_item("B0BUNDLE01", "EF ECOFLOW DELTA 3 Max Plus Solar Generator with 220W Bifacial "
+                                                  "Solar Panel, 2048Wh", brand="EF ECOFLOW")}
+    conn = FakeConn([{"asin": "B0BUNDLE01", "kind": "kit"}])
+    rep, _ = run_phase(build(model_first={"enabled": False}), FakeCreators(items), conn)
+    assert rep.rows == [{"asin": "B0BUNDLE01", "model_id": None, "rule": "bundle-no-kit", "confidence": 0.0,
+                         "bundle": {"station_id": "ecoflow-delta-3-max-plus", "panels": {"220": 1},
+                                    "battery": False, "panel_ids": [], "battery_ids": []}}]
+    assert SENTINEL not in json.dumps(rep.to_dict())
 
 
 # ---------------------------------------------------------------------------
