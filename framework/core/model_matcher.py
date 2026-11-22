@@ -390,6 +390,10 @@ class ModelRecord:
     capacity_wh: Optional[float] = None
     power_w: Optional[float] = None
     components: tuple[tuple[Any, int], ...] = ()
+    #: Kit rows only: the maker's bundle-family names (rule 12). Taken from an
+    #: explicit ``family_aliases`` column, never from ``aliases``: ordinary kit
+    #: aliases are not family names and must not force the bundle path.
+    family_aliases: tuple[str, ...] = ()
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "ModelRecord":
@@ -416,7 +420,8 @@ class ModelRecord:
                    model_numbers=_texts(row.get("model_number")),
                    brand_aliases=_texts(row.get("brand_aliases")),
                    capacity_wh=_num(row.get("capacity_wh")), power_w=_num(row.get("power_w")),
-                   components=tuple(pairs))
+                   components=tuple(pairs),
+                   family_aliases=_texts(row.get("family_aliases")))
 
 
 @dataclass(frozen=True)
@@ -750,9 +755,9 @@ class ModelIndex:
         for kid in b.kits:
             info = self._kits.get(kid)
             rec = self.records[kid]
-            if info is None or not rec.aliases:
+            if info is None or not rec.family_aliases:
                 continue
-            for part in _name_parts(rec.aliases):
+            for part in _name_parts(rec.family_aliases):
                 if self.occurrences(b.key, tokenize(part), family=False):
                     continue
                 for d in designations_of((part,), brand_prefixes=brand_prefixes, codes_from_parens=False)[0]:

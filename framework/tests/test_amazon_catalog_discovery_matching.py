@@ -976,8 +976,10 @@ def test_bundle_no_kit_rows_carry_our_signature():
     conn = FakeConn([{"asin": "B0BUNDLE01", "kind": "kit"}])
     rep, _ = run_phase(build(model_first={"enabled": False}), FakeCreators(items), conn)
     assert rep.rows == [{"asin": "B0BUNDLE01", "model_id": None, "rule": "bundle-no-kit", "confidence": 0.0,
-                         "bundle": {"station_id": "ecoflow-delta-3-max-plus", "panels": {"220": 1},
-                                    "battery": False, "panel_ids": [], "battery_ids": []}}]
+                         "bundle": {"station_id": "ecoflow-delta-3-max-plus",
+                                    "panel_ids": [], "battery_ids": []}}]
+    # Wattages, counts and battery flags are read from the title: never persisted.
+    assert "panels" not in rep.rows[0]["bundle"] and "battery" not in rep.rows[0]["bundle"]
     assert SENTINEL not in json.dumps(rep.to_dict())
 
 

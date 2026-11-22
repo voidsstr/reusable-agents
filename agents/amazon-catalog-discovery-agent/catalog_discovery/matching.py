@@ -188,7 +188,11 @@ class MatchReport:
             row = {"asin": asin, "model_id": model_id, "rule": rule,
                    "confidence": round(float(confidence or 0.0), 4)}
             if bundle is not None:
-                row["bundle"] = bundle.to_dict()     # our ids and derived counts only
+                # Our model ids only: wattages, counts and battery flags are
+                # read from the listing title, so they never leave memory.
+                row["bundle"] = {"station_id": bundle.station_id,
+                                 "panel_ids": list(bundle.panel_ids),
+                                 "battery_ids": list(bundle.battery_ids)}
             self.rows.append(row)
 
     def products_model_matched_pct(self, *, dry_run: bool) -> Optional[float]:

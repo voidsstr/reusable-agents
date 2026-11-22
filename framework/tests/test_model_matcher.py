@@ -443,7 +443,7 @@ def _index(patch=None):
 @pytest.fixture(scope="module")
 def fam():
     # Kit aliases are the maker's bundle-family names (rule 12).
-    return _index({KIT_J1000P_AIR2: {"aliases": ["Solar Generator 1000 Plus"]}})
+    return _index({KIT_J1000P_AIR2: {"family_aliases": ["Solar Generator 1000 Plus"]}})
 
 
 FAMILY_CASES = [
@@ -472,14 +472,14 @@ def test_bundle_family_index_rules(fam, idx):
     assert fam.brands["jackery"].family == {"solargenerator1000plus": {J1000P}}
     assert not idx.brands["jackery"].family     # the fixture's kits carry no family alias
     # an alias holding one of our designations, a maker's name or no number is not a family name
-    other = _index({KIT_J1000P_AIR2: {"aliases": ["Explorer 1000 Plus Solar Generator", "Jackery",
+    other = _index({KIT_J1000P_AIR2: {"family_aliases": ["Explorer 1000 Plus Solar Generator", "Jackery",
                                                   "Solar Generator Bundle Deluxe"]}})
     assert not other.brands["jackery"].family
     assert M.match("Jackery", "Jackery Explorer 1000 Plus Solar Generator, 1264Wh LiFePO4",
                    other).model_id == J1000P
     # one family name on kits of two stations: ambiguous
-    two = _index({KIT_J1000P_AIR2: {"aliases": ["Solar Generator 9000"]},
-                  KIT_X2000V2_200: {"aliases": ["Solar Generator 9000"]}})
+    two = _index({KIT_J1000P_AIR2: {"family_aliases": ["Solar Generator 9000"]},
+                  KIT_X2000V2_200: {"family_aliases": ["Solar Generator 9000"]}})
     assert M.match("Jackery", "Jackery Solar Generator 9000 with 2 x SolarSaga 100 Air",
                    two).reason_code == "ambiguous"
     # without the alias the station after 'with' is still a bundled part
