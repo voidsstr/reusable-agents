@@ -1,4 +1,4 @@
-# keep-the-lights-on: system config for RuntimePicks (runtimepicks.com).
+# keep-the-lights-on: system config for SolarGeneratorPicks (solargeneratorpicks.com).
 #
 # The runbook is reusable-agents .claude/skills/keep-the-lights-on/SKILL.md;
 # every value for this site lives here (template: the skill's
@@ -26,7 +26,7 @@
 
 system: runtimepicks
 type: site
-display_name: "RuntimePicks (runtimepicks.com): portable power stations, solar kits and their runtimes"
+display_name: "SolarGeneratorPicks (solargeneratorpicks.com): portable power stations, solar kits and their runtimes"
 
 # ── North star ──
 # Success is people who reach Amazon from this site and buy, measured as
@@ -72,7 +72,7 @@ db:
 
 # ── Live URLs to HTTP-probe (homepage and sitemap must answer 200) ──
 # The serving host is site.json `canonicalOrigin`: the Azure address until the
-# bind (noindexed staging, launch plan §3.1), https://runtimepicks.com after it
+# bind (noindexed staging, launch plan §3.1), https://solargeneratorpicks.com after it
 # (§3.3 step 1). Switch every URL in this file in the same commit as site.json;
 # agents/check_configs.py fails while they differ. After the bind the Azure
 # address answers 301, so probing it would read as down.
@@ -188,7 +188,7 @@ catalog_health:
       sql: "select count(*)::int from pg_stat_activity"
       expect_max: 160
       owner_class: shared-db
-      note: "Server-wide sessions on nscappsdb (every database). Launch plan B.9 acceptance: peak <= 160. Above it: stop the RuntimePicks timers first (they are the newcomers), then escalate."
+      note: "Server-wide sessions on nscappsdb (every database). Launch plan B.9 acceptance: peak <= 160. Above it: stop the SolarGeneratorPicks timers first (they are the newcomers), then escalate."
     - name: runtimepicks_connections
       db: runtimepicks
       sql: "select count(*)::int from pg_stat_activity where datname = current_database()"
@@ -329,7 +329,7 @@ catalog_health:
       metric: creators_calls_all_consumers_today
       expect_max: 7600
       owner_class: creators-budget
-      note: "Launch plan §5: alert when the shared credential's day total (every consumer) passes 7,600 of 8,000. RuntimePicks takes no more than its default shares during Black Friday."
+      note: "Launch plan §5: alert when the shared credential's day total (every consumer) passes 7,600 of 8,000. SolarGeneratorPicks takes no more than its default shares during Black Friday."
     - name: discovery_budget_overrun
       agent: runtimepicks-amazon-catalog-discovery
       metric: budget_overrun_calls
@@ -493,9 +493,9 @@ scheduled_checks:
     note: "S11: deploy-gate state (the sweep reads it every tick: status, signature, red_since). Red: SKILL §11.D. Never deploy around the gate."
 
 # ── SpecPicks impact watch (launch plan B.8 / §10 risk 8; design §4, S11) ──
-# Seven days from the day the RuntimePicks agents are registered (A1), once a
-# day: RuntimePicks shares nscappsdb, the Creators credential and the gate host
-# with SpecPicks' money path. A breach: stop the RuntimePicks timers first,
+# Seven days from the day the SolarGeneratorPicks agents are registered (A1), once a
+# day: SolarGeneratorPicks shares nscappsdb, the Creators credential and the gate host
+# with SpecPicks' money path. A breach: stop the SolarGeneratorPicks timers first,
 # then escalate with the numbers.
 spillover_watch:
   starts: "the day the runtimepicks agents are registered (launch step A1)"
@@ -513,7 +513,7 @@ spillover_watch:
       max_ratio_to_baseline: 1.5
     - name: nscappsdb_cpu_max_pct
       cmd: "az monitor metrics list --resource <nscappsdb resource id> --metric cpu_percent --interval PT1H --aggregation Maximum --offset 24h -o table"
-      note: "Hourly CPU maximum of the shared server (166 of 182 hours were >= 90% before RuntimePicks). Read-only; compare with the baseline. The scale trigger is a D4ds resize (+$147 a month), an operator decision."
+      note: "Hourly CPU maximum of the shared server (166 of 182 hours were >= 90% before SolarGeneratorPicks). Read-only; compare with the baseline. The scale trigger is a D4ds resize (+$147 a month), an operator decision."
     - name: nscappsdb_peak_connections
       note: "catalog_health.nscappsdb_connections every tick; the watch keeps the day's maximum (<= 160)."
     - name: creators_day_total
