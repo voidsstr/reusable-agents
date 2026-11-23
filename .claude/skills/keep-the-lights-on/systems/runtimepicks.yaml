@@ -77,10 +77,10 @@ db:
 # agents/check_configs.py fails while they differ. After the bind the Azure
 # address answers 301, so probing it would read as down.
 urls:
-  homepage: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/
-  sitemap: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/sitemap.xml
-  health: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/health
-  llms: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/llms.txt
+  homepage: https://solargeneratorpicks.com/
+  sitemap: https://solargeneratorpicks.com/sitemap.xml
+  health: https://solargeneratorpicks.com/health
+  llms: https://solargeneratorpicks.com/llms.txt
 
 # ── Escalation recipient ──
 # The fleet operator address of the recipient policy (SKILL §6; reusable-agents
@@ -470,7 +470,7 @@ scheduled_checks:
     cmd: >-
       cd /home/voidsstr/development/reusable-agents &&
       python3 -m framework.cli.content_policy_scan --rule-set electrical --rule-set electrical-year1 --rule-set medical
-      --base https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io --sitemap --max-pages 300 --pause 1 --quiet
+      --base https://solargeneratorpicks.com --sitemap --max-pages 300 --pause 1 --quiet
       --report-json ~/.reusable-agents/ktlo-work/runtimepicks-content-policy.json
     expect: "exit 0"
     note: "S11: a daily content_policy crawl of the live pages (GET only, same host, never /r/ or /api/). Exit 1 = a reject-level violation reached a live page: escalate with the report (the deploy gate and the publish gate should have caught it). Exit 3 = pages unreadable: check the site first. --base follows site.json canonicalOrigin (switch at the bind)."
@@ -524,9 +524,9 @@ functional_tests:
   runner: playwright
   cwd: /home/voidsstr/development/runtimepicks/tests
   target: production
-  base_url: https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io
-  full_cmd: "TEST_URL=https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io npx playwright test --grep @prod-safe --reporter=line --workers=2"
-  smoke_cmd: "TEST_URL=https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io npx playwright test --grep @prod-safe --reporter=line --workers=2"
+  base_url: https://solargeneratorpicks.com
+  full_cmd: "TEST_URL=https://solargeneratorpicks.com npx playwright test --grep @prod-safe --reporter=line --workers=2"
+  smoke_cmd: "TEST_URL=https://solargeneratorpicks.com npx playwright test --grep @prod-safe --reporter=line --workers=2"
   total_tests: 0
   run_every_hours: 24
   run_smoke_after_prod_change: true
