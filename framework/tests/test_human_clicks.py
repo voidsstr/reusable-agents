@@ -690,3 +690,81 @@ def test_attribution_block_tells_the_llm_to_use_recorded_placements():
     block = hc.attribution_prompt_block(attr)
     assert "use these exact values in RECS_JSON `placements`" in block
     assert "pdp-hero" in block
+
+
+# ── seed_scored_days (page seeds count only checker-scored days) ───────────
+
+class _SeqCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params):
+        self.conn.calls.append((sql, list(params)))
+
+    def fetchone(self):
+        return (self.conn.scored,)
+
+    def fetchall(self):
+        return self.conn.rows
+
+
+class _SeqConn:
+    def __init__(self, scored, rows):
+        self.scored, self.rows, self.calls = scored, rows, []
+
+    def cursor(self):
+        return _SeqCursor(self)
+
+
+SCORED = {"seed_scored_days": {"reason_col": "bot_reason",
+                               "reasons": ["checker-a", "checker-b"],
+                               "tz": "America/Los_Angeles", "lookback_days": 14}}
+
+
+def test_seed_scored_days_off_by_default():
+    spec = hc.resolve_spec({"referer_col": "referer"}, config={})
+    assert spec["seed_scored_days"] is None
+    sql, params = hc.build_breakdown_query(spec, table="clicks", window_days=30,
+                                           group_col="referer")
+    assert "_t < %s" not in sql
+    assert sql.count("%s") == len(params)
+
+
+def test_seed_scored_days_caps_page_counts_at_last_scored_day():
+    from zoneinfo import ZoneInfo
+    spec = hc.resolve_spec(hc._merge({"referer_col": "referer"}, SCORED), config={})
+    conn = _SeqConn(date(2026, 11, 21), [("human", "/blog/a", 4)])
+    out = hc.human_click_paths(conn, spec, table="clicks", group_col="referer")
+    assert out == [{"path": "/blog/a", "clicks": 4}]
+    (probe_sql, probe_params), (sql, params) = conn.calls
+    assert "bot_reason = ANY(%s)" in probe_sql
+    assert probe_params == ["America/Los_Angeles", ["checker-a", "checker-b"], 14]
+    assert "_t < %s" in sql and sql.count("%s") == len(params)
+    assert params[-1] == datetime(2026, 11, 22, tzinfo=ZoneInfo("America/Los_Angeles"))
+    # breakdown() (the counts) ignores the key: no probe, no cap
+    conn2 = _SeqConn(date(2026, 11, 21), [("human", 9)])
+    assert hc.breakdown(conn2, spec, table="clicks")["human"] == 9
+    assert len(conn2.calls) == 1 and "_t < %s" not in conn2.calls[0][0]
+
+
+def test_seed_scored_days_nothing_scored_means_no_pages():
+    spec = hc.resolve_spec(hc._merge({"referer_col": "referer"}, SCORED), config={})
+    conn = _SeqConn(None, [("human", "/blog/a", 4)])
+    assert hc.human_counts_by(conn, spec, table="clicks", group_col="referer") == {}
+    assert len(conn.calls) == 1
+
+
+def test_seed_scored_days_needs_reasons_and_valid_ident():
+    spec = hc.resolve_spec({"seed_scored_days": {"reasons": []}}, config={})
+    with pytest.raises(ValueError):
+        hc.human_counts_by(_SeqConn(None, []), spec, table="clicks", group_col="referer")
+    spec = hc.resolve_spec({"seed_scored_days": {"reasons": ["x"], "reason_col": "a;b"}},
+                           config={})
+    with pytest.raises(ValueError):
+        hc.scored_through(_SeqConn(None, []), spec, table="clicks")

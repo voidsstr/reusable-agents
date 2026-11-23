@@ -227,6 +227,21 @@ DEFAULT_SPEC: dict[str, Any] = {
     "extra_datacenter_ip_prefixes": [],
     "exclude_countries": ["SG"],
     "max_clicks_per_ip_day": 20,
+    # Page-ranking callers only (human_counts_by / human_click_paths, the
+    # "which pages do people click from" seed lists): count only days a
+    # later per-row checker has already scored. A checker that runs a day
+    # or more behind (e.g. a GA4 page-view cross-check that sets the bot
+    # flag once GA4 settles) leaves the newest days unscored, and a click
+    # fleet lands there first; seeding audits from those days sends them to
+    # the fleet's pages. Shape:
+    #   {"reason_col": "bot_reason", "reasons": ["<checker reason>", ...],
+    #    "tz": "<checker's day timezone>", "lookback_days": 14}
+    # The last scored day = the latest day (in `tz`) with a row whose
+    # reason_col is one of `reasons`; rows after it are left out. No scored
+    # day in the lookback = nothing is known to be checked = no pages.
+    # Counts (breakdown/count_human) and attribution ignore this key.
+    # None = off (behaviour-preserving).
+    "seed_scored_days": None,
     "stale_browser": {
         "enabled": True,
         # How many majors behind the estimated current release a UA may be
@@ -485,8 +500,12 @@ def _reason_case(spec: Mapping, *, today: Optional[date] = None) -> tuple[str, l
 def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
                           match: Optional[Mapping[str, Any]] = None,
                           today: Optional[date] = None,
-                          group_col: Optional[str] = None) -> tuple[str, list]:
+                          group_col: Optional[str] = None,
+                          until: Optional[datetime] = None) -> tuple[str, list]:
     """SQL returning (verdict, count) rows for clicks in the window.
+
+    `until` (aware datetime) leaves out COUNTED rows at or after it; the
+    velocity rule still sees them (same reasoning as `match`).
 
     `match` narrows the COUNTED rows ({"target": "amazon"}; a list value
     means IN). The velocity window deliberately spans ALL rows of the table
@@ -515,6 +534,9 @@ def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
         else:
             where_match.append(f"{c} = %s")
             mparams.append(v)
+    if until is not None:
+        where_match.append("_t < %s")
+        mparams.append(until)
     max_ipd = int(spec.get("max_clicks_per_ip_day") or 0)
     velocity = (f"WHEN _per_ip_day > {max_ipd} THEN 'velocity' " if max_ipd > 0 else "")
     sql = (
@@ -562,6 +584,44 @@ def count_human(conn, spec: Mapping, *, table: str, window_days: int = 30,
                      match=match)[VERDICT_HUMAN]
 
 
+def scored_through(conn, spec: Mapping, *, table: str) -> Optional[date]:
+    """The last day (in the checker's timezone) that `seed_scored_days`
+    says a later checker has scored, or None when none is in the lookback.
+    A fully clean day leaves no flagged row, so this can lag by a day: that
+    only drops more of the newest clicks, never keeps unscored ones."""
+    cfg = spec.get("seed_scored_days") or {}
+    reasons = [str(r) for r in (cfg.get("reasons") or []) if r]
+    if not reasons:
+        raise ValueError("human_clicks: seed_scored_days needs reasons")
+    tbl = _ident(table, "table")
+    t = _ident(spec.get("time_col"), "time_col")
+    rc = _ident(cfg.get("reason_col") or "bot_reason", "seed_scored_days.reason_col")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT max(({t} AT TIME ZONE %s)::date) FROM {tbl}"
+            f" WHERE {rc} = ANY(%s) AND {t} > now() - make_interval(days => %s)",
+            [str(cfg.get("tz") or "UTC"), reasons, int(cfg.get("lookback_days") or 14)])
+        row = cur.fetchone()
+    if row is None:
+        return None
+    d = row[0] if not isinstance(row, Mapping) else next(iter(row.values()), None)
+    if isinstance(d, datetime):
+        d = d.date()
+    return d if isinstance(d, date) else None
+
+
+def scored_until(conn, spec: Mapping, *, table: str) -> Optional[datetime]:
+    """Start of the first unscored day (aware), or None when nothing is
+    known to be scored. Only meaningful when `seed_scored_days` is set."""
+    from zoneinfo import ZoneInfo
+    d = scored_through(conn, spec, table=table)
+    if d is None:
+        return None
+    n = d + timedelta(days=1)
+    tz = ZoneInfo(str((spec.get("seed_scored_days") or {}).get("tz") or "UTC"))
+    return datetime(n.year, n.month, n.day, tzinfo=tz)
+
+
 def human_counts_by(conn, spec: Mapping, *, table: str, group_col: str,
                     window_days: int = 30,
                     match: Optional[Mapping[str, Any]] = None) -> dict[str, int]:
@@ -569,10 +629,17 @@ def human_counts_by(conn, spec: Mapping, *, table: str, group_col: str,
 
     Same verdicts as :func:`breakdown`; NULL group values come back as "".
     Typical use: human clicks per referring page (`group_col="referer"`).
+    With `seed_scored_days` set, only days a later checker has scored count
+    (none scored = {}).
     """
+    until = None
+    if spec.get("seed_scored_days"):
+        until = scored_until(conn, spec, table=table)
+        if until is None:
+            return {}
     sql, params = build_breakdown_query(spec, table=table,
                                         window_days=window_days, match=match,
-                                        group_col=group_col)
+                                        group_col=group_col, until=until)
     out: dict[str, int] = {}
     with conn.cursor() as cur:
         cur.execute(sql, params)
