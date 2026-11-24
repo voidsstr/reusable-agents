@@ -204,7 +204,7 @@ class CannedModel:
         body += ["", "See [how we calculate](/how-we-calculate) for the formula."]
         asins = [p.rsplit("/", 1)[-1] for p in products]
         return json.dumps({
-            "title": "Canned draft: " + slug.replace("-", " ")[:90], "slug": slug,
+            "title": ("Canned draft: " + slug.replace("-", " "))[:60], "slug": slug,
             "subtitle": "A canned dry-run body built from the facts pack",
             "excerpt": "A canned dry-run draft that links the stations in the facts pack and renders every table "
                        "from the site's own data.",
