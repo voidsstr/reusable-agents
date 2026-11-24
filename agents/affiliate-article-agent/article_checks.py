@@ -80,11 +80,11 @@ def internal_paths(body_md: str, own_hosts: Sequence[str]) -> set[str]:
     return out
 
 
-def _shape(draft: Mapping[str, Any], entry) -> Check:
+def _shape(draft: Mapping[str, Any], entry, max_title: int = MAX_TITLE) -> Check:
     p = []
     if draft.get("slug") != entry.slug:
         p.append(f"slug must be exactly {entry.slug!r} (got {str(draft.get('slug'))[:80]!r})")
-    for k, mx in (("title", MAX_TITLE), ("subtitle", MAX_SUBTITLE), ("excerpt", MAX_EXCERPT), ("body_md", MAX_BODY)):
+    for k, mx in (("title", max_title), ("subtitle", MAX_SUBTITLE), ("excerpt", MAX_EXCERPT), ("body_md", MAX_BODY)):
         if len(str(draft.get(k) or "")) > mx:
             p.append(f"{k} longer than {mx} characters")
     faqs = draft.get("faqs") or []
@@ -177,7 +177,8 @@ def clean_buystrip(draft, settings, store) -> dict:
 
 def run_checks(draft: dict, *, entry, settings, store, facts, scenario, content_pol, claims_policy,
                storage=None) -> CheckReport:
-    checks = [_shape(draft, entry)]
+    from article_prompt import title_max_chars  # the same budget the prompt states
+    checks = [_shape(draft, entry, title_max_chars(settings))]
     for fn in (lambda: _content_policy(draft, content_pol),
                lambda: _claims(draft, facts, scenario, claims_policy),
                lambda: _honesty(draft, settings, storage) if settings.honesty_guard else Check("honesty", True),

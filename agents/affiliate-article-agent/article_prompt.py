@@ -24,6 +24,15 @@ OUTPUT_KEYS = ("title", "slug", "subtitle", "excerpt", "body_md", "faqs", "tags"
                "expected_links")
 
 
+def title_max_chars(settings) -> int:
+    """prompt.title_max_chars (default 110): the guide's title is also its page <title>, so a site whose
+    title tag has a fixed budget sets it there."""
+    try:
+        return max(30, min(160, int((settings.prompt or {}).get("title_max_chars") or 110)))
+    except (TypeError, ValueError):
+        return 110
+
+
 def system_prompt(settings, *, slug: str) -> str:
     pr = settings.prompt or {}
     kinds = settings.placeholder_kinds
@@ -38,7 +47,7 @@ def system_prompt(settings, *, slug: str) -> str:
         "",
         "OUTPUT: return exactly one JSON object and nothing else (no text before or after it, no code fence).",
         "Keys:",
-        "  title: string, at most 110 characters, the question the guide answers",
+        f"  title: string, at most {title_max_chars(settings)} characters, the question the guide answers",
         f"  slug: string, exactly \"{slug}\"",
         "  subtitle: string, at most 200 characters",
         "  excerpt: string, 120-160 characters: the answer in one sentence, with one FACTS figure",
