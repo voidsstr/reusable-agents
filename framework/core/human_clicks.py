@@ -57,6 +57,15 @@ first match names the row's verdict so the breakdown is auditable):
   scanner-referer    referer is attack-scanner exhaust (SQLi probes, .php)
   velocity           survived every per-row rule but its IP produced more
                      than `max_clicks_per_ip_day` such clicks that day
+  burst              survived every rule above, and is one of at least
+                     `burst.min_single_click_ips` visitors (IPs by default)
+                     that each made exactly ONE such click in the same
+                     `burst.window_minutes` bucket on the same placement
+                     (`burst.group_cols`), with no engagement signal
+                     (`burst.engagement`). A click fleet rotates IPs so each
+                     one stays under every per-IP rule, but it fires them at
+                     one placement in a burst; real visitors spread over
+                     pages and hours. OFF by default (see DEFAULT_SPEC).
 
 Everything is DATA, not code: table, column names, regexes, prefixes,
 countries and thresholds come from (lowest to highest precedence)
@@ -242,6 +251,39 @@ DEFAULT_SPEC: dict[str, Any] = {
     # Counts (breakdown/count_human) and attribution ignore this key.
     # None = off (behaviour-preserving).
     "seed_scored_days": None,
+    # Burst rule (offline reporting only; the click table is never written).
+    # Within one `window_minutes` bucket (fixed buckets aligned to the Unix
+    # epoch, so 60 = clock hours in UTC) and one group (`group_cols`, e.g.
+    # ["placement"] or [{"col": "referer", "as_path": true}, "placement"]),
+    # when at least `min_single_click_ips` visitors each made exactly one
+    # click that passed every other rule and showed no engagement, those
+    # clicks are 'burst'. Counting spans every row of the table (like
+    # velocity), not only the `match` rows.
+    #   visitor_col          None = the spec's ip_col; else e.g. a session id
+    #   group_cols           column names (raw value) or {"col", "as_path"}
+    #                        (the path of a URL column). Empty = rule off.
+    #   null_group_eligible  False = a click whose group columns are all
+    #                        empty/NULL is never burst (no placement recorded
+    #                        is not "one placement")
+    #   require_no_engagement True = a click matching any `engagement`
+    #                        condition is never burst and does not count
+    #                        toward the threshold. With no conditions there
+    #                        is no signal to read, so every click counts as
+    #                        unengaged.
+    #   engagement           [{"col", "op", "value"}] OR-ed; op is one of
+    #                        >= > <= < = != in not_null true
+    #                        e.g. {"col": "session_pageviews", "op": ">=",
+    #                        "value": 2}, {"col": "user_id", "op": "not_null"}
+    "burst": {
+        "enabled": False,
+        "window_minutes": 60,
+        "min_single_click_ips": 10,
+        "require_no_engagement": True,
+        "group_cols": [],
+        "null_group_eligible": False,
+        "visitor_col": None,
+        "engagement": [],
+    },
     "stale_browser": {
         "enabled": True,
         # How many majors behind the estimated current release a UA may be
@@ -497,6 +539,126 @@ def _reason_case(spec: Mapping, *, today: Optional[date] = None) -> tuple[str, l
     return "CASE " + " ".join(whens) + " ELSE NULL END", params
 
 
+# ── burst rule ─────────────────────────────────────────────────────────────
+
+VERDICT_BURST = "burst"
+_BURST_CMP_OPS = {">=", ">", "<=", "<", "=", "!="}
+_BURST_OPS = _BURST_CMP_OPS | {"in", "not_null", "true"}
+
+
+def burst_config(spec: Mapping) -> Optional[dict]:
+    """The normalized burst rule, or None when it is off (disabled, no
+    group columns, or a non-positive window / threshold)."""
+    b = spec.get("burst") or {}
+    if not isinstance(b, Mapping) or not b.get("enabled"):
+        return None
+    try:
+        window = int(b.get("window_minutes") or 0)
+        n = int(b.get("min_single_click_ips") or 0)
+    except (TypeError, ValueError):
+        return None
+    groups: list[tuple[str, bool]] = []
+    for g in b.get("group_cols") or []:
+        if isinstance(g, Mapping):
+            groups.append((_ident(g.get("col"), "burst.group_cols"), bool(g.get("as_path"))))
+        else:
+            groups.append((_ident(g, "burst.group_cols"), False))
+    if window <= 0 or n <= 0 or not groups:
+        return None
+    eng: list[tuple[str, str, Any]] = []
+    if b.get("require_no_engagement", True):
+        for c in b.get("engagement") or []:
+            if not isinstance(c, Mapping):
+                continue
+            op = str(c.get("op") or "").strip().lower()
+            if op not in _BURST_OPS:
+                raise ValueError(f"human_clicks: invalid burst.engagement op {op!r}")
+            eng.append((_ident(c.get("col"), "burst.engagement col"), op, c.get("value")))
+    vc = b.get("visitor_col")
+    return {"window_s": window * 60, "min_ips": n, "groups": groups,
+            "null_group_eligible": bool(b.get("null_group_eligible")),
+            "visitor_col": _ident(vc, "burst.visitor_col") if vc else None,
+            "engagement": eng}
+
+
+def _burst_w_cols(spec: Mapping, cfg: Mapping) -> tuple[str, list]:
+    """Extra `w` CTE columns: _vk (visitor), _bkt (bucket), _bg (group key,
+    NULL = ineligible), _eng (engaged)."""
+    t = _ident(spec.get("time_col"), "time_col")
+    ip = _ident(spec.get("ip_col"), "ip_col")
+    vk = (f"CAST({cfg['visitor_col']} AS text)" if cfg["visitor_col"]
+          else f"split_part(CAST({ip} AS text), '/', 1)")
+    parts = [_path_sql(c) if as_path else f"COALESCE(CAST({c} AS text), '')"
+             for c, as_path in cfg["groups"]]
+    key = "concat_ws(chr(31), " + ", ".join(parts) + ")"
+    if not cfg["null_group_eligible"]:
+        key = f"CASE WHEN concat({', '.join(parts)}) = '' THEN NULL ELSE {key} END"
+    conds, params = [], []
+    for col, op, val in cfg["engagement"]:
+        if op == "not_null":
+            conds.append(f"{col} IS NOT NULL")
+        elif op == "true":
+            conds.append(f"COALESCE({col}, FALSE)")
+        elif op == "in":
+            conds.append(f"COALESCE(CAST({col} AS text) = ANY(%s), FALSE)")
+            params.append([str(v) for v in _values(val)])
+        else:
+            conds.append(f"COALESCE({col} {op} %s, FALSE)")
+            params.append(val)
+    eng = "(" + " OR ".join(conds) + ")" if conds else "FALSE"
+    sql = (f", {vk} AS _vk, floor(extract(epoch FROM {t}) / {int(cfg['window_s'])})::bigint AS _bkt,"
+           f" {key} AS _bg, {eng} AS _eng")
+    return sql, params
+
+
+def _burst_pred(cfg: Mapping, sfx: str = "") -> str:
+    """Row is burst (given it already passed the per-row rules)."""
+    return (f"(_pb{sfx} = 1 AND NOT _eng AND _bg IS NOT NULL"
+            f" AND _bn{sfx} >= {int(cfg['min_ips'])})")
+
+
+def _burst_bn(alive: str, sfx: str = "") -> str:
+    return (f"COUNT(*) FILTER (WHERE {alive} AND _pb{sfx} = 1 AND NOT _eng"
+            f" AND _bg IS NOT NULL) OVER (PARTITION BY _bkt, _bg) AS _bn{sfx}")
+
+
+def burst_flags(rows: Iterable[Mapping], spec: Mapping) -> set[int]:
+    """Python mirror of the burst rule, for tests and offline audits.
+
+    `rows`: [{"t": datetime, "ip": str, "group": tuple|str|None,
+    "engaged": bool, "passed": bool}] where "passed" = survived every
+    earlier rule (per-row and velocity) and "group" holds the group-column
+    values. Returns the indices of rows the rule flags."""
+    cfg = burst_config(spec)
+    if cfg is None:
+        return set()
+    rows = list(rows)
+
+    def _key(g: Any) -> Optional[tuple]:
+        vals = tuple("" if v is None else str(v)
+                     for v in (g if isinstance(g, (list, tuple)) else (g,)))
+        return None if (not cfg["null_group_eligible"] and not "".join(vals)) else vals
+
+    def _bkt(r: Mapping) -> int:
+        return int((_as_utc(r["t"]).timestamp()) // cfg["window_s"])
+
+    per_ip: dict[tuple, int] = {}
+    for r in rows:
+        if r.get("passed", True):
+            k = (str(r.get("ip")), _bkt(r))
+            per_ip[k] = per_ip.get(k, 0) + 1
+    cand = [i for i, r in enumerate(rows)
+            if r.get("passed", True) and per_ip[(str(r.get("ip")), _bkt(r))] == 1
+            and not (cfg["engagement"] and r.get("engaged"))
+            and _key(r.get("group")) is not None]
+    per_grp: dict[tuple, int] = {}
+    for i in cand:
+        k = (_bkt(rows[i]), _key(rows[i].get("group")))
+        per_grp[k] = per_grp.get(k, 0) + 1
+    return {i for i in cand
+            if per_grp[(_bkt(rows[i]), _key(rows[i].get("group")))] >= cfg["min_ips"]}
+
+
 def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
                           match: Optional[Mapping[str, Any]] = None,
                           today: Optional[date] = None,
@@ -539,26 +701,35 @@ def build_breakdown_query(spec: Mapping, *, table: str, window_days: int,
         mparams.append(until)
     max_ipd = int(spec.get("max_clicks_per_ip_day") or 0)
     velocity = (f"WHEN _per_ip_day > {max_ipd} THEN 'velocity' " if max_ipd > 0 else "")
+    bcfg = burst_config(spec)
+    bw, bparams, bv, bcte, burst, src = "", [], "", "", "", "v"
+    if bcfg:
+        bw, bparams = _burst_w_cols(spec, bcfg)
+        bv = ", COUNT(*) FILTER (WHERE _reason IS NULL) OVER (PARTITION BY _vk, _bkt) AS _pb"
+        alive = "_reason IS NULL" + (f" AND _per_ip_day <= {max_ipd}" if max_ipd > 0 else "")
+        bcte = f"), b AS ( SELECT *, {_burst_bn(alive)} FROM v"
+        burst = f"WHEN {_burst_pred(bcfg)} THEN '{VERDICT_BURST}' "
+        src = "b"
     sql = (
         "WITH w AS ("
         f" SELECT split_part(CAST({ip} AS text), '/', 1) AS _ip, {t} AS _t,"
-        f" {reason} AS _reason{sel_match}"
+        f" {reason} AS _reason{sel_match}{bw}"
         f" FROM {tbl}"
         f" WHERE {t} > now() - make_interval(days => %s)"
         "), v AS ("
         " SELECT *, COUNT(*) FILTER (WHERE _reason IS NULL)"
         " OVER (PARTITION BY _ip, (_t AT TIME ZONE 'UTC')::date) AS _per_ip_day"
-        " FROM w"
-        ")"
+        f"{bv} FROM w"
+        f"{bcte})"
         " SELECT CASE WHEN _reason IS NOT NULL THEN _reason "
-        f"{velocity}ELSE '{VERDICT_HUMAN}' END AS verdict,"
+        f"{velocity}{burst}ELSE '{VERDICT_HUMAN}' END AS verdict,"
         + (" _grp," if grp else "")
         + " COUNT(*)"
-        " FROM v"
+        f" FROM {src}"
         + (" WHERE " + " AND ".join(where_match) if where_match else "")
         + (" GROUP BY 1, 2 ORDER BY 3 DESC" if grp else " GROUP BY 1 ORDER BY 2 DESC")
     )
-    return sql, rparams + [int(window_days)] + mparams
+    return sql, rparams + bparams + [int(window_days)] + mparams
 
 
 def breakdown(conn, spec: Mapping, *, table: str, window_days: int = 30,
@@ -802,34 +973,49 @@ def build_trend_query(spec: Mapping, *, table: str, windows: Iterable[int] = (7,
         grp = "NULL::text"
 
     max_ipd = int(spec.get("max_clicks_per_ip_day") or 0)
+    bcfg = burst_config(spec)
+    bw, bwparams = _burst_w_cols(spec, bcfg) if bcfg else ("", [])
     vcols, hcols, vparams, hparams = [], [], [], []
+    bcols, bparams = [], []
     for i, w in enumerate(wins):
         recent = "_t > now() - make_interval(days => %s)"
+        alive = f"_reason IS NULL AND {recent}"
         if max_ipd > 0:
             vcols.append(f"COUNT(*) FILTER (WHERE _reason IS NULL AND {recent})"
                          f" OVER (PARTITION BY _ip, (_t AT TIME ZONE 'UTC')::date) AS _v{i}")
             vparams.append(w)
-            hcols.append(f"COUNT(*) FILTER (WHERE _reason IS NULL AND {recent}"
-                         f" AND _v{i} <= {max_ipd}) AS h{i}")
+            alive += f" AND _v{i} <= {max_ipd}"
+        if bcfg:
+            # Per window, like velocity: a window's first bucket is cut at
+            # its start exactly as breakdown(window_days=W) cuts it.
+            vcols.append(f"COUNT(*) FILTER (WHERE _reason IS NULL AND {recent})"
+                         f" OVER (PARTITION BY _vk, _bkt) AS _pb{i}")
+            vparams.append(w)
+            bcols.append(_burst_bn(alive, str(i)))
+            bparams.extend([w])
+            hcols.append(f"COUNT(*) FILTER (WHERE {alive}"
+                         f" AND NOT {_burst_pred(bcfg, str(i))}) AS h{i}")
         else:
-            hcols.append(f"COUNT(*) FILTER (WHERE _reason IS NULL AND {recent}) AS h{i}")
+            hcols.append(f"COUNT(*) FILTER (WHERE {alive}) AS h{i}")
         hparams.append(w)
     sel_match = "".join(f", {c}" for c in mcols)
     sql = (
         "WITH w AS ("
         f" SELECT split_part(CAST({ip} AS text), '/', 1) AS _ip, {t} AS _t,"
-        f" {reason} AS _reason{sel_match}, {tmpl} AS _tmpl, {grp} AS _grp"
+        f" {reason} AS _reason{sel_match}, {tmpl} AS _tmpl, {grp} AS _grp{bw}"
         f" FROM {tbl}"
         f" WHERE {t} > now() - make_interval(days => %s)"
         "), v AS ("
         " SELECT *" + "".join(f", {c}" for c in vcols) + " FROM w"
-        ")"
+        + ("), b AS ( SELECT *, " + ", ".join(bcols) + " FROM v" if bcols else "")
+        + ")"
         " SELECT _tmpl, _grp, " + ", ".join(hcols) +
-        " FROM v"
+        (" FROM b" if bcols else " FROM v")
         + (" WHERE " + " AND ".join(mwhere) if mwhere else "")
         + " GROUP BY 1, 2"
     )
-    return sql, rparams + tparams + [max(wins)] + vparams + hparams + mparams
+    return sql, (rparams + tparams + bwparams + [max(wins)] + vparams + bparams
+                 + hparams + mparams)
 
 
 def _row_values(row: Any, n: int) -> list:
@@ -911,23 +1097,31 @@ def build_rows_query(spec: Mapping, *, table: str, window_days: int,
     path = _path_sql(_ident(page, "page_col")) if page else "''"
     grp = f"CAST({_ident(group_col, 'group_col')} AS text)" if group_col else "NULL::text"
     max_ipd = int(spec.get("max_clicks_per_ip_day") or 0)
-    where = ["_reason IS NULL"] + ([f"_per_ip_day <= {max_ipd}"] if max_ipd > 0 else []) + mwhere
+    alive = ["_reason IS NULL"] + ([f"_per_ip_day <= {max_ipd}"] if max_ipd > 0 else [])
+    bcfg = burst_config(spec)
+    bw, bparams, bv, bcte, src, bwhere = "", [], "", "", "v", []
+    if bcfg:
+        bw, bparams = _burst_w_cols(spec, bcfg)
+        bv = ", COUNT(*) FILTER (WHERE _reason IS NULL) OVER (PARTITION BY _vk, _bkt) AS _pb"
+        bcte = f"), b AS ( SELECT *, {_burst_bn(' AND '.join(alive))} FROM v"
+        src, bwhere = "b", [f"NOT {_burst_pred(bcfg)}"]
+    where = alive + bwhere + mwhere
     sel_match = "".join(f", {c}" for c in mcols)
     sql = (
         "WITH w AS ("
         f" SELECT split_part(CAST({ip} AS text), '/', 1) AS _ip, {t} AS _t,"
-        f" {reason} AS _reason{sel_match}, {path} AS _path, {grp} AS _grp"
+        f" {reason} AS _reason{sel_match}, {path} AS _path, {grp} AS _grp{bw}"
         f" FROM {tbl}"
         f" WHERE {t} > now() - make_interval(days => %s)"
         "), v AS ("
         " SELECT *, COUNT(*) FILTER (WHERE _reason IS NULL)"
         " OVER (PARTITION BY _ip, (_t AT TIME ZONE 'UTC')::date) AS _per_ip_day"
-        " FROM w"
-        ")"
-        " SELECT _t, _path, _grp FROM v WHERE " + " AND ".join(where) +
+        f"{bv} FROM w"
+        f"{bcte})"
+        f" SELECT _t, _path, _grp FROM {src} WHERE " + " AND ".join(where) +
         f" ORDER BY _t LIMIT {max(1, int(limit))}"
     )
-    return sql, rparams + [int(window_days)] + mparams
+    return sql, rparams + bparams + [int(window_days)] + mparams
 
 
 def _as_utc(v: Any) -> Optional[datetime]:

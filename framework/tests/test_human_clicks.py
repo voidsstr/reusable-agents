@@ -768,3 +768,135 @@ def test_seed_scored_days_needs_reasons_and_valid_ident():
                            config={})
     with pytest.raises(ValueError):
         hc.scored_through(_SeqConn(None, []), spec, table="clicks")
+
+
+# ── burst rule ──────────────────────────────────────────────────────────────
+
+_BURST = {"enabled": True, "window_minutes": 60, "min_single_click_ips": 10,
+          "group_cols": ["placement"],
+          "engagement": [{"col": "session_pageviews", "op": ">=", "value": 2}]}
+
+
+def _burst_spec(**over):
+    b = dict(_BURST, **over)
+    return hc.resolve_spec({"referer_col": "ref", "burst": b}, config={})
+
+
+def _click(ip, minute, group="similar", engaged=False, passed=True, hour=11):
+    return {"t": datetime(2026, 11, 23, hour, tzinfo=timezone.utc) + timedelta(minutes=minute),
+            "ip": ip, "group": group, "engaged": engaged, "passed": passed}
+
+
+def test_burst_is_off_by_default_and_sql_unchanged():
+    spec = hc.resolve_spec({"referer_col": "ref"}, config={})
+    assert spec["burst"]["enabled"] is False
+    assert hc.burst_config(spec) is None
+    fleet = [_click(f"198.51.100.{i}", i) for i in range(30)]
+    assert hc.burst_flags(fleet, spec) == set()
+    for build in (lambda s: hc.build_breakdown_query(s, table="t", window_days=7),
+                  lambda s: hc.build_trend_query(s, table="t", windows=(7, 30)),
+                  lambda s: hc.build_rows_query(s, table="t", window_days=7)):
+        sql, params = build(spec)
+        assert "_bkt" not in sql and "'burst'" not in sql
+    # enabled but no group column = no placement to concentrate on = off
+    assert hc.burst_config(_burst_spec(group_cols=[])) is None
+    assert hc.burst_config(_burst_spec(min_single_click_ips=0)) is None
+
+
+def test_burst_flags_the_single_click_fleet_on_one_placement():
+    spec = _burst_spec()
+    fleet = [_click(f"198.51.100.{i}", i * 4) for i in range(12)]   # 12 IPs, 1 click each, 1 h
+    assert hc.burst_flags(fleet, spec) == set(range(12))
+    # below the threshold: untouched
+    assert hc.burst_flags(fleet[:9], spec) == set()
+
+
+def test_burst_leaves_spread_out_human_clicks_alone():
+    spec = _burst_spec()
+    # one click per IP, but over 12 different hours ...
+    by_hour = [_click(f"198.51.100.{i}", 5, hour=i) for i in range(12)]
+    assert hc.burst_flags(by_hour, spec) == set()
+    # ... or 12 different placements in the same hour
+    by_placement = [_click(f"198.51.100.{i}", i, group=f"p{i}") for i in range(12)]
+    assert hc.burst_flags(by_placement, spec) == set()
+    # no placement recorded (e.g. direct visitors on many pages) is not one placement
+    no_group = [_click(f"198.51.100.{i}", i, group=None) for i in range(30)]
+    assert hc.burst_flags(no_group, spec) == set()
+    assert hc.burst_flags(no_group, _burst_spec(null_group_eligible=True)) == set(range(30))
+
+
+def test_burst_skips_engaged_and_multi_click_visitors():
+    spec = _burst_spec()
+    engaged = [_click(f"198.51.100.{i}", i, engaged=True) for i in range(12)]
+    assert hc.burst_flags(engaged, spec) == set()
+    # with no engagement condition configured there is no signal: all count
+    assert hc.burst_flags(engaged, _burst_spec(engagement=[])) == set(range(12))
+    # engaged visitors do not count toward the threshold either
+    mixed = [_click(f"198.51.100.{i}", i, engaged=i < 4) for i in range(12)]
+    assert hc.burst_flags(mixed, spec) == set()
+    mixed += [_click(f"198.51.100.{i}", i) for i in range(20, 22)]
+    assert hc.burst_flags(mixed, spec) == set(range(4, 14))
+    # an IP with two clicks in the bucket is not a single-click IP
+    doubled = [_click(f"198.51.100.{i}", i) for i in range(10)] + [_click("198.51.100.0", 30)]
+    assert hc.burst_flags(doubled, spec) == set()
+    # clicks that already failed a rule neither count nor get flagged
+    failed = [_click(f"198.51.100.{i}", i, passed=i >= 3) for i in range(12)]
+    assert hc.burst_flags(failed, spec) == set()
+
+
+def test_burst_buckets_are_fixed_windows():
+    spec = _burst_spec(min_single_click_ips=4, window_minutes=30)
+    rows = [_click(f"198.51.100.{i}", m) for i, m in enumerate((1, 10, 20, 29, 31, 40))]
+    assert hc.burst_flags(rows, spec) == {0, 1, 2, 3}
+
+
+def test_burst_breakdown_sql_shape():
+    spec = _burst_spec(engagement=[{"col": "session_pageviews", "op": ">=", "value": 2},
+                                   {"col": "user_id", "op": "not_null"},
+                                   {"col": "via", "op": "in", "value": ["beacon"]}])
+    sql, params = hc.build_breakdown_query(spec, table="t", window_days=7,
+                                           match={"target": "amazon"})
+    assert sql.index("'velocity'") < sql.index("'burst'") < sql.index("'human'")
+    assert "floor(extract(epoch FROM created_at) / 3600)::bigint AS _bkt" in sql
+    assert "OVER (PARTITION BY _vk, _bkt) AS _pb" in sql
+    assert "OVER (PARTITION BY _bkt, _bg) AS _bn" in sql
+    assert "_bn >= 10" in sql and "FROM b" in sql
+    assert "user_id IS NOT NULL" in sql and "COALESCE(session_pageviews >= %s, FALSE)" in sql
+    assert "CASE WHEN concat(" in sql                      # empty group = ineligible
+    assert sql.count("%s") == len(params)
+    assert sql.replace("%s", "").count("%") == 0
+    reason, rparams = hc._reason_case(spec)
+    assert params[len(rparams):] == [2, ["beacon"], 7, "amazon"]
+    # null-group eligibility drops the CASE; page+placement reduces the page to a path
+    sql2, _ = hc.build_breakdown_query(
+        _burst_spec(null_group_eligible=True, engagement=[],
+                    group_cols=[{"col": "ref", "as_path": True}, "placement"]),
+        table="t", window_days=7)
+    assert "CASE WHEN concat(" not in sql2 and "FALSE AS _eng" in sql2
+    assert "regexp_replace(COALESCE(CAST(ref AS text)" in sql2
+
+
+def test_burst_trend_and_rows_queries_apply_the_same_rule():
+    spec = _burst_spec()
+    sql, params = hc.build_trend_query(spec, table="t", windows=(7, 30),
+                                       match={"source": "amazon"})
+    assert sql.count("OVER (PARTITION BY _vk, _bkt)") == 2       # per window
+    assert "_bn0 >= 10" in sql and "_bn1 >= 10" in sql and " FROM b " in sql
+    assert sql.count("%s") == len(params)
+    assert params[-1] == "amazon"
+    rsql, rparams = hc.build_rows_query(spec, table="t", window_days=7)
+    assert "NOT (_pb = 1 AND NOT _eng AND _bg IS NOT NULL AND _bn >= 10)" in rsql
+    assert rsql.count("%s") == len(rparams)
+
+
+def test_burst_config_validation_and_profile_override(storage):
+    with pytest.raises(ValueError):
+        hc.burst_config(_burst_spec(group_cols=["placement; drop table t"]))
+    with pytest.raises(ValueError):
+        hc.burst_config(_burst_spec(engagement=[{"col": "x", "op": "~"}]))
+    storage.write_json(hc.CONFIG_KEY, {"by_profile": {"p1": {"burst": {
+        "enabled": True, "group_cols": ["placement"], "min_single_click_ips": 12}}}})
+    on = hc.resolve_spec({}, profile="p1", storage=storage)
+    assert hc.burst_config(on)["min_ips"] == 12
+    assert on["burst"]["window_minutes"] == 60                  # dict merge keeps defaults
+    assert hc.burst_config(hc.resolve_spec({}, profile="p2", storage=storage)) is None
