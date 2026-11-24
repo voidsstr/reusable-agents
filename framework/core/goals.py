@@ -2,7 +2,7 @@
 
 Storage layout:
   agents/<id>/goals/active.json          # current full goal set (validated)
-  agents/<id>/goals/history/<run-ts>.json # snapshot per run (audit trail)
+  agents/<id>/goals/history/<run-ts>.json # per-run snapshot, OFF by default (GOALS_HISTORY_SNAPSHOTS=1)
   agents/<id>/goals/accomplished.jsonl   # append-only log of accomplishments
 
 Convention: every agent in the framework declares goals (3-7 typical).
@@ -34,6 +34,7 @@ fresh measurement, not a stale current.
 """
 from __future__ import annotations
 
+import os
 import json
 import math
 import sys
@@ -527,8 +528,12 @@ def record_goal_progress(
     doc["updated_at"] = _now()
     s.write_json(goals_key(agent_id), doc)
 
-    # Per-run snapshot for audit trail
-    if run_ts:
+    # Per-run snapshot (audit trail). Off by default since 2026-11-24: nothing
+    # reads these, and agents that record progress every minute wrote one full
+    # goal doc per run -- 3.5 TB / 1.1M blobs for backlog-dispatcher-agent
+    # alone, the largest line on the storage bill. active.json and
+    # accomplished.jsonl keep the state and the audit of accomplishments.
+    if run_ts and os.environ.get("GOALS_HISTORY_SNAPSHOTS", "") == "1":
         s.write_json(
             f"agents/{agent_id}/goals/history/{run_ts}.json",
             doc,
