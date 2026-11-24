@@ -60,7 +60,10 @@ agents:
     - runtimepicks-spec-extractor
     - runtimepicks-pick-builder
     - runtimepicks-site-goals-tracker       # not AgentBase: no run-index; check its goal values
-  # After 12-02 (launch plan §6): runtimepicks-article-engine, runtimepicks-shelf-audit-agent,
+    - runtimepicks-article-engine           # live 2026-11-24 (operator): Opus guides, up to 8 a day
+    - runtimepicks-indexnow-submitter       # registered by scripts/l2-day0.sh
+    - runtimepicks-indexnow-bulk            # registered by scripts/l2-day0.sh
+  # Later (launch plan §6): runtimepicks-shelf-audit-agent,
   # runtimepicks-indexnow-submitter / -bulk, runtimepicks-gsc-coverage-auditor. Add them here when registered.
 
 # ── Databases (env-var NAMES in ~/.reusable-agents/secrets.env). The sweep runs
