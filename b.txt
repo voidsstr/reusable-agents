@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en-US">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+<title>Page Not Found | RuntimePicks</title>
+<meta name="description" content="The page you asked for does not exist on this site.">
+<meta name="robots" content="noindex, follow">
+<link rel="canonical" href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/product/%00">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Page Not Found | RuntimePicks">
+<meta property="og:description" content="The page you asked for does not exist on this site.">
+<meta property="og:url" content="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/product/%00">
+<meta property="og:site_name" content="RuntimePicks">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Page Not Found | RuntimePicks">
+<meta name="twitter:description" content="The page you asked for does not exist on this site.">
+<style id="ssr-styles">:root{color-scheme:light dark;--kit-bg:#ffffff;--kit-surface:#f8fafc;--kit-text:#0f172a;--kit-muted:#475569;--kit-border:#e2e8f0;--kit-link:#1d4ed8;--kit-accent:#b45309;--kit-cta-bg:#f59e0b;--kit-cta-text:#111827;--kit-focus:#2563eb;--kit-font:system-ui, -apple-system, "Segoe UI", Roboto, sans-serif}@media (prefers-color-scheme: dark){:root{--kit-bg:#0b1120;--kit-surface:#111827;--kit-text:#e5e7eb;--kit-muted:#9ca3af;--kit-border:#1f2937;--kit-link:#93c5fd;--kit-accent:#fbbf24;--kit-cta-bg:#f59e0b;--kit-cta-text:#111827;--kit-focus:#60a5fa}}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--kit-bg);color:var(--kit-text);font-family:var(--kit-font);font-size:1rem;line-height:1.6;overflow-wrap:break-word}
+img,svg,video{max-width:100%;height:auto}
+a{color:var(--kit-link);text-underline-offset:2px}
+a:hover{text-decoration-thickness:2px}
+:focus-visible{outline:3px solid var(--kit-focus);outline-offset:2px}
+[id]{scroll-margin-top:1rem}
+h1,h2,h3,h4,h5,h6{color:var(--kit-text);line-height:1.25;margin:1.6em 0 .6em}
+h1{font-size:clamp(1.6rem,4.5vw,2.25rem);margin-top:.4em}
+h2{font-size:1.45rem}
+h3{font-size:1.2rem}
+h4,h5,h6{font-size:1.05rem}
+p,ul,ol,dl,blockquote,figure{margin:0 0 1em}
+hr{border:0;border-top:1px solid var(--kit-border);margin:2em 0}
+code,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}
+:not(pre)>code{background:var(--kit-surface);color:var(--kit-text);padding:.1em .35em;border-radius:4px}
+a :not(pre)>code,a>code{background:transparent;color:inherit;padding:0}
+.kit-wrap{width:100%;max-width:72rem;margin:0 auto;padding-left:1rem;padding-right:1rem}
+.kit-skip-link{position:absolute;left:-9999px;top:0;z-index:100;background:var(--kit-bg);color:var(--kit-link);padding:.5rem 1rem}
+.kit-skip-link:focus{left:1rem;top:1rem}
+.kit-header{background:var(--kit-bg);border-bottom:1px solid var(--kit-border)}
+.kit-header-inner{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1.5rem;padding-top:.75rem;padding-bottom:.75rem}
+.kit-brand{color:var(--kit-text);font-weight:700;font-size:1.15rem;text-decoration:none}
+.kit-nav ul{display:flex;flex-wrap:wrap;gap:.25rem 1rem;list-style:none;margin:0;padding:0}
+.kit-nav a{color:var(--kit-link);text-decoration:none}
+.kit-nav a:hover,.kit-nav a[aria-current="page"]{text-decoration:underline}
+.kit-main{display:block;min-width:0;padding-top:1rem;padding-bottom:2.5rem}
+.kit-footer{background:var(--kit-bg);color:var(--kit-muted);border-top:1px solid var(--kit-border);font-size:.875rem;padding:1.5rem 0 2rem}
+.kit-footer a{color:var(--kit-link)}
+.kit-footer ul{list-style:none;margin:0;padding:0}
+.kit-footer li{margin:.3rem 0}
+.kit-footer-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(10rem,1fr));gap:1rem 2rem;margin:1.25rem 0}
+.kit-footer-heading{color:var(--kit-text);font-weight:700;margin:0 0 .4rem}
+.kit-footer-links ul{display:flex;flex-wrap:wrap;gap:.25rem 1.25rem}
+.kit-copyright{color:var(--kit-muted);margin:1rem 0 0}
+.kit-amazon-notice,.kit-earnings-disclosure{color:var(--kit-muted);font-size:.8125rem;line-height:1.5;margin:.5rem 0}
+.kit-earnings-disclosure a{color:var(--kit-muted);text-decoration:underline}
+.kit-earnings-disclosure--top{margin:0 0 1rem}
+.kit-breadcrumb{color:var(--kit-muted);font-size:.875rem;margin:0 0 .75rem}
+.kit-breadcrumb ol{display:flex;flex-wrap:wrap;gap:.25rem;list-style:none;margin:0;padding:0}
+.kit-breadcrumb li+li::before{content:"›";color:var(--kit-muted);margin-right:.25rem}
+.kit-breadcrumb a{color:var(--kit-link)}
+.kit-bc-current{color:var(--kit-muted)}
+.ssr-list{padding-left:1.4em}
+.ssr-list li{margin:.25em 0}
+.ssr-quote{color:var(--kit-text);border-left:4px solid var(--kit-accent);margin:1.25em 0;padding:.25em 0 .25em 1em}
+.ssr-quick-answer-authored{background:var(--kit-surface);color:var(--kit-text);border-left:4px solid var(--kit-accent);border-radius:0 .5rem .5rem 0;margin:0 0 1.5em;padding:.25rem 1rem .5rem}
+.ssr-quick-answer-authored>:first-child{margin-top:.75rem}
+.ssr-quick-answer-authored a{color:var(--kit-text);text-decoration:underline}
+.md-table-wrap{max-width:100%;overflow-x:auto;margin:0 0 1.25em;border:1px solid var(--kit-border);border-radius:.5rem}
+.md-table{width:100%;border-collapse:collapse;font-size:.95rem}
+.md-table th,.md-table td{padding:.55rem .75rem;text-align:left;vertical-align:top;border-bottom:1px solid var(--kit-border)}
+.md-table thead th{background:var(--kit-surface);color:var(--kit-text);font-weight:700}
+.md-table thead th a{color:var(--kit-text);text-decoration:underline}
+.md-table tbody tr:last-child td{border-bottom:0}
+.md-table .md-align-left{text-align:left}
+.md-table .md-align-center{text-align:center}
+.md-table .md-align-right{text-align:right}
+.ssr-code-block{background:#0f172a;border:1px solid #334155;border-radius:.6rem;margin:1.25em 0;overflow:hidden}
+.ssr-code-lang{display:block;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;padding:.45rem .9rem 0}
+.ssr-code{background:#0f172a;color:#e2e8f0;margin:0;padding:.75rem .9rem 1rem;overflow-x:auto;font-size:.86rem;line-height:1.6;white-space:pre}
+.ssr-code code{background:transparent;color:inherit;padding:0;font-size:inherit;white-space:inherit}
+.kit-faq{margin:2rem 0}
+.kit-faq-item{background:var(--kit-bg);color:var(--kit-text);border:1px solid var(--kit-border);border-radius:.5rem;margin:.5rem 0}
+.kit-faq-item summary{color:var(--kit-text);cursor:pointer;font-weight:600;padding:.75rem 1rem}
+.kit-faq-item p{color:var(--kit-text);margin:0;padding:0 1rem .9rem}
+.ssr-amz-cta{display:inline-flex;align-items:center;justify-content:center;gap:.4em;max-width:100%;min-height:44px;padding:.7rem 1.2rem;border-radius:.5rem;background:var(--kit-cta-bg);color:var(--kit-cta-text);font-weight:700;line-height:1.2;text-align:center;text-decoration:none}
+.ssr-amz-cta:visited{color:var(--kit-cta-text)}
+.ssr-amz-cta:hover{color:var(--kit-cta-text);text-decoration:underline}
+.ssr-detail-link{display:inline-flex;align-items:center;min-height:44px;padding:.7rem 1rem;border:1px solid var(--kit-border);border-radius:.5rem;color:var(--kit-link);font-weight:600;text-decoration:none}
+.ssr-detail-link:hover{text-decoration:underline}
+.ssr-price{color:var(--kit-text);font-weight:800}
+.ssr-price-checked{color:var(--kit-muted);font-size:.875em}
+.kit-availability{color:var(--kit-text);font-weight:600}
+.kit-availability--unknown{color:var(--kit-muted);font-weight:400}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+.kit-price-details{font:inherit;font-size:.85em;margin:0 0 0 .3em;padding:0;border:0;background:none;color:inherit;text-decoration:underline dotted;text-underline-offset:2px;cursor:pointer}.kit-price-details:focus-visible{outline:2px solid currentColor;outline-offset:2px}.kit-price-disclaimer{max-width:min(28rem,calc(100vw - 2rem));padding:.75rem 1rem;border:1px solid currentColor;border-radius:.5rem;font-size:.875rem;line-height:1.45}@supports not selector(:popover-open){.kit-price-details{display:none}.kit-price-disclaimer{display:inline;padding:0;border:0;font-size:.8em}}
+:root{--rp-ok:#15803d;--rp-bad:#b91c1c;--rp-warn:#b45309}@media (prefers-color-scheme: dark){:root{--rp-ok:#15803d;--rp-bad:#f87171;--rp-warn:#b45309}}@media (max-width:40rem){.kit-nav{flex:1 1 100%;min-width:0;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}.kit-nav ul{flex-wrap:nowrap;white-space:nowrap;gap:0 1rem}.kit-nav li{flex:none}.kit-nav a{display:inline-block;padding:.35rem 0;font-size:.95rem}}.rp-answer{font-size:1.125rem;line-height:1.55;color:var(--kit-text);margin:0 0 1rem}.rp-answer strong{font-weight:700}.rp-updated{color:var(--kit-muted);font-size:.875rem;margin:-.25rem 0 1.25rem}.rp-section-head{margin:2rem 0 .75rem}.rp-section-head>h2,.rp-section-head>h3{margin:0 0 .25rem}.rp-section-lede{color:var(--kit-muted);margin:0}.rp-num{font-variant-numeric:tabular-nums;white-space:nowrap}.rp-unit{color:var(--kit-muted);font-size:.9em;white-space:nowrap}.rp-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,8.5rem),1fr));gap:.75rem;margin:0 0 1.5rem;padding:0}.rp-stat{min-width:0;background:var(--kit-surface);color:var(--kit-text);border:1px solid var(--kit-border);border-radius:.6rem;padding:.75rem .9rem;margin:0}.rp-stat dt{color:var(--kit-muted);font-size:.8125rem;line-height:1.3;margin:0 0 .25rem}.rp-stat dd{margin:0}.rp-stat-value{color:var(--kit-text);font-size:1.35rem;font-weight:800;line-height:1.2;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.rp-stat .rp-unit{color:var(--kit-muted)}.rp-stat-note{display:block;color:var(--kit-muted);font-size:.8125rem;margin-top:.2rem}.rp-table caption{caption-side:top;text-align:left;padding:.6rem .75rem;font-weight:700}.rp-table td,.rp-table th{overflow-wrap:break-word}.rp-table .rp-cell-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.rp-table tbody th[scope="row"]{font-weight:600;color:var(--kit-text);min-width:10rem}.rp-table td .rp-verdict-block{min-width:13rem}.rp-table td.rp-card-cta{min-width:12rem}.rp-table .rp-cell-num .rp-basis{white-space:normal;min-width:6rem}.rp-table tbody th[scope="row"] a{color:var(--kit-link)}.rp-table thead th{vertical-align:bottom}.rp-table th button.rp-sort{font:inherit;font-weight:700;color:inherit;background:none;border:0;padding:0;min-height:44px;cursor:pointer;text-align:inherit}.rp-table th[aria-sort="ascending"] .rp-sort::after{content:" \2191"}.rp-table th[aria-sort="descending"] .rp-sort::after{content:" \2193"}.rp-table-empty{color:var(--kit-muted);background:var(--kit-surface);border:1px dashed var(--kit-muted);border-radius:.5rem;padding:.75rem 1rem}.rp-table-note{color:var(--kit-muted);font-size:.875rem;margin:-.75rem 0 1.25rem}@media (max-width:40rem){.rp-table{display:block;width:100%}.rp-table caption{display:block}.rp-table thead{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}.rp-table tbody{display:block}.rp-table tbody tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.55rem 1rem;padding:.8rem .75rem;border-bottom:1px solid var(--kit-border)}.rp-table tbody tr:last-child{border-bottom:0}.rp-table tbody th,.rp-table tbody td{display:block;min-width:0;padding:0;border:0;text-align:left;white-space:normal}.rp-table tbody th[scope="row"]{grid-column:1/-1;order:0;min-width:0;font-size:1.05rem}.rp-table tbody td{grid-column:1/-1;order:3}.rp-table tbody td.rp-cell-num{grid-column:auto;text-align:left;white-space:normal}.rp-table tbody td.rp-cell-num[data-label]::before{display:inline;margin:0 .4em 0 0}.rp-table td .rp-verdict-block,.rp-table td.rp-card-cta{min-width:0}.rp-table tbody td.rp-card-lead{order:1}.rp-table tbody td.rp-card-cta{order:2}.rp-table tbody td[data-label]::before{content:attr(data-label);display:block;color:var(--kit-muted);font-size:.8125rem;font-weight:400;margin:0 0 .1rem}}.rp-verdict{display:inline-flex;align-items:center;gap:.4em;max-width:100%;background:var(--kit-surface);color:var(--kit-text);border:1px solid var(--kit-border);border-left:4px solid var(--kit-muted);border-radius:.4rem;padding:.15rem .55rem;font-weight:700;font-size:.9rem;line-height:1.35}.rp-verdict::before{content:"";flex:none;width:.6em;height:.6em;border-radius:50%;border:2px solid var(--kit-muted);background:transparent}.rp-verdict--fits{border-left-color:var(--rp-ok)}.rp-verdict--fits::before{background:var(--rp-ok);border-color:var(--rp-ok)}.rp-verdict--fit-unverified{border-left-color:var(--rp-warn)}.rp-verdict--fit-unverified::before{border-color:var(--rp-warn);border-radius:2px}.rp-verdict--does-not-fit{border-left-color:var(--rp-bad)}.rp-verdict--does-not-fit::before{border-color:var(--rp-bad);border-radius:0;transform:rotate(45deg)}.rp-verdict--not-checked::before{border-style:dashed}.rp-verdict--nowrap{white-space:nowrap}.rp-verdict-block{margin:0 0 .75rem}.rp-assumptions{color:var(--kit-muted);font-size:.875rem;margin:.3rem 0 0;padding-left:1.1em}.rp-assumptions li{margin:.1rem 0}.rp-runtime{color:var(--kit-text);font-weight:700;font-variant-numeric:tabular-nums}.rp-runtime--not-checked,.rp-runtime--over-continuous{font-weight:600;color:var(--kit-muted)}.rp-basis{display:block;color:var(--kit-muted);font-size:.8125rem;font-weight:400}.rp-cta{display:flex;flex-direction:column;align-items:flex-start;gap:.5rem;margin:0 0 1rem;max-width:100%}.rp-cta p{margin:0}.rp-cta .ssr-amz-cta{width:100%;max-width:24rem}.rp-cta-price{color:var(--kit-text)}.rp-cta--soon,.rp-cta--none{background:var(--kit-surface);color:var(--kit-text);border:1px dashed var(--kit-muted);border-radius:.5rem;padding:.65rem .9rem}.rp-cta--soon a,.rp-cta--none a{color:var(--kit-text);text-decoration:underline}@media (min-width:40rem){.rp-cta .ssr-amz-cta{width:auto}}.rp-cta-soon{color:var(--kit-muted);font-size:.875rem}.rp-card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,16rem),1fr));gap:1rem;margin:0 0 1.5rem;padding:0;list-style:none}.rp-card{min-width:0;background:var(--kit-surface);color:var(--kit-text);border:1px solid var(--kit-border);border-radius:.75rem;padding:1rem}.rp-card>:last-child{margin-bottom:0}.rp-card h3{font-size:1.05rem;margin:0 0 .4rem;overflow-wrap:anywhere}.rp-card a{color:var(--kit-text);text-decoration:underline}.rp-card .ssr-amz-cta,.rp-card .ssr-amz-cta:hover,.rp-card .ssr-amz-cta:visited{color:var(--kit-cta-text);text-decoration:none}.rp-empty-slot{background:var(--kit-bg);border:1px dashed var(--kit-muted)}.rp-empty-slot .rp-empty-label{color:var(--kit-muted);font-weight:700;margin:0 0 .25rem}.rp-filters{display:flex;flex-wrap:wrap;gap:.5rem;list-style:none;margin:0 0 1rem;padding:0}.rp-filters a{display:inline-flex;align-items:center;min-height:44px;padding:.25rem .8rem;border:1px solid var(--kit-border);border-radius:999px;color:var(--kit-link);text-decoration:none}.rp-filters a[aria-current="page"]{border-color:var(--kit-accent);font-weight:700}.rp-callout{background:var(--kit-surface);color:var(--kit-text);border-left:4px solid var(--rp-warn);border-radius:0 .5rem .5rem 0;margin:1.25rem 0;padding:.65rem 1rem}.rp-callout p{margin:0}.rp-callout a{color:var(--kit-text);text-decoration:underline}.rp-sources{margin:2rem 0 0;font-size:.875rem;color:var(--kit-muted)}.rp-sources h2{font-size:1.1rem;color:var(--kit-text)}.rp-sources ol{padding-left:1.4em;margin:0}.rp-sources li{margin:.3rem 0;overflow-wrap:anywhere}.rp-sources a{color:var(--kit-link)}.rp-form{display:grid;gap:.9rem;margin:0 0 1.5rem;max-width:40rem}.rp-field{display:grid;gap:.3rem;min-width:0}.rp-field label,.rp-field legend{font-weight:600;color:var(--kit-text)}.rp-field .rp-hint{color:var(--kit-muted);font-size:.8125rem}.rp-form input,.rp-form select{font:inherit;min-height:44px;max-width:100%;padding:.45rem .6rem;background:var(--kit-bg);color:var(--kit-text);border:1px solid var(--kit-muted);border-radius:.4rem}.rp-form fieldset{border:0;margin:0;padding:0;min-width:0}.rp-check{display:inline-flex;align-items:center;gap:.5rem;min-height:44px;font-weight:400!important;cursor:pointer}.rp-form .rp-check input{width:1.25rem;height:1.25rem;min-height:0;padding:0;margin:0;flex:none}.rp-form button[type="submit"]{font:inherit;font-weight:700;min-height:44px;padding:.6rem 1.2rem;border:0;border-radius:.5rem;background:var(--kit-text);color:var(--kit-bg);cursor:pointer;justify-self:start}.kit-main input::placeholder,.kit-main textarea::placeholder{color:var(--kit-muted);opacity:1}.rp-related{margin:2rem 0 0}.rp-related h2{font-size:1.15rem;margin:0 0 .4rem}.rp-link-list{margin:.5rem 0 1rem;padding-left:1.2rem}.rp-link-list li{margin:.4rem 0;overflow-wrap:anywhere}.rp-link-list .rp-unit{white-space:normal}@media print{.kit-header,.kit-nav,.kit-skip-link,.kit-footer-cols,.rp-filters,.rp-form,.kit-price-details{display:none!important}body{background:#fff;color:#000;font-size:11pt}a{color:#000}.md-table-wrap{overflow:visible!important;border:0!important}.md-table{font-size:9.5pt}.md-table th,.md-table td{border:1px solid #666!important;color:#000!important;background:#fff!important}thead{display:table-header-group}tr,.rp-card,.rp-stat,.rp-callout,.rp-verdict-block{break-inside:avoid}.rp-card,.rp-stat,.rp-callout,.rp-cta--soon,.rp-cta--none{background:#fff!important;color:#000!important;border-color:#666!important}.kit-price-disclaimer{display:inline!important;position:static!important;border:0!important;padding:0!important}}</style>
+</head>
+<body class="kit-page">
+<a class="kit-skip-link" href="#main">Skip to content</a>
+<header class="kit-header"><div class="kit-wrap kit-header-inner"><a class="kit-brand" href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/">RuntimePicks</a><nav class="kit-nav" aria-label="Main navigation"><ul><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/power-stations">Power Stations</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/solar-generator-kits">Solar Kits</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/runtime">Runtime</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/compat">Compatibility</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/best">Best Picks</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/tools">Tools</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/guides">Guides</a></li></ul></nav></div></header>
+<main id="main" class="ssr-main kit-main kit-wrap">
+<h1>Page Not Found</h1><p>Start again from the <a href="/">home page</a>, the <a href="/power-stations">power stations</a> or <a href="/runtime">runtime by appliance</a>.</p>
+</main>
+<footer class="kit-footer"><div class="kit-wrap"><nav class="kit-footer-cols" aria-label="Site sections"><div class="kit-footer-col"><p class="kit-footer-heading">Shop by type</p><ul><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/power-stations">Power stations</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/solar-generator-kits">Solar generator kits</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/expansion-batteries">Expansion batteries</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/solar-panels">Solar panels</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/cables-adapters">Cables and adapters</a></li></ul></div><div class="kit-footer-col"><p class="kit-footer-heading">Answers</p><ul><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/runtime">Runtime by appliance</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/compat">Compatibility</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/kits">Outage kits</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/best">Best picks</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/brands">Brands</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/guides">Guides</a></li></ul></div><div class="kit-footer-col"><p class="kit-footer-heading">Tools</p><ul><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/tools/backup-power-planner">Backup power planner</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/tools/runtime-calculator">Runtime calculator</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/tools/solar-calculator">Solar calculator</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/tools">All tools</a></li></ul></div></nav><nav class="kit-footer-links" aria-label="About this site"><ul><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/how-we-calculate">How we calculate</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/recalls">Recalls</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/about">About</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/disclosure">Disclosure</a></li><li><a href="https://runtimepicks.happysky-24190067.eastus.azurecontainerapps.io/privacy">Privacy</a></li></ul></nav><p class="kit-copyright">&copy; 2026 RuntimePicks</p></div></footer>
+<script defer src="/kit/client.2563f92dc910.js"></script>
+<script defer src="/assets/site.d796e6dd2efc.js"></script>
+</body>
+</html>
