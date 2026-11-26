@@ -66,6 +66,7 @@ REPOS=(
     "aisleprompt:"
     "specpicks:master"
     "nsc-assistant:master"
+    "runtimepicks:main"      # solargeneratorpicks.com (internal id runtimepicks)
     "reusable-agents:main"
 )
 GIT_HOST="${GIT_HOST:-git@github.com:voidsstr}"
