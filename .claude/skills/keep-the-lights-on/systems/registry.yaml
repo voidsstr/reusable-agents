@@ -6,7 +6,8 @@
 # _example.yaml template + this registry.
 #
 # The skill resolves a system's config by:
-#   1. this registry (path in the site repo)  ← authoritative
+#   1. this registry (path in the site repo; optional `site_id` = the internal
+#      id when the system is named differently, e.g. by its domain)  ← authoritative
 #   2. fallback convention: /home/voidsstr/development/<name>/keep-the-lights-on.yaml
 #   3. fallback: systems/<name>.yaml in the skill dir (dev/example only)
 #
@@ -21,6 +22,14 @@ systems:
   specpicks:
     config: /home/voidsstr/development/specpicks/keep-the-lights-on.yaml
     repo: /home/voidsstr/development/specpicks
+    type: site
+  # Named by its domain (operator 2026-11-26). Its repo, agent ids (runtimepicks-*),
+  # systemd units, DB and gate state keep the internal id `site_id`; the host
+  # sweep resolves the config and that id from this entry.
+  solargeneratorpicks:
+    config: /home/voidsstr/development/runtimepicks/keep-the-lights-on.yaml
+    repo: /home/voidsstr/development/runtimepicks    # commit config changes here (main), then copy to systems/solargeneratorpicks.yaml
+    site_id: runtimepicks
     type: site
   # DAEMON-type system (no DB / publish volume / homepage). Its config lives
   # in the skill dir because the daemon is a thin bridge in nsc-assistant with

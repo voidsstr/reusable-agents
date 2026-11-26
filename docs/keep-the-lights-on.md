@@ -21,7 +21,7 @@ workflow with worked examples.
 ## Starting a KTLO session (new session, from scratch)
 
 1. Invoke the skill: **`/keep-the-lights-on`**, or just tell Claude
-   *"keep the lights on for aisleprompt, specpicks and the retro-chat agent."*
+   *"keep the lights on for aisleprompt, specpicks, solargeneratorpicks and the retro-chat agent."*
 2. It loads each system's config (via the registry, below), runs the cheap
    tick, emits one status box per system, and calls `ScheduleWakeup` to keep
    the loop alive. You don't need to do anything else — it re-invokes itself.
@@ -34,7 +34,7 @@ resumes without double-alerting or repeating work.
 
 ---
 
-## The three live systems (2026-08 roster)
+## The live systems (2026-11 roster)
 
 Registry: `.claude/skills/keep-the-lights-on/systems/registry.yaml`. Each
 system declares a `type` that drives its health model.
@@ -43,6 +43,7 @@ system declares a `type` that drives its health model.
 |---|---|---|---|
 | **aisleprompt** | site | `<aisleprompt>/keep-the-lights-on.yaml` | Agents running, `aisleprompt.com` 200, articles publishing (`editorial_articles`), pool alive, daily @smoke green |
 | **specpicks** | site | `<specpicks>/keep-the-lights-on.yaml` | Same, for `specpicks.com` |
+| **solargeneratorpicks** | site | `<runtimepicks>/keep-the-lights-on.yaml` (registry `site_id: runtimepicks`) | Same, for `solargeneratorpicks.com`: the runtimepicks-* agents running, guides publishing (up to 8/day), prices fresh, licence/recall/pricing-integrity checks at 0 |
 | **retro-chat** | daemon | `.claude/skills/keep-the-lights-on/systems/retro-chat.yaml` | `retro-chat-daemon.service` active AND actively discovering LAN retro agents (not a hung "zombie") |
 
 **Site vs daemon health.** A *site* tick checks the agent roster, DB publish
@@ -54,6 +55,9 @@ restart). A daemon has no DB/volume/homepage.
 Onboard another system by copying `systems/_example.yaml` into that system's
 repo (sites) or the skill dir (daemons), editing it, and adding a registry
 line. No skill-code change — the runbook is generic; config carries the values.
+A system named differently from its repo / agent prefix (e.g. by its domain)
+adds `site_id: <internal id>` to its registry line; the sweep uses that id for
+the agent units and the deploy-gate state.
 
 ---
 

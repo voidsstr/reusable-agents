@@ -1,30 +1,31 @@
 # keep-the-lights-on: system config for SolarGeneratorPicks (solargeneratorpicks.com).
 #
+# KTLO names this system by its domain: `solargeneratorpicks` (operator,
+# 2026-11-26). The repo, agent ids (runtimepicks-*), systemd units, database
+# and deploy scripts keep the internal id `runtimepicks`; the skill registry
+# (reusable-agents .claude/skills/keep-the-lights-on/systems/registry.yaml)
+# maps the system to this file with `site_id: runtimepicks`, and the host sweep
+# (~/.reusable-agents/ktlo-work/sweep.py) resolves it through that registry.
+#
 # The runbook is reusable-agents .claude/skills/keep-the-lights-on/SKILL.md;
 # every value for this site lives here (template: the skill's
-# systems/_example.yaml). The skill resolves this file by convention
-# (/home/voidsstr/development/runtimepicks/keep-the-lights-on.yaml); the
-# explicit `runtimepicks` line in the skill's systems/registry.yaml is an edit
-# of a frozen file and waits for 12-02 (launch plan §6). Its byte-identical
-# copy is the skill's systems/runtimepicks.yaml (the dev fallback): edit THIS
-# file, then copy it over (`cp keep-the-lights-on.yaml
-# /home/voidsstr/development/reusable-agents/.claude/skills/keep-the-lights-on/systems/runtimepicks.yaml`);
-# agents/check_configs.py fails while the two differ.
+# systems/_example.yaml). Its byte-identical copy is the skill's
+# systems/solargeneratorpicks.yaml (the dev fallback): edit THIS file, then copy
+# it over; agents/check_configs.py fails while the two differ.
 #
-# NOT ACTIVE until the agents are registered (launch step A1) and the operator
-# starts a loop ("keep the lights on for runtimepicks").
+# ACTIVE since 2026-11-26: a KTLO loop sweeps it with specpicks and aisleprompt
+# ("keep the lights on for specpicks, aisleprompt, solargeneratorpicks").
 #
-# What the host sweep (~/.reusable-agents/ktlo-work/sweep.py) runs every tick:
-# the agents roster, the first `db` entry's catalog_health checks, the
-# agent_metric_checks, the urls, the deploy-gate state
-# (~/.reusable-agents/deployer/gate-state/runtimepicks.json) and the
-# conversion block. Its bound checks only compare int / float results, so every
-# check below casts to ::int or ::float8 (a numeric column would never be
-# checked). `scheduled_checks` and `spillover_watch` are Layer-B procedures the
-# session runs on their cadence: the sweep does not run them yet (their keys
-# go into _example.yaml and the sweep after 12-02).
+# What the host sweep runs every tick: the agents roster, the first `db`
+# entry's catalog_health checks, the agent_metric_checks, the urls, the
+# deploy-gate state (none: this site deploys with its own scripts/deploy, not
+# the agent deployer) and the conversion block. Its bound checks only compare
+# int / float results, so every check below casts to ::int or ::float8 (a
+# numeric column would never be checked). `scheduled_checks` and
+# `spillover_watch` are Layer-B procedures the session runs on their cadence.
 
-system: runtimepicks
+system: solargeneratorpicks
+site_id: runtimepicks          # internal id: repo, agents, units, DB
 type: site
 display_name: "SolarGeneratorPicks (solargeneratorpicks.com): portable power stations, solar kits and their runtimes"
 
@@ -63,8 +64,8 @@ agents:
     - runtimepicks-article-engine           # live 2026-11-24 (operator): Opus guides, up to 8 a day
     - runtimepicks-indexnow-submitter       # registered by scripts/l2-day0.sh
     - runtimepicks-indexnow-bulk            # registered by scripts/l2-day0.sh
-  # Later (launch plan §6): runtimepicks-shelf-audit-agent,
-  # runtimepicks-indexnow-submitter / -bulk, runtimepicks-gsc-coverage-auditor. Add them here when registered.
+  # Later (launch plan §6): runtimepicks-shelf-audit-agent, runtimepicks-gsc-coverage-auditor
+  # (scripts/l2-plus7.sh, about 12-01). Add them here when registered.
 
 # ── Databases (env-var NAMES in ~/.reusable-agents/secrets.env). The sweep runs
 # every catalog_health check on the FIRST entry; specpicks is read only by the
@@ -96,7 +97,7 @@ owner_email_env: [FRAMEWORK_OPERATOR_EMAIL, OPERATOR_EMAIL]
 # ── Known non-issues (do not re-flag) ──
 known_excluded:
   - agent: runtimepicks-site-goals-tracker
-    reason: "Until the GSC Domain property is verified (about L2-7) and a GA4 property exists (design I5), every run logs a GSC and a GA4 error and records only the DB metrics. Expected."
+    reason: "No GA4 property exists yet (design I5), so every run logs a GA4 error. GSC sc-domain:solargeneratorpicks.com is verified (2026-11-24), but its search data lags 2-3 days: empty GSC rows in the first week are expected."
   - pattern: "seed source sizing-launch skipped"
     reason: "content/seed-asins.json is written at D1; until then discovery reports the seed source error and carries on."
   - pattern: "seed source specpicks-power-stations skipped"
@@ -182,9 +183,23 @@ catalog_health:
     - name: published_articles_24h
       db: runtimepicks
       sql: "select count(*)::int from editorial_articles where status = 'published' and published_at > now() - interval '24 hours'"
-      expect_max: 1
+      expect_max: 16
       owner_class: content-volume
-      note: "S11 / article_output_gate: at most one guide a day, and only through the publish gate (status pending -> published by the publisher role). More = the gate or the output gate was bypassed: escalate."
+      note: "Operator 2026-11-24: as much content as fast as possible. runtimepicks-article-engine's output gate allows 8 guides per UTC day (site.yaml proposals.output_gate), so a rolling 24 h can hold up to 16 across a UTC midnight. Above 16 = the output gate or the publish gate was bypassed: escalate. 0 for a whole day = read the engine's last runs (pool, readiness, checks)."
+    - name: implausible_station_prices
+      db: runtimepicks
+      sql: >-
+        select count(distinct asin)::int from (
+          select bb.asin from v_buy_button bb join models m on m.id = bb.model_id
+            join station_specs ss on ss.model_id = m.id join v_offer_display o on o.asin = bb.asin
+           where bb.shows_buy_button and o.price is not null and ss.capacity_wh > 0
+             and o.price / ss.capacity_wh < 0.15
+          union all
+          select pe.asin from v_pick_eligible pe
+           where pe.kind in ('station', 'kit') and pe.capacity_wh > 0 and pe.price / pe.capacity_wh < 0.15) x
+      expect_max: 0
+      owner_class: pricing-integrity
+      note: "A buy-buttoned or pick-eligible station / kit priced under $0.15 per rated Wh (2026-11-26: cheapest real one $0.29/Wh, median $0.47). It is a mis-linked listing (2026-11-24: an EP500Pro page linked to a $329 listing, $0.064/Wh, and topped the winter-kit ladder). Fix: unlink it like db/data/2026-11-24-implausible-price-unlink.sql (model_id NULL, is_active false, quality flag price-implausible-unlinked-<date>), then trigger runtimepicks-pick-builder. Never loosen the floor."
     # Shared database (launch plan §10 risk 8: nscappsdb is shared with SpecPicks)
     - name: nscappsdb_connections
       db: runtimepicks
@@ -382,6 +397,33 @@ catalog_health:
       expect_max: 0
       owner_class: pick-coverage
       note: "The same for an active best list whose kind has no selector."
+    - name: guide_engine_running
+      agent: runtimepicks-article-engine
+      metric: model_calls
+      max_age_hours: 5
+      owner_class: content-engine
+      note: "Cron every 2 h at :40 (host time). No run for 5 h = the timer or the unit broke: systemctl --user status agent-runtimepicks-article-engine.timer, journalctl for the last run."
+    - name: guide_engine_pool_deferred
+      agent: runtimepicks-article-engine
+      metric: deferred_pool
+      expect_max: 0
+      sustain_runs: 3
+      owner_class: content-engine
+      note: "Three runs in a row deferred because fewer than 2 claude-pool profiles were ready (CLAUDE_POOL_RESERVE). A pool problem, not this engine: `python3 -m framework.cli.claude_pool status`; re-auth is an operator action (incident playbook)."
+    - name: guide_engine_topic_ready
+      agent: runtimepicks-article-engine
+      metric: topic_ready
+      expect_min: 1
+      sustain_runs: 3
+      owner_class: content-engine
+      note: "Three runs in a row with no calendar topic ready (calendar exhausted, or every remaining topic waits on readiness such as ladder_tiers_with_station). The fix is more calendar topics in agents/article-engine (Opus-written briefs, a commit to the site repo), or the data the waiting topic needs."
+    - name: guide_engine_checks_failed
+      agent: runtimepicks-article-engine
+      metric: guides_published
+      expect_min: 1
+      sustain_runs: 4
+      owner_class: content-engine
+      note: "Four runs in a row published nothing while the engine ran. Read the runs' checks_failed / held / gate_held and the draft reports: a check that always fails (links, placeholders, claims) is a config or facts-pack bug, never a reason to loosen a guard."
     - name: specs_amazon_sourced
       agent: runtimepicks-spec-extractor
       metric: amazon_sourced_values
@@ -423,7 +465,7 @@ conversion:
   money_set: {window_days: 30, min_clicks: 2, max_pages: 25, max_products: 150, slug_path_regex: '^/guides/([^/?#]+)$'}
   watch:
     full_every_minutes: 60
-    cache: ~/.reusable-agents/ktlo-work/conversion-runtimepicks.json
+    cache: ~/.reusable-agents/ktlo-work/conversion-solargeneratorpicks.json
     drop_pct: 30
     min_prev7: 15
     sustain_passes: 2
@@ -460,6 +502,7 @@ conversion:
     year1-boundary:     {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
     catalog-match:      {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
     content-volume:     {action: escalate}
+    content-engine:     {agent: runtimepicks-article-engine, action: escalate}
     shared-db:          {action: escalate}
     template-drop:      {action: escalate}
     placement-drop:     {action: escalate}

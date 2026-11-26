@@ -42,10 +42,11 @@
 > a prior loop wakes itself via `ScheduleWakeup` (re-invoke the SAME args every
 > tick to sustain the loop).
 >
-> **Three live systems** (registry: `.claude/skills/keep-the-lights-on/systems/registry.yaml`):
-> `aisleprompt` (site) · `specpicks` (site) · `retro-chat` (daemon —
+> **Four live systems** (registry: `.claude/skills/keep-the-lights-on/systems/registry.yaml`):
+> `aisleprompt` (site) · `specpicks` (site) · `solargeneratorpicks` (site;
+> solargeneratorpicks.com, repo/agents/DB keep the internal id `runtimepicks`) · `retro-chat` (daemon —
 > `retro-chat-daemon.service`, health = active AND actively discovering, not a
-> hung zombie). One combined session can keep all three lit: one status box
+> hung zombie). One combined session can keep all four lit: one status box
 > per system, one `ScheduleWakeup` at the shortest cadence needed. A new
 > session starts KTLO by invoking the skill and naming the systems.
 >
