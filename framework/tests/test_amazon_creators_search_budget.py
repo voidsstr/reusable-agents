@@ -224,6 +224,17 @@ def test_parse_item_drops_negative_discount_and_its_type():
     assert p["original_price"] is None and p["original_price_type"] is None
 
 
+def test_parse_item_drops_list_price_over_3x_sale():
+    """Inflated "Save $X" (pricing integrity, KTLO inflated_savings_3x)."""
+    item = copy.deepcopy(SEARCH_ITEM)
+    price = item["offersV2"]["listings"][0]["price"]["money"]["amount"]
+    item["offersV2"]["listings"][0]["price"]["savingBasis"]["money"]["amount"] = price * 3 + 1
+    p = ac.parse_item(item)
+    assert p["original_price"] is None and p["original_price_type"] is None
+    item["offersV2"]["listings"][0]["price"]["savingBasis"]["money"]["amount"] = price * 2
+    assert ac.parse_item(item)["original_price"] == price * 2
+
+
 def test_parse_item_empty_item_is_safe():
     p = ac.parse_item({"asin": "B1"})
     assert p["price"] is None and p["in_stock"] is False and p["browse_nodes"] == []

@@ -847,6 +847,12 @@ def parse_item(raw: dict) -> dict:
     # rules forbid; drop it rather than store a negative discount.
     if original_price is not None and price is not None and original_price < price:
         original_price = None
+    # A list price above 3x the sale price is almost always a bogus "List
+    # Price" (renewed, bundle or third-party listings) and renders as an
+    # inflated "Save $X" strike-through, which the pricing-integrity contract
+    # forbids (KTLO check inflated_savings_3x; 108 rows cleared 2026-11-26).
+    if original_price is not None and price is not None and price > 0 and original_price > 3 * price:
+        original_price = None
 
     def _dv(node: Any) -> Optional[str]:
         return (node.get("displayValue") or None) if isinstance(node, dict) else None
