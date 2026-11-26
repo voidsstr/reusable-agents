@@ -316,14 +316,21 @@ catalog_health:
       note: "Gauge: active products Amazon cannot sell right now (substitutes lead those pages)."
   # Bounds on the owners' own RunResult.metrics (agents/<id>/run-index.json).
   agent_metric_checks:
-    - name: price_refresh_fresh_priced_pct
+    - name: price_refresh_fresh_checked_pct
       agent: runtimepicks-price-refresh
-      metric: fresh_priced_pct
+      metric: fresh_checked_pct
       expect_min: 90
       sustain_runs: 2
       max_age_hours: 6
       owner_class: price-stale
-      note: "Indexable product pages with a fresh price (cron every 4 h; 6 h without a run = the refresh stopped)."
+      note: "STALENESS: indexable product pages whose Amazon answer (a price, out of stock or no offer) is inside the quotable window. Below 90 = the refresh is falling behind (cron every 4 h; 6 h without a run = it stopped)."
+    - name: price_refresh_fresh_priced_pct
+      agent: runtimepicks-price-refresh
+      metric: fresh_priced_pct
+      expect_min: 65
+      sustain_runs: 2
+      owner_class: stock-coverage
+      note: "IN STOCK: indexable product pages with a fresh, buyable price. Out-of-stock pages count against it although their data is fresh (2026-11-26: 73-75%, all 114 pages checked inside the window; 25 of the 28 unpriced pages were genuine Amazon stock-outs, 3 had an in-stock sibling listing and were re-pointed by db/data/2026-11-26-in-stock-primary-listings.sql). Below 65 for two runs = a stock collapse or listings gone dead: look for in-stock sibling listings of the models (pin models.primary_product_id), then discovery for replacement ASINs. Before 2026-11-26 this metric carried the 90 bound by mistake."
     - name: price_refresh_api_rows_past_24h
       agent: runtimepicks-price-refresh
       metric: api_rows_past_24h
@@ -490,6 +497,7 @@ conversion:
   owners:
     measurement:        {agent: runtimepicks-site-goals-tracker, action: trigger, goals: [goal-amazon-clicks-30d]}
     price-stale:        {agent: runtimepicks-price-refresh, action: escalate}
+    stock-coverage:     {agent: runtimepicks-amazon-catalog-discovery, action: escalate}
     licence-purge:      {agent: runtimepicks-price-refresh, action: escalate}
     amazon-content:     {action: escalate}
     engine-regression:  {action: escalate}
